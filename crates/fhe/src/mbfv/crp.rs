@@ -3,7 +3,9 @@ use std::sync::Arc;
 use crate::bfv::BfvParameters;
 use crate::Result;
 use fhe_math::rq::Poly;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, RngCore, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 
 /// A polynomial sampled from a random _common reference string_.
 // TODO CRS->CRP implementation. For now just a random polynomial.
@@ -16,6 +18,11 @@ impl CommonRandomPoly {
     /// Generate a new random CRP.
     pub fn new<R: RngCore + CryptoRng>(par: &Arc<BfvParameters>, rng: &mut R) -> Result<Self> {
         Self::new_leveled(par, 0, rng)
+    }
+
+    /// Generate a new CRP from a shared deterministic seed.
+    pub fn new_deterministic(par: &Arc<BfvParameters>, seed: <ChaCha8Rng as SeedableRng>::Seed,) -> Result<Self> {
+        Self::new_leveled_deterministic(par, 0, seed)
     }
 
     /// Generate a new random CRP vector.
@@ -40,5 +47,23 @@ impl CommonRandomPoly {
         let ctx = par.ctx_at_level(level)?;
         let poly = Poly::random(ctx, fhe_math::rq::Representation::Ntt, rng);
         Ok(Self { poly })
+    }
+
+    /// Generate a new deterministic leveled CRP.
+    pub fn new_leveled_deterministic(
+        par: &Arc<BfvParameters>,
+        level: usize,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+    ) -> Result<Self> {
+        let ctx = par.ctx_at_level(level)?;
+        let poly = Poly::random_from_seed(ctx, fhe_math::rq::Representation::Ntt, seed);
+        Ok(Self { poly })
+    }
+}
+
+impl Serialize for CommonRandomPoly {
+    fn to_bytes(&self) -> Vec<u8> {
+        //PublicKeyProto::from(self).encode_to_vec()
+        Vec::new()
     }
 }
