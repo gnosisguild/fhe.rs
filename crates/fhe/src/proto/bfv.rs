@@ -76,3 +76,8 @@ pub struct PublicKey {
     #[prost(message, optional, tag = "1")]
     pub c: ::core::option::Option<Ciphertext>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PublicKeyShare {
+    #[prost(message, optional, tag = "1")]
+    pub c: ::core::option::Option<Ciphertext>,
+}

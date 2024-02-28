@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
+use crate::proto::bfv::{Ciphertext as CiphertextProto, PublicKeyShare as PublicKeyShareProto};
+use fhe_traits::{DeserializeParametrized, Serialize};
 use crate::errors::Result;
 use crate::Error;
 use fhe_math::rq::{traits::TryConvertFrom, Poly, Representation};
@@ -77,6 +79,20 @@ impl Aggregate<PublicKeyShare> for PublicKey {
             c: Ciphertext::new(vec![p0, share.crp.poly], &share.par)?,
             par: share.par,
         })
+    }
+}
+
+impl From<&PublicKeyShare> for PublicKeyShareProto {
+    fn from(pks: &PublicKeyShare) -> Self {
+        PublicKeyShareProto {
+            c: Some(CiphertextProto::from(&p0_share.p0)),
+        }
+    }
+}
+
+impl Serialize for PublicKeyShare {
+    fn to_bytes(&self) -> Vec<u8> {
+        PublicKeyShareProto::from(self).encode_to_vec()
     }
 }
 
