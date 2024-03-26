@@ -17,6 +17,12 @@ pub trait FheParametrized {
     type Parameters: FheParameters;
 }
 
+/// Indicates that an object is parametrized.
+// pub trait FheCommonRandomPoly {
+//     /// The type of the FHE parameters.
+//     type CommonRandomPoly: FheCommonRandomPolys;
+// }
+
 /// Indicates that Self parameters can be switched.
 pub trait FheParametersSwitchable<S: FheParametrized>
 where
@@ -169,4 +175,20 @@ where
 
     /// Attempt to deserialize from a vector of bytes
     fn try_deserialize(bytes: &[u8]) -> Result<Self, Self::Error>;
+}
+
+/// Deserialization setting an explicit context.
+pub trait DeserializeWithCRP
+where
+    Self: Sized,
+    Self: FheParametrized,
+{
+    /// The type of error returned.
+    type Error;
+
+    /// The type of context.
+    type CommonRandomPoly;
+
+    /// Attempt to deserialize from a vector of bytes
+    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>, crp: Self::CommonRandomPoly) -> Result<Self, Self::Error>;
 }

@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
 use crate::proto::bfv::{Ciphertext as CiphertextProto, PublicKeyShare as PublicKeyShareProto};
-use fhe_traits::{DeserializeParametrized, Serialize};
+use fhe_traits::{DeserializeWithContext, Serialize};
 use crate::errors::Result;
 use crate::Error;
 use fhe_math::rq::{traits::TryConvertFrom, Poly, Representation};
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
+//use serde::{Serialize, Deserialize};
 
 use super::{Aggregate, CommonRandomPoly};
 
@@ -61,6 +62,15 @@ impl PublicKeyShare {
 
         Ok(Self { par, crp, p0_share })
     }
+
+    pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>, crp: CommonRandomPoly) -> Result<Self> {
+        let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
+        Ok(Self {
+            par: par.clone(),
+            crp: crp.clone(),
+            p0_share: test.unwrap(),
+        })
+    }
 }
 
 impl Aggregate<PublicKeyShare> for PublicKey {
@@ -82,19 +92,38 @@ impl Aggregate<PublicKeyShare> for PublicKey {
     }
 }
 
-impl From<&PublicKeyShare> for PublicKeyShareProto {
-    fn from(pks: &PublicKeyShare) -> Self {
-        PublicKeyShareProto {
-            c: Some(CiphertextProto::from(&p0_share.p0)),
-        }
-    }
-}
+// impl From<&PublicKeyShare> for PublicKeyShare {
+//     fn from(pks: &PublicKeyShare) -> Self {
+//         PublicKeyShareProto {
+//             c: Some(CiphertextProto::from(&p0_share.p0)),
+//         }
+//     }
+// }
 
 impl Serialize for PublicKeyShare {
     fn to_bytes(&self) -> Vec<u8> {
-        PublicKeyShareProto::from(self).encode_to_vec()
+        //PublicKeyShareProto::from(self).encode_to_vec()
+        // PublicKeyShare {
+        //     par: self.par,
+        //     crp: self.crp,
+        //     p0_share: self.p0_share,
+        // }
+        // .encode_to_vec()
+        self.p0_share.to_bytes()
     }
 }
+
+// impl DeserializeWithCRP for PublicKeyShare {
+//     type Error = Error;
+
+//     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>, crp: CommonRandomPoly) -> Result<Self> {
+//         Ok(Self {
+//             par: par.clone(),
+//             crp: crp.clone(),
+//             p0_share,
+//         })
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
