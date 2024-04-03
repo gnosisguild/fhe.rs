@@ -4,6 +4,7 @@ use fhe_math::{
     rq::{traits::TryConvertFrom, Poly, Representation},
     zq::Modulus,
 };
+use fhe_traits::{DeserializeWithContext, Serialize};
 use itertools::Itertools;
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
@@ -86,6 +87,15 @@ impl SecretKeySwitchShare {
 
         Ok(Self { par, ct, h_share })
     }
+
+    pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>, ct: Arc<Ciphertext>) -> Result<Self> {
+        let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
+        Ok(Self {
+            par: par.clone(),
+            ct: ct.clone(),
+            h_share: test.unwrap(),
+        })
+    }
 }
 
 impl Aggregate<SecretKeySwitchShare> for Ciphertext {
@@ -104,6 +114,12 @@ impl Aggregate<SecretKeySwitchShare> for Ciphertext {
         let c1 = share.ct.c[1].clone();
 
         Ciphertext::new(vec![c0, c1], &share.par)
+    }
+}
+
+impl Serialize for SecretKeySwitchShare {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.h_share.to_bytes()
     }
 }
 
@@ -132,6 +148,19 @@ impl DecryptionShare {
         let zero = SecretKey::new(vec![0; par.degree()], par);
         let sks_share = SecretKeySwitchShare::new(sk_input_share, &zero, ct.clone(), rng)?;
         Ok(DecryptionShare { sks_share })
+    }
+
+    pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>, ct: Arc<Ciphertext>) -> Result<Self> {
+        let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
+        Ok(Self {
+            sks_share: SecretKeySwitchShare::deserialize(bytes, par, ct).unwrap(),
+        })
+    }
+}
+
+impl Serialize for DecryptionShare {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.sks_share.to_bytes()
     }
 }
 
