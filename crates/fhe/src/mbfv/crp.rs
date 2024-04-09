@@ -5,7 +5,7 @@ use crate::Result;
 use fhe_math::rq::Poly;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
+use fhe_traits::{DeserializeParametrized, DeserializeWithContext, FheEncrypter, FheParametrized, Serialize};
 
 /// A polynomial sampled from a random _common reference string_.
 // TODO CRS->CRP implementation. For now just a random polynomial.
@@ -59,11 +59,19 @@ impl CommonRandomPoly {
         let poly = Poly::random_from_seed(ctx, fhe_math::rq::Representation::Ntt, seed);
         Ok(Self { poly })
     }
+
+    pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
+        let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
+        Ok(Self {
+            poly: test.unwrap(),
+        })
+    }
 }
 
 impl Serialize for CommonRandomPoly {
     fn to_bytes(&self) -> Vec<u8> {
         //PublicKeyProto::from(self).encode_to_vec()
-        Vec::new()
+        //Vec::new()
+        self.poly.to_bytes()
     }
 }
