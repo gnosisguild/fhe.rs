@@ -38,7 +38,7 @@ impl SecretKey {
     }
 
     /// Generate a [`SecretKey`] from its coefficients.
-    pub(crate) fn new(coeffs: Vec<i64>, par: &Arc<BfvParameters>) -> Self {
+    pub fn new(coeffs: Vec<i64>, par: &Arc<BfvParameters>) -> Self {
         Self {
             par: par.clone(),
             coeffs: coeffs.into_boxed_slice(),
