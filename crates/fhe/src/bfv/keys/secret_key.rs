@@ -19,7 +19,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SecretKey {
     pub(crate) par: Arc<BfvParameters>,
-    pub(crate) coeffs: Box<[i64]>,
+    pub coeffs: Box<[i64]>,
 }
 
 impl Zeroize for SecretKey {
