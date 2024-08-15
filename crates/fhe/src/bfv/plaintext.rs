@@ -44,7 +44,7 @@ impl Zeroize for Plaintext {
 }
 
 impl Plaintext {
-    pub(crate) fn to_poly(&self) -> Poly {
+    pub fn to_poly(&self) -> Poly {
         let mut m_v = Zeroizing::new(self.value.clone());
         self.par
             .plaintext

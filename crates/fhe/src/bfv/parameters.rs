@@ -108,13 +108,23 @@ impl BfvParameters {
         self.plaintext_modulus
     }
 
+    /// Returns the variance
+    pub const fn variance(&self) -> usize {
+        self.variance
+    }
+
+    /// Returns the ctx
+    pub fn ctx(&self) -> &[Arc<Context>] {
+        &self.ctx
+    }
+
     /// Returns the maximum level allowed by these parameters.
     pub fn max_level(&self) -> usize {
         self.moduli.len() - 1
     }
 
     /// Returns the context corresponding to the level.
-    pub(crate) fn ctx_at_level(&self, level: usize) -> Result<&Arc<Context>> {
+    pub fn ctx_at_level(&self, level: usize) -> Result<&Arc<Context>> {
         self.ctx
             .get(level)
             .ok_or_else(|| Error::DefaultError("No context".to_string()))

@@ -17,7 +17,7 @@ use super::SecretKey;
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PublicKey {
     pub(crate) par: Arc<BfvParameters>,
-    pub(crate) c: Ciphertext,
+    pub c: Ciphertext,
 }
 
 impl PublicKey {

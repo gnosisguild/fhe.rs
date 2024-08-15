@@ -7,15 +7,15 @@ use crate::{ntt::NttOperator, rns::RnsContext, zq::Modulus, Error, Result};
 /// Struct that holds the context associated with elements in rq.
 #[derive(Default, Clone, PartialEq, Eq)]
 pub struct Context {
-    pub(crate) moduli: Box<[u64]>,
-    pub(crate) q: Box<[Modulus]>,
-    pub(crate) rns: Arc<RnsContext>,
-    pub(crate) ops: Box<[NttOperator]>,
-    pub(crate) degree: usize,
-    pub(crate) bitrev: Box<[usize]>,
-    pub(crate) inv_last_qi_mod_qj: Box<[u64]>,
-    pub(crate) inv_last_qi_mod_qj_shoup: Box<[u64]>,
-    pub(crate) next_context: Option<Arc<Context>>,
+    pub moduli: Box<[u64]>,
+    pub q: Box<[Modulus]>,
+    pub rns: Arc<RnsContext>,
+    pub ops: Box<[NttOperator]>,
+    pub degree: usize,
+    pub bitrev: Box<[usize]>,
+    pub inv_last_qi_mod_qj: Box<[u64]>,
+    pub inv_last_qi_mod_qj_shoup: Box<[u64]>,
+    pub next_context: Option<Arc<Context>>,
 }
 
 impl Debug for Context {

@@ -22,7 +22,7 @@ pub struct Ciphertext {
     pub(crate) seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
 
     /// The ciphertext elements.
-    pub(crate) c: Vec<Poly>,
+    pub c: Vec<Poly>,
 
     /// The ciphertext level
     pub(crate) level: usize,
