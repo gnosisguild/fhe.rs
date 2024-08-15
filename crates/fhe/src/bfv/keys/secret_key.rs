@@ -218,7 +218,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
 #[cfg(test)]
 mod tests {
     use super::SecretKey;
-    use crate::bfv::{parameters::BfvParameters, Encoding, Plaintext};
+    use crate::bfv::{parameters::BfvParameters, BfvParametersBuilder, Encoding, Plaintext};
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::thread_rng;
     use std::error::Error;
@@ -235,6 +235,39 @@ mod tests {
             assert!((*ci).abs() <= 2 * sk.par.variance as i64)
         })
     }
+
+    // #[test]
+    // fn keygen_vele() -> Result<(), Box<dyn Error>> {
+    //     let degree = 32768;
+    //     let moduli_sizes = vec![
+    //         52, 52, 52, 52, 52, 52, 52, 52, 52, 52, 52, 51, 51, 51, 51, 51,
+    //     ];
+    //     let t = 1u64 << 20;
+
+    //     let params = BfvParametersBuilder::new()
+    //         .set_degree(degree)
+    //         .set_plaintext_modulus(t)
+    //         .set_moduli_sizes(&moduli_sizes)
+    //         .build_arc()?;
+    //     let mut rng = thread_rng();
+
+    //     let sk = SecretKey::random(&params, &mut rng);
+
+    //     let pt = Plaintext::try_encode(
+    //         &params.plaintext.random_vec(params.degree(), &mut rng),
+    //         Encoding::poly(),
+    //         &params,
+    //     )?;
+    //     let ct = sk.try_encrypt(&pt, &mut rng)?;
+    //     let pt2 = sk.try_decrypt(&ct)?;
+
+    //     println!("Noise: {}", unsafe { sk.measure_noise(&ct)? });
+    //     assert_eq!(pt2, pt);
+
+    //     println!("{:x?}", params.moduli);
+
+    //     Ok(())
+    // }
 
     #[test]
     fn encrypt_decrypt() -> Result<(), Box<dyn Error>> {
