@@ -16,7 +16,7 @@ pub struct Plaintext {
     /// The parameters of the underlying BFV encryption scheme.
     pub(crate) par: Arc<BfvParameters>,
     /// The value after encoding.
-    pub(crate) value: Box<[u64]>,
+    pub value: Box<[u64]>,
     /// The encoding of the plaintext, if known
     pub(crate) encoding: Option<Encoding>,
     /// The plaintext as a polynomial.

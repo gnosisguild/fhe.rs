@@ -40,7 +40,7 @@ pub struct BfvParameters {
     pub(crate) variance: usize,
 
     /// Context for the underlying polynomials
-    pub(crate) ctx: Vec<Arc<Context>>,
+    pub ctx: Vec<Arc<Context>>,
 
     /// Ntt operator for the SIMD plaintext, if possible.
     pub(crate) op: Option<Arc<NttOperator>>,

@@ -16,7 +16,7 @@ use super::SecretKey;
 /// Public key for the BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PublicKey {
-    pub(crate) par: Arc<BfvParameters>,
+    pub par: Arc<BfvParameters>,
     pub c: Ciphertext,
 }
 
@@ -33,6 +33,62 @@ impl PublicKey {
             par: sk.par.clone(),
             c,
         }
+    }
+
+    /// Encrypt a plaintext with the public key.
+    /// The encryption is done in the same level as the plaintext.
+    /// Returns the ciphertext and the noise polynomials.
+    pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
+        &self,
+        pt: &Plaintext,
+        rng: &mut R,
+    ) -> Result<(Ciphertext, Poly, Poly, Poly)> {
+        let mut ct = self.c.clone();
+        while ct.level != pt.level {
+            ct.mod_switch_to_next_level()?;
+        }
+
+        let ctx = self.par.ctx_at_level(ct.level)?;
+        let u = Poly::small(
+            ctx,
+            Representation::Ntt,
+            self.par.variance,
+            rng,
+        )?;
+        let e1 = Poly::small(
+            ctx,
+            Representation::Ntt,
+            self.par.variance,
+            rng,
+        )?;
+        let e2 = Poly::small(
+            ctx,
+            Representation::Ntt,
+            self.par.variance,
+            rng,
+        )?;
+
+        let m = Zeroizing::new(pt.to_poly());
+        let mut c0 = u.as_ref() * &ct.c[0];
+        c0 += &e1;
+        c0 += &m;
+        let mut c1 = u.as_ref() * &ct.c[1];
+        c1 += &e2;
+
+        // It is now safe to enable variable time computations.
+        unsafe {
+            c0.allow_variable_time_computations();
+            c1.allow_variable_time_computations()
+        }
+
+        let ciphertext = Ciphertext {
+            par: self.par.clone(),
+            seed: None,
+            c: vec![c0, c1],
+            level: ct.level,
+        };
+
+        Ok((ciphertext, u, e1, e2))
     }
 }
 

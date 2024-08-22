@@ -79,7 +79,7 @@ impl SubstitutionExponent {
 /// Struct that holds a polynomial for a specific context.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Poly {
-    ctx: Arc<Context>,
+    pub ctx: Arc<Context>,
     representation: Representation,
     has_lazy_coefficients: bool,
     allow_variable_time_computations: bool,
@@ -415,6 +415,7 @@ impl Poly {
         }
     }
 
+
     /// Modulus switch down the polynomial by dividing and rounding each
     /// coefficient by the last modulus in the chain, then drops the last
     /// modulus, as described in Algorithm 2 of <https://eprint.iacr.org/2018/931.pdf>.
@@ -505,6 +506,15 @@ impl Poly {
 
         Ok(())
     }
+
+
+        /// Switch the polynomial to the next level.
+        pub fn mod_switch_to_next_level(&mut self) -> Result<()> {
+            self.change_representation(Representation::PowerBasis);
+            self.mod_switch_down_next()?;
+            self.change_representation(Representation::Ntt);
+            Ok(())
+        }
 
     /// Modulo switch down to a smaller context.
     ///

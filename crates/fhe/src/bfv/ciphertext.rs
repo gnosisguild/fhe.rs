@@ -25,7 +25,7 @@ pub struct Ciphertext {
     pub c: Vec<Poly>,
 
     /// The ciphertext level
-    pub(crate) level: usize,
+    pub level: usize,
 }
 
 impl Ciphertext {
