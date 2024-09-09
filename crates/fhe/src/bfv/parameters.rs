@@ -125,58 +125,63 @@ impl BfvParameters {
         self.ctx[0].niterations_to(ctx).map_err(Error::MathError)
     }
 
-    /// Vector of default parameters providing about 128 bits of security
-    /// according to the <https://homomorphicencryption.org> standard.
+    /// Vector of default parameters providing about 128 bits of quantum security
+    /// according to the <https://eprint.iacr.org/2024/463> standard. The number
+    /// of bits represented by the moduli vector sum to the maximum logQ in table
+    /// 4.2 under the quantum, gaussian secret key distribution column. Note this
+    /// library uses a centered binomial distribution with variance 10≈3.19² by
+    /// default for its secret and error distributions and checks that the bounds
+    /// match 6σ.
     pub fn default_parameters_128(plaintext_nbits: usize) -> Vec<Arc<BfvParameters>> {
         debug_assert!(plaintext_nbits < 64);
 
         let mut n_and_qs = HashMap::new();
-        n_and_qs.insert(1024, vec![0x7e00001]);
-        n_and_qs.insert(2048, vec![0x3fffffff000001]);
-        n_and_qs.insert(4096, vec![0xffffee001, 0xffffc4001, 0x1ffffe0001]);
+        n_and_qs.insert(1024, vec![0x7fff801]);
+        n_and_qs.insert(2048, vec![0xffffffffff001]);
+        n_and_qs.insert(4096, vec![0x3fffe4001, 0x3fffd0001, 0x7ffff6001]);
         n_and_qs.insert(
             8192,
             vec![
-                0x7fffffd8001,
-                0x7fffffc8001,
-                0xfffffffc001,
-                0xffffff6c001,
-                0xfffffebc001,
+                0x1ffffff0001,
+                0x1fffffb0001,
+                0x1fffff24001,
+                0x1ffffed8001,
+                0x1ffffed0001,
             ],
         );
         n_and_qs.insert(
             16384,
             vec![
-                0xfffffffd8001,
-                0xfffffffa0001,
-                0xfffffff00001,
-                0x1fffffff68001,
-                0x1fffffff50001,
-                0x1ffffffee8001,
-                0x1ffffffea0001,
-                0x1ffffffe88001,
-                0x1ffffffe48001,
+                0x1ffffff18001,
+                0x1fffffee8001,
+                0x1fffffe58001,
+                0x3ffffff70001,
+                0x3ffffff58001,
+                0x3ffffff28001,
+                0x3fffffe50001,
+                0x3fffffe08001,
+                0x3fffffce8001,
             ],
         );
         n_and_qs.insert(
             32768,
             vec![
-                0x7fffffffe90001,
-                0x7fffffffbf0001,
-                0x7fffffffbd0001,
-                0x7fffffffba0001,
-                0x7fffffffaa0001,
-                0x7fffffffa50001,
-                0x7fffffff9f0001,
-                0x7fffffff7e0001,
-                0x7fffffff770001,
-                0x7fffffff380001,
-                0x7fffffff330001,
-                0x7fffffff2d0001,
-                0x7fffffff170001,
-                0x7fffffff150001,
-                0x7ffffffef00001,
-                0xfffffffff70001,
+                0xffffffff00001,
+                0xfffffffe40001,
+                0xfffffffe20001,
+                0xfffffffbe0001,
+                0xfffffffa60001,
+                0xfffffff820001,
+                0xfffffff750001,
+                0xfffffff5d0001,
+                0xfffffff480001,
+                0xfffffff3f0001,
+                0xfffffff390001,
+                0x7fffffffe0001,
+                0x7ffffffdd0001,
+                0x7ffffffd20001,
+                0x7ffffffd10001,
+                0x7ffffffc60001,
             ],
         );
 
