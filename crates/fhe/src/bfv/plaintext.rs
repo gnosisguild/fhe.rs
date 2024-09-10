@@ -5,6 +5,9 @@ use crate::{
 };
 use fhe_math::rq::{traits::TryConvertFrom, Context, Poly, Representation};
 use fhe_traits::{FheDecoder, FheEncoder, FheParametrized, FhePlaintext};
+use ndarray::Array2;
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use std::sync::Arc;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -44,16 +47,65 @@ impl Zeroize for Plaintext {
 }
 
 impl Plaintext {
+    // pub fn to_poly(&self) -> Poly {
+    //     let mut m_v = Zeroizing::new(self.value.clone());
+    //     self.par
+    //         .plaintext
+    //         .scalar_mul_vec(&mut m_v, self.par.q_mod_t[self.level]);
+    //     let ctx = self.par.ctx_at_level(self.level).unwrap();
+    //     let mut m =
+    //         Poly::try_convert_from(m_v.as_ref(), ctx, false, Representation::PowerBasis).unwrap();
+    //     m.change_representation(Representation::Ntt);
+    //     m *= &self.par.delta[self.level];
+    //     m
+    // }
+
+    /// Temporary hack to fix centered reduction for Greco. Rather than multiplying the standard form m_v
+    /// by the standard form delta after NTT, we first center m_v, multiply by standard form delta, reduce
+    /// the i64 values and convert back to standard form. There seems to be an issue with simply converting
+    /// to standard form without first converting to centered, then scaling and reducing. Note it was
+    /// necessary to use BigInt as the multiplication with delta causes a very large integer, greater than
+    /// 64 bits.
     pub fn to_poly(&self) -> Poly {
+        // Scale plaintext by q_mod_t for the current level
         let mut m_v = Zeroizing::new(self.value.clone());
         self.par
             .plaintext
             .scalar_mul_vec(&mut m_v, self.par.q_mod_t[self.level]);
+
+        // Get the context for the current level
         let ctx = self.par.ctx_at_level(self.level).unwrap();
+        let mut m_scaled_by_delta: Vec<u64> = Vec::new();
+
+        for qi in ctx.moduli_operators() {
+            let qi_modulus = BigInt::from(qi.modulus());
+            let delta = BigInt::from(qi.inv(qi.neg(self.par.plaintext())).unwrap());
+
+            for x in m_v.iter() {
+                // Scale by delta, reduce by modulus, and ensure result is non-negative
+                let mut reduced =
+                    BigInt::from(self.par.plaintext.center(*x)) * &delta % &qi_modulus;
+                if reduced < BigInt::from(0) {
+                    reduced += &qi_modulus;
+                }
+
+                // Convert to u64, panicking if the value is too large
+                m_scaled_by_delta.push(
+                    reduced
+                        .to_u64()
+                        .unwrap_or_else(|| panic!("Value {:?} too large for u64", reduced)),
+                );
+            }
+        }
+
+        // Convert the scaled values into a polynomial
+        let m_final =
+            Array2::from_shape_vec((ctx.moduli().len(), self.par.degree()), m_scaled_by_delta)
+                .unwrap();
         let mut m =
-            Poly::try_convert_from(m_v.as_ref(), ctx, false, Representation::PowerBasis).unwrap();
+            Poly::try_convert_from(m_final, ctx, false, Representation::PowerBasis).unwrap();
         m.change_representation(Representation::Ntt);
-        m *= &self.par.delta[self.level];
+
         m
     }
 
