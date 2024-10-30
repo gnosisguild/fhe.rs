@@ -396,14 +396,15 @@ impl Modulus {
     const unsafe fn center_vt(&self, a: u64) -> i64 {
         debug_assert!(a < self.p);
 
-        if a >= self.p >> 1 {
+        //if a >= self.p >> 1 {
+        if a > (self.p - 1) >> 1 {
             (a as i64) - (self.p as i64)
         } else {
             a as i64
         }
     }
 
-    /// Centers a `u64` value into the range `[-self.p/2, self.p/2)`
+    /// Centers a `u64` value into the range `[[-(self.p - 1)]/2, (self.p - 1)/2]`
     /// according to the modulus `self.p`, in constant time.
     ///
     /// # Arguments
@@ -413,13 +414,18 @@ impl Modulus {
     /// # Returns
     ///
     /// An `i64` value centered around zero with respect to the modulus `self.p`.
+    /// Note centering here was modifyed so as to be consistent with Greco
     pub fn center(&self, a: u64) -> i64 {
         assert!(a < self.p, "Value must be less than modulus.");
 
-        let half_p = self.p >> 1; // Equivalent to p / 2
+
+        //let half_p = self.p  >> 1; // Equivalent to p / 2
+        let half_p = (self.p - 1) >> 1; // Equivalent to (p - 1)/ 2
 
         // Compute centered value using bitwise operations
-        let offset = (a >= half_p) as i64; // This will be 1 if true, 0 if false
+
+        let offset = (a > half_p) as i64; // This will be 1 if true, 0 if false
+        //let offset = (a >= half_p) as i64; // This will be 1 if true, 0 if false
         let centered = a as i64 - (offset * self.p as i64);
 
         centered
