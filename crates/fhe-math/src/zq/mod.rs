@@ -393,6 +393,7 @@ impl Modulus {
     /// # Safety
     /// This function is not constant time and its timing may reveal information
     /// about the value being centered.
+    /// Note centering here was modified so as to be consistent with Greco
     const unsafe fn center_vt(&self, a: u64) -> i64 {
         debug_assert!(a < self.p);
 
@@ -414,7 +415,7 @@ impl Modulus {
     /// # Returns
     ///
     /// An `i64` value centered around zero with respect to the modulus `self.p`.
-    /// Note centering here was modifyed so as to be consistent with Greco
+    /// Note centering here was modified so as to be consistent with Greco
     pub fn center(&self, a: u64) -> i64 {
         assert!(a < self.p, "Value must be less than modulus.");
 
