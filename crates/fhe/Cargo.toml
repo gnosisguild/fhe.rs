@@ -17,6 +17,8 @@ fhe-math = { version = "^0.1.0-beta.7", path = "../fhe-math" }
 fhe-traits = { version = "^0.1.0-beta.7", path = "../fhe-traits" }
 fhe-util = { version = "^0.1.0-beta.7", path = "../fhe-util" }
 serde = "1.0.197"
+shamir_secret_sharing = "0.1.1"
+num-bigint-old = { package = "num-bigint", version = "0.2.6" }
 
 doc-comment.workspace = true
 itertools.workspace = true
