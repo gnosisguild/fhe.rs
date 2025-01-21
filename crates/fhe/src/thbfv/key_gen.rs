@@ -30,10 +30,17 @@ mod tests {
     #[test]
     fn test_tfhe() {
         println!("testing123...");
-    let sss = SSS {
-        threshold: 3,
-        share_amount: 5,
-        prime: BigInt::parse_bytes(b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",16).unwrap()
-        };
+        let sss = SSS {
+            threshold: 3,
+            share_amount: 5,
+            prime: BigInt::parse_bytes(b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",16).unwrap()
+            };
+
+        let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
+
+        let shares = sss.split(secret.clone());
+
+        println!("shares: {:?}", shares);
+        assert_eq!(secret, sss.recover(&shares[0..sss.threshold as usize]));
     }
 }
