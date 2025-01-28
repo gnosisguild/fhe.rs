@@ -3,4 +3,4 @@
 
 mod key_gen;
 
-pub use key_gen::PublicKeyShare;
+pub use key_gen::TrBFVShare;
