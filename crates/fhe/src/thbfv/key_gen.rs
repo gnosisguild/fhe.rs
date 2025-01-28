@@ -69,13 +69,13 @@ mod tests {
             .unwrap();
         let sk_share = SecretKey::random(&sk_par, &mut rng);
         println!("{:?}", sk_share.coeffs.len());
-        println!("{:?}", sk_share.coeffs);
+        //println!("{:?}", sk_share.coeffs);
 
         let sss = SSS {
             threshold: threshold,
             share_amount: n,
             prime: BigInt::parse_bytes(b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",16).unwrap()
-            };
+        };
 
         // for each coeff generate an SSS of degree n and threshold n = 2t + 1
         let mut result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(threshold);
@@ -97,13 +97,14 @@ mod tests {
         let mut node_shares: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(n);
         for j in 0..n {
             let mut node_share_i: Vec<(usize, BigInt)> = Vec::with_capacity(threshold);
-            for i in 0..threshold {
+            for i in 0..degree {
                 node_share_i.push(result[i][j].clone());
             }
             node_shares.push(node_share_i)
         } 
 
         println!("{:?}", node_shares[0]);
+        println!("{:?}", node_shares[0].len());
         // SSS is failing with negative values
         //assert_eq!(secret, sss.recover(&shares[0..sss.threshold as usize]));
     }
