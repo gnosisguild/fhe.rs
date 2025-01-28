@@ -77,17 +77,13 @@ mod tests {
             prime: BigInt::parse_bytes(b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",16).unwrap()
             };
 
-        //let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
-
         // for each coeff generate an SSS of degree n and threshold n = 2t + 1
-        //let mut result = vec![vec![0;degree];n];
         let mut result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(threshold);
 
         for i in 0..degree {
             let secret = sk_share.coeffs[i].to_bigint().unwrap();
-            //println!("secret N_1: {:?}", secret);
+            // encode negative coeffs as positive ints [11,19]
             let shares = sss.split(secret.clone());
-            //println!("shares: {:?}", shares.len());
             let mut sssvec: Vec<(usize, BigInt)> = Vec::with_capacity(n);
             for j in 0..n {
                 sssvec.push(shares[j].clone());
@@ -96,18 +92,9 @@ mod tests {
         }
 
         //println!("{:?}", shares[0]);
-        println!("{:?}", result[0]);
+        //println!("{:?}", result[0]);
 
         let mut node_shares: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(n);
-        // for i in 0..result.len() {
-        //     for j in 0..n {
-        //         nodes_shares[j]
-        //         let node_share = result[i][j].clone();
-        //         node_shares.push(Vec::new());
-        //         node_shares[j][i] = result[i][j].clone();
-        //     }
-        // }
-
         for j in 0..n {
             let mut node_share_i: Vec<(usize, BigInt)> = Vec::with_capacity(threshold);
             for i in 0..threshold {
