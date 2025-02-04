@@ -15,15 +15,33 @@ use num_bigint_old::Sign::*;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct TrBFVShare {
-    pub test: String
+    n: u64,
+    threshold: u64,
+    degree: u64,
+    plaintext_modulus: u64,
+    sss_modulus: u64,
+    moduli: Vec<u64>
 }
 
 impl TrBFVShare {
-    pub fn new(
-        N: u64,
-        threshold: u64
+    pub fn new<R: RngCore + CryptoRng>(
+        n: u64,
+        threshold: u64,
+        degree: u64,
+        plaintext_modulus: u64,
+        sss_modulus: u64,
+        moduli: Vec<u64>,
+        rng: &mut R
     ) -> Result<Self> {
-        Ok(Self { test: "test".to_string()})
+        // generate random secret
+        Ok(Self { 
+            n,
+            threshold,
+            degree,
+            plaintext_modulus,
+            sss_modulus,
+            moduli
+        })
     }
 }
 
@@ -38,10 +56,10 @@ mod tests {
     use crate::mbfv::{CommonRandomPoly};
 
     #[test]
-    fn test_tfhe() {
+    fn test_trbfv() {
         let mut rng = thread_rng();
         // generate fhe secret key polynomial
-        // for each poly coef, generate a shamir secret share
+        // for each poly coeff, generate a shamir secret share
         let n = 16;
         let threshold = 9;
         let degree = 2048;
