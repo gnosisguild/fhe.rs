@@ -11,7 +11,9 @@ use rand::{CryptoRng, RngCore};
 
 use num_bigint_dig::{prime::probably_prime, BigUint, ModInverse};
 use num_traits::{cast::ToPrimitive, PrimInt};
-use std::panic::UnwindSafe;
+use prime_factorization::Factorization;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+use std::{error::Error, fmt, panic::UnwindSafe};
 
 /// Define catch_unwind to silence the panic in unit tests.
 pub fn catch_unwind<F, R>(f: F) -> std::thread::Result<R>
@@ -28,6 +30,78 @@ where
 /// Returns whether the modulus p is prime; this function is 100% accurate.
 pub fn is_prime(p: u64) -> bool {
     probably_prime(&BigUint::from(p), 0)
+}
+
+#[derive(Debug)]
+pub enum FactorError {
+    EmptyInput,
+    NoFactorsFound(u64),
+    NoResult,
+}
+
+impl fmt::Display for FactorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FactorError::EmptyInput => write!(f, "No input provided"),
+            FactorError::NoFactorsFound(m) => write!(f, "No factors found for {}", m),
+            FactorError::NoResult => write!(f, "Unable to determine smallest factor"),
+        }
+    }
+}
+
+impl Error for FactorError {}
+
+/// # Overview
+/// This function takes a slice of `u64` integers (`moduli`) and determines the smallest prime factor among them.
+/// It can be used to determine the maximum number of parties that can be involved in a threshold RNS BFV Shamir secret sharing scheme,
+/// as the smallest prime factor of given moduli provides that upper bound.
+///
+/// The computations are performed in parallel using the Rayon library, making it efficient for larger input sets.
+///
+/// The function uses the [prime_factorization](https://docs.rs/prime_factorization/latest/prime_factorization/) Rust library that accepts
+/// up to 128 bit integers. This library makes use of a sequence of several prime factorization algorithms for better performance.
+///
+/// # Parameters
+///
+/// - `moduli`: A slice of `u64` values for which to compute the smallest prime factor. Each value can be prime or composite.
+///
+/// # Returns
+///
+/// Returns a `Result<u64, FactorError>`:
+/// - `Ok(u64)` containing the smallest prime factor found among all the provided moduli.
+///   If a modulus is prime, that modulus is considered as its own smallest prime factor.
+/// - `Err(FactorError)` if an error occurs, such as:
+///   - `FactorError::EmptyInput` if `moduli` is empty.
+///   - `FactorError::NoFactorsFound(m)` if a composite number `m` produces no factors.
+///   - `FactorError::NoResult` if no smallest factor could be determined (extremely unlikely).
+///
+/// # Errors
+///
+/// - If the provided slice is empty, it returns a `FactorError::EmptyInput`.
+/// - If factorization fails to find factors for a composite modulus, it returns `FactorError::NoFactorsFound(m)`.
+/// - If no result could be determined after processing (which should not happen for valid input), it returns `FactorError::NoResult`.
+pub fn get_smallest_prime_factor(moduli: &[u64]) -> Result<u64, FactorError> {
+    if moduli.is_empty() {
+        return Err(FactorError::EmptyInput);
+    }
+
+    let factors = moduli
+        .par_iter()
+        .map(|&m| {
+            if is_prime(m) {
+                Ok(m)
+            } else {
+                Factorization::run(m)
+                    .factors
+                    .iter()
+                    .copied()
+                    .min()
+                    .ok_or(FactorError::NoFactorsFound(m))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    factors.into_iter().min().ok_or(FactorError::NoResult)
 }
 
 /// Sample a vector of independent centered binomial distributions of a given
@@ -199,8 +273,8 @@ mod tests {
     use crate::variance;
 
     use super::{
-        inverse, is_prime, sample_vec_cbd, transcode_bidirectional, transcode_from_bytes,
-        transcode_to_bytes,
+        get_smallest_prime_factor, inverse, is_prime, sample_vec_cbd, transcode_bidirectional,
+        transcode_from_bytes, transcode_to_bytes,
     };
 
     #[test]
@@ -218,6 +292,43 @@ mod tests {
         assert!(!is_prime(8));
         assert!(!is_prime(9));
         assert!(!is_prime(4611686018326724607));
+    }
+
+    #[test]
+    fn test_get_smallest_prime_factor() {
+        // Mixed scenario
+        let numbers = vec![49, 3, 4, 15, 17, 19];
+        assert_eq!(get_smallest_prime_factor(&numbers).unwrap(), 2);
+
+        // All primes
+        let primes = vec![71, 11, 13, 29, 31];
+        assert_eq!(get_smallest_prime_factor(&primes).unwrap(), 11);
+
+        // All composites
+        let composites = vec![4, 15, 21, 49, 50];
+        assert_eq!(get_smallest_prime_factor(&composites).unwrap(), 2);
+
+        // Singles
+        let single = vec![97_u64];
+        assert_eq!(get_smallest_prime_factor(&single).unwrap(), 97);
+
+        let single_composite = vec![100_u64];
+        assert_eq!(get_smallest_prime_factor(&single_composite).unwrap(), 2);
+
+        // Large numbers scenario
+        let large_numbers = vec![99194853094755497, 2971215073, 14736260453];
+        assert_eq!(get_smallest_prime_factor(&large_numbers).unwrap(), 28657);
+
+        // Duplicates
+        let duplicates = vec![2971215073, 2971215073, 2971215073, 2971215073];
+        assert_eq!(get_smallest_prime_factor(&duplicates).unwrap(), 2971215073);
+
+        // Empty slice should panic
+        let empty: Vec<u64> = vec![];
+        assert!(
+            get_smallest_prime_factor(&empty).is_err(),
+            "Expected an error on empty input"
+        );
     }
 
     #[test]
