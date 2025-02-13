@@ -71,12 +71,22 @@ jobs:
           cargo test --no-fail-fast
       - name: List generated coverage files
         run: find target/coverage -name "*.profraw" || true
-      - uses: actions-rs/grcov@v0.1
-        with:
-          config: .github/actions-rs/grcov.yml
+      - name: Install grcov
+        run: cargo install grcov
+      - name: Generate coverage report with grcov
+        run: |
+          grcov target/coverage \
+            --binary-path ./target/debug \
+            --source-dir . \
+            -t cobertura \
+            --branch \
+            --ignore-not-existing \
+            --ignore "crates/fhe/src/bfv/proto/*" \
+            --ignore "crates/fhe-math/src/proto/*" \
+            -o cobertura.xml
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v3
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          file: ${{ steps.coverage.outputs.report }}
+          file: cobertura.xml
           fail_ci_if_error: true
