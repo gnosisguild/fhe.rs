@@ -49,24 +49,9 @@ impl PublicKey {
         }
 
         let ctx = self.par.ctx_at_level(ct.level)?;
-        let u = Poly::small(
-            ctx,
-            Representation::Ntt,
-            self.par.variance,
-            rng,
-        )?;
-        let e1 = Poly::small(
-            ctx,
-            Representation::Ntt,
-            self.par.variance,
-            rng,
-        )?;
-        let e2 = Poly::small(
-            ctx,
-            Representation::Ntt,
-            self.par.variance,
-            rng,
-        )?;
+        let u = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
+        let e1 = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
+        let e2 = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
 
         let m = Zeroizing::new(pt.to_poly());
         let mut c0 = u.as_ref() * &ct.c[0];

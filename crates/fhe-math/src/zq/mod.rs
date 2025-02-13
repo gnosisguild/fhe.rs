@@ -419,14 +419,10 @@ impl Modulus {
     pub fn center(&self, a: u64) -> i64 {
         assert!(a < self.p, "Value must be less than modulus.");
 
-
-        //let half_p = self.p  >> 1; // Equivalent to p / 2
         let half_p = (self.p - 1) >> 1; // Equivalent to (p - 1)/ 2
 
         // Compute centered value using bitwise operations
-
         let offset = (a > half_p) as i64; // This will be 1 if true, 0 if false
-        //let offset = (a >= half_p) as i64; // This will be 1 if true, 0 if false
         let centered = a as i64 - (offset * self.p as i64);
 
         centered

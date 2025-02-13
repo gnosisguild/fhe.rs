@@ -1,4 +1,6 @@
-//! Key-switching keys for the BFV encryption scheme
+//! Key-switching keys for the BFV encryption scheme. Adapts the Brakerski-Vaikuntanathan key
+//! switching through decomposition technique adapted to RNS as described in the HPS optimization paper
+//! (https://eprint.iacr.org/2018/117)
 
 use crate::bfv::{traits::TryConvertFrom as BfvTryConvertFrom, BfvParameters, SecretKey};
 use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
@@ -121,7 +123,43 @@ impl KeySwitchingKey {
         c1
     }
 
-    /// Generate the c0's from the c1's and the secret key
+    /// Generate the c0 component of the key switching key (KSK) using the Brakerski-Vaikuntanathan key
+    /// switching through decomposition technique adapted to RNS as described in the HPS optimization paper
+    /// (https://eprint.iacr.org/2018/117).
+    ///
+    /// A key switching key consists of two components (c0,c1) = (KS_0, KS_1). This function generates
+    /// the KS_0 component while KS_1 is generated separately as random polynomials.
+    ///
+    /// For each RNS modulus q_i in the basis, KS_0[i] is computed as:
+    /// KS_0[i] = [e_i - a_i·s + p·g_i]_{Q}
+    /// where:
+    /// - e_i is a small error polynomial in RNS
+    /// - a_i is the i-th random polynomial from KS_1 in RNS
+    /// - s is the secret key in RNS
+    /// - p is the input polynomial in RNS
+    /// - g_i is the RNS basis conversion factor (q̃_i · q*_i) for the current modulus q_i
+    ///
+    /// Each element of KS_0 therefore corresponds to operations performed in RNS,
+    /// with its own error polynomial e_i and random polynomial a_i, resulting in a collection of RNS
+    /// polynomials that form the complete KS_0 component.
+    ///
+    /// # Arguments
+    ///
+    /// * `sk` - The secret key
+    /// * `from` - The polynomial to be switched (in RNS representation)
+    /// * `c1` - The KS_1 polynomials (containing a_i for i in 0..k-1)
+    /// * `rng` - Random number generator
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Vec<Poly>>` - The generated KS_0 polynomials, where each element corresponds to
+    ///                         an RNS polynomial
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The c1 vector is empty
+    /// * The `from` polynomial is not in power basis representation
     fn generate_c0<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         from: &Poly,
@@ -148,22 +186,37 @@ impl KeySwitchingKey {
         s.change_representation(Representation::Ntt);
 
         let rns = RnsContext::new(&sk.par.moduli[..size])?;
+
+        // For each of the RNS moduli qi, we compute the following:
+        // a_s = a*s
+        // b = e - a*s
+        // gi = qi_tilde * qi_star
+        // g_i_from = poly * qi_tilde * qi_star
+        // b = poly * qi_tilde * qi_star - a*s + e
         let c0 = c1
             .iter()
             .enumerate()
             .map(|(i, c1i)| {
+                // a_s = a*s
                 let mut a_s = Zeroizing::new(c1i.clone());
                 a_s.disallow_variable_time_computations();
                 a_s.change_representation(Representation::Ntt);
                 *a_s.as_mut() *= s.as_ref();
                 a_s.change_representation(Representation::PowerBasis);
 
+                // b = e - a*s
                 let mut b =
                     Poly::small(a_s.ctx(), Representation::PowerBasis, sk.par.variance, rng)?;
                 b -= &a_s;
 
+                // gi = qi_tilde * qi_star
                 let gi = rns.get_garner(i).unwrap();
+
+                // g_i_from = poly * qi_tilde * qi_star
+                // We expect that every RNS component of g_i_from has all zero coefficients except for the i-th RNS component
                 let g_i_from = Zeroizing::new(gi * from);
+
+                // b = poly * qi_tilde * qi_star - a*s + e
                 b += &g_i_from;
 
                 // It is now safe to enable variable time computations.
@@ -229,7 +282,33 @@ impl KeySwitchingKey {
         Ok(c0)
     }
 
-    /// Key switch a polynomial.
+    /// Key switch a polynomial from one secret key to another using the Brakerski-Vaikuntanathan key
+    /// switching through decomposition technique adapted to RNS as described in the HPS optimization paper
+    /// (https://eprint.iacr.org/2018/117).
+    ///
+    /// This function performs key switching on a polynomial `p` encrypted under one secret key to obtain
+    /// a ciphertext encrypted under a different secret key. Unlike key switching a full ciphertext,
+    /// this function only handles the switching of a single polynomial (typically C1 of a ciphertext)
+    /// and does not add any existing C0 term to the result. This makes it more flexible for use in
+    /// various homomorphic operations where different handling of the C0 term may be desired.
+    ///
+    /// The function supports two modes of operation:
+    /// - When `log_base = 0`: Direct key switching without decomposition (hybrid key switching)
+    /// - When `log_base > 0`: Key switching with base-2^log_base decomposition (RNS decomposition key switching)
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The input polynomial to key switch, must be in power basis representation
+    ///
+    /// # Returns
+    ///
+    /// * `Result<(Poly, Poly)>` - A tuple containing (C0, C1) of the key switched result
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The input polynomial's context doesn't match the expected ciphertext context
+    /// * The input polynomial is not in power basis representation
     pub fn key_switch(&self, p: &Poly) -> Result<(Poly, Poly)> {
         if self.log_base != 0 {
             return self.key_switch_decomposition(p);
@@ -251,6 +330,7 @@ impl KeySwitchingKey {
             self.c0.iter(),
             self.c1.iter()
         ) {
+            // Takes the coefficients of [p]_{qi} and converts them to an RNS representation by taking [[p]_qi]_qj for every RNS basis qj!
             let mut c2_i = unsafe {
                 Poly::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
                     c2_i_coefficients.as_slice().unwrap(),

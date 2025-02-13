@@ -190,5 +190,9 @@ where
     type CommonRandomPoly;
 
     /// Attempt to deserialize from a vector of bytes
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>, crp: Self::CommonRandomPoly) -> Result<Self, Self::Error>;
+    fn from_bytes(
+        bytes: &[u8],
+        par: &Arc<Self::Parameters>,
+        crp: Self::CommonRandomPoly,
+    ) -> Result<Self, Self::Error>;
 }
