@@ -1,5 +1,10 @@
+input-path: target/coverage
+source-dir: .
+binary-path: ./target/debug
 output-type: cobertura
 output-path: ./cobertura.xml
+branch: true
+ignore-not-existing: true
 ignore:
   - "crates/fhe/src/bfv/proto/*"
   - "crates/fhe-math/src/proto/*"
