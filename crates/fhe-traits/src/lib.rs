@@ -17,7 +17,7 @@ pub trait FheParametrized {
     type Parameters: FheParameters;
 }
 
-/// Indicates that an object is parametrized.
+// /// Indicates that an object is parametrized.
 // pub trait FheCommonRandomPoly {
 //     /// The type of the FHE parameters.
 //     type CommonRandomPoly: FheCommonRandomPolys;
