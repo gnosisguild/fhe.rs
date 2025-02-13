@@ -424,9 +424,8 @@ impl Modulus {
 
         // Compute centered value using bitwise operations
         let offset = (a > half_p) as i64; // This will be 1 if true, 0 if false
-        let centered = a as i64 - (offset * self.p as i64);
 
-        centered
+        a as i64 - (offset * self.p as i64)
     }
 
     /// Center a vector in variable time.
@@ -754,7 +753,6 @@ mod tests {
     use proptest::collection::vec as prop_vec;
     use proptest::prelude::{any, BoxedStrategy, Just, Strategy};
     use rand::{thread_rng, RngCore};
-    use std::time::Instant;
 
     // Utility functions for the proptests.
 

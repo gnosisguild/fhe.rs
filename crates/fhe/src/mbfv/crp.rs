@@ -3,9 +3,7 @@ use std::sync::Arc;
 use crate::bfv::BfvParameters;
 use crate::Result;
 use fhe_math::rq::Poly;
-use fhe_traits::{
-    DeserializeParametrized, DeserializeWithContext, FheEncrypter, FheParametrized, Serialize,
-};
+use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -65,6 +63,7 @@ impl CommonRandomPoly {
         Ok(Self { poly })
     }
 
+    /// Deserialize a CRP from bytes
     pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
         let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
         Ok(Self {

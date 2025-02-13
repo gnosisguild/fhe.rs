@@ -79,11 +79,17 @@ impl SubstitutionExponent {
 /// Struct that holds a polynomial for a specific context.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Poly {
+    /// The context containing the polynomial's parameters
     pub ctx: Arc<Context>,
+    /// The current representation of the polynomial
     representation: Representation,
+    /// Whether the coefficients are in lazy reduced form
     has_lazy_coefficients: bool,
+    /// Whether variable time computations are allowed
     allow_variable_time_computations: bool,
+    /// The polynomial coefficients in RNS form
     coefficients: Array2<u64>,
+    /// Optional Shoup representation of coefficients for faster multiplication
     coefficients_shoup: Option<Array2<u64>>,
 }
 

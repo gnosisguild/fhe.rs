@@ -16,7 +16,9 @@ use super::SecretKey;
 /// Public key for the BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PublicKey {
+    /// The BFV parameters
     pub par: Arc<BfvParameters>,
+    /// The public key ciphertext
     pub c: Ciphertext,
 }
 

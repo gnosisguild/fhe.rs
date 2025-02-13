@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
 use crate::errors::Result;
-use crate::proto::bfv::{Ciphertext as CiphertextProto, PublicKeyShare as PublicKeyShareProto};
 use crate::Error;
 use fhe_math::rq::{traits::TryConvertFrom, Poly, Representation};
 use fhe_traits::{DeserializeWithContext, Serialize};
@@ -63,6 +62,8 @@ impl PublicKeyShare {
         Ok(Self { par, crp, p0_share })
     }
 
+    /// Deserialize a PublicKeyShare from bytes with the given parameters and
+    /// CRP
     pub fn deserialize(
         bytes: &[u8],
         par: &Arc<BfvParameters>,
