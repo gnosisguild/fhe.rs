@@ -32,6 +32,18 @@ pub fn is_prime(p: u64) -> bool {
     probably_prime(&BigUint::from(p), 0)
 }
 
+/// Error type for factorization operations.
+///
+/// This enum represents the various error conditions that can occur during
+/// factorization of numbers, particularly when finding prime factors.
+///
+/// # Variants
+/// * `EmptyInput` - Returned when attempting to factor an empty input slice
+/// * `NoFactorsFound` - Returned when no prime factors could be found for a
+///   given number
+/// * `NoResult` - Returned when the computation fails to determine a smallest
+///   factor
+
 #[derive(Debug)]
 pub enum FactorError {
     EmptyInput,
