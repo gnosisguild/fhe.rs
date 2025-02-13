@@ -61,6 +61,8 @@ jobs:
           profile: minimal
           toolchain: stable
           override: true
+      - name: Add llvm-tools
+        run: rustup component add llvm-tools-preview
       - name: Run tests with coverage instrumentation
         env:
           LLVM_PROFILE_FILE: "target/coverage/coverage-%p-%m.profraw"
@@ -85,8 +87,8 @@ jobs:
             --ignore "crates/fhe-math/src/proto/*" \
             -o cobertura.xml
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          file: cobertura.xml
+          files: cobertura.xml
           fail_ci_if_error: true
