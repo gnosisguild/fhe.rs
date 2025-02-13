@@ -54,18 +54,21 @@ impl Plaintext {
     //         .scalar_mul_vec(&mut m_v, self.par.q_mod_t[self.level]);
     //     let ctx = self.par.ctx_at_level(self.level).unwrap();
     //     let mut m =
-    //         Poly::try_convert_from(m_v.as_ref(), ctx, false, Representation::PowerBasis).unwrap();
+    //         Poly::try_convert_from(m_v.as_ref(), ctx, false,
+    // Representation::PowerBasis).unwrap();
     //     m.change_representation(Representation::Ntt);
     //     m *= &self.par.delta[self.level];
     //     m
     // }
 
-    /// Temporary hack to fix centered reduction for Greco. Rather than multiplying the standard form m_v
-    /// by the standard form delta after NTT, we first center m_v, multiply by standard form delta, reduce
-    /// the i64 values and convert back to standard form. There seems to be an issue with simply converting
-    /// to standard form without first converting to centered, then scaling and reducing. Note it was
-    /// necessary to use BigInt as the multiplication with delta causes a very large integer, greater than
-    /// 64 bits.
+    /// Temporary hack to fix centered reduction for Greco. Rather than
+    /// multiplying the standard form m_v by the standard form delta after
+    /// NTT, we first center m_v, multiply by standard form delta, reduce
+    /// the i64 values and convert back to standard form. There seems to be an
+    /// issue with simply converting to standard form without first
+    /// converting to centered, then scaling and reducing. Note it was
+    /// necessary to use BigInt as the multiplication with delta causes a very
+    /// large integer, greater than 64 bits.
     pub fn to_poly(&self) -> Poly {
         // Scale plaintext by q_mod_t for the current level
         let mut m_v = Zeroizing::new(self.value.clone());

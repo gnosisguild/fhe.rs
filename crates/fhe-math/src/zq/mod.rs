@@ -405,8 +405,8 @@ impl Modulus {
         }
     }
 
-    /// Centers a `u64` value into the range `[[-(self.p - 1)]/2, (self.p - 1)/2]`
-    /// according to the modulus `self.p`, in constant time.
+    /// Centers a `u64` value into the range `[[-(self.p - 1)]/2, (self.p -
+    /// 1)/2]` according to the modulus `self.p`, in constant time.
     ///
     /// # Arguments
     ///
@@ -414,8 +414,9 @@ impl Modulus {
     ///
     /// # Returns
     ///
-    /// An `i64` value centered around zero with respect to the modulus `self.p`.
-    /// Note centering here was modified so as to be consistent with Greco
+    /// An `i64` value centered around zero with respect to the modulus
+    /// `self.p`. Note centering here was modified so as to be consistent
+    /// with Greco
     pub fn center(&self, a: u64) -> i64 {
         assert!(a < self.p, "Value must be less than modulus.");
 

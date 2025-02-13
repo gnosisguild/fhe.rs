@@ -120,8 +120,8 @@ impl Serialize for PublicKeyShare {
 // impl DeserializeWithCRP for PublicKeyShare {
 //     type Error = Error;
 
-//     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>, crp: CommonRandomPoly) -> Result<Self> {
-//         Ok(Self {
+//     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>, crp:
+// CommonRandomPoly) -> Result<Self> {         Ok(Self {
 //             par: par.clone(),
 //             crp: crp.clone(),
 //             p0_share,

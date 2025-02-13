@@ -135,13 +135,13 @@ impl BfvParameters {
         self.ctx[0].niterations_to(ctx).map_err(Error::MathError)
     }
 
-    /// Vector of default parameters providing about 128 bits of quantum security
-    /// according to the <https://eprint.iacr.org/2024/463> standard. The number
-    /// of bits represented by the moduli vector sum to the maximum logQ in table
-    /// 4.2 under the quantum, gaussian secret key distribution column. Note this
-    /// library uses a centered binomial distribution with variance 10≈3.19² by
-    /// default for its secret and error distributions and checks that the bounds
-    /// match 6σ.
+    /// Vector of default parameters providing about 128 bits of quantum
+    /// security according to the <https://eprint.iacr.org/2024/463> standard. The number
+    /// of bits represented by the moduli vector sum to the maximum logQ in
+    /// table 4.2 under the quantum, gaussian secret key distribution
+    /// column. Note this library uses a centered binomial distribution with
+    /// variance 10≈3.19² by default for its secret and error distributions
+    /// and checks that the bounds match 6σ.
     pub fn default_parameters_128(plaintext_nbits: usize) -> Vec<Arc<BfvParameters>> {
         debug_assert!(plaintext_nbits < 64);
 
@@ -554,7 +554,8 @@ mod tests {
     // 		.set_degree(1024)
     // 		.set_plaintext_modulus(0)
     // 		.build()
-    // 		.is_err_and(|e| e.to_string() == "modulus should be between 2 and 2^62-1"));
+    // 		.is_err_and(|e| e.to_string() == "modulus should be between 2 and
+    // 2^62-1"));
 
     // 	let params = BfvParametersBuilder::new()
     // 		.set_degree(1024)
@@ -584,15 +585,16 @@ mod tests {
     // 		.set_plaintext_modulus(2)
     // 		.set_moduli(&[1])
     // 		.build()
-    // 		.is_err_and(|e| e.to_string() == "modulus should be between 2 and 2^62-1"));
+    // 		.is_err_and(|e| e.to_string() == "modulus should be between 2 and
+    // 2^62-1"));
 
     // 	let params = BfvParametersBuilder::new()
     // 		.set_degree(8)
     // 		.set_plaintext_modulus(2)
     // 		.set_moduli(&[2])
     // 		.build();
-    // 	assert!(params.is_err_and(|e| e.to_string() == "Impossible to construct a Ntt
-    // operator"));
+    // 	assert!(params.is_err_and(|e| e.to_string() == "Impossible to construct a
+    // Ntt operator"));
 
     // 	let params = BfvParametersBuilder::new()
     // 		.set_degree(8)
