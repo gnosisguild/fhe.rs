@@ -79,6 +79,7 @@ mod tests {
         // println!("{:?}", crp.poly.coefficients[[1, 2047]]);
         // println!("{:?}", crp.poly.coefficients);
 
+        // For each party, generate secret key share contribution (this will never be shared)
         let sk_par = BfvParametersBuilder::new()
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus)
@@ -87,7 +88,10 @@ mod tests {
             .unwrap();
         let sk_share = SecretKey::random(&sk_par, &mut rng);
         println!("{:?}", sk_share.coeffs.len());
-        //println!("{:?}", sk_share.coeffs);
+        println!("{:?}", sk_share.par);
+
+        // For each party, generate public key contribution from sk, this will be broadcast publicly
+        let pk_share = PublicKey::new(&sk_share, &mut rng);
 
         let sss = SSS {
             threshold: threshold,
@@ -96,34 +100,40 @@ mod tests {
         };
 
         // for each coeff generate an SSS of degree n and threshold n = 2t + 1
-        let mut result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(threshold);
+        let mut result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
 
         for i in 0..degree {
             let secret = sk_share.coeffs[i].to_bigint().unwrap();
             // encode negative coeffs as positive ints [11,19]
             let shares = sss.split(secret.clone());
-            let mut sssvec: Vec<(usize, BigInt)> = Vec::with_capacity(n);
-            for j in 0..n {
-                sssvec.push(shares[j].clone());
-            }
-            result.push(sssvec);
+            // let mut sssvec: Vec<(usize, BigInt)> = Vec::with_capacity(n);
+            // for j in 0..n {
+            //     sssvec.push(shares[j].clone());
+            // }
+            result.push(shares);
         }
 
-        //println!("{:?}", shares[0]);
-        //println!("{:?}", result[0]);
-
         let mut node_shares: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(n);
-        for j in 0..n {
+        for i in 0..n {
             let mut node_share_i: Vec<(usize, BigInt)> = Vec::with_capacity(threshold);
-            for i in 0..degree {
-                node_share_i.push(result[i][j].clone());
+            for j in 0..degree {
+                node_share_i.push(result[j][i].clone());
             }
             node_shares.push(node_share_i)
         } 
 
-        println!("{:?}", node_shares[0]);
+
+        let mut test_sssvec: Vec<(usize, BigInt)> = Vec::with_capacity(n);
+        for i in 0..n {
+            test_sssvec.push(node_shares[n-1][0].clone());
+        }
+        println!("{:?}", test_sssvec);
+
+
         println!("{:?}", node_shares[0].len());
+        println!("The useful size of `v` is {}", size_of_val(&*node_shares[0]));
         // SSS is failing with negative values
-        //assert_eq!(secret, sss.recover(&shares[0..sss.threshold as usize]));
+        println!(" Secret coeff {:?}", sk_share.coeffs[0].to_bigint().unwrap());
+        assert_eq!(sk_share.coeffs[0].to_bigint().unwrap(), sss.recover(&result[0][0..sss.threshold as usize]));
     }
 }
