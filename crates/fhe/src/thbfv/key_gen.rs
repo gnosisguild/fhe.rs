@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
 use crate::proto::bfv::{Ciphertext as CiphertextProto, PublicKeyShare as PublicKeyShareProto};
 use fhe_traits::{DeserializeWithContext, Serialize};
+use fhe_util::sample_vec_cbd;
 use crate::errors::Result;
 use crate::Error;
 use fhe_math::rq::{traits::TryConvertFrom, Poly, Representation};
@@ -93,6 +94,11 @@ mod tests {
         // For each party, generate public key contribution from sk, this will be broadcast publicly
         let pk_share = PublicKey::new(&sk_share, &mut rng);
 
+        // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
+        // in [−Bsm, Bsm]
+        let s_coefficients = sample_vec_cbd(sk_par.degree(), sk_par.variance, &mut rng).unwrap();
+
+        // Shamir secret share params
         let sss = SSS {
             threshold: threshold,
             share_amount: n,
