@@ -96,7 +96,7 @@ mod tests {
 
         // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
         // in [−Bsm, Bsm]
-        let s_coefficients = sample_vec_cbd(sk_par.degree(), sk_par.variance, &mut rng).unwrap();
+        let s_coefficients = sample_vec_cbd(sk_par.degree() - 1, sk_par.variance, &mut rng).unwrap();
 
         // Shamir secret share params
         let sss = SSS {
@@ -110,12 +110,8 @@ mod tests {
 
         for i in 0..degree {
             let secret = sk_share.coeffs[i].to_bigint().unwrap();
-            // encode negative coeffs as positive ints [11,19]
+            // TODO: encode negative coeffs as positive ints [11,19]
             let shares = sss.split(secret.clone());
-            // let mut sssvec: Vec<(usize, BigInt)> = Vec::with_capacity(n);
-            // for j in 0..n {
-            //     sssvec.push(shares[j].clone());
-            // }
             result.push(shares);
         }
 
@@ -138,7 +134,7 @@ mod tests {
 
         println!("{:?}", node_shares[0].len());
         println!("The useful size of `v` is {}", size_of_val(&*node_shares[0]));
-        // SSS is failing with negative values
+        // SSS is failing with negative values until encoding scheme TODO above
         println!(" Secret coeff {:?}", sk_share.coeffs[0].to_bigint().unwrap());
         assert_eq!(sk_share.coeffs[0].to_bigint().unwrap(), sss.recover(&result[0][0..sss.threshold as usize]));
     }
