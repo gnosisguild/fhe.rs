@@ -23,35 +23,51 @@ use zeroize::Zeroizing;
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct KeySwitchingKey {
     /// The parameters of the underlying BFV encryption scheme.
-    pub(crate) par: Arc<BfvParameters>,
+    pub par: Arc<BfvParameters>,
 
     /// The (optional) seed that generated the polynomials c1.
-    pub(crate) seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
+    pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
 
     /// The key switching elements c0.
-    pub(crate) c0: Box<[Poly]>,
+    pub c0: Box<[Poly]>,
 
     /// The key switching elements c1.
-    pub(crate) c1: Box<[Poly]>,
+    pub c1: Box<[Poly]>,
 
     /// The level and context of the polynomials that will be key switched.
-    pub(crate) ciphertext_level: usize,
-    pub(crate) ctx_ciphertext: Arc<Context>,
+    pub ciphertext_level: usize,
+    pub ctx_ciphertext: Arc<Context>,
 
     /// The level and context of the key switching key.
-    pub(crate) ksk_level: usize,
-    pub(crate) ctx_ksk: Arc<Context>,
+    pub ksk_level: usize,
+    pub ctx_ksk: Arc<Context>,
 
     // For level with only one modulus, we will use basis
-    pub(crate) log_base: usize,
+    pub log_base: usize,
 }
 
 impl KeySwitchingKey {
     /// Generate a [`KeySwitchingKey`] to this [`SecretKey`] from a polynomial
-    /// `from`.
+    /// `from` using a random seed for generating c1 values.
     pub fn new<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         from: &Poly,
+        ciphertext_level: usize,
+        ksk_level: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut seed);
+
+        Self::new_with_seed(sk, from, seed, ciphertext_level, ksk_level, rng)
+    }
+
+    /// Generate a [`KeySwitchingKey`] with a provided seed for generating c1
+    /// values
+    pub fn new_with_seed<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        from: &Poly,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
         ciphertext_level: usize,
         ksk_level: usize,
         rng: &mut R,
@@ -64,9 +80,6 @@ impl KeySwitchingKey {
                 "Incorrect context for polynomial from".to_string(),
             ));
         }
-
-        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        rng.fill(&mut seed);
 
         if ctx_ksk.moduli().len() == 1 {
             let modulus = ctx_ksk.moduli().first().unwrap();
@@ -635,6 +648,32 @@ mod tests {
             let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
             let ksk_proto = KeySwitchingKeyProto::from(&ksk);
             assert_eq!(ksk, KeySwitchingKey::try_convert_from(&ksk_proto, &params)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compare_constructors() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        for params in [BfvParameters::default_arc(6, 8)] {
+            let sk = SecretKey::random(&params, &mut rng);
+            let ctx = params.ctx_at_level(0)?;
+            let p = Poly::small(ctx, Representation::PowerBasis, 10, &mut rng)?;
+
+            // Create first key with new()
+            let ksk1 = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
+
+            // Get the seed from the first key
+            let seed = ksk1.seed.expect("Key should have a seed");
+
+            // Create second key with new_with_seed() using the same seed
+            let ksk2 = KeySwitchingKey::new_with_seed(&sk, &p, seed, 0, 0, &mut rng)?;
+
+            // Compare c1 values
+            assert_eq!(ksk1.c1.len(), ksk2.c1.len());
+            for (c1_1, c1_2) in ksk1.c1.iter().zip(ksk2.c1.iter()) {
+                assert_eq!(c1_1, c1_2);
+            }
         }
         Ok(())
     }

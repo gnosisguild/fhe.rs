@@ -7,7 +7,8 @@ use crate::{Error, Result};
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 use prost::Message;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -20,18 +21,27 @@ pub struct LBFVPublicKey {
     pub c: Vec<Ciphertext>,
     /// The decomposition size which is the number of RNS moduli (the l in lBFV)
     pub l: usize,
+    /// The seed used to generate all ciphertexts deterministically
+    pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
 }
 
 impl LBFVPublicKey {
-    /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`].
-    /// Creates a ciphertext for each RNS modulus, all encrypting zero.
-    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Self {
+    /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a provided
+    /// seed.
+    pub fn new_with_seed<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+        rng: &mut R,
+    ) -> Self {
         let zero = Plaintext::zero(Encoding::poly(), &sk.par).unwrap();
         let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.par.moduli().len());
+        let mut seed_rng = ChaCha8Rng::from_seed(seed);
 
         // Create a ciphertext for each RNS modulus
         for _ in 0..sk.par.moduli().len() {
-            let mut ct: Ciphertext = sk.try_encrypt(&zero, rng).unwrap();
+            let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
+            seed_rng.fill(&mut seed_i);
+            let mut ct = sk.try_encrypt_with_seed(&zero, seed_i, rng).unwrap();
             // The polynomials of a public key should not allow for variable time
             // computation.
             ct.c.iter_mut()
@@ -43,7 +53,16 @@ impl LBFVPublicKey {
             par: sk.par.clone(),
             c,
             l: sk.par.moduli().len(),
+            seed: Some(seed),
         }
+    }
+
+    /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a random
+    /// seed.
+    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Self {
+        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut seed);
+        Self::new_with_seed(sk, seed, rng)
     }
 
     /// Encrypt a plaintext with the public key.
@@ -204,6 +223,7 @@ impl DeserializeParametrized for LBFVPublicKey {
             par: par.clone(),
             c,
             l: proto.l as usize,
+            seed: None,
         })
     }
 }
@@ -212,8 +232,10 @@ impl DeserializeParametrized for LBFVPublicKey {
 mod tests {
     use super::LBFVPublicKey;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
+    use fhe_math::rq::{Poly, Representation};
     use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
-    use rand::thread_rng;
+    use rand::{thread_rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
     use std::error::Error;
 
     #[test]
@@ -276,6 +298,39 @@ mod tests {
             let bytes = pk.to_bytes();
             assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_deterministic_public_key() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        // Create a fixed seed
+        let seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+
+        // Create two public keys with the same seed
+        let pk1 = LBFVPublicKey::new_with_seed(&sk, seed, &mut rng);
+        let pk2 = LBFVPublicKey::new_with_seed(&sk, seed, &mut rng);
+
+        // Verify that both public keys have the same seed
+        assert_eq!(pk1.seed, pk2.seed);
+        assert_eq!(pk1.seed, Some(seed));
+
+        // Verify that all ciphertexts have the same c[1] components
+        assert_eq!(pk1.c.len(), pk2.c.len());
+        for (ct1, ct2) in pk1.c.iter().zip(pk2.c.iter()) {
+            assert_eq!(ct1.c[1], ct2.c[1]); // The 'a' polynomials should be identical
+            assert_ne!(ct1.c[0], ct2.c[0]); // The 'b' polynomials should differ due to random error
+
+            // Verify both decrypt to zero
+            let pt1 = sk.try_decrypt(ct1)?;
+            let pt2 = sk.try_decrypt(ct2)?;
+            assert_eq!(pt1, Plaintext::zero(Encoding::poly(), &params)?);
+            assert_eq!(pt2, Plaintext::zero(Encoding::poly(), &params)?);
+        }
+
         Ok(())
     }
 }
