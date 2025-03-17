@@ -28,10 +28,13 @@ use fhe_math::rq::{
     switcher::Switcher, traits::TryConvertFrom as TryConvertFromPoly, Poly, Representation,
 };
 use fhe_traits::{DeserializeParametrized, FheParametrized, Serialize};
+use itertools::izip;
 use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
+
+use super::LBFVPublicKey;
 
 /// A relinearization key for the l-BFV scheme, consisting of two key switching
 /// keys: one from r to s and another from s to r. This enables single-round
@@ -51,10 +54,24 @@ pub struct LBFVRelinearizationKey {
     /// of this key switching key anyways so a positive 'a' is not a big
     /// deal. We get (r*a + e + sk*g, a).
     pub(crate) ksk_s_to_r: KeySwitchingKey,
+    /// The polynomial b_vec used in the relinearization process. This is the
+    /// l-BFV public key b-values associated with the secret key.
+    pub(crate) b_vec: Vec<Poly>,
 }
 
 impl LBFVRelinearizationKey {
-    /// Generate a new relinearization key
+    /// Generate a new relinearization key. This relinearization key is
+    /// generated using the key switching keys from r to s and s to r, following
+    /// the l-BFV relinearization algorithm in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
+    /// The first key switching key is generated using the seed `d1_seed` and
+    /// the second key switching key is generated using the seed `a_seed`. If
+    /// `d1_seed` is not provided, a new seed is generated. The key in the paper
+    /// follows (d0,d1,d2). In our implementation, (d0,d1) is the key switching
+    /// key from r to s and (d2, a) is the key switching key from s to r. Note,
+    /// it should be (d2, -a), but we negate 'r' to counteract the effects of
+    /// a positive 'a' since we do not want to go into the code and negate 'a'
+    /// itself. We only use d2  anyways so a not used positive 'a' is not a big
+    /// deal. We get (r*a + e + sk*g, a).
     ///
     /// # Arguments
     /// * `sk` - The secret key to use for key generation
@@ -65,7 +82,7 @@ impl LBFVRelinearizationKey {
     /// * `rng` - The random number generator to use for key generation
     pub fn new<R: RngCore + CryptoRng>(
         sk: &SecretKey,
-        a_seed: <ChaCha8Rng as SeedableRng>::Seed,
+        pk: &LBFVPublicKey,
         d1_seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
         ciphertext_level: usize,
         key_level: usize,
@@ -73,6 +90,7 @@ impl LBFVRelinearizationKey {
     ) -> Result<Self> {
         let ctx_relin_key = sk.par.ctx_at_level(key_level)?;
         let ctx_ciphertext = sk.par.ctx_at_level(ciphertext_level)?;
+        let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
 
         if ctx_relin_key.moduli().len() == 1 {
             return Err(Error::DefaultError(
@@ -82,25 +100,25 @@ impl LBFVRelinearizationKey {
 
         // Generate random polynomial 'r' from the key distribution
         let r: SecretKey = SecretKey::random(&sk.par, rng);
-        let mut r_poly = Zeroizing::new(Poly::try_convert_from(
+        let r_poly = Zeroizing::new(Poly::try_convert_from(
             r.coeffs.as_ref(),
             ctx_ciphertext,
             false,
             Representation::PowerBasis,
         )?);
-        r_poly.change_representation(Representation::Ntt);
+        let r_switched_up = Zeroizing::new(r_poly.mod_switch_to(&switcher_up)?);
 
         // Convert 'sk' coefficients to polynomial
-        let mut sk_poly = Zeroizing::new(Poly::try_convert_from(
+        let sk_poly = Zeroizing::new(Poly::try_convert_from(
             sk.coeffs.as_ref(),
             ctx_ciphertext,
             false,
             Representation::PowerBasis,
         )?);
-        sk_poly.change_representation(Representation::Ntt);
+        let sk_switched_up = Zeroizing::new(sk_poly.mod_switch_to(&switcher_up)?);
 
         // Create key switching key from r to s using d1_seed if provided, otherwise
-        // generate new seed (-sk*d1 + e + r*g, d1)
+        // generate new seed (-sk*d1 + e + r*g, d1) = (d0, d1)
         let d1_seed = d1_seed.unwrap_or_else(|| {
             let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
             rng.fill(&mut seed);
@@ -108,7 +126,7 @@ impl LBFVRelinearizationKey {
         });
         let ksk_r_to_s = KeySwitchingKey::new_with_seed(
             sk,
-            r_poly.as_ref(),
+            &r_switched_up,
             d1_seed,
             ciphertext_level,
             key_level,
@@ -123,78 +141,110 @@ impl LBFVRelinearizationKey {
         neg_r.coeffs.iter_mut().for_each(|x| *x = x.wrapping_neg());
         let ksk_s_to_r = KeySwitchingKey::new_with_seed(
             &neg_r,
-            sk_poly.as_ref(),
-            a_seed,
+            &sk_switched_up,
+            pk.seed
+                .ok_or_else(|| Error::DefaultError("Public key is missing its seed".to_string()))?,
             ciphertext_level,
             key_level,
             rng,
         )?;
 
+        // Extract b_vec from pk.c[i][0]
+        let b_vec = pk.extract_b_polynomials_ntt_shoup()?;
+
         Ok(Self {
             ksk_r_to_s,
             ksk_s_to_r,
+            b_vec,
         })
     }
 
-    /// Relinearize an "extended" ciphertext (c₀, c₁, c₂) into a [`Ciphertext`]
-    ///
-    /// This method transforms a degree-2 ciphertext with three components
-    /// (c₀, c₁, c₂) into a regular degree-1 ciphertext with two components
-    /// (c₀', c₁').
-    /// This process is necessary after homomorphic multiplication, which
-    /// produces ciphertexts containing terms encrypted under s², not s, thus
-    /// expanding the size of the ciphertext.
-    ///
-    /// A degree-2 ciphertext can be decrypted by computing
-    /// c₀ + c₁·s + c₂·s² = m + e, where e is the noise. During
-    /// relinearization, we want to make c₀' + c₁'·s = m + e', where e' is
-    /// the new noise, so we need to find a way to make the following
-    /// approximate equality:
-    /// c₀ + c₁·s + c₂·s² ≈ c₀' + c₁'·s = m + e'. We can do this by
-    /// setting c₀' = c₀ + c₂·s². Thus, we can add an encryption of s² * c₂, a
-    /// polynomial that we get from the key switch operation between c₂ and
-    /// a key switch key s² → s.
-    ///
-    /// # Process
-    /// 1. Takes the c₂ component and converts it to power basis
-    /// 2. Uses the key switching key to transform c₂ into (d₀, d₁) = c₂ * s²,
-    ///    encrypted under s
-    /// 3. Adds d₀ to c₀ and d₁ to c₁ to produce the final relinearized
-    ///    ciphertext (c₀', c₁') such that c₀' + c₁'·s = m + e'.
-    ///
-    /// # Arguments
-    /// * `ct` - A mutable reference to a [`Ciphertext`] with three components
-    ///
-    /// # Returns
-    /// * `Ok(())` if relinearization succeeds
-    /// * `Err` if the ciphertext doesn't have exactly 3 components or is at
-    ///   wrong level
-    ///
-    /// # Note
-    /// The input ciphertext must be at the same level as specified during key
-    /// generation
     pub fn relinearizes(&self, ct: &mut Ciphertext) -> Result<()> {
-        // TODO: Implement this
-        Ok(())
+        if ct.c.len() != 3 {
+            Err(Error::DefaultError(
+                "Only supports relinearization of ciphertext with 3 parts".to_string(),
+            ))
+        } else if ct.level != self.ksk_r_to_s.ciphertext_level
+            || ct.level != self.ksk_s_to_r.ciphertext_level
+        {
+            Err(Error::DefaultError(
+                "Ciphertext has incorrect level".to_string(),
+            ))
+        } else {
+            let mut c2_hat = ct.c[2].clone();
+            c2_hat.change_representation(Representation::PowerBasis);
+
+            // Step 3: c2_prime = < D_Q(c2_hat), b_vec >
+            let mut c2_prime = self.decompose_poly_and_product_sum(&c2_hat, &self.b_vec)?;
+            c2_prime.change_representation(Representation::PowerBasis);
+            if c2_prime.ctx() != ct.c[0].ctx() {
+                c2_prime.mod_switch_down_to(ct.c[0].ctx())?;
+            }
+
+            // Step 4
+            let (mut c0_prime, mut c1_prime) = self.ksk_r_to_s.key_switch(&c2_prime)?;
+            if c0_prime.ctx() != ct.c[0].ctx() || c1_prime.ctx() != ct.c[1].ctx() {
+                c0_prime.change_representation(Representation::PowerBasis);
+                c1_prime.change_representation(Representation::PowerBasis);
+                c0_prime.mod_switch_down_to(ct.c[0].ctx())?;
+                c1_prime.mod_switch_down_to(ct.c[1].ctx())?;
+                c0_prime.change_representation(Representation::Ntt);
+                c1_prime.change_representation(Representation::Ntt);
+            }
+            ct.c[0] += &c0_prime;
+            ct.c[1] += &c1_prime;
+
+            // Step 5
+            let mut c1_double_prime =
+                self.decompose_poly_and_product_sum(&c2_hat, &self.ksk_s_to_r.c0)?;
+            if c1_double_prime.ctx() != ct.c[1].ctx() {
+                c1_double_prime.change_representation(Representation::PowerBasis);
+                c1_double_prime.mod_switch_down_to(ct.c[1].ctx())?;
+                c1_double_prime.change_representation(Representation::Ntt);
+            }
+            ct.c[1] += &c1_double_prime;
+
+            // Remove unnecessary third element
+            ct.c.truncate(2);
+            Ok(())
+        }
     }
 
-    /// Same operation as [`relinearizes`] but for relinearizing a polynomial
-    /// rather than a full ciphertext. Takes a polynomial representing c₂
-    /// and returns the relinearized components (d₀, d₁) = c₂·s², encrypted
-    /// under s.
-    ///
-    /// # Arguments
-    /// * `c2` - The polynomial to relinearize, representing the c₂ component
-    ///
-    /// # Returns
-    /// * `Ok((d₀, d₁))` - The relinearized components encrypted under s
-    /// * `Err` if the key switching operation fails
-    pub(crate) fn relinearizes_poly(&self, c2: &Poly) -> Result<(Poly, Poly)> {
-        // TODO: Implement this
-        Ok((
-            Poly::zero(c2.ctx(), Representation::Ntt),
-            Poly::zero(c2.ctx(), Representation::Ntt),
-        ))
+    fn decompose_poly_and_product_sum(&self, poly: &Poly, arr: &[Poly]) -> Result<Poly> {
+        // Validate equal context and representation
+        if poly.ctx().as_ref() != self.ksk_r_to_s.ctx_ciphertext.as_ref() {
+            return Err(Error::DefaultError(
+                "The input polynomial does not have the correct context.".to_string(),
+            ));
+        }
+        if poly.representation() != &Representation::PowerBasis {
+            return Err(Error::DefaultError("Incorrect representation".to_string()));
+        }
+
+        // Product-sum of decomposed polynomial and array of polynomials
+        let mut out = Poly::zero(&self.ksk_r_to_s.ctx_ksk, Representation::Ntt);
+        for (poly_i_coefficients, arr_i) in izip!(poly.coefficients().outer_iter(), arr.iter()) {
+            // Validate equal context and representation
+            if arr_i.ctx().as_ref() != self.ksk_r_to_s.ctx_ciphertext.as_ref() {
+                return Err(Error::DefaultError(
+                    "A polynomial in the array does not have the correct context.".to_string(),
+                ));
+            }
+            if arr_i.representation() != &Representation::NttShoup {
+                return Err(Error::DefaultError("Incorrect representation".to_string()));
+            }
+
+            // Takes the coefficients of [p]_{qi} and converts them to an RNS representation
+            // by taking [[p]_qi]_qj for every RNS basis qj
+            let poly_i = unsafe {
+                Poly::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
+                    poly_i_coefficients.as_slice().unwrap(),
+                    &self.ksk_r_to_s.ctx_ksk,
+                )
+            };
+            out += &(&poly_i * arr_i);
+        }
+        Ok(out)
     }
 }
 
@@ -267,147 +317,44 @@ impl LBFVRelinearizationKey {
 #[cfg(test)]
 mod tests {
     use super::LBFVRelinearizationKey;
-    use crate::bfv::{traits::TryConvertFrom, BfvParameters, Ciphertext, Encoding, SecretKey};
-    use crate::proto::bfv::RelinearizationKey as RelinearizationKeyProto;
-    use fhe_math::rq::{traits::TryConvertFrom as TryConvertFromPoly, Poly, Representation};
-    use fhe_traits::{FheDecoder, FheDecrypter};
+    use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
+    use crate::lbfv::keys::LBFVPublicKey;
+    use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use rand::thread_rng;
     use std::error::Error;
 
-    // #[test]
-    // fn relinearization() -> Result<(), Box<dyn Error>> {
-    //     let mut rng = thread_rng();
-    //     for params in [BfvParameters::default_arc(6, 8)] {
-    //         for _ in 0..100 {
-    //             let sk = SecretKey::random(&params, &mut rng);
-    //             let rk = RelinearizationKey::new(&sk, &mut rng)?;
+    #[test]
+    fn test_relinearization_after_multiplication() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng);
 
-    //             let ctx = params.ctx_at_level(0)?;
-    //             let mut s = Poly::try_convert_from(
-    //                 sk.coeffs.as_ref(),
-    //                 ctx,
-    //                 false,
-    //                 Representation::PowerBasis,
-    //             )
-    //             .map_err(crate::Error::MathError)?;
-    //             s.change_representation(Representation::Ntt);
-    //             let s2 = &s * &s;
+        // Create relinearization key
+        let relin_key = LBFVRelinearizationKey::new(
+            &sk, &pk, None, // Use random d1_seed
+            0,    // ciphertext level
+            0,    // key level
+            &mut rng,
+        )?;
 
-    //             // Let's generate manually an "extended" ciphertext (c₀ = e -
-    // c₁·s - c₂·s²,             // c₁, c₂) encrypting 0.
-    //             let mut c2 = Poly::random(ctx, Representation::Ntt, &mut
-    // rng);             let c1 = Poly::random(ctx, Representation::Ntt,
-    // &mut rng);             let mut c0 = Poly::small(ctx,
-    // Representation::PowerBasis, 16, &mut rng)?;
-    // c0.change_representation(Representation::Ntt);             c0 -=
-    // &(&c1 * &s);             c0 -= &(&c2 * &s2);
-    //             let mut ct = Ciphertext::new(vec![c0.clone(), c1.clone(),
-    // c2.clone()], &params)?;
+        // Create a plaintext with value 2
+        let pt = Plaintext::try_encode(&[2u64], Encoding::poly(), &params)?;
 
-    //             // Relinearize the extended ciphertext!
-    //             rk.relinearizes(&mut ct)?;
-    //             assert_eq!(ct.c.len(), 2);
+        // Encrypt the plaintext
+        let ct = pk.try_encrypt(&pt, &mut rng)?;
 
-    //             // Check that the relinearization by polynomials works the
-    // same way
-    // c2.change_representation(Representation::PowerBasis);             let
-    // (mut c0r, mut c1r) = rk.relinearizes_poly(&c2)?;
-    // c0r.change_representation(Representation::PowerBasis);
-    // c0r.mod_switch_down_to(c0.ctx())?;
-    // c1r.change_representation(Representation::PowerBasis);
-    // c1r.mod_switch_down_to(c1.ctx())?;
-    // c0r.change_representation(Representation::Ntt);
-    // c1r.change_representation(Representation::Ntt);
-    // assert_eq!(ct, Ciphertext::new(vec![&c0 + &c0r, &c1 + &c1r], &params)?);
+        // Multiply the ciphertext with itself (this creates a 3-part ciphertext)
+        let mut ct_squared = &ct.clone() * &ct;
 
-    //             // Print the noise and decrypt
-    //             println!("Noise: {}", unsafe { sk.measure_noise(&ct)? });
-    //             let pt = sk.try_decrypt(&ct)?;
-    //             let w = Vec::<u64>::try_decode(&pt, Encoding::poly())?;
-    //             assert_eq!(w, &[0u64; 8]);
-    //         }
-    //     }
-    //     Ok(())
-    // }
+        // Relinearize the squared ciphertext
+        relin_key.relinearizes(&mut ct_squared)?;
 
-    // #[test]
-    // fn relinearization_leveled() -> Result<(), Box<dyn Error>> {
-    //     let mut rng = thread_rng();
-    //     for params in [BfvParameters::default_arc(5, 8)] {
-    //         for ciphertext_level in 0..params.max_level() {
-    //             for key_level in 0..=ciphertext_level {
-    //                 for _ in 0..10 {
-    //                     let sk = SecretKey::random(&params, &mut rng);
-    //                     let rk = RelinearizationKey::new_leveled(
-    //                         &sk,
-    //                         ciphertext_level,
-    //                         key_level,
-    //                         &mut rng,
-    //                     )?;
+        // Decrypt and verify the result is 4 (2 * 2)
+        let pt_result = sk.try_decrypt(&ct_squared)?;
+        let result = Vec::<u64>::try_decode(&pt_result, Encoding::poly())?;
+        assert_eq!(result[0], 4);
 
-    //                     let ctx = params.ctx_at_level(ciphertext_level)?;
-    //                     let mut s = Poly::try_convert_from(
-    //                         sk.coeffs.as_ref(),
-    //                         ctx,
-    //                         false,
-    //                         Representation::PowerBasis,
-    //                     )
-    //                     .map_err(crate::Error::MathError)?;
-    //                     s.change_representation(Representation::Ntt);
-    //                     let s2 = &s * &s;
-    //                     // Let's generate manually an "extended" ciphertext
-    // (c₀ = e - c₁·s - c₂·s²,                     // c₁, c₂) encrypting 0.
-    //                     let mut c2 = Poly::random(ctx, Representation::Ntt,
-    // &mut rng);                     let c1 = Poly::random(ctx,
-    // Representation::Ntt, &mut rng);                     let mut c0 =
-    // Poly::small(ctx, Representation::PowerBasis, 16, &mut rng)?;
-    //                     c0.change_representation(Representation::Ntt);
-    //                     c0 -= &(&c1 * &s);
-    //                     c0 -= &(&c2 * &s2);
-    //                     let mut ct =
-    //                         Ciphertext::new(vec![c0.clone(), c1.clone(),
-    // c2.clone()], &params)?;
-
-    //                     // Relinearize the extended ciphertext!
-    //                     rk.relinearizes(&mut ct)?;
-    //                     assert_eq!(ct.c.len(), 2);
-
-    //                     // Check that the relinearization by polynomials
-    // works the same way
-    // c2.change_representation(Representation::PowerBasis);
-    // let (mut c0r, mut c1r) = rk.relinearizes_poly(&c2)?;
-    // c0r.change_representation(Representation::PowerBasis);
-    // c0r.mod_switch_down_to(c0.ctx())?;
-    // c1r.change_representation(Representation::PowerBasis);
-    // c1r.mod_switch_down_to(c1.ctx())?;
-    // c0r.change_representation(Representation::Ntt);
-    // c1r.change_representation(Representation::Ntt);
-    // assert_eq!(ct, Ciphertext::new(vec![&c0 + &c0r, &c1 + &c1r], &params)?);
-
-    //                     // Print the noise and decrypt
-    //                     println!("Noise: {}", unsafe { sk.measure_noise(&ct)?
-    // });                     let pt = sk.try_decrypt(&ct)?;
-    //                     let w = Vec::<u64>::try_decode(&pt,
-    // Encoding::poly())?;                     assert_eq!(w, &[0u64; 8]);
-    //                 }
-    //             }
-    //         }
-    //     }
-    //     Ok(())
-    // }
-
-    // #[test]
-    // fn proto_conversion() -> Result<(), Box<dyn Error>> {
-    //     let mut rng = thread_rng();
-    //     for params in [
-    //         BfvParameters::default_arc(6, 8),
-    //         BfvParameters::default_arc(3, 8),
-    //     ] {
-    //         let sk = SecretKey::random(&params, &mut rng);
-    //         let rk = RelinearizationKey::new(&sk, &mut rng)?;
-    //         let proto = RelinearizationKeyProto::from(&rk);
-    //         assert_eq!(rk, RelinearizationKey::try_convert_from(&proto,
-    // &params)?);     }
-    //     Ok(())
-    // }
+        Ok(())
+    }
 }

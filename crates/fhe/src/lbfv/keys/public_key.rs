@@ -112,6 +112,32 @@ impl LBFVPublicKey {
 
         Ok((ciphertext, u, e1, e2))
     }
+
+    /// Extract the b polynomials from the ciphertexts in the public key.
+    /// These are the c[0] components of each ciphertext.
+    pub fn extract_b_polynomials(&self) -> Result<Vec<Poly>> {
+        self.c.iter().map(|ct| Ok(ct.c[0].clone())).collect()
+    }
+
+    /// Extract the b polynomials from the ciphertexts in the public key and
+    /// convert them to NTTShoup representation. These are the c[0]
+    /// components of each ciphertext.
+    pub fn extract_b_polynomials_ntt_shoup(&self) -> Result<Vec<Poly>> {
+        self.c
+            .iter()
+            .map(|ct| {
+                let mut poly = ct.c[0].clone();
+                poly.change_representation(Representation::NttShoup);
+                Ok(poly)
+            })
+            .collect()
+    }
+
+    /// Extract the a polynomials from the ciphertexts in the public key.
+    /// These are the c[1] components of each ciphertext.
+    pub fn extract_a_polynomials(&self) -> Result<Vec<Poly>> {
+        self.c.iter().map(|ct| Ok(ct.c[1].clone())).collect()
+    }
 }
 
 impl FheParametrized for LBFVPublicKey {
