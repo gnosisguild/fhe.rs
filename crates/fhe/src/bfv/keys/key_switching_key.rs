@@ -363,7 +363,8 @@ impl KeySwitchingKey {
                 )
             };
             c0 += &(&c2_i * c0_i);
-            c2_i *= c1_i;
+
+            c2_i *= c1_i; // Re-uses memory, is faster
             c1 += &c2_i;
         }
         Ok((c0, c1))
