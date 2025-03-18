@@ -106,19 +106,6 @@ mod tests {
         let plaintext_modulus: u64 = 4096;
         let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
 
-        // Generate the common random poly BFV parameters structure.
-        // let crp_par = BfvParametersBuilder::new()
-        //     .set_degree(degree)
-        //     .set_plaintext_modulus(plaintext_modulus)
-        //     .set_moduli(&moduli)
-        //     .build_arc()
-        //     .unwrap();
-
-        // let crp = CommonRandomPoly::new(&crp_par, &mut rng).unwrap();
-        // println!("{:?}", crp.poly.coefficients.len());
-        // println!("{:?}", crp.poly.coefficients[[1, 2047]]);
-        // println!("{:?}", crp.poly.coefficients);
-
         // For each party, generate secret key share contribution (this will never be shared)
         let sk_par = BfvParametersBuilder::new()
             .set_degree(degree)
@@ -145,7 +132,6 @@ mod tests {
             prime: BigInt::parse_bytes(b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",16).unwrap()
         };
 
-        // ------
         // for each smuding error coeff generate an SSS of degree n and threshold n = 2t + 1
         let mut sss_smudge_result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
 
@@ -164,9 +150,7 @@ mod tests {
             }
             smudge_node_shares.push(node_share_i)
         } 
-        // ------
 
-        // ------
         // for each sk coeff generate an SSS of degree n and threshold n = 2t + 1
         let mut result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
 
@@ -185,8 +169,9 @@ mod tests {
             }
             node_shares.push(node_share_i)
         } 
-        // ------
 
+
+        // Test decrypt
         let mut test_sssvec: Vec<(usize, BigInt)> = Vec::with_capacity(n);
         for i in 0..n {
             test_sssvec.push(node_shares[n-1][0].clone());
