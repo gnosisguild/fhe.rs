@@ -71,7 +71,18 @@ impl TrBFVShare {
             result.push(shares);
         }
         Ok(result)
-    }    
+    }
+
+    pub fn gen_smudging_error<R: RngCore + CryptoRng>(
+        degree: usize, // todo get this from self
+        variance: usize, // todo get this from self
+        rng: &mut R
+    ) -> Result<Vec<i64>> {
+        // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
+        // in [−Bsm, Bsm]
+        let s_coefficients = sample_vec_cbd_unbounded(degree, variance, rng).unwrap();
+        Ok(s_coefficients)
+    }   
 }
 
 #[cfg(test)]
@@ -124,7 +135,7 @@ mod tests {
 
         // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
         // in [−Bsm, Bsm]
-        let s_coefficients = sample_vec_cbd_unbounded(sk_par.degree() - 1, 16, &mut rng).unwrap();
+        let s_coefficients = sample_vec_cbd_unbounded(sk_par.degree(), 16, &mut rng).unwrap();
         println!("{:?}", s_coefficients[1]);
 
         // Shamir secret share params
@@ -134,7 +145,29 @@ mod tests {
             prime: BigInt::parse_bytes(b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",16).unwrap()
         };
 
-        // for each coeff generate an SSS of degree n and threshold n = 2t + 1
+        // ------
+        // for each smuding error coeff generate an SSS of degree n and threshold n = 2t + 1
+        let mut sss_smudge_result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
+
+        for i in 0..degree {
+            let secret = s_coefficients[i].to_bigint().unwrap();
+            // TODO: encode negative coeffs as positive ints [11,19]
+            let shares = sss.split(secret.clone());
+            sss_smudge_result.push(shares);
+        }
+
+        let mut smudge_node_shares: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut node_share_i: Vec<(usize, BigInt)> = Vec::with_capacity(threshold);
+            for j in 0..degree {
+                node_share_i.push(sss_smudge_result[j][i].clone());
+            }
+            smudge_node_shares.push(node_share_i)
+        } 
+        // ------
+
+        // ------
+        // for each sk coeff generate an SSS of degree n and threshold n = 2t + 1
         let mut result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
 
         for i in 0..degree {
@@ -152,7 +185,7 @@ mod tests {
             }
             node_shares.push(node_share_i)
         } 
-
+        // ------
 
         let mut test_sssvec: Vec<(usize, BigInt)> = Vec::with_capacity(n);
         for i in 0..n {
