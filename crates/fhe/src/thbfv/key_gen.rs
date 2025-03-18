@@ -21,6 +21,7 @@ pub struct TrBFVShare {
     degree: u64,
     plaintext_modulus: u64,
     sss_modulus: u64,
+    sumdging_variance: u64,
     moduli: Vec<u64>
 }
 
@@ -31,6 +32,7 @@ impl TrBFVShare {
         degree: u64,
         plaintext_modulus: u64,
         sss_modulus: u64,
+        sumdging_variance: u64,
         moduli: Vec<u64>,
         rng: &mut R
     ) -> Result<Self> {
@@ -41,9 +43,35 @@ impl TrBFVShare {
             degree,
             plaintext_modulus,
             sss_modulus,
+            sumdging_variance,
             moduli
         })
     }
+
+    pub fn gen_sss_shares(
+        degree: usize, // todo get this from self
+        threshold: usize, // todo get this from self
+        share_amount: usize,
+        prime: BigInt,
+        coeffs: Vec<i64>
+    ) -> Result<Vec<Vec<(usize, BigInt)>>> {
+        // Shamir secret share params
+        let sss = SSS {
+            threshold: threshold,
+            share_amount: share_amount,
+            prime: prime
+        };
+        // for each coeff generate an SSS of degree n and threshold n = 2t + 1
+        let mut result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
+
+        for i in 0..degree {
+            let secret = coeffs[i as usize].to_bigint().unwrap();
+            // TODO: encode negative coeffs as positive ints [11,19]
+            let shares = sss.split(secret.clone());
+            result.push(shares);
+        }
+        Ok(result)
+    }    
 }
 
 #[cfg(test)]
@@ -96,7 +124,8 @@ mod tests {
 
         // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
         // in [−Bsm, Bsm]
-        let s_coefficients = sample_vec_cbd_unbounded(sk_par.degree() - 1, sk_par.variance, &mut rng).unwrap();
+        let s_coefficients = sample_vec_cbd_unbounded(sk_par.degree() - 1, 16, &mut rng).unwrap();
+        println!("{:?}", s_coefficients[1]);
 
         // Shamir secret share params
         let sss = SSS {
@@ -129,7 +158,7 @@ mod tests {
         for i in 0..n {
             test_sssvec.push(node_shares[n-1][0].clone());
         }
-        println!("{:?}", test_sssvec);
+        //println!("{:?}", test_sssvec);
 
 
         println!("{:?}", node_shares[0].len());
