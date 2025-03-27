@@ -15,7 +15,7 @@ bench = false # Disable default bench (we use criterion)
 [dependencies]
 fhe-traits = { version = "^0.1.0-beta.7", path = "../fhe-traits" }
 fhe-util = { version = "^0.1.0-beta.7", path = "../fhe-util" }
-
+prime-number-utils.workspace = true
 ethnum.workspace = true
 itertools.workspace = true
 ndarray.workspace = true

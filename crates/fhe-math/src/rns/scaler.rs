@@ -22,7 +22,11 @@ pub struct ScalingFactor {
 impl ScalingFactor {
     /// Create a new scaling factor. Aborts if the denominator is 0.
     pub fn new(numerator: &BigUint, denominator: &BigUint) -> Self {
-        assert_ne!(denominator, &BigUint::zero());
+        // assert_ne!(denominator, &BigUint::zero());
+        // We can write the above as: 
+        if &BigUint::zero() == denominator {
+            panic!("Denominator cannot be zero");
+        }
         Self {
             numerator: numerator.clone(),
             denominator: denominator.clone(),

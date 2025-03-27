@@ -9,9 +9,10 @@ extern crate proptest;
 
 use rand::{CryptoRng, RngCore};
 
-use num_bigint_dig::{prime::probably_prime, BigUint, ModInverse};
+use num_bigint_dig::{BigUint, ModInverse};
 use num_traits::{cast::ToPrimitive, PrimInt};
 use prime_factorization::Factorization;
+use prime_number_utils::baillie_psw;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use std::{error::Error, fmt, panic::UnwindSafe};
 
@@ -25,11 +26,6 @@ where
     let r = std::panic::catch_unwind(f);
     std::panic::set_hook(prev_hook);
     r
-}
-
-/// Returns whether the modulus p is prime; this function is 100% accurate.
-pub fn is_prime(p: u64) -> bool {
-    probably_prime(&BigUint::from(p), 0)
 }
 
 /// Error type for factorization operations.
@@ -105,7 +101,7 @@ pub fn get_smallest_prime_factor(moduli: &[u64]) -> Result<u64, FactorError> {
     let factors = moduli
         .par_iter()
         .map(|&m| {
-            if is_prime(m) {
+            if baillie_psw(m as usize) {
                 Ok(m)
             } else {
                 Factorization::run(m)
@@ -288,27 +284,27 @@ mod tests {
     use rand::{thread_rng, RngCore};
 
     use crate::variance;
-
+    use prime_number_utils::baillie_psw;
     use super::{
-        get_smallest_prime_factor, inverse, is_prime, sample_vec_cbd, transcode_bidirectional,
+        get_smallest_prime_factor, inverse, sample_vec_cbd, transcode_bidirectional,
         transcode_from_bytes, transcode_to_bytes,
     };
 
     #[test]
     fn prime() {
-        assert!(is_prime(2));
-        assert!(is_prime(3));
-        assert!(is_prime(5));
-        assert!(is_prime(7));
-        assert!(is_prime(4611686018326724609));
+        assert!(baillie_psw(2 as usize));
+        assert!(baillie_psw(3 as usize));
+        assert!(baillie_psw(5 as usize));
+        assert!(baillie_psw(7 as usize));
+        assert!(baillie_psw(4611686018326724609 as usize));
 
-        assert!(!is_prime(0));
-        assert!(!is_prime(1));
-        assert!(!is_prime(4));
-        assert!(!is_prime(6));
-        assert!(!is_prime(8));
-        assert!(!is_prime(9));
-        assert!(!is_prime(4611686018326724607));
+        assert!(!baillie_psw(0 as usize));
+        assert!(!baillie_psw(1 as usize));
+        assert!(!baillie_psw(4 as usize));
+        assert!(!baillie_psw(6 as usize));
+        assert!(!baillie_psw(8 as usize));
+        assert!(!baillie_psw(9 as usize));
+        assert!(!baillie_psw(4611686018326724607 as usize));
     }
 
     #[test]

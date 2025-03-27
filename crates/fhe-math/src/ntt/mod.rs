@@ -1,8 +1,7 @@
 //! Number-Theoretic Transform in ZZ_q.
 
-use fhe_util::is_prime;
-
 mod native;
+use prime_number_utils::baillie_psw;
 pub use native::NttOperator;
 
 /// Returns whether a modulus p is prime and supports the Number Theoretic
@@ -12,7 +11,7 @@ pub use native::NttOperator;
 pub(crate) fn supports_ntt(p: u64, n: usize) -> bool {
     assert!(n >= 8 && n.is_power_of_two());
 
-    p % ((n as u64) << 1) == 1 && is_prime(p)
+    p % ((n as u64) << 1) == 1 && baillie_psw(p as usize)
 }
 
 #[cfg(test)]

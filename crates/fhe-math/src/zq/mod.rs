@@ -5,10 +5,11 @@
 pub mod primes;
 
 use crate::errors::{Error, Result};
-use fhe_util::{is_prime, transcode_from_bytes, transcode_to_bytes};
+use fhe_util::{transcode_from_bytes, transcode_to_bytes};
 use itertools::{izip, Itertools};
 use num_bigint::BigUint;
 use num_traits::cast::ToPrimitive;
+use prime_number_utils::baillie_psw;
 use rand::{distributions::Uniform, CryptoRng, Rng, RngCore};
 use serde::{Serialize, Deserialize};
 
@@ -535,7 +536,7 @@ impl Modulus {
     /// Returns None if p is not prime or a = 0.
     /// Aborts if a >= p in debug mode.
     pub fn inv(&self, a: u64) -> std::option::Option<u64> {
-        if !is_prime(self.p) || a == 0 {
+        if !baillie_psw(self.p as usize) || a == 0 {
             None
         } else {
             let r = self.pow(a, self.p - 2);

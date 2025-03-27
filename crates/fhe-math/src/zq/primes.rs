@@ -1,6 +1,5 @@
 //! Optimized primes generated as in the NFLlib library.
-
-use fhe_util::is_prime;
+use prime_number_utils::baillie_psw;
 use num_bigint::BigUint;
 
 /// Returns whether the modulus supports optimized multiplication and reduction.
@@ -42,13 +41,13 @@ pub fn generate_prime(num_bits: usize, modulo: u64, upper_bound: u64) -> Option<
         }
 
         while tentative_prime.leading_zeros() == leading_zeros
-            && !is_prime(tentative_prime)
+            && !baillie_psw(tentative_prime as usize)
             && tentative_prime >= modulo
         {
             tentative_prime -= modulo
         }
 
-        if tentative_prime.leading_zeros() == leading_zeros && is_prime(tentative_prime) {
+        if tentative_prime.leading_zeros() == leading_zeros && baillie_psw(tentative_prime as usize) {
             Some(tentative_prime)
         } else {
             None

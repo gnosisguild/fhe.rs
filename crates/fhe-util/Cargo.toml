@@ -11,8 +11,9 @@ rust-version.workspace = true
 
 [dependencies]
 itertools.workspace = true
-num-bigint-dig = { workspace = true, features = ["prime"] }
+num-bigint-dig = { workspace = true }
 num-traits.workspace = true
+prime-number-utils.workspace = true
 prime_factorization.workspace = true
 rand.workspace = true
 rayon.workspace = true
