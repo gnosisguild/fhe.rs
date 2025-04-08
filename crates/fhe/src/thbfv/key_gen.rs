@@ -113,7 +113,7 @@ mod tests {
             .set_moduli(&moduli)
             .build_arc()
             .unwrap();
-        let sk_share = SecretKey::random(&sk_par, &mut rng);
+        let mut sk_share = SecretKey::random(&sk_par, &mut rng);
         println!("{:?}", sk_share.coeffs.len());
         println!("{:?}", sk_share.par);
 
@@ -122,7 +122,7 @@ mod tests {
 
         // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
         // in [−Bsm, Bsm]
-        let s_coefficients = sample_vec_cbd_unbounded(sk_par.degree(), 16, &mut rng).unwrap();
+        let mut s_coefficients = sample_vec_cbd_unbounded(sk_par.degree(), 16, &mut rng).unwrap();
         println!("{:?}", s_coefficients[1]);
 
         // Shamir secret share params
@@ -136,9 +136,15 @@ mod tests {
         let mut sss_smudge_result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
 
         for i in 0..degree {
+            if(s_coefficients[i] < 0) {
+                //println!("minus");
+                s_coefficients[i] = s_coefficients[i] + 19;
+            }
             let secret = s_coefficients[i].to_bigint().unwrap();
             // TODO: encode negative coeffs as positive ints [11,19]
+            //println!("{:?}", s_coefficients[i]);
             let shares = sss.split(secret.clone());
+            //println!("{:?}", shares);
             sss_smudge_result.push(shares);
         }
 
@@ -155,6 +161,10 @@ mod tests {
         let mut result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
 
         for i in 0..degree {
+            if(sk_share.coeffs[i] < 0) {
+                //println!("minus");
+                sk_share.coeffs[i] = sk_share.coeffs[i] + 19;
+            }
             let secret = sk_share.coeffs[i].to_bigint().unwrap();
             // TODO: encode negative coeffs as positive ints [11,19]
             let shares = sss.split(secret.clone());
