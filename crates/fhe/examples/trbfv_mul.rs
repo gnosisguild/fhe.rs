@@ -8,10 +8,12 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, DecryptionShare, PublicKeyShare},
+    thbfv::{TrBFVShare},
 };
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use util::timeit::{timeit, timeit_n};
+use num_bigint_old::{BigInt, ToBigInt};
 
 fn print_notice_and_exit(error: Option<String>) {
     println!(
@@ -35,9 +37,10 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let degree = 4096;
+    let degree = 2048;
     let plaintext_modulus: u64 = 4096;
     let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
+    let sss_prime = BigInt::parse_bytes(b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",16).unwrap();
 
     // This executable is a command line tool which enables to specify
     // voter/election worker sizes.
@@ -50,6 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut num_users = 1;
     let mut num_parties = 10;
+    let threshold = 5; // todo get from clit input
 
     // Update the number of users and/or number of parties depending on the
     // arguments provided.
@@ -59,7 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             if a.len() != 2 || a[0].parse::<usize>().is_err() {
                 print_notice_and_exit(Some("Invalid `--num_users` argument".to_string()))
             } else {
-                num_voters = a[0].parse::<usize>()?
+                num_users = a[0].parse::<usize>()?
             }
         } else if arg.starts_with("--num_parties") {
             let a: Vec<&str> = arg.rsplit('=').collect();
@@ -73,7 +77,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if num_users == 0 || num_voters == 0 {
+    if num_users == 0 || num_users == 0 {
         print_notice_and_exit(Some("Users and party sizes must be nonzero".to_string()))
     }
 
@@ -100,74 +104,50 @@ fn main() -> Result<(), Box<dyn Error>> {
     // public key.
     struct Party {
         sk_share: SecretKey,
-        pk_share: PublicKeyShare,
+        pk_share: PublicKey,
+        sk_sss: Vec<Vec<(usize, BigInt)>>,
+        smudge_error: Vec<i64>,
+        smudge_sss: Vec<Vec<(usize, BigInt)>>,
     }
     let mut parties = Vec::with_capacity(num_parties);
     timeit_n!("Party setup (per party)", num_parties as u32, {
         let sk_share = SecretKey::random(&params, &mut OsRng);
-        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
-        parties.push(Party { sk_share, pk_share });
+        let pk_share = PublicKey::new(&sk_share, &mut OsRng);
+        // encode away negative coeffs
+        let sk_coeffs_encoded = TrBFVShare::encode_coeffs(&mut sk_share.coeffs.to_vec()).unwrap();
+        let sk_sss = TrBFVShare::gen_sss_shares(
+            degree,
+            threshold,
+            num_parties,
+            sss_prime.clone(),
+            sk_coeffs_encoded
+        ).unwrap();
+        let mut smudge_error = TrBFVShare::gen_smudging_error(
+            degree,
+            16,
+            &mut OsRng
+        ).unwrap();
+        let smudge_error_encoded = TrBFVShare::encode_coeffs(&mut smudge_error).unwrap();
+        let smudge_sss = TrBFVShare::gen_sss_shares(
+            degree,
+            threshold,
+            num_parties,
+            sss_prime.clone(),
+            smudge_error_encoded
+        ).unwrap();
+        parties.push(Party { sk_share, pk_share, sk_sss, smudge_error, smudge_sss });
     });
+    println!("{:?}", parties.len());
+
 
     // Aggregation: this could be one of the parties or a separate entity. Or the
     // parties can aggregate cooperatively, in a tree-like fashion.
-    let pk = timeit!("Public key aggregation", {
-        let pk: PublicKey = parties.iter().map(|p| p.pk_share.clone()).aggregate()?;
-        pk
-    });
+    // let pk = timeit!("Public key aggregation", {
+    //     let pk: PublicKey = parties.iter().map(|p| p.pk_share.clone()).aggregate()?;
+    //     pk
+    // });
 
-    // Vote casting
-    let dist = Uniform::new_inclusive(0, 1);
-    let votes: Vec<u64> = dist
-        .sample_iter(&mut thread_rng())
-        .take(num_voters)
-        .collect();
-    let mut votes_encrypted = Vec::with_capacity(num_voters);
-    let mut _i = 0;
-    timeit_n!("Vote casting (per voter)", num_voters as u32, {
-        #[allow(unused_assignments)]
-        let pt = Plaintext::try_encode(&[votes[_i]], Encoding::poly(), &params)?;
-        let ct = pk.try_encrypt(&pt, &mut thread_rng())?;
-        votes_encrypted.push(ct);
-        _i += 1;
-    });
-
-    // Computing the tally: this can be done by anyone (party, aggregator, separate
-    // computing entity).
-    let tally = timeit!("Vote tallying", {
-        let mut sum = Ciphertext::zero(&params);
-        for ct in &votes_encrypted {
-            sum += ct;
-        }
-        Arc::new(sum)
-    });
-
-    // The result of a vote is typically public, so in this scenario the parties can
-    // perform a collective decryption. If instead the result of the computation
-    // should be kept private, the parties could collectively perform a
-    // keyswitch to a different public key.
-    let mut decryption_shares = Vec::with_capacity(num_parties);
-    let mut _i = 0;
-    timeit_n!("Decryption (per party)", num_parties as u32, {
-        let sh = DecryptionShare::new(&parties[_i].sk_share, &tally, &mut thread_rng())?;
-        decryption_shares.push(sh);
-        _i += 1;
-    });
-
-    // Again, an aggregating party aggregates the decryption shares to produce the
-    // decrypted plaintext.
-    let tally_pt = timeit!("Decryption share aggregation", {
-        let pt: Plaintext = decryption_shares.into_iter().aggregate()?;
-        pt
-    });
-    let tally_vec = Vec::<u64>::try_decode(&tally_pt, Encoding::poly())?;
-    let tally_result = tally_vec[0];
-
-    // Show vote result
-    println!("Vote result = {} / {}", tally_result, num_voters);
-
-    let expected_tally = votes.iter().sum();
-    assert_eq!(tally_result, expected_tally);
+    // encrypted mul
 
     Ok(())
 }

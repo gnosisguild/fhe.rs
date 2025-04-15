@@ -87,9 +87,7 @@ pub struct Poly {
     has_lazy_coefficients: bool,
     /// Whether variable time computations are allowed
     allow_variable_time_computations: bool,
-    /// The polynomial coefficients in RNS form
-    coefficients: Array2<u64>,
-    /// Optional Shoup representation of coefficients for faster multiplication
+    pub coefficients: Array2<u64>,
     coefficients_shoup: Option<Array2<u64>>,
 }
 
