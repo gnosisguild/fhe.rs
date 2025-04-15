@@ -82,7 +82,27 @@ impl TrBFVShare {
         // in [−Bsm, Bsm]
         let s_coefficients = sample_vec_cbd_unbounded(degree, variance, rng).unwrap();
         Ok(s_coefficients)
-    }   
+    }
+
+    pub fn encode_coeffs(coeffs: &mut Vec<i64>) -> Result<Vec<i64>> {
+        for i in 0..coeffs.len() {
+            // encode negative coeffs as positive ints [11,19]
+            if(coeffs[i] < 0) {
+                coeffs[i] = coeffs[i] + 19;
+            }
+        }
+        Ok(coeffs.to_vec())
+    }
+
+    pub fn decode_coeffs(coeffs: &mut Vec<i64>) -> Result<Vec<i64>> {
+        for i in 0..coeffs.len() {
+            // encode negative coeffs as positive ints [11,19]
+            if(coeffs[i] > 9) {
+                coeffs[i] = coeffs[i] - 19;
+            }
+        }
+        Ok(coeffs.to_vec())
+    }
 }
 
 #[cfg(test)]
@@ -123,7 +143,6 @@ mod tests {
         // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
         // in [−Bsm, Bsm]
         let mut s_coefficients = sample_vec_cbd_unbounded(sk_par.degree(), 16, &mut rng).unwrap();
-        println!("{:?}", s_coefficients[1]);
 
         // Shamir secret share params
         let sss = SSS {
@@ -136,12 +155,12 @@ mod tests {
         let mut sss_smudge_result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
 
         for i in 0..degree {
+            // encode negative coeffs as positive ints [11,19]
             if(s_coefficients[i] < 0) {
                 //println!("minus");
                 s_coefficients[i] = s_coefficients[i] + 19;
             }
             let secret = s_coefficients[i].to_bigint().unwrap();
-            // TODO: encode negative coeffs as positive ints [11,19]
             //println!("{:?}", s_coefficients[i]);
             let shares = sss.split(secret.clone());
             //println!("{:?}", shares);
@@ -161,12 +180,12 @@ mod tests {
         let mut result: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
 
         for i in 0..degree {
+            // encode negative coeffs as positive ints [11,19]
             if(sk_share.coeffs[i] < 0) {
                 //println!("minus");
                 sk_share.coeffs[i] = sk_share.coeffs[i] + 19;
             }
             let secret = sk_share.coeffs[i].to_bigint().unwrap();
-            // TODO: encode negative coeffs as positive ints [11,19]
             let shares = sss.split(secret.clone());
             result.push(shares);
         }
@@ -187,11 +206,8 @@ mod tests {
             test_sssvec.push(node_shares[n-1][0].clone());
         }
         //println!("{:?}", test_sssvec);
-
-
         println!("{:?}", node_shares[0].len());
         println!("The useful size of `v` is {}", size_of_val(&*node_shares[0]));
-        // SSS is failing with negative values until encoding scheme TODO above
         println!(" Secret coeff {:?}", sk_share.coeffs[0].to_bigint().unwrap());
         assert_eq!(sk_share.coeffs[0].to_bigint().unwrap(), sss.recover(&result[0][0..sss.threshold as usize]));
     }
