@@ -1,18 +1,9 @@
-use std::sync::Arc;
-
-use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
-use crate::proto::bfv::{Ciphertext as CiphertextProto, PublicKeyShare as PublicKeyShareProto};
-use fhe_traits::{DeserializeWithContext, Serialize};
+use crate::bfv::{PublicKey};
 use fhe_util::sample_vec_cbd_unbounded;
 use crate::errors::Result;
-use crate::Error;
-use fhe_math::rq::{traits::TryConvertFrom, Poly, Representation};
 use rand::{CryptoRng, RngCore};
-use zeroize::Zeroizing;
-//use serde::{Serialize, Deserialize};
 use shamir_secret_sharing::ShamirSecretSharing as SSS;
-use num_bigint_old::{BigInt, BigUint, ToBigInt};
-use num_bigint_old::Sign::*;
+use num_bigint_old::{BigInt, ToBigInt};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct TrBFVShare {
@@ -87,7 +78,7 @@ impl TrBFVShare {
     pub fn encode_coeffs(coeffs: &mut Vec<i64>) -> Result<Vec<i64>> {
         for i in 0..coeffs.len() {
             // encode negative coeffs as positive ints [11,19]
-            if(coeffs[i] < 0) {
+            if coeffs[i] < 0 {
                 coeffs[i] = coeffs[i] + 19;
             }
         }
@@ -97,7 +88,7 @@ impl TrBFVShare {
     pub fn decode_coeffs(coeffs: &mut Vec<i64>) -> Result<Vec<i64>> {
         for i in 0..coeffs.len() {
             // encode negative coeffs as positive ints [11,19]
-            if(coeffs[i] > 9) {
+            if coeffs[i] > 9 {
                 coeffs[i] = coeffs[i] - 19;
             }
         }
@@ -108,12 +99,8 @@ impl TrBFVShare {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use fhe_traits::{FheEncoder, FheEncrypter};
     use rand::thread_rng;
-
-    use crate::bfv::{BfvParameters, BfvParametersBuilder, Encoding, Plaintext, SecretKey};
-    use crate::mbfv::{CommonRandomPoly};
+    use crate::bfv::{BfvParametersBuilder, SecretKey};
 
     #[test]
     fn test_trbfv() {
@@ -156,7 +143,7 @@ mod tests {
 
         for i in 0..degree {
             // encode negative coeffs as positive ints [11,19]
-            if(s_coefficients[i] < 0) {
+            if s_coefficients[i] < 0 {
                 //println!("minus");
                 s_coefficients[i] = s_coefficients[i] + 19;
             }
@@ -181,7 +168,7 @@ mod tests {
 
         for i in 0..degree {
             // encode negative coeffs as positive ints [11,19]
-            if(sk_share.coeffs[i] < 0) {
+            if sk_share.coeffs[i] < 0 {
                 //println!("minus");
                 sk_share.coeffs[i] = sk_share.coeffs[i] + 19;
             }

@@ -83,7 +83,7 @@ pub struct Poly {
     representation: Representation,
     has_lazy_coefficients: bool,
     allow_variable_time_computations: bool,
-    coefficients: Array2<u64>,
+    pub coefficients: Array2<u64>,
     coefficients_shoup: Option<Array2<u64>>,
 }
 
