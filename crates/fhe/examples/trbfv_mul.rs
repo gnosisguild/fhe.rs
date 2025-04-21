@@ -104,16 +104,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     // public key.
     struct Party {
         sk_share: SecretKey,
-        pk_share: PublicKey,
+        pk_share: PublicKeyShare,
         sk_sss: Vec<Vec<(usize, BigInt)>>,
         smudge_error: Vec<i64>,
         smudge_sss: Vec<Vec<(usize, BigInt)>>,
     }
     let mut parties = Vec::with_capacity(num_parties);
+
+    let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
+
     timeit_n!("Party setup (per party)", num_parties as u32, {
         let sk_share = SecretKey::random(&params, &mut OsRng);
-        let pk_share = PublicKey::new(&sk_share, &mut OsRng);
-        // encode away negative coeffs
+        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
+        // encode away negative coeffs for secret key shamir shares
         let sk_coeffs_encoded = TrBFVShare::encode_coeffs(&mut sk_share.coeffs.to_vec()).unwrap();
         let sk_sss = TrBFVShare::gen_sss_shares(
             degree,
@@ -137,17 +140,90 @@ fn main() -> Result<(), Box<dyn Error>> {
         ).unwrap();
         parties.push(Party { sk_share, pk_share, sk_sss, smudge_error, smudge_sss });
     });
+
     println!("{:?}", parties.len());
 
+    // collect shares
+    let mut p0_smudges: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
+    for i in 0..degree {
+        let mut sss_vec = Vec::with_capacity(num_parties);
+        sss_vec.push(parties[0].smudge_sss[i][0].clone());
+        for j in 1..num_parties {
+            sss_vec.push(parties[j].smudge_sss[i][j].clone());
+        }
+        p0_smudges.push(sss_vec);
+    }
 
-    // Aggregation: this could be one of the parties or a separate entity. Or the
-    // parties can aggregate cooperatively, in a tree-like fashion.
-    // let pk = timeit!("Public key aggregation", {
-    //     let pk: PublicKey = parties.iter().map(|p| p.pk_share.clone()).aggregate()?;
-    //     pk
-    // });
+    println!("{:?}", parties[0].smudge_sss[1000]);
+
+    // Aggregation: same as previous mbfv aggregations
+    let pk = timeit!("Public key aggregation", {
+        let pk: PublicKey = parties.iter().map(|p| p.pk_share.clone()).aggregate()?;
+        pk
+    });
 
     // encrypted mul
+    let amount = 5;
+    let dist = Uniform::new_inclusive(0, 1);
+    let numbers: Vec<u64> = dist
+        .sample_iter(&mut thread_rng())
+        .take(amount)
+        .collect();
+    let mut numbers_encrypted = Vec::with_capacity(amount);
+    let mut _i = 0;
+    timeit_n!("Encrypting Numbers (per encryption)", amount as u32, {
+        #[allow(unused_assignments)]
+        let pt = Plaintext::try_encode(&[numbers[_i]], Encoding::poly(), &params)?;
+        let ct = pk.try_encrypt(&pt, &mut thread_rng())?;
+        numbers_encrypted.push(ct);
+        _i += 1;
+    });
+
+    // calculation 
+    let tally = timeit!("Number tallying", {
+        let mut sum = Ciphertext::zero(&params);
+        for ct in &numbers_encrypted {
+            sum += ct;
+        }
+        Arc::new(sum)
+    });
+
+    // threshold decrypt. We will assume the last two parties in the set drop out
+    let t = num_parties - 2;
+    //let mut threshold_decryption_shares = Vec::with_capacity(t);
+    let mut _i = 0;
+    // sum esm
+        timeit_n!("Summing smudge noise (per party up to threshold)", t as u32, {
+        let esm_i = parties[_i].smudge_sss[0].clone();
+        _i += 1;
+    });
+    timeit_n!("Decryption (per party up to threshold)", t as u32, {
+        //let sh = TrBFVShare::decryption_share()?;
+        _i += 1;
+    });   
+
+    //decrypt
+    let mut decryption_shares = Vec::with_capacity(num_parties);
+    let mut _i = 0;
+    timeit_n!("Decryption (per party)", num_parties as u32, {
+        let sh = DecryptionShare::new(&parties[_i].sk_share, &tally, &mut thread_rng())?;
+        decryption_shares.push(sh);
+        _i += 1;
+    });
+
+    // aggregate decrypted shares
+    let tally_pt = timeit!("Decryption share aggregation", {
+        let pt: Plaintext = decryption_shares.into_iter().aggregate()?;
+        pt
+    });
+    let tally_vec = Vec::<u64>::try_decode(&tally_pt, Encoding::poly())?;
+    let tally_result = tally_vec[0];
+
+    // Show vote result
+    println!("Sum result = {} / {}", tally_result, amount);
+
+    let expected_tally = numbers.iter().sum();
+    assert_eq!(tally_result, expected_tally);
 
     Ok(())
 }

@@ -1,4 +1,4 @@
-use crate::bfv::{PublicKey};
+use crate::bfv::{PublicKey, Ciphertext};
 use fhe_util::sample_vec_cbd_unbounded;
 use crate::errors::Result;
 use rand::{CryptoRng, RngCore};
@@ -57,7 +57,7 @@ impl TrBFVShare {
 
         for i in 0..degree {
             let secret = coeffs[i as usize].to_bigint().unwrap();
-            // TODO: encode negative coeffs as positive ints [11,19]
+            // Tnegative coeffs are encoded as positive ints [11,19]
             let shares = sss.split(secret.clone());
             result.push(shares);
         }
@@ -93,6 +93,12 @@ impl TrBFVShare {
             }
         }
         Ok(coeffs.to_vec())
+    }
+
+    pub fn decryption_share(ciphertext: Ciphertext, smudge: i64) -> Result<i64> {
+        // sum c0 + c1
+        let mut c0c1 = ciphertext.c[0].as_ref() + &ciphertext.c[1];
+        Ok(0)
     }
 }
 
