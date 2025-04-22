@@ -14,6 +14,7 @@ use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use util::timeit::{timeit, timeit_n};
 use num_bigint_old::{BigInt, ToBigInt};
+use shamir_secret_sharing::ShamirSecretSharing as SSS;
 
 fn print_notice_and_exit(error: Option<String>) {
     println!(
@@ -53,7 +54,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut num_users = 1;
     let mut num_parties = 10;
-    let threshold = 5; // todo get from clit input
+    let threshold = 8; // todo get from cli input
 
     // Update the number of users and/or number of parties depending on the
     // arguments provided.
@@ -97,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .build_arc()?
     );
 
-    // No crp in trBFV
+    // No crp in trBFV?
     //let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
     // Party setup: each party generates a secret key and shares of a collective
@@ -112,6 +113,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut parties = Vec::with_capacity(num_parties);
 
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
+
+    let sss = SSS {
+        threshold: threshold,
+        share_amount: num_parties,
+        prime: sss_prime.clone()
+    };
 
     timeit_n!("Party setup (per party)", num_parties as u32, {
         let sk_share = SecretKey::random(&params, &mut OsRng);
@@ -141,9 +148,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         parties.push(Party { sk_share, pk_share, sk_sss, smudge_error, smudge_sss });
     });
 
-    println!("{:?}", parties.len());
+    // collect secret key shares: all parties will share the same set of shares after sharing
+    // p_0 sends index 0 of points to [p_1 - p_n]
+    // p_1 sends index 1 of points to [p_0], [p_2 - p_n]
+    // p_2 sends index 2 of points to [p_0 - p_1], [p_3 - p_n]
+    // p_3 sends index 3 of points to [p_0 - p_2], [p_4 - p_n]
+    let mut p0_sks: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
+    for i in 0..degree {
+        let mut sss_vec = Vec::with_capacity(num_parties);
+        sss_vec.push(parties[0].sk_sss[i][0].clone());
+        for j in 1..num_parties {
+            sss_vec.push(parties[j].sk_sss[i][j].clone());
+        }
+        p0_sks.push(sss_vec);
+    }
 
-    // collect shares
+    // collect smudge shares: all parties will share the same set of shares after sharing
+    // p_0 sends index 0 of points to [p_1 - p_n]
+    // p_1 sends index 1 of points to [p_0], [p_2 - p_n]
+    // p_2 sends index 2 of points to [p_0 - p_1], [p_3 - p_n]
+    // p_3 sends index 3 of points to [p_0 - p_2], [p_4 - p_n]
     let mut p0_smudges: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
     for i in 0..degree {
         let mut sss_vec = Vec::with_capacity(num_parties);
@@ -154,7 +178,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         p0_smudges.push(sss_vec);
     }
 
-    println!("{:?}", parties[0].smudge_sss[1000]);
+    //println!("{:?}", p0_smudges[0]);
+    //println!("{:?}", parties[0].smudge_sss[1000]);
 
     // Aggregation: same as previous mbfv aggregations
     let pk = timeit!("Public key aggregation", {
@@ -190,15 +215,50 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // threshold decrypt. We will assume the last two parties in the set drop out
     let t = num_parties - 2;
+
     //let mut threshold_decryption_shares = Vec::with_capacity(t);
+    let mut sum_esm: Vec<(BigInt)> = Vec::with_capacity(degree);
+    let mut esm_open: Vec<(BigInt)> = Vec::with_capacity(degree);
     let mut _i = 0;
     // sum esm
-        timeit_n!("Summing smudge noise (per party up to threshold)", t as u32, {
-        let esm_i = parties[_i].smudge_sss[0].clone();
+        timeit_n!("Summing smudge noise (per party up to threshold)", degree as u32, {
+        // summ smudge from collected shares in p0_smudge
+        let mut esm_i_sum = 0.to_bigint().unwrap();
+        // sum esm up to the threshold of honest nodes
+        for j in 0..threshold {
+            esm_i_sum = p0_smudges[_i][j].1.clone() + esm_i_sum;
+        }
+        sum_esm.push(esm_i_sum);
+        esm_open.push(sss.recover(&p0_smudges[_i][0..threshold as usize]));
         _i += 1;
     });
-    timeit_n!("Decryption (per party up to threshold)", t as u32, {
-        //let sh = TrBFVShare::decryption_share()?;
+    //println!("{:?}", sum_esm[0]);
+    //println!("{:?}", esm_open[100]);
+    let open_p0_esm = sss.recover(&parties[0].smudge_sss[0][0..threshold as usize]);
+    //println!("{:?}", open_p0_esm);
+
+    // sum sk
+    let mut sum_sk: Vec<(BigInt)> = Vec::with_capacity(degree);
+    let mut _i = 0;
+    // sum esm
+        timeit_n!("Summing sk shares (per party up to threshold)", degree as u32, {
+        // sum sk from collected shares in p0_sks
+        let mut sk_i_sum = 0.to_bigint().unwrap();
+        // sum sk up to the threshold of honest nodes
+        for j in 0..threshold {
+            sk_i_sum = p0_sks[_i][j].1.clone() + sk_i_sum;
+        }
+        sum_sk.push(sk_i_sum);
+        _i += 1;
+    });
+    //println!("{:?}", sum_sk[0]);
+    //println!("{:?}", tally);
+
+    // convert esm and sk summed shares into polynomals
+
+    timeit_n!("Decryption (per party up to threshold)", 1 as u32, {
+
+        let sh = TrBFVShare::decryption_share(tally.clone(), sum_esm.clone(), sum_sk.clone())?;
         _i += 1;
     });   
 
