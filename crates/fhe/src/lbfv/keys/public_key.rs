@@ -27,7 +27,9 @@ pub struct LBFVPublicKey {
 
 impl LBFVPublicKey {
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a provided
-    /// seed.
+    /// seed. The seed is used to generate l seeds for the ciphertexts which are
+    /// used to generate the random polynomials aᵢ for each ciphertext
+    /// deterministically.
     pub fn new_with_seed<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
@@ -35,9 +37,11 @@ impl LBFVPublicKey {
     ) -> Self {
         let zero = Plaintext::zero(Encoding::poly(), &sk.par).unwrap();
         let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.par.moduli().len());
-        let mut seed_rng = ChaCha8Rng::from_seed(seed);
+        let mut seed_rng = ChaCha8Rng::from_seed(seed); // This is used to generate the seeds for the ciphertexts by creating a new
+                                                        // ChaCha8Rng from the input seed
 
-        // Create a ciphertext for each RNS modulus
+        // Create a vector of ciphertexts, each encrypting zero, for each RNS modulus
+        // [(b₁, a₁), ..., (bₗ, aₗ)].
         for _ in 0..sk.par.moduli().len() {
             let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
             seed_rng.fill(&mut seed_i);

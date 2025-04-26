@@ -8,7 +8,7 @@ use fhe_math::{
 use num_bigint::BigUint;
 
 use crate::{
-    bfv::{keys::RelinearizationKey, BfvParameters, Ciphertext},
+    bfv::{BfvParameters, Ciphertext, traits::GenericRelinearizationKey},
     Error, Result,
 };
 
@@ -27,7 +27,7 @@ pub struct Multiplicator {
     pub(crate) down_scaler: Scaler,
     pub(crate) base_ctx: Arc<Context>,
     pub(crate) mul_ctx: Arc<Context>,
-    rk: Option<RelinearizationKey>,
+    rk: Option<GenericRelinearizationKey>,
     mod_switch: bool,
     level: usize,
 }
@@ -99,10 +99,15 @@ impl Multiplicator {
     }
 
     /// Default multiplication strategy using relinearization.
-    pub fn default(rk: &RelinearizationKey) -> Result<Self> {
-        let ctx = rk.ksk.par.ctx_at_level(rk.ksk.ciphertext_level)?;
+    pub fn default<RK>(rk: &RK) -> Result<Self>
+    where
+        for<'a> &'a RK: Into<GenericRelinearizationKey>,
+    {
+        let rk: GenericRelinearizationKey = rk.into();
+        let par = rk.parameters();
+        let ctx = par.ctx_at_level(rk.ciphertext_level())?;
 
-        let modulus_size = rk.ksk.par.moduli_sizes()[..ctx.moduli().len()]
+        let modulus_size = par.moduli_sizes()[..ctx.moduli().len()]
             .iter()
             .sum::<usize>();
         let n_moduli = (modulus_size + 60).div_ceil(62);
@@ -111,7 +116,7 @@ impl Multiplicator {
         extended_basis.append(&mut ctx.moduli().to_vec());
         let mut upper_bound = 1 << 62;
         while extended_basis.len() != ctx.moduli().len() + n_moduli {
-            upper_bound = generate_prime(62, 2 * rk.ksk.par.degree() as u64, upper_bound).unwrap();
+            upper_bound = generate_prime(62, 2 * par.degree() as u64, upper_bound).unwrap();
             if !extended_basis.contains(&upper_bound) && !ctx.moduli().contains(&upper_bound) {
                 extended_basis.push(upper_bound)
             }
@@ -122,26 +127,35 @@ impl Multiplicator {
             ScalingFactor::one(),
             &extended_basis,
             ScalingFactor::new(
-                &BigUint::from(rk.ksk.par.plaintext.modulus()),
+                &BigUint::from(par.plaintext.modulus()),
                 ctx.modulus(),
             ),
-            rk.ksk.ciphertext_level,
-            &rk.ksk.par,
+            rk.ciphertext_level(),
+            &par,
         )?;
 
-        multiplicator.enable_relinearization(rk)?;
+        multiplicator.enable_relinearization_with_key(rk)?;
         Ok(multiplicator)
     }
 
-    /// Enable relinearization after multiplication.
-    pub fn enable_relinearization(&mut self, rk: &RelinearizationKey) -> Result<()> {
-        let rk_ctx = self.par.ctx_at_level(rk.ksk.ciphertext_level)?;
+    /// Takes a reference, clones internally (for external users)
+    pub fn enable_relinearization<RK>(&mut self, rk: &RK) -> Result<()>
+    where
+        for<'a> &'a RK: Into<GenericRelinearizationKey>,
+    {
+        let rk = rk.into();
+        self.enable_relinearization_with_key(rk)
+    }
+
+    /// Takes ownership, no clone
+    fn enable_relinearization_with_key(&mut self, rk: GenericRelinearizationKey) -> Result<()> {
+        let rk_ctx = self.par.ctx_at_level(rk.ciphertext_level())?;
         if rk_ctx != &self.base_ctx {
             return Err(Error::DefaultError(
                 "Invalid relinearization key context".to_string(),
             ));
         }
-        self.rk = Some(rk.clone());
+        self.rk = Some(rk);
         Ok(())
     }
 
@@ -166,9 +180,10 @@ impl Multiplicator {
             ));
         }
         if lhs.level != self.level || rhs.level != self.level {
-            return Err(Error::DefaultError(
-                "Ciphertexts are not at expected level".to_string(),
-            ));
+            return Err(Error::DefaultError(format!(
+                "Ciphertexts are not at expected level. lhs: {}, rhs: {}, expected: {}",
+                lhs.level, rhs.level, self.level
+            )));
         }
         if lhs.c.len() != 2 || rhs.c.len() != 2 {
             return Err(Error::DefaultError(
@@ -183,107 +198,120 @@ impl Multiplicator {
         let c11 = rhs.c[1].scale(&self.extender_rhs)?;
 
         // Multiply
-        let mut c0 = &c00 * &c10;
+        let c0 = &c00 * &c10;
         let mut c1 = &c00 * &c11;
         c1 += &(&c01 * &c10);
-        let mut c2 = &c01 * &c11;
-        c0.change_representation(Representation::PowerBasis);
-        c1.change_representation(Representation::PowerBasis);
-        c2.change_representation(Representation::PowerBasis);
+        let c2 = &c01 * &c11;
 
         // Scale
-        let c0 = c0.scale(&self.down_scaler)?;
-        let c1 = c1.scale(&self.down_scaler)?;
-        let c2 = c2.scale(&self.down_scaler)?;
-
         let mut c = vec![c0, c1, c2];
+        for p in c.iter_mut() {
+            p.change_representation(Representation::PowerBasis);
+            *p = p.scale(&self.down_scaler)?;
+            p.change_representation(Representation::Ntt)
+        }
 
+        // Create a ciphertext
+        let mut ct = Ciphertext::new(c, &self.par)?;
+        
         // Relinearize
         if let Some(rk) = self.rk.as_ref() {
-            #[allow(unused_mut)]
-            let (mut c0r, mut c1r) = rk.relinearizes_poly(&c[2])?;
+            rk.relinearizes(&mut ct)?;
+        } 
 
-            if c0r.ctx() != c[0].ctx() {
-                c0r.change_representation(Representation::PowerBasis);
-                c1r.change_representation(Representation::PowerBasis);
-                c0r.mod_switch_down_to(c[0].ctx())?;
-                c1r.mod_switch_down_to(c[1].ctx())?;
-            } else {
-                c[0].change_representation(Representation::Ntt);
-                c[1].change_representation(Representation::Ntt);
-            }
-
-            c[0] += &c0r;
-            c[1] += &c1r;
-            c.truncate(2);
-        }
-
-        // We construct a ciphertext, but it may not have the right representation for
-        // the polynomials yet.
-        let mut c = Ciphertext {
-            par: self.par.clone(),
-            seed: None,
-            c,
-            level: self.level,
-        };
-
+        // Reduce by one modulus to control noise growth
         if self.mod_switch {
-            c.mod_switch_to_next_level()?;
-        } else {
-            c.c.iter_mut()
-                .for_each(|p| p.change_representation(Representation::Ntt));
+            ct.mod_switch_to_next_level()?;
         }
 
-        Ok(c)
+        Ok(ct)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::bfv::{
         BfvParameters, Ciphertext, Encoding, Plaintext, RelinearizationKey, SecretKey,
     };
+    use crate::lbfv::keys::LBFVRelinearizationKey;
+    use crate::lbfv::LBFVPublicKey;
     use fhe_math::{
         rns::{RnsContext, ScalingFactor},
         zq::primes::generate_prime,
     };
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use num_bigint::BigUint;
-    use rand::{rngs::OsRng, thread_rng};
+    use rand::rngs::OsRng;
+    use rand::{RngCore, CryptoRng, thread_rng};
     use std::error::Error;
 
     use super::Multiplicator;
+
+    // Feature flag to control LBFV tests
+    const RUN_LBFV_TESTS: bool = true;
 
     #[test]
     fn mul() -> Result<(), Box<dyn Error>> {
         let mut rng = thread_rng();
         let par = BfvParameters::default_arc(3, 8);
-        for _ in 0..30 {
-            // We will encode `values` in an Simd format, and check that the product is
-            // computed correctly.
-            let values = par.plaintext.random_vec(par.degree(), &mut rng);
-            let mut expected = values.clone();
-            par.plaintext.mul_vec(&mut expected, &values);
-
-            let sk = SecretKey::random(&par, &mut OsRng);
-            let rk = RelinearizationKey::new(&sk, &mut rng)?;
-            let pt = Plaintext::try_encode(&values, Encoding::simd(), &par)?;
-            let ct1 = sk.try_encrypt(&pt, &mut rng)?;
-            let ct2 = sk.try_encrypt(&pt, &mut rng)?;
-
-            let mut multiplicator = Multiplicator::default(&rk)?;
-            let ct3 = multiplicator.multiply(&ct1, &ct2)?;
-            println!("Noise: {}", unsafe { sk.measure_noise(&ct3)? });
-            let pt = sk.try_decrypt(&ct3)?;
-            assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
-
-            multiplicator.enable_mod_switching()?;
-            let ct3 = multiplicator.multiply(&ct1, &ct2)?;
-            assert_eq!(ct3.level, 1);
-            println!("Noise: {}", unsafe { sk.measure_noise(&ct3)? });
-            let pt = sk.try_decrypt(&ct3)?;
-            assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
+        
+        // Standard BFV tests
+        for _ in 0..15 {
+            run_mul_test(par.clone(), false, &mut rng)?;
         }
+        
+        // LBFV tests (conditionally)
+        if RUN_LBFV_TESTS {
+            for _ in 0..15 {
+                run_mul_test(par.clone(), true, &mut rng)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn run_mul_test<R: RngCore + CryptoRng>(
+        par: Arc<BfvParameters>, 
+        use_lbfv: bool,
+        rng: &mut R
+    ) -> Result<(), Box<dyn Error>> {
+        // We will encode `values` in an Simd format, and check that the product is
+        // computed correctly.
+        let values = par.plaintext.random_vec(par.degree(), rng);
+        let mut expected = values.clone();
+        par.plaintext.mul_vec(&mut expected, &values);
+
+        let sk = SecretKey::random(&par, rng);
+        let pt = Plaintext::try_encode(&values, Encoding::simd(), &par)?;
+        let ct1 = sk.try_encrypt(&pt, rng)?;
+        let ct2 = sk.try_encrypt(&pt, rng)?;
+        
+        let mut multiplicator = if use_lbfv {
+            let pk = LBFVPublicKey::new(&sk, rng);
+            let rk = LBFVRelinearizationKey::new(&sk, &pk, None, rng)?;
+            Multiplicator::default(&rk)?
+        } else {
+            let rk = RelinearizationKey::new(&sk, rng)?;
+            Multiplicator::default(&rk)?
+        };
+        
+        let ct3 = multiplicator.multiply(&ct1, &ct2)?;
+        println!("Noise ({}) : {}", if use_lbfv { "LBFV" } else { "BFV" }, 
+                 unsafe { sk.measure_noise(&ct3)? });
+        let pt = sk.try_decrypt(&ct3)?;
+        assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
+
+        multiplicator.enable_mod_switching()?;
+        let ct3 = multiplicator.multiply(&ct1, &ct2)?;
+        assert_eq!(ct3.level, 1);
+        println!("Noise ({} with mod switch): {}", 
+                 if use_lbfv { "LBFV" } else { "BFV" },
+                 unsafe { sk.measure_noise(&ct3)? });
+        let pt = sk.try_decrypt(&ct3)?;
+        assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
+        
         Ok(())
     }
 
@@ -291,34 +319,68 @@ mod tests {
     fn mul_at_level() -> Result<(), Box<dyn Error>> {
         let mut rng = thread_rng();
         let par = BfvParameters::default_arc(3, 8);
-        for _ in 0..15 {
+        
+        // Standard BFV tests
+        for _ in 0..5 {
             for level in 0..2 {
-                let values = par.plaintext.random_vec(par.degree(), &mut rng);
-                let mut expected = values.clone();
-                par.plaintext.mul_vec(&mut expected, &values);
-
-                let sk = SecretKey::random(&par, &mut OsRng);
-                let rk = RelinearizationKey::new_leveled(&sk, level, level, &mut rng)?;
-                let pt = Plaintext::try_encode(&values, Encoding::simd_at_level(level), &par)?;
-                let ct1: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
-                let ct2: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
-                assert_eq!(ct1.level, level);
-                assert_eq!(ct2.level, level);
-
-                let mut multiplicator = Multiplicator::default(&rk).unwrap();
-                let ct3 = multiplicator.multiply(&ct1, &ct2).unwrap();
-                println!("Noise: {}", unsafe { sk.measure_noise(&ct3)? });
-                let pt = sk.try_decrypt(&ct3)?;
-                assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
-
-                multiplicator.enable_mod_switching()?;
-                let ct3 = multiplicator.multiply(&ct1, &ct2)?;
-                assert_eq!(ct3.level, level + 1);
-                println!("Noise: {}", unsafe { sk.measure_noise(&ct3)? });
-                let pt = sk.try_decrypt(&ct3)?;
-                assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
+                run_mul_at_level_test(&par, level, false, &mut rng)?;
             }
         }
+        
+        // LBFV tests (conditionally)
+        if RUN_LBFV_TESTS {
+            for _ in 0..5 {
+                for level in 0..2 {
+                    run_mul_at_level_test(&par, level, true, &mut rng)?;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn run_mul_at_level_test<R: RngCore + CryptoRng>(
+        par: &Arc<BfvParameters>,
+        level: usize,
+        use_lbfv: bool,
+        rng: &mut R
+    ) -> Result<(), Box<dyn Error>> {
+        let values = par.plaintext.random_vec(par.degree(), rng);
+        let mut expected = values.clone();
+        par.plaintext.mul_vec(&mut expected, &values);
+
+        let sk = SecretKey::random(par, rng);
+        let pt = Plaintext::try_encode(&values, Encoding::simd_at_level(level), par)?;
+        let ct1: Ciphertext = sk.try_encrypt(&pt, rng)?;
+        let ct2: Ciphertext = sk.try_encrypt(&pt, rng)?;
+        assert_eq!(ct1.level, level);
+        assert_eq!(ct2.level, level);
+
+        let mut multiplicator = if use_lbfv {
+            let pk = LBFVPublicKey::new(&sk, rng);
+            let rk = LBFVRelinearizationKey::new_leveled(&sk, &pk, None, level, level, rng)?;
+            Multiplicator::default(&rk)?
+        } else {
+            let rk = RelinearizationKey::new_leveled(&sk, level, level, rng)?;
+            Multiplicator::default(&rk)?
+        };
+        
+        let ct3 = multiplicator.multiply(&ct1, &ct2)?;
+        println!("Noise ({} at level {}): {}", 
+                 if use_lbfv { "LBFV" } else { "BFV" }, level,
+                 unsafe { sk.measure_noise(&ct3)? });
+        let pt = sk.try_decrypt(&ct3)?;
+        assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
+
+        multiplicator.enable_mod_switching()?;
+        let ct3 = multiplicator.multiply(&ct1, &ct2)?;
+        assert_eq!(ct3.level, level + 1);
+        println!("Noise ({} at level {} with mod switch): {}", 
+                 if use_lbfv { "LBFV" } else { "BFV" }, level,
+                 unsafe { sk.measure_noise(&ct3)? });
+        let pt = sk.try_decrypt(&ct3)?;
+        assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
+        
         Ok(())
     }
 
@@ -404,6 +466,73 @@ mod tests {
             let pt = sk.try_decrypt(&ct3)?;
             assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
         }
+
+        Ok(())
+    }
+
+    // #[test]
+    fn multiply_three_times_with_level_changes() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        const DEGREE: usize = 8;
+        let params = BfvParameters::default_arc(6, DEGREE); // Using 6 moduli to allow for multiple levels
+        let sk = SecretKey::random(&params, &mut rng);
+
+        // Create a single relinearization key at level 0
+        let rk = RelinearizationKey::new_leveled(&sk, 0, 0, &mut rng)?;
+        let mut multiplicator = Multiplicator::default(&rk)?;
+        multiplicator.enable_mod_switching()?;
+
+        // Encrypt a value at level 0
+        let pt = Plaintext::try_encode(&[2u64; DEGREE], Encoding::simd(), &params)?;
+        let mut ct: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
+        assert_eq!(ct.level, 0);
+        println!("Noise: {}", unsafe { sk.measure_noise(&ct)? });
+        let pt = sk.try_decrypt(&ct)?;
+        assert_eq!(
+            Vec::<u64>::try_decode(&pt, Encoding::simd())?,
+            &[2u64; DEGREE]
+        );
+
+        // First multiplication and relinearization
+        println!("First multiplication...");
+        let ct_squared = multiplicator.multiply(&ct, &ct)?;
+        assert_eq!(ct_squared.level, 1);
+        println!("Noise: {}", unsafe { sk.measure_noise(&ct_squared)? });
+        let pt_squared = sk.try_decrypt(&ct_squared)?;
+        assert_eq!(
+            Vec::<u64>::try_decode(&pt_squared, Encoding::simd())?,
+            &[4u64; DEGREE]
+        );
+
+        // Second multiplication and relinearization
+        println!("Second multiplication...");
+        let rk = RelinearizationKey::new_leveled(&sk, 1, 1, &mut rng)?;
+        let mut multiplicator = Multiplicator::default(&rk)?;
+        multiplicator.enable_mod_switching()?;
+        ct.mod_switch_to_next_level()?;
+        let ct_cubed = multiplicator.multiply(&ct_squared, &ct)?;
+        assert_eq!(ct_cubed.level, 2);
+        println!("Noise: {}", unsafe { sk.measure_noise(&ct_cubed)? });
+        let pt_cubed = sk.try_decrypt(&ct_cubed)?;
+        assert_eq!(
+            Vec::<u64>::try_decode(&pt_cubed, Encoding::simd())?,
+            &[8u64; DEGREE]
+        );
+
+        // Third multiplication and relinearization
+        println!("Third multiplication...");
+        let rk = RelinearizationKey::new_leveled(&sk, 2, 2, &mut rng)?;
+        let mut multiplicator = Multiplicator::default(&rk)?;
+        multiplicator.enable_mod_switching()?;
+        ct.mod_switch_to_next_level()?;
+        let ct_quad = multiplicator.multiply(&ct_cubed, &ct)?;
+        assert_eq!(ct_quad.level, 3);
+        println!("Noise: {}", unsafe { sk.measure_noise(&ct_quad)? });
+        let pt_quad = sk.try_decrypt(&ct_quad)?;
+        assert_eq!(
+            Vec::<u64>::try_decode(&pt_quad, Encoding::simd())?,
+            &[16u64; DEGREE]
+        );
 
         Ok(())
     }

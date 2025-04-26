@@ -4,7 +4,7 @@
 
 mod ciphertext;
 mod encoding;
-pub(crate) mod keys;
+mod keys;
 mod ops;
 mod parameters;
 mod plaintext;
@@ -14,8 +14,7 @@ mod rgsw_ciphertext;
 pub mod traits;
 pub use ciphertext::Ciphertext;
 pub use encoding::Encoding;
-pub use keys::KeySwitchingKey;
-pub use keys::{EvaluationKey, EvaluationKeyBuilder, PublicKey, RelinearizationKey, SecretKey};
+pub use keys::{EvaluationKey, EvaluationKeyBuilder, KeySwitchingKey, PublicKey, RelinearizationKey, SecretKey};
 pub use ops::{dot_product_scalar, Multiplicator};
 pub use parameters::{BfvParameters, BfvParametersBuilder};
 pub use plaintext::Plaintext;

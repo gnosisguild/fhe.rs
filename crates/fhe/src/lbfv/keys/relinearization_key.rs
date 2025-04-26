@@ -18,8 +18,8 @@
 
 use std::sync::Arc;
 
-use crate::bfv::keys::key_switching_key::KeySwitchingKey;
-use crate::bfv::{traits::TryConvertFrom, BfvParameters, Ciphertext, SecretKey};
+use crate::bfv::traits::TryConvertFrom;
+use crate::bfv::{BfvParameters, Ciphertext, SecretKey, KeySwitchingKey};
 use crate::proto::bfv::{
     KeySwitchingKey as KeySwitchingKeyProto, RelinearizationKey as RelinearizationKeyProto,
 };
@@ -80,7 +80,7 @@ impl LBFVRelinearizationKey {
     /// * `ciphertext_level` - The level of the ciphertext to relinearize
     /// * `key_level` - The level of the key to use for relinearization
     /// * `rng` - The random number generator to use for key generation
-    pub fn new<R: RngCore + CryptoRng>(
+    pub fn new_leveled<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         pk: &LBFVPublicKey,
         d1_seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
@@ -158,6 +158,15 @@ impl LBFVRelinearizationKey {
             b_vec,
         })
     }
+
+    pub fn new<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        pk: &LBFVPublicKey,
+        d1_seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
+        rng: &mut R,
+    ) -> Result<Self> {
+        Self::new_leveled(sk, pk, d1_seed, 0, 0, rng)
+    }   
 
     pub fn relinearizes(&self, ct: &mut Ciphertext) -> Result<()> {
         if ct.c.len() != 3 {
@@ -333,8 +342,6 @@ mod tests {
         // Create relinearization key
         let relin_key = LBFVRelinearizationKey::new(
             &sk, &pk, None, // Use random d1_seed
-            0,    // ciphertext level
-            0,    // key level
             &mut rng,
         )?;
 

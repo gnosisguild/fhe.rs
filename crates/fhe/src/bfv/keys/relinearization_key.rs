@@ -21,8 +21,8 @@
 
 use std::sync::Arc;
 
-use super::key_switching_key::KeySwitchingKey;
-use crate::bfv::{traits::TryConvertFrom, BfvParameters, Ciphertext, SecretKey};
+use crate::bfv::traits::TryConvertFrom;
+use crate::bfv::{BfvParameters, Ciphertext, KeySwitchingKey, SecretKey};
 use crate::proto::bfv::{
     KeySwitchingKey as KeySwitchingKeyProto, RelinearizationKey as RelinearizationKeyProto,
 };
