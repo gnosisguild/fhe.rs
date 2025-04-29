@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let degree = 2048;
     let plaintext_modulus: u64 = 4096;
     let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
-    let sss_prime = BigInt::parse_bytes(b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",16).unwrap();
+    let sss_prime = BigInt::parse_bytes(b"40",16).unwrap();
 
     // This executable is a command line tool which enables to specify
     // voter/election worker sizes.
@@ -158,7 +158,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut sss_vec = Vec::with_capacity(num_parties);
         sss_vec.push(parties[0].sk_sss[i][0].clone());
         for j in 1..num_parties {
-            sss_vec.push(parties[j].sk_sss[i][j].clone());
+            sss_vec.push(parties[j].sk_sss[i][j].clone()); // this should be parties[j].sk_sss[i][0] for party 0
         }
         p0_sks.push(sss_vec);
     }
@@ -179,7 +179,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     //println!("{:?}", p0_smudges[0]);
-    //println!("{:?}", parties[0].smudge_sss[1000]);
+    println!("{:?}", parties[0].smudge_sss[1000]);
 
     // Aggregation: same as previous mbfv aggregations
     let pk = timeit!("Public key aggregation", {
@@ -251,7 +251,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sum_sk.push(sk_i_sum);
         _i += 1;
     });
-    //println!("{:?}", sum_sk[0]);
+    println!("{:?}", sum_sk[0]);
     //println!("{:?}", tally);
 
     // convert esm and sk summed shares into polynomals
