@@ -362,7 +362,7 @@ impl Aggregate<RelinKeyShare<R2>> for RelinearizationKey {
             ctx_ksk: ctx.clone(),
             log_base: 0,
         };
-        Ok(RelinearizationKey { ksk })
+        Ok(RelinearizationKey::new_from_ksk(ksk))
     }
 }
 

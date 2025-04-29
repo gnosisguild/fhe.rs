@@ -47,13 +47,17 @@ use zeroize::Zeroizing;
 /// homomorphic multiplication operations.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct RelinearizationKey {
-    pub(crate) ksk: KeySwitchingKey,
+    ksk: KeySwitchingKey,
 }
 
 impl RelinearizationKey {
     /// Generate a [`RelinearizationKey`] from a [`SecretKey`].
     pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
         Self::new_leveled_internal(sk, 0, 0, rng)
+    }
+
+    pub fn new_from_ksk(ksk: KeySwitchingKey) -> Self {
+        Self { ksk }
     }
 
     /// Generate a [`RelinearizationKey`] from a [`SecretKey`].
@@ -183,6 +187,18 @@ impl RelinearizationKey {
         }
     }
 
+    pub fn parameters(&self) -> Arc<BfvParameters> {
+        self.ksk.par.clone()
+    }
+
+    pub fn ciphertext_level(&self) -> usize {
+        self.ksk.ciphertext_level
+    }
+
+    pub fn key_level(&self) -> usize {
+        self.ksk.ksk_level
+    }
+
     /// Same operation as [`relinearizes`] but for relinearizing a polynomial
     /// rather than a full ciphertext. Takes a polynomial representing c₂
     /// and returns the relinearized components (d₀, d₁) = c₂·s², encrypted
@@ -194,7 +210,8 @@ impl RelinearizationKey {
     /// # Returns
     /// * `Ok((d₀, d₁))` - The relinearized components encrypted under s
     /// * `Err` if the key switching operation fails
-    pub(crate) fn relinearizes_poly(&self, c2: &Poly) -> Result<(Poly, Poly)> {
+    
+    pub fn relinearizes_poly(&self, c2: &Poly) -> Result<(Poly, Poly)> {
         self.ksk.key_switch(c2)
     }
 }

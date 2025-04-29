@@ -1,16 +1,17 @@
 //! Public keys for the l-BFV encryption scheme
 
-use crate::bfv::traits::TryConvertFrom;
-use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
-use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
 use crate::{Error, Result};
-use fhe_math::rq::{Poly, Representation};
-use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
+use std::sync::Arc;
+
 use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use std::sync::Arc;
 use zeroize::Zeroizing;
+
+use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom};
+use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
+use fhe_math::rq::{Poly, Representation, switcher::Switcher};
+use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 
 /// Public key for the L-BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -117,30 +118,59 @@ impl LBFVPublicKey {
         Ok((ciphertext, u, e1, e2))
     }
 
-    /// Extract the b polynomials from the ciphertexts in the public key.
-    /// These are the c[0] components of each ciphertext.
-    pub fn extract_b_polynomials(&self) -> Result<Vec<Poly>> {
-        self.c.iter().map(|ct| Ok(ct.c[0].clone())).collect()
-    }
+    /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
+    ///
+    /// This method extracts the first l = # moduli - ciphertext level, c[0] components from each ciphertext in the public key, 
+    /// mod switches them to the key level, and converts them to the specified representation.
+    ///
+    /// # Arguments
+    /// * `ciphertext_level` - The level of the ciphertext that will use these polynomials
+    /// * `key_level` - The level of the key that will be used (currently must be 0)
+    /// * `rep` - The desired representation for the output polynomials
+    ///
+    /// # Returns
+    /// * `Ok(Vec<Poly>)` - A vector of polynomials in the specified representation at the target level
+    /// * `Err` if:
+    ///   - The requested ciphertext level is greater than the maximum level
+    ///   - The key level is not 0 (current limitation)
+    ///   - The public key is not at level 0
+    ///   - Any polynomial operations fail during mod switching or representation changes
+    pub fn extract_b_polynomials(&self, ciphertext_level: usize, key_level: usize, rep: Representation) -> Result<Vec<Poly>> {
+        // Necessary checks
+        if ciphertext_level > self.par.max_level() {
+            return Err(Error::DefaultError("Level is greater than the maximum level".to_string()));
+        }
+        
+        // Note: this may seem redundant, but it's because in the future, we want to experiment with different key levels
+        // for the public key.
+        if key_level != 0 {
+            return Err(Error::DefaultError("Key level must be 0".to_string()));
+        }
 
-    /// Extract the b polynomials from the ciphertexts in the public key and
-    /// convert them to NTTShoup representation. These are the c[0]
-    /// components of each ciphertext.
-    pub fn extract_b_polynomials_ntt_shoup(&self) -> Result<Vec<Poly>> {
-        self.c
-            .iter()
-            .map(|ct| {
-                let mut poly = ct.c[0].clone();
-                poly.change_representation(Representation::NttShoup);
-                Ok(poly)
-            })
-            .collect()
-    }
+        let key_ctx = self.par.ctx_at_level(key_level)?;
+        if self.c[0].c[0].ctx() != key_ctx {
+            return Err(Error::DefaultError("Public key is not at level 0".to_string()));
+        }
 
-    /// Extract the a polynomials from the ciphertexts in the public key.
-    /// These are the c[1] components of each ciphertext.
-    pub fn extract_a_polynomials(&self) -> Result<Vec<Poly>> {
-        self.c.iter().map(|ct| Ok(ct.c[1].clone())).collect()
+        // Note: key switching is redundant for now.
+        // Create switcher to mod switch from initial to final context (for when public key is at different level than ciphertext)
+        let ciphertext_ctx = self.par.ctx_at_level(ciphertext_level)?;
+        let switcher = Switcher::new(ciphertext_ctx, key_ctx)?;
+
+        // Extract (l - level) b polynomials and change representation accordingly
+        let new_l = self.l - ciphertext_level;
+        let mut b_polynomials = Vec::with_capacity(new_l);
+        for i in 0..new_l {
+            let mut poly = self.c[i].c[0].clone();
+            if poly.ctx() != key_ctx {
+                println!("Switching from level {} to level {}", ciphertext_level, key_level);
+                poly.change_representation(Representation::PowerBasis);
+                poly = poly.mod_switch_to(&switcher)?;
+            }
+            poly.change_representation(rep.clone());
+            b_polynomials.push(poly);
+        }
+        Ok(b_polynomials)
     }
 }
 

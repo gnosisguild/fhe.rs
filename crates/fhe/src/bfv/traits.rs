@@ -46,18 +46,23 @@ impl GenericRelinearizationKey {
             GenericRelinearizationKey::LBFV(rk) => rk.relinearizes(ct),
         }
     }
-
+    pub fn key_level(&self) -> usize {
+        match self {
+            GenericRelinearizationKey::Standard(rk) => rk.key_level(),
+            GenericRelinearizationKey::LBFV(rk) => rk.key_level(),
+        }
+    }
     pub fn ciphertext_level(&self) -> usize {
         match self {
-            GenericRelinearizationKey::Standard(rk) => rk.ksk.ciphertext_level,
-            GenericRelinearizationKey::LBFV(rk) => rk.ksk_r_to_s.ciphertext_level,
+            GenericRelinearizationKey::Standard(rk) => rk.ciphertext_level(),
+            GenericRelinearizationKey::LBFV(rk) => rk.ciphertext_level(),
         }
     }
 
     pub fn parameters(&self) -> Arc<BfvParameters> {
         match self {
-            GenericRelinearizationKey::Standard(rk) => rk.ksk.par.clone(),
-            GenericRelinearizationKey::LBFV(rk) => rk.ksk_r_to_s.par.clone(),
+            GenericRelinearizationKey::Standard(rk) => rk.parameters(),
+            GenericRelinearizationKey::LBFV(rk) => rk.parameters(),
         }
     }
 }
