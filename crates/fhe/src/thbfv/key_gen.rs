@@ -197,6 +197,7 @@ mod tests {
 
         // Add the two shamir polynomials
         let sum_shamir = &s1_share_poly + &s2_share_poly;
+        //let mul_shamir = &s1_share_poly * &s2_share_poly;
 
         // gather the result of poly addition u64 coeffs
         let mut collect_coeffs: Vec<u64> = Vec::with_capacity(n * 3);
