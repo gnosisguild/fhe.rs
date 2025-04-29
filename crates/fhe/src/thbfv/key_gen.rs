@@ -1,3 +1,5 @@
+use std::{sync::Arc};
+
 use crate::bfv::{PublicKey, Ciphertext};
 use fhe_util::sample_vec_cbd_unbounded;
 use crate::errors::Result;
@@ -75,6 +77,7 @@ impl TrBFVShare {
         Ok(s_coefficients)
     }
 
+    // assumes variance is 19, todo: variable variance
     pub fn encode_coeffs(coeffs: &mut Vec<i64>) -> Result<Vec<i64>> {
         for i in 0..coeffs.len() {
             // encode negative coeffs as positive ints [11,19]
@@ -95,9 +98,18 @@ impl TrBFVShare {
         Ok(coeffs.to_vec())
     }
 
-    pub fn decryption_share(ciphertext: Ciphertext, smudge: i64) -> Result<i64> {
+    // todo: generate sharabe set (simply get nodes id(index) from the vector to send to all other nodes)
+
+    pub fn decryption_share(ciphertext: Arc<Ciphertext>, smudge: Vec<(BigInt)>, sk: Vec<(BigInt)>) -> Result<i64> {
         // sum c0 + c1
         let mut c0c1 = ciphertext.c[0].as_ref() + &ciphertext.c[1];
+        // mul c0 + c1 * sk
+        //let poly_sk = Poly::try_convert_from(m_v.as_ref(), ctx, false, Representation::PowerBasis).unwrap();
+        //poly_sk.change_representation(Representation::Ntt);
+        //Poly::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time
+        //let cxs = c0c1 * &sk;
+        //println!("{:?}", sk[0]);
+        // add esm
         Ok(0)
     }
 }
@@ -107,6 +119,102 @@ mod tests {
     use super::*;
     use rand::thread_rng;
     use crate::bfv::{BfvParametersBuilder, SecretKey};
+    use zeroize::{Zeroizing};
+    use fhe_math::rq::{traits::TryConvertFrom, Context, Poly, Representation};
+    use num_traits::ToPrimitive;
+
+    #[test]
+    fn convert_poly_to_shared_poly() {
+        let mut rng = thread_rng();
+        // generate fhe secret key polynomial
+        // for each poly coeff, generate a shamir secret share
+        let n = 16;
+        let threshold = 9;
+        let degree = 2048;
+        let plaintext_modulus: u64 = 4096;
+        let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
+        let secret1 = 4;
+        let secret2 = 6;
+
+        let sk_par = BfvParametersBuilder::new()
+            .set_degree(degree)
+            .set_plaintext_modulus(plaintext_modulus)
+            .set_moduli(&moduli)
+            .build_arc()
+            .unwrap();
+        let mut s_raw = SecretKey::random(&sk_par, &mut rng);
+
+        let mut s = Zeroizing::new(Poly::try_convert_from(
+            s_raw.coeffs.as_ref(),
+            &sk_par.ctx_at_level(0).unwrap(),
+            false,
+            Representation::PowerBasis,
+        ).unwrap());
+
+        // gather seceret coeffs
+        let coeffview = s.coefficients();
+        // use rns_mod_i (smaller than rns mod)
+        // todo convert back to rns mod
+        let rns_mod_i = sk_par.moduli()[0];
+
+        let shamir = SSS {
+            threshold: threshold,
+            share_amount: n,
+            prime: BigInt::from(rns_mod_i)
+        };
+
+        // test two secret coeff points
+        let secret_1 = secret1.to_bigint().unwrap();
+        let secret_2 = secret2.to_bigint().unwrap();
+        // create shamir polynomials
+        let s1_shares = shamir.split(secret_1.clone());
+        let s2_shares = shamir.split(secret_2.clone());
+
+
+        // convert shamir points to u64 for poly coeffs
+        let mut u64shamirvec_1: Vec<u64> = Vec::with_capacity(n);
+        for i in 0..n {
+            u64shamirvec_1.push(s1_shares[i].1.to_u64().unwrap());
+        }
+        let mut u64shamirvec_2: Vec<u64> = Vec::with_capacity(n);
+        for i in 0..n {
+            u64shamirvec_2.push(s2_shares[i].1.to_u64().unwrap());
+        }
+
+        // create fhe.rs poly with u64 shamir coeffs
+        let mut s1_share_poly = Poly::try_convert_from(
+            u64shamirvec_1,
+            &sk_par.ctx_at_level(0).unwrap(),
+            false,
+            Representation::PowerBasis,
+        ).unwrap();
+        let mut s2_share_poly = Poly::try_convert_from(
+            u64shamirvec_2,
+            &sk_par.ctx_at_level(0).unwrap(),
+            false,
+            Representation::PowerBasis,
+        ).unwrap();
+
+        // Add the two shamir polynomials
+        let sum_shamir = &s1_share_poly + &s2_share_poly;
+
+        // gather the result of poly addition u64 coeffs
+        let mut collect_coeffs: Vec<u64> = Vec::with_capacity(n * 3);
+        for ((x, y), value) in sum_shamir.coefficients().indexed_iter() {
+            if *value != 0 as u64 { collect_coeffs.push(*value); }
+        }
+        // convert u64 to shamir big int tuple
+        let mut shamir_rep: Vec<(usize, BigInt)> = Vec::with_capacity(n);
+        for i in 0..16 {
+            let index = i + 1 as usize;
+            let bigintcoeff = collect_coeffs[i].to_bigint().unwrap();
+            shamir_rep.push((index, bigintcoeff));
+        }
+
+        // Open the shamir secret to get s1 + s2.
+        let result = shamir.recover(&shamir_rep[0..shamir.threshold as usize]);
+        println!("{:?}", result);
+    }
 
     #[test]
     fn test_trbfv() {
@@ -201,7 +309,8 @@ mod tests {
         //println!("{:?}", test_sssvec);
         println!("{:?}", node_shares[0].len());
         println!("The useful size of `v` is {}", size_of_val(&*node_shares[0]));
-        println!(" Secret coeff {:?}", sk_share.coeffs[0].to_bigint().unwrap());
+        //println!(" Secret coeff {:?}", sk_share.coeffs[0].to_bigint().unwrap());
         assert_eq!(sk_share.coeffs[0].to_bigint().unwrap(), sss.recover(&result[0][0..sss.threshold as usize]));
+        println!("{:?}", result[0]);
     }
 }
