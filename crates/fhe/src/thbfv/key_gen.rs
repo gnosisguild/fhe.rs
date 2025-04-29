@@ -117,6 +117,7 @@ impl TrBFVShare {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use itertools::{izip, zip};
     use rand::thread_rng;
     use crate::bfv::{BfvParametersBuilder, SecretKey};
     use zeroize::{Zeroizing};
@@ -142,7 +143,7 @@ mod tests {
             .set_moduli(&moduli)
             .build_arc()
             .unwrap();
-        let mut s_raw = SecretKey::random(&sk_par, &mut rng);
+        let mut s_raw: SecretKey = SecretKey::random(&sk_par, &mut rng);
 
         let mut s = Zeroizing::new(Poly::try_convert_from(
             s_raw.coeffs.as_ref(),
@@ -151,8 +152,31 @@ mod tests {
             Representation::PowerBasis,
         ).unwrap());
 
+        let mut s_shares: Vec<Poly> = vec![Poly::zero(&sk_par.ctx_at_level(0).unwrap(), Representation::PowerBasis); n];
+        // For each modulus
+        for (k, (m, p)) in izip!(s.ctx().moduli().iter(), s.coefficients().outer_iter()).enumerate() {
+            // Create shamir object
+            let shamir = SSS {
+                threshold: threshold,
+                share_amount: n,
+                prime: BigInt::from(*m)
+            };
+            // For each coeff in the polynomial p under the current modulus m
+            for (i, c) in p.iter().enumerate() {
+                // Split the coeff into n shares
+                let secret = c.to_bigint().unwrap();
+                let c_shares = shamir.split(secret.clone());
+                // For each share
+                for (j, (_, c_share)) in c_shares.iter().enumerate() {
+                    // Set the coefficient in the corresponding polynomial matrix of s_shares
+                    s_shares[j].coefficients_mut()[k][i] = c_share.to_u64().unwrap();
+                }
+            }
+        }
+
         // gather seceret coeffs
         let coeffview = s.coefficients();
+        println!("{:?}", coeffview);
         // use rns_mod_i (smaller than rns mod)
         // todo convert back to rns mod
         let rns_mod_i = sk_par.moduli()[0];

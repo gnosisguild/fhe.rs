@@ -629,7 +629,7 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b05180d69e3da0e530ba2a1dae5110317e49e3b7f3d41be227dc5f92e49ee7af"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.4",
  "num-complex",
  "num-integer",
  "num-iter",
@@ -714,7 +714,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0638a1c9d0a3c0914158145bc76cff373a75a627e6ecbfb71cbe6f453a5a19b0"
 dependencies = [
  "autocfg",
- "num-bigint",
+ "num-bigint 0.4.4",
  "num-integer",
  "num-traits",
 ]
@@ -815,7 +815,7 @@ checksum = "bb24cb4f70d64221509ab3dca82ad2ec24e1d7f3fa3e7cb9eed4ced578683287"
 dependencies = [
  "itertools 0.10.5",
  "num",
- "rand",
+ "rand 0.8.5",
 ]
 
 [[package]]
