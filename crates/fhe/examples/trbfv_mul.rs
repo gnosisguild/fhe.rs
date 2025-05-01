@@ -255,10 +255,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     //println!("{:?}", tally);
 
     // convert esm and sk summed shares into polynomals
-
     timeit_n!("Decryption (per party up to threshold)", 1 as u32, {
-
-        let sh = TrBFVShare::decryption_share(tally.clone(), sum_esm.clone(), sum_sk.clone())?;
+        // let sh = TrBFVShare::decryption_share((*tally).clone(), sum_sk.clone())?;
         _i += 1;
     });   
 

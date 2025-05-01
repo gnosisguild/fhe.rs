@@ -4,7 +4,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-authors = ["Tancrède Lepoint"]
+authors = ["Tancrède Lepoint", "Vele Tosevski", "Nathan Ginnever"]
 documentation = "https://fhe.rs"
 edition = "2021"
 repository = "https://github.com/tlepoint/fhe.rs"

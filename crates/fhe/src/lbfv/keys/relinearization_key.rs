@@ -16,23 +16,24 @@
  *    inherently provides robustness in the threshold setting.
  */
 
-use std::sync::Arc;
-
 use crate::bfv::traits::TryConvertFrom;
 use crate::bfv::{BfvParameters, Ciphertext, SecretKey, KeySwitchingKey};
 use crate::proto::bfv::{
-    KeySwitchingKey as KeySwitchingKeyProto, RelinearizationKey as RelinearizationKeyProto,
+    KeySwitchingKey as KeySwitchingKeyProto,
+    LbfvRelinearizationKey as LBFVRelinearizationKeyProto
 };
-use crate::{Error, Result};
 use fhe_math::rq::{
     switcher::Switcher, traits::TryConvertFrom as TryConvertFromPoly, Poly, Representation, Context
 };
-use fhe_traits::{DeserializeParametrized, FheParametrized, Serialize};
+use fhe_traits::{
+    DeserializeParametrized, DeserializeWithContext, FheParametrized, Serialize,
+};
 use itertools::izip;
 use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use zeroize::Zeroizing;
+use std::sync::Arc;
+use crate::{Error, Result};
 
 use super::LBFVPublicKey;
 
@@ -91,6 +92,12 @@ impl LBFVRelinearizationKey {
         let ctx_relin_key = sk.par.ctx_at_level(key_level)?;
         let ctx_ciphertext = sk.par.ctx_at_level(ciphertext_level)?;
         let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
+
+        if ciphertext_level > key_level {
+            return Err(Error::DefaultError(
+                "Ciphertext level must be less than or equal to key level".to_string(),
+            ));
+        }
 
         if ctx_relin_key.moduli().len() == 1 {
             return Err(Error::DefaultError(
@@ -325,50 +332,65 @@ impl LBFVRelinearizationKey {
     }
 }
 
-/// Converts a [`RelinearizationKey`] into its protobuf representation
-// impl From<&RelinearizationKey> for RelinearizationKeyProto {
-//     fn from(value: &RelinearizationKey) -> Self {
-//         RelinearizationKeyProto {
-//             ksk: Some(KeySwitchingKeyProto::from(&value.ksk)),
-//         }
-//     }
-// }
+/// Converts a [`LBFVRelinearizationKey`] into its protobuf representation
+impl From<&LBFVRelinearizationKey> for LBFVRelinearizationKeyProto {
+    fn from(value: &LBFVRelinearizationKey) -> Self {
+        LBFVRelinearizationKeyProto {
+            ksk_r_to_s: Some(KeySwitchingKeyProto::from(&value.ksk_r_to_s)),
+            ksk_s_to_r: Some(KeySwitchingKeyProto::from(&value.ksk_s_to_r)),
+            b_vec: value.b_vec.iter().map(|p| p.to_bytes()).collect(),
+        }
+    }
+}
 
 /// Attempts to convert a protobuf representation back into a
-/// [`RelinearizationKey`]
+/// [`LBFVRelinearizationKey`]
 ///
 /// # Arguments
 /// * `value` - The protobuf representation to convert
 /// * `par` - The BFV parameters to use for the conversion
 ///
 /// # Returns
-/// * `Ok(RelinearizationKey)` if conversion succeeds
+/// * `Ok(LBFVRelinearizationKey)` if conversion succeeds
 /// * `Err` if the protobuf is invalid or conversion fails
-// impl TryConvertFrom<&RelinearizationKeyProto> for RelinearizationKey {
-//     fn try_convert_from(value: &RelinearizationKeyProto, par: &Arc<BfvParameters>) ->
-// Result<Self> {         if value.ksk.is_some() {
-//             Ok(RelinearizationKey {
-//                 ksk: KeySwitchingKey::try_convert_from(value.ksk.as_ref().unwrap(), par)?,
-//             })
-//         } else {
-//             Err(Error::DefaultError("Invalid serialization".to_string()))
-//         }
-//     }
-// }
+impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
+    fn try_convert_from(value: &LBFVRelinearizationKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
+        if value.ksk_r_to_s.is_none() || value.ksk_s_to_r.is_none() {
+            return Err(Error::DefaultError("Invalid serialization: missing key switching keys".to_string()));
+        }
+        
+        let ksk_r_to_s = KeySwitchingKey::try_convert_from(value.ksk_r_to_s.as_ref().unwrap(), par)?;
+        let ksk_s_to_r = KeySwitchingKey::try_convert_from(value.ksk_s_to_r.as_ref().unwrap(), par)?;
+        
+        // Deserialize b_vec
+        let key_ctx = ksk_r_to_s.ctx_ksk.clone();
+        let mut b_vec = Vec::with_capacity(value.b_vec.len());
+        for poly_bytes in &value.b_vec {
+            let poly = Poly::from_bytes(poly_bytes, &key_ctx)?;
+            b_vec.push(poly);
+        }
+        
+        Ok(LBFVRelinearizationKey {
+            ksk_r_to_s,
+            ksk_s_to_r,
+            b_vec,
+        })
+    }
+}
 
-/// Serializes the [`RelinearizationKey`] into a byte vector
-// impl Serialize for RelinearizationKey {
-//     fn to_bytes(&self) -> Vec<u8> {
-//         RelinearizationKeyProto::from(self).encode_to_vec()
-//     }
-// }
+/// Serializes the [`LBFVRelinearizationKey`] into a byte vector
+impl Serialize for LBFVRelinearizationKey {
+    fn to_bytes(&self) -> Vec<u8> {
+        LBFVRelinearizationKeyProto::from(self).encode_to_vec()
+    }
+}
 
-/// Associates the [`RelinearizationKey`] with BFV parameters
-// impl FheParametrized for RelinearizationKey {
-//     type Parameters = BfvParameters;
-// }
+/// Associates the [`LBFVRelinearizationKey`] with BFV parameters
+impl FheParametrized for LBFVRelinearizationKey {
+    type Parameters = BfvParameters;
+}
 
-/// Deserializes a [`RelinearizationKey`] from bytes using the provided
+/// Deserializes a [`LBFVRelinearizationKey`] from bytes using the provided
 /// parameters
 ///
 /// # Arguments
@@ -376,60 +398,105 @@ impl LBFVRelinearizationKey {
 /// * `par` - The BFV parameters to use for deserialization
 ///
 /// # Returns
-/// * `Ok(RelinearizationKey)` if deserialization succeeds
+/// * `Ok(LBFVRelinearizationKey)` if deserialization succeeds
 /// * `Err` if the bytes are invalid or deserialization fails
-// impl DeserializeParametrized for RelinearizationKey {
-//     type Error = Error;
+impl DeserializeParametrized for LBFVRelinearizationKey {
+    type Error = Error;
 
-//     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-//         let rk = Message::decode(bytes);
-//         if let Ok(rk) = rk {
-//             RelinearizationKey::try_convert_from(&rk, par)
-//         } else {
-//             Err(Error::DefaultError("Invalid serialization".to_string()))
-//         }
-//     }
-// }
+    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+        let rk = Message::decode(bytes);
+        if let Ok(rk) = rk {
+            LBFVRelinearizationKey::try_convert_from(&rk, par)
+        } else {
+            Err(Error::DefaultError("Invalid serialization".to_string()))
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use super::LBFVRelinearizationKey;
-    use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
-    use crate::lbfv::keys::LBFVPublicKey;
+    use super::*;
+    use crate::bfv::{Encoding, Plaintext};
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use rand::thread_rng;
     use std::error::Error;
+    use std::result::Result;
 
     #[test]
-    fn test_relinearization_after_multiplication() -> Result<(), Box<dyn Error>> {
+    fn test_serialize_deserialize() -> Result<(), Box<dyn Error>> {
         let mut rng = thread_rng();
         let params = BfvParameters::default_arc(6, 8);
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng);
-
+        
         // Create relinearization key
-        let relin_key = LBFVRelinearizationKey::new(
-            &sk, &pk, None, // Use random d1_seed
-            &mut rng,
-        )?;
-
-        // Create a plaintext with value 2
+        let relin_key = LBFVRelinearizationKey::new(&sk, &pk, None, &mut rng)?;
+        
+        // Serialize and deserialize
+        let bytes = relin_key.to_bytes();
+        let deserialized_key = LBFVRelinearizationKey::from_bytes(&bytes, &params)?;
+        
+        // Test that the deserialized key works correctly
         let pt = Plaintext::try_encode(&[2u64], Encoding::poly(), &params)?;
-
-        // Encrypt the plaintext
         let ct = pk.try_encrypt(&pt, &mut rng)?;
-
-        // Multiply the ciphertext with itself (this creates a 3-part ciphertext)
         let mut ct_squared = &ct.clone() * &ct;
-
-        // Relinearize the squared ciphertext
-        relin_key.relinearizes(&mut ct_squared)?;
-
-        // Decrypt and verify the result is 4 (2 * 2)
-        let pt_result = sk.try_decrypt(&ct_squared)?;
-        let result = Vec::<u64>::try_decode(&pt_result, Encoding::poly())?;
+        
+        // Relinearize with original key
+        let mut ct_squared_original = ct_squared.clone();
+        relin_key.relinearizes(&mut ct_squared_original)?;
+        
+        // Relinearize with deserialized key
+        deserialized_key.relinearizes(&mut ct_squared)?;
+        
+        // Decrypt and verify both give the same result
+        let pt_original = sk.try_decrypt(&ct_squared_original)?;
+        let pt_deserialized = sk.try_decrypt(&ct_squared)?;
+        
+        assert_eq!(pt_original, pt_deserialized);
+        
+        let result = Vec::<u64>::try_decode(&pt_deserialized, Encoding::poly())?;
         assert_eq!(result[0], 4);
+        
+        Ok(())
+    }
 
+    #[test]
+    fn test_multiplication() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng);
+        
+        // Create relinearization key
+        let relin_key = LBFVRelinearizationKey::new(&sk, &pk, None, &mut rng)?;
+        
+        // Test multiplication with different encodings
+        for encoding in [Encoding::poly(), Encoding::simd()] {
+            // Encode and encrypt values
+            let pt1 = Plaintext::try_encode(&[3u64], encoding.clone(), &params)?;
+            let pt2 = Plaintext::try_encode(&[5u64], encoding.clone(), &params)?;
+            let ct1 = pk.try_encrypt(&pt1, &mut rng)?;
+            let ct2 = pk.try_encrypt(&pt2, &mut rng)?;
+            
+            // Multiply ciphertexts
+            let mut ct_product = &ct1 * &ct2;
+            
+            // Relinearize
+            relin_key.relinearizes(&mut ct_product)?;
+            
+            // Decrypt and verify
+            let pt_result = sk.try_decrypt(&ct_product)?;
+            let result = Vec::<u64>::try_decode(&pt_result, encoding.clone())?;
+            
+            // Check result (3 * 5 = 15)
+            if encoding == Encoding::poly() {
+                assert_eq!(result[0], 15);
+            } else {
+                // For SIMD encoding, all values should be 15
+                assert!(result.iter().all(|&x| x == 15));
+            }
+        }
+        
         Ok(())
     }
 }

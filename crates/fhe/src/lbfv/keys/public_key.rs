@@ -245,6 +245,7 @@ impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
         LBFVPublicKeyProto {
             c: pk.c.iter().map(CiphertextProto::from).collect(),
             l: pk.l as u32,
+            seed: pk.seed.map_or_else(Vec::new, |s| s.to_vec()),
         }
     }
 }
@@ -279,11 +280,23 @@ impl DeserializeParametrized for LBFVPublicKey {
             c.push(ct);
         }
 
+        // Import the seed if it exists
+        let seed = if !proto.seed.is_empty() {
+            let mut seed_array = <ChaCha8Rng as SeedableRng>::Seed::default();
+            if proto.seed.len() != seed_array.len() {
+                return Err(Error::SerializationError);
+            }
+            seed_array.copy_from_slice(&proto.seed);
+            Some(seed_array)
+        } else {
+            None
+        };
+
         Ok(Self {
             par: par.clone(),
             c,
             l: proto.l as usize,
-            seed: None,
+            seed,
         })
     }
 }
@@ -292,7 +305,6 @@ impl DeserializeParametrized for LBFVPublicKey {
 mod tests {
     use super::LBFVPublicKey;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
-    use fhe_math::rq::{Poly, Representation};
     use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
     use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;

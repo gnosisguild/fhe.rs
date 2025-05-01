@@ -1,6 +1,6 @@
 use crate::bfv::{PublicKey, Ciphertext};
-use fhe_util::sample_vec_cbd_unbounded;
 use crate::errors::Result;
+use fhe_util::sample_vec_cbd_unbounded;
 use rand::{CryptoRng, RngCore};
 use shamir_secret_sharing::ShamirSecretSharing as SSS;
 use num_bigint_old::{BigInt, ToBigInt};
