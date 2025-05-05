@@ -37,15 +37,19 @@ pub struct KeySwitchingKey {
     /// Max level and context of polynomials that can be key switched. This
     /// defines the decomposition basis of the key switching key.
     pub ciphertext_level: usize,
+
+    /// Context of the ciphertext being key switched.
     pub ctx_ciphertext: Arc<Context>,
 
     /// Level and context of the key switching key polynomials. These can be
     /// mod switched down to be multiplied during keyswitching with a ciphertext
     /// that is of a different level.
     pub ksk_level: usize,
+
+    /// Context of the key switching key polynomials.
     pub ctx_ksk: Arc<Context>,
 
-    // For level with only one modulus, we will use basis.
+    /// For level with only one modulus, we will use basis.
     pub log_base: usize,
 }
 

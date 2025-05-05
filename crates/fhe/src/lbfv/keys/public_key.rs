@@ -1,4 +1,6 @@
-//! Public keys for the l-BFV encryption scheme
+/*!
+ * This module contains the public key for the l-BFV encryption scheme.
+ */
 
 use crate::{Error, Result};
 use std::sync::Arc;

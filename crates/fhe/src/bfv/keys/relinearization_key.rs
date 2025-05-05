@@ -47,6 +47,8 @@ use zeroize::Zeroizing;
 /// homomorphic multiplication operations.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct RelinearizationKey {
+    /// The key switching key that transforms a ciphertext encrypted under s² to
+    /// a ciphertext encrypted under s.
     ksk: KeySwitchingKey,
 }
 
@@ -56,6 +58,7 @@ impl RelinearizationKey {
         Self::new_leveled_internal(sk, 0, 0, rng)
     }
 
+    /// Generate a [`RelinearizationKey`] from a [`KeySwitchingKey`].
     pub fn new_from_ksk(ksk: KeySwitchingKey) -> Self {
         Self { ksk }
     }
@@ -187,14 +190,17 @@ impl RelinearizationKey {
         }
     }
 
+    /// Get the parameters of the relinearization key
     pub fn parameters(&self) -> Arc<BfvParameters> {
         self.ksk.par.clone()
     }
 
+    /// Get the ciphertext level of the relinearization key
     pub fn ciphertext_level(&self) -> usize {
         self.ksk.ciphertext_level
     }
 
+    /// Get the key level of the relinearization key
     pub fn key_level(&self) -> usize {
         self.ksk.ksk_level
     }
@@ -210,7 +216,6 @@ impl RelinearizationKey {
     /// # Returns
     /// * `Ok((d₀, d₁))` - The relinearized components encrypted under s
     /// * `Err` if the key switching operation fails
-    
     pub fn relinearizes_poly(&self, c2: &Poly) -> Result<(Poly, Poly)> {
         self.ksk.key_switch(c2)
     }

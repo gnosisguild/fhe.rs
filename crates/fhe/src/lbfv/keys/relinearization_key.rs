@@ -2,18 +2,8 @@
  * Implementation of the l-BFV relinearization algorithm as described in
  * [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
  *
- * The l-BFV (linear BFV) relinearization algorithm provides several key
- * advantages over traditional relinearization approaches:
- *
- * 1. Linear Communication: The protocol achieves linear communication
- *    complexity, making it more efficient than quadratic alternatives.
- *
- * 2. Single Round: Unlike traditional approaches that require two rounds of
- *    communication, l-BFV completes relinearization in a single round,
- *    significantly reducing latency and network overhead.
- *
- * 3. Enhanced Robustness: The single-round nature of the protocol
- *    inherently provides robustness in the threshold setting.
+ * This module contains the relinearization key for the l-BFV scheme, along with the relinearization key 
+ * relinearization algorithm.
  */
 
 use crate::bfv::traits::TryConvertFrom;
@@ -93,9 +83,9 @@ impl LBFVRelinearizationKey {
         let ctx_ciphertext = sk.par.ctx_at_level(ciphertext_level)?;
         let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
 
-        if ciphertext_level > key_level {
+        if ciphertext_level < key_level {
             return Err(Error::DefaultError(
-                "Ciphertext level must be less than or equal to key level".to_string(),
+                "Ciphertext level must be greater than or equal to key level".to_string(),
             ));
         }
 
@@ -175,6 +165,13 @@ impl LBFVRelinearizationKey {
         })
     }
 
+    /// Get "l" in "l-BFV" based on members of the [`LBFVRelinearizationKey`] struct, 
+    /// which is equal to the number of ciphertexts in the public key.
+    /// 
+    /// # Returns
+    /// * `Ok(usize)` - The number of ciphertexts in the public key
+    /// * `Err` if the number of moduli in the ciphertext context is not equal 
+    /// to the number of polynomials in `b_vec`, which should be equal to "l".
     pub fn l(&self) -> Result<usize> {
         if self.ksk_r_to_s.par.max_level() + 1 - self.ciphertext_level() != self.b_vec.len() {
             return Err(Error::DefaultError("'l' is not consistent.".to_string()));
@@ -182,6 +179,12 @@ impl LBFVRelinearizationKey {
         Ok(self.b_vec.len())
     }
 
+    /// Generate a new relinearization key. This relinearization key is
+    /// generated using the key switching keys from r to s and s to r, following
+    /// the l-BFV relinearization algorithm in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
+    /// The first key switching key is generated using the seed `d1_seed` and
+    /// the second key switching key is generated using the seed `a_seed`. If
+    /// `d1_seed` is not provided, a new seed is generated.
     pub fn new<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         pk: &LBFVPublicKey,
@@ -191,6 +194,21 @@ impl LBFVRelinearizationKey {
         Self::new_leveled(sk, pk, d1_seed, 0, 0, rng)
     }   
 
+    /// Relinearizes a ciphertext of degree 2 to degree 1 using the l-BFV relinearization algorithm.
+    /// 
+    /// This function implements the relinearization algorithm from [Robust Multiparty Computation from 
+    /// Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
+    /// 
+    /// Note: Key switching operations are done in the key switching key context, not the ciphertext context.
+    /// When necesary, the ciphertext is converted to the key switching key context. Then, it is converted back
+    /// to the ciphertext context to perform necessary mathematical operations.
+    ///
+    /// # Arguments
+    /// * `ct` - The ciphertext to relinearize. Must have exactly 3 parts (degree 2).
+    ///
+    /// # Returns
+    /// * `Ok(())` - If relinearization succeeds. The input ciphertext is modified in-place to have 2 parts (degree 1).
+    /// * `Err` - If the ciphertext does not have exactly 3 parts or is at the wrong level.
     pub fn relinearizes(&self, ct: &mut Ciphertext) -> Result<()> {
         if ct.c.len() != 3 {
             Err(Error::DefaultError(
@@ -242,22 +260,47 @@ impl LBFVRelinearizationKey {
         }
     }
 
+    /// Get the ciphertext level of the relinearization key.
+    /// 
+    /// # Returns
+    /// * `usize` - The ciphertext level of the relinearization key which is the same 
+    /// as the ciphertext level of the key switching key. 
     pub fn ciphertext_level(&self) -> usize {
         self.ksk_r_to_s.ciphertext_level
     }
 
+    /// Get the ciphertext context of the relinearization key.
+    /// 
+    /// # Returns
+    /// * `Arc<Context>` - The ciphertext context of the relinearization key which is the same 
+    /// as the ciphertext context of the key switching key. 
     pub fn ciphertext_ctx(&self) -> Arc<Context> {
         self.ksk_r_to_s.ctx_ciphertext.clone()
     }
 
-    pub fn key_level(&self) -> usize {
+    /// Get the key level of the relinearization key.
+    /// 
+    /// # Returns
+    /// * `usize` - The key level of the relinearization key which is the same 
+    /// as the key level of the key switching key. 
+    pub fn key_level(&self) -> usize {  
         self.ksk_r_to_s.ksk_level
     }
 
+    /// Get the key context of the relinearization key.
+    /// 
+    /// # Returns
+    /// * `Arc<Context>` - The key context of the relinearization key which is the same 
+    /// as the key context of the key switching key. 
     pub fn key_ctx(&self) -> Arc<Context> {
         self.ksk_r_to_s.ctx_ksk.clone()
     }
 
+    /// Get the BFV parameters of the relinearization key.
+    /// 
+    /// # Returns
+    /// * `Arc<BfvParameters>` - The BFV parameters of the relinearization key which is the same 
+    /// as the BFV parameters of the key switching key. 
     pub fn parameters(&self) -> Arc<BfvParameters> {
         self.ksk_r_to_s.par.clone()
     }
@@ -489,12 +532,7 @@ mod tests {
             let result = Vec::<u64>::try_decode(&pt_result, encoding.clone())?;
             
             // Check result (3 * 5 = 15)
-            if encoding == Encoding::poly() {
-                assert_eq!(result[0], 15);
-            } else {
-                // For SIMD encoding, all values should be 15
-                assert!(result.iter().all(|&x| x == 15));
-            }
+            assert_eq!(result[0], 15);
         }
         
         Ok(())
