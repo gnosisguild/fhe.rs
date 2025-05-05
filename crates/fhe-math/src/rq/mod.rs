@@ -304,6 +304,39 @@ impl Poly {
         self.coefficients.view()
     }
 
+    /// Creates a Poly from raw u64 coefficient data assumed to be in NTT representation.
+    ///
+    /// # Safety
+    /// Assumes the input data has the correct size (ctx.q.len() * ctx.degree)
+    /// and represents valid coefficients in NTT form for the given context.
+    /// The caller is responsible for ensuring the data layout matches ndarray's expectation.
+    /// Input data should be properly aligned for u64.
+    pub unsafe fn from_raw_ntt_coeffs(
+        ctx: &Arc<Context>,
+        raw_coeffs: &[u64],
+    ) -> Result<Self> {
+        if raw_coeffs.len() != ctx.q.len() * ctx.degree {
+            return Err(Error::Default(
+                "Incorrect raw coefficient buffer size".to_string(),
+            ));
+        }
+
+        // Create Array2 from slice.
+        let coeffs = Array2::from_shape_vec((ctx.q.len(), ctx.degree), raw_coeffs.to_vec())
+            .map_err(|e| Error::Default(format!("Failed to create Array2 from raw data: {}", e)))?;
+
+        Ok(Self {
+            ctx: ctx.clone(),
+            // Assume input is already NTT
+            representation: Representation::Ntt,
+            // Assume input is normalized, caller responsibility
+            has_lazy_coefficients: false,
+            allow_variable_time_computations: false,
+            coefficients: coeffs,
+            coefficients_shoup: None,
+        })
+    }
+
     /// Computes the forward Ntt on the coefficients
     fn ntt_forward(&mut self) {
         if self.allow_variable_time_computations {
@@ -1118,6 +1151,58 @@ mod tests {
                 .collect_vec(),
             Vec::<BigUint>::from(&q)
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_raw_ntt_coeffs_valid() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        let ctx = Arc::new(Context::new(MODULI, 8)?);
+        let mut p_orig = Poly::random(&ctx, Representation::PowerBasis, &mut rng);
+        p_orig.change_representation(Representation::Ntt); // Ensure it's NTT
+
+        // Extract raw coefficients
+        let raw_coeffs = p_orig.coefficients().to_slice().unwrap().to_vec();
+
+        // Reconstruct using the new function (no allow_variable_time flag)
+        let p_reconstructed = unsafe {
+            Poly::from_raw_ntt_coeffs(&ctx, &raw_coeffs)?
+        };
+
+        assert_eq!(p_orig, p_reconstructed);
+        assert_eq!(p_reconstructed.representation(), &Representation::Ntt);
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_raw_ntt_coeffs_invalid_size() -> Result<(), Box<dyn Error>> {
+        let ctx = Arc::new(Context::new(MODULI, 8)?);
+        let mut raw_coeffs = vec![0u64; ctx.q.len() * ctx.degree]; // Correct size
+
+        // Test too small
+        raw_coeffs.pop();
+        let result_small = unsafe { Poly::from_raw_ntt_coeffs(&ctx, &raw_coeffs) };
+        assert!(result_small.is_err());
+        match result_small {
+            Err(crate::Error::Default(msg)) => {
+                assert!(msg.contains("Incorrect raw coefficient buffer size"));
+            }
+            _ => panic!("Expected crate::Error::Default for small size"),
+        }
+
+        // Test too large
+        raw_coeffs.push(0); // Back to original size
+        raw_coeffs.push(0); // Make it too large
+        let result_large = unsafe { Poly::from_raw_ntt_coeffs(&ctx, &raw_coeffs) };
+        assert!(result_large.is_err());
+        match result_large {
+            Err(crate::Error::Default(msg)) => {
+                assert!(msg.contains("Incorrect raw coefficient buffer size"));
+            }
+            _ => panic!("Expected crate::Error::Default for large size"),
+        }
 
         Ok(())
     }
