@@ -200,7 +200,7 @@ impl LBFVRelinearizationKey {
     /// Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
     /// 
     /// Note: Key switching operations are done in the key switching key context, not the ciphertext context.
-    /// When necesary, the ciphertext is converted to the key switching key context. Then, it is converted back
+    /// When necessary, the ciphertext is converted to the key switching key context. Then, it is converted back
     /// to the ciphertext context to perform necessary mathematical operations.
     ///
     /// # Arguments
