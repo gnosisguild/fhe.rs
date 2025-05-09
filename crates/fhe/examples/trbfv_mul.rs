@@ -112,6 +112,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         smudge_error: Vec<i64>,
         smudge_sss: Vec<Vec<(usize, BigInt)>>,
     }
+    struct Party_v2{
+        sk_share: SecretKey,
+        pk_share: PublicKeyShare,
+        sk_sss: Vec<Vec<u64>>,
+        sk_collect: Vec<Vec<Poly>>,
+        trbfv: TrBFVShare,
+    }
     let mut parties = Vec::with_capacity(num_parties);
 
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
