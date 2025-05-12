@@ -24,9 +24,10 @@ use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
+use serde::{Serialize, Deserialize};
 
 /// Possible representations of the underlying polynomial.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Representation {
     /// This is the list of coefficients ci, such that the polynomial is c0 + c1
     /// * x + ... + c_(degree - 1) * x^(degree - 1)
@@ -40,7 +41,7 @@ pub enum Representation {
 }
 
 /// An exponent for a substitution.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubstitutionExponent {
     /// The value of the exponent.
     pub exponent: usize,
@@ -77,7 +78,7 @@ impl SubstitutionExponent {
 }
 
 /// Struct that holds a polynomial for a specific context.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Poly {
     /// The context containing the polynomial's parameters
     pub ctx: Arc<Context>,

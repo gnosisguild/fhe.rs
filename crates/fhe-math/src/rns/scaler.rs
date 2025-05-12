@@ -9,9 +9,10 @@ use ndarray::{ArrayView1, ArrayViewMut1};
 use num_bigint::BigUint;
 use num_traits::{One, ToPrimitive, Zero};
 use std::{cmp::min, sync::Arc};
+use serde::{Serialize, Deserialize};
 
 /// Scaling factor when performing a RNS scaling.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalingFactor {
     numerator: BigUint,
     denominator: BigUint,
@@ -41,7 +42,7 @@ impl ScalingFactor {
 
 /// Scaler for a RNS context.
 /// This is a helper struct to perform RNS scaling.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RnsScaler {
     from: Arc<RnsContext>,
     to: Arc<RnsContext>,

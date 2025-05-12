@@ -10,9 +10,9 @@ use crate::{
 use itertools::izip;
 use ndarray::{s, Array2, Axis};
 use std::sync::Arc;
-
+use serde::{Serialize, Deserialize};
 /// Context extender.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scaler {
     from: Arc<Context>,
     to: Arc<Context>,

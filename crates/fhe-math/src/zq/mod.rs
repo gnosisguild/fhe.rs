@@ -10,9 +10,10 @@ use itertools::{izip, Itertools};
 use num_bigint::BigUint;
 use num_traits::cast::ToPrimitive;
 use rand::{distributions::Uniform, CryptoRng, Rng, RngCore};
+use serde::{Serialize, Deserialize};
 
 /// Structure encapsulating an integer modulus up to 62 bits.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Modulus {
     pub(crate) p: u64,
     nbits: usize,

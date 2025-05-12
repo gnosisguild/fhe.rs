@@ -3,9 +3,10 @@ use itertools::Itertools;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::iter::successors;
+use serde::{Serialize, Deserialize};
 
 /// Number-Theoretic Transform operator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NttOperator {
     p: Modulus,
     p_twice: u64,

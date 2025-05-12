@@ -9,13 +9,14 @@ use num_bigint::BigUint;
 use num_bigint_dig::{BigInt as BigIntDig, BigUint as BigUintDig, ExtendedGcd, ModInverse};
 use num_traits::{cast::ToPrimitive, One, Zero};
 use std::{cmp::Ordering, fmt::Debug};
+use serde::{Serialize, Deserialize};
 
 mod scaler;
 
 pub use scaler::{RnsScaler, ScalingFactor};
 
 /// Context for a Residue Number System.
-#[derive(Default, Clone, PartialEq, Eq)]
+#[derive(Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RnsContext {
     moduli_u64: Vec<u64>,
     moduli: Vec<Modulus>,

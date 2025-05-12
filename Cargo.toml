@@ -19,10 +19,11 @@ doc-comment = "0.3.3"
 ethnum = "1.5.0"
 indicatif = "0.17.7"
 itertools = "0.12.0"
-ndarray = "0.15.6"
-num-bigint = "0.4.4"
-num-bigint-dig = "0.8.4"
-num-traits = "0.2.17"
+ndarray = { version = "0.15.6", default-features = false, features = ["serde"] }
+num-bigint-dig = { version = "0.8.4", default-features = false }
+num-bigint = { version = "0.4.6", default-features = false }
+num-traits = { version = "0.2.19", default-features = false }
+prime-number-utils = "0.1.0"
 prime_factorization = "1.0.5"
 proptest = "1.4.0"
 prost = "0.12.3"
@@ -34,3 +35,4 @@ sha2 = "0.10.8"
 thiserror = "1.0.50"
 zeroize = "1.7.0"
 zeroize_derive = "1.4.2"
+serde = { version = "1.0.197", default-features = false, features = ["derive", "rc"] }

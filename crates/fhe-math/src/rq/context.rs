@@ -1,11 +1,12 @@
 use itertools::Itertools;
 use num_bigint::BigUint;
 use std::{fmt::Debug, sync::Arc};
+use serde::{Serialize, Deserialize};
 
 use crate::{ntt::NttOperator, rns::RnsContext, zq::Modulus, Error, Result};
 
 /// Struct that holds the context associated with elements in rq.
-#[derive(Default, Clone, PartialEq, Eq)]
+#[derive(Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context {
     /// List of prime moduli
     pub moduli: Box<[u64]>,

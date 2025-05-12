@@ -10,7 +10,7 @@ version.workspace = true
 rust-version.workspace = true
 
 [lib]
-bench = false  # Disable default bench (we use criterion)
+bench = false # Disable default bench (we use criterion)
 
 [dependencies]
 fhe-traits = { version = "^0.1.0-beta.7", path = "../fhe-traits" }
@@ -19,16 +19,16 @@ fhe-util = { version = "^0.1.0-beta.7", path = "../fhe-util" }
 ethnum.workspace = true
 itertools.workspace = true
 ndarray.workspace = true
-num-bigint.workspace = true
-num-bigint-dig.workspace = true
 num-traits.workspace = true
 prost.workspace = true
-rand.workspace = true
+num-bigint-dig = { version = "0.8.4", default-features = false, features = ["serde"] }
+num-bigint = { version = "0.4.6", default-features = false, features = ["serde"] }
+rand = { version = "0.8.5", features = ["serde1"] }
 rand_chacha.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 sha2.workspace = true
-
+serde.workspace = true
 [build-dependencies]
 prost-build.workspace = true
 

@@ -18,7 +18,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 /// Parameters for the BFV encryption scheme.
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BfvParameters {
     /// Number of coefficients in a polynomial.
     polynomial_degree: usize,
@@ -41,10 +41,10 @@ pub struct BfvParameters {
 
     /// Context for the underlying polynomials
     pub ctx: Vec<Arc<Context>>,
-
+    
     /// Ntt operator for the SIMD plaintext, if possible.
     pub(crate) op: Option<Arc<NttOperator>>,
-
+    
     /// Scaling polynomial for the plaintext
     pub(crate) delta: Box<[Poly]>,
 
@@ -216,6 +216,24 @@ impl BfvParameters {
         }
 
         params
+    }
+
+    /// Serialize a `BfvParameters` to a byte slice.
+    /// 
+    /// # Returns
+    /// 
+    /// A byte slice containing the serialized `BfvParameters`.
+    pub fn to_raw_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).unwrap()
+    }
+
+    /// Deserialize a `BfvParameters` from a byte slice.
+    /// 
+    /// # Errors
+    /// 
+    /// Returns an error if the byte slice is not a valid `BfvParameters`.
+    pub fn from_raw_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|_| Error::SerializationError)
     }
 
     #[cfg(test)]
@@ -497,7 +515,7 @@ impl Deserialize for BfvParameters {
 }
 
 /// Multiplication parameters
-#[derive(Debug, PartialEq, Eq, Default)]
+#[derive(Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MultiplicationParameters {
     pub(crate) extender: Scaler,
     pub(crate) down_scaler: Scaler,
