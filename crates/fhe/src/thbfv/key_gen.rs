@@ -10,10 +10,11 @@ use num_bigint_old::{BigInt, ToBigInt};
 use fhe_math::rq::{traits::TryConvertFrom, Context, Poly, Representation};
 use num_traits::ToPrimitive;
 use itertools::{izip, zip};
+use ndarray::{array, Array2, Axis};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct TrBFVShare {
-    n: u64,
+    n: usize,
     threshold: usize,
     degree: usize,
     sumdging_variance: u64,
@@ -21,13 +22,12 @@ pub struct TrBFVShare {
 }
 
 impl TrBFVShare {
-    pub fn new<R: RngCore + CryptoRng>(
-        n: u64,
+    pub fn new(
+        n: usize,
         threshold: usize,
         degree: usize,
         sumdging_variance: u64,
-        moduli: Vec<u64>,
-        rng: &mut R
+        moduli: Vec<u64>
     ) -> Result<Self> {
         // generate random secret
         Ok(Self { 
@@ -81,17 +81,25 @@ impl TrBFVShare {
     // convert_poly_to_shares
     pub fn gen_sss_shares_v2(
         &mut self,
-        share_amount: usize,
-        poly: Zeroizing<Poly>,
+        params: Arc<BfvParameters>,
+        sk: SecretKey
     ) -> Result<Vec<Vec<(u64)>>> {
-        // 2 dim array, rows = fhe coeffs, columns = party members shamir share coeff
-        let mut shamir_coeffs: Vec<Vec<u64>> = Vec::with_capacity(self.degree);
+        let mut poly = Zeroizing::new(Poly::try_convert_from(
+            sk.coeffs.as_ref(),
+            &params.ctx_at_level(0).unwrap(),
+            false,
+            Representation::PowerBasis,
+        ).unwrap());
+
+        // 2 dim array, rows = fhe coeffs (degree), columns = party members shamir share coeff (n)
+        let mut shamir_coeffs: Vec<Vec<u64>> = Vec::with_capacity(self.degree * params.moduli.len()); // TODO: need to store m of these
+
         // for each coeff generate an SSS of degree n and threshold n = 2t + 1
         for (k, (m, p)) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()).enumerate() {
             // Create shamir object
             let shamir = SSS {
                 threshold: self.threshold,
-                share_amount: share_amount,
+                share_amount: self.n,
                 prime: BigInt::from(*m)
             };
             // For each coeff in the polynomial p under the current modulus m
@@ -100,7 +108,7 @@ impl TrBFVShare {
                 let secret = c.to_bigint().unwrap();
                 let c_shares = shamir.split(secret.clone());
                 // For each share convert to u64
-                let mut c_vec: Vec<u64> = Vec::with_capacity(share_amount);
+                let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
                 for (j, (_, c_share)) in c_shares.iter().enumerate() {
                     c_vec.push(c_share.to_u64().unwrap());
                 }
@@ -109,8 +117,8 @@ impl TrBFVShare {
         }
         // collect n vectors down the degree of coeffs (can probably collect better above)
         // rows = party members shamir share coeff, columns = fhe coeffs
-        let mut collect_vec_n: Vec<Vec<u64>> = Vec::with_capacity(share_amount);
-        for i in 0..share_amount {
+        let mut collect_vec_n: Vec<Vec<u64>> = Vec::with_capacity(self.n);
+        for i in 0..self.n {
             let mut collect_vec_degree: Vec<u64> = Vec::with_capacity(self.degree);
             for j in 0..self.degree {
                 collect_vec_degree.push(shamir_coeffs[j][i]);
@@ -118,20 +126,32 @@ impl TrBFVShare {
             collect_vec_n.push(collect_vec_degree);
         }
         Ok(collect_vec_n)
+
+        // c1 = s1, s2 ... sn
+        // c2 = s1, s2 ... sn
+
+        // s1 = c1.1 c2.1 c3.1 x m
+        // s2 = c1.2 c2.2 c3.2 x m
+        // ...
+        // sn = c1.n c2.n c3.n x m
     }
 
     // This is only for one moduli, call this moduli.len times?
     pub fn convert_shares_to_polys(
         &mut self,
         modulus: u64,
-        share_amount: usize, // todo get from self.n to remain consistant
-        secret_share_coeffs: Vec<Vec<u64>>, // num_party shares of u64 shamir coeffs
+        secret_share_coeffs: &Vec<Vec<u64>>, // num_party shares of u64 shamir coeffs
     ) -> Result<Vec<Poly>> {
+        //let mut s_shares: Vec<Poly> = vec![Poly::zero(&sk_par.ctx_at_level(0).unwrap(), Representation::PowerBasis); n]; // think we need m of these
+        //s_shares[j].coefficients_mut()[k][i] = c_share.to_u64().unwrap();
+        //create array2 from vec<vec<u64>
+        //s_shares[j].set_coefficients(array2);
+
         // moduli.len * share_amount * degree // do this a level up
         let ctx_m = Context::new_arc(&[modulus], self.degree).unwrap();
         // for each modulus there are num_party vecs of degree coeff length u64 shamir coeffs
-        let mut s_share_polys: Vec<Poly> = Vec::with_capacity(share_amount);
-        for i in 0..share_amount {
+        let mut s_share_polys: Vec<Poly> = Vec::with_capacity(self.n);
+        for i in 0..self.n {
             let mut s_share_poly = Poly::try_convert_from(
                 &secret_share_coeffs[i],
                 &ctx_m,
@@ -202,6 +222,7 @@ mod tests {
     use zeroize::{Zeroizing};
     use fhe_math::rq::{traits::TryConvertFrom, Context, Poly, Representation};
     use num_traits::ToPrimitive;
+    use ndarray::{array, Array2, Axis};
 
     #[test]
     fn convert_poly_to_shared_poly() {
@@ -223,7 +244,7 @@ mod tests {
             .build_arc()
             .unwrap();
         let mut s_raw: SecretKey = SecretKey::random(&sk_par, &mut rng);
-        println!("{:?}", s_raw);
+        //println!("{:?}", s_raw);
 
         let mut s = Zeroizing::new(Poly::try_convert_from(
             s_raw.coeffs.as_ref(),
@@ -253,6 +274,17 @@ mod tests {
             };
             // 2 dim array, rows = fhe coeffs, columns = party members shamir share coeff
             let mut shamir_coeffs: Vec<Vec<u64>> = Vec::with_capacity(degree);
+            // arr2 version
+            let ncols = n;
+            let mut data: Vec<u64> = Vec::new();
+            let nrows = degree;
+            // for i in 0..2 {
+            //     // Compute `row` and append it to `data`; this is a trivial example:
+            //     let row = vec![i; ncols];
+            //     data.extend_from_slice(&row);
+            // }
+            // let arr = Array2::from_shape_vec((nrows, ncols), data)?
+
             // For each coeff in the polynomial p under the current modulus m
             for (i, c) in p.iter().enumerate() {
                 // Split the coeff into n shares
@@ -266,9 +298,15 @@ mod tests {
                     // create a setter function
                     //s_shares[j].coefficients_mut()[k][i] = c_share.to_u64().unwrap();
                 }
+                data.extend_from_slice(&c_vec);
+
                 shamir_coeffs.push(c_vec);
             }
-
+            println!("{:?}", data.len());
+            let arr_matrix = Array2::from_shape_vec((nrows, ncols), data).unwrap();
+            println!("{:?}", arr_matrix);
+            // create a arr2 of the vec<vec<u64>>
+            //let array_vecs = ndarray::arr2(&shamir_coeffs);
             println!("{:?}", m);
             // get the context for current modulus
             let ctx_m = Context::new_arc(&[*m], degree).unwrap();
@@ -375,6 +413,13 @@ mod tests {
         // Open the shamir secret to get s1 + s2.
         let result = shamir.recover(&shamir_rep[0..shamir.threshold as usize]);
         println!("{:?}", result);
+
+        let mut arr = Array2::zeros((3, 3));
+        for (i, mut row) in arr.axis_iter_mut(Axis(0)).enumerate() {
+            // Perform calculations and assign to `row`; this is a trivial example:
+            row.fill(i);
+        }
+        assert_eq!(arr, array![[0, 0, 0], [1, 1, 1], [2,2,2]]);
     }
 
     #[test]

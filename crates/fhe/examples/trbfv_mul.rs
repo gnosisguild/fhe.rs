@@ -104,122 +104,65 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Party setup: each party generates a secret key and shares of a collective
     // public key.
-    struct Party {
-        sk_share: SecretKey,
-        pk_share: PublicKeyShare,
-        sk_sss: Vec<Vec<(usize, BigInt)>>,
-        sk_collect: Vec<Vec<Poly>>,
-        smudge_error: Vec<i64>,
-        smudge_sss: Vec<Vec<(usize, BigInt)>>,
-    }
-    struct Party_v2{
+    struct Party{
         sk_share: SecretKey,
         pk_share: PublicKeyShare,
         sk_sss: Vec<Vec<u64>>,
-        sk_collect: Vec<Vec<Poly>>,
+        sk_sss_collected: Vec<Vec<u64>>,
+        sk_poly_sum: Vec<Poly>,
         trbfv: TrBFVShare,
     }
     let mut parties = Vec::with_capacity(num_parties);
 
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
-    let sss = SSS {
-        threshold: threshold,
-        share_amount: num_parties,
-        prime: sss_prime.clone()
-    };
-
     timeit_n!("Party setup (per party)", num_parties as u32, {
         let sk_share = SecretKey::random(&params, &mut OsRng);
         let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
         // encode away negative coeffs for secret key shamir shares
-        let sk_coeffs_encoded = TrBFVShare::encode_coeffs(&mut sk_share.coeffs.to_vec()).unwrap();
-        let rns_mod_i = params.moduli()[0];
-        let sk_sss = TrBFVShare::gen_sss_shares(
-            degree,
-            threshold,
+        let mut trbfv = TrBFVShare::new(
             num_parties,
-            BigInt::from(rns_mod_i),
-            sk_coeffs_encoded
-        ).unwrap();
-        let mut smudge_error = TrBFVShare::gen_smudging_error(
+            threshold,
             degree,
             16,
-            &mut OsRng
+            moduli.clone()
         ).unwrap();
-        let smudge_error_encoded = TrBFVShare::encode_coeffs(&mut smudge_error).unwrap();
-        let smudge_sss = TrBFVShare::gen_sss_shares(
-            degree,
-            threshold,
-            num_parties,
-            BigInt::from(rns_mod_i),
-            smudge_error_encoded
+        let sk_sss = trbfv.gen_sss_shares_v2(
+            params.clone(),
+            sk_share.clone()
         ).unwrap();
-        let mut sk_collect: Vec<Vec<Poly>> = Vec::with_capacity(degree); // may not need
-        parties.push(Party { sk_share, pk_share, sk_sss, sk_collect, smudge_error, smudge_sss });
+        let mut sk_sss_collected: Vec<Vec<u64>> = Vec::with_capacity(num_parties);
+        let mut sk_poly_sum: Vec<Poly> = Vec::with_capacity(moduli.len());
+        parties.push(Party { sk_share, pk_share, sk_sss, sk_sss_collected, sk_poly_sum, trbfv });
     });
+    println!("{:?}", parties[0].sk_sss.len());
+    println!("{:?}", parties[0].sk_sss[9].len());
 
-    // instead of collecting here, lets make the poly and push to each parties struct sk_collect?
-    // parties[party_i].sk_collect.push(poly vec);
-    let mut sk_collect_bigint: Vec<Vec<Vec<(usize, BigInt)>>> = Vec::with_capacity(num_parties);
-    for party_i in 0..num_parties {
-        let mut pi_sks: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
-        for i in 0..degree {
-            let mut sss_vec = Vec::with_capacity(num_parties); // rather than store these as bigint vects, create the poly here?
-            //let mut collect_bigint_coeffs: Vec<BigInt> = Vec::with_capacity(num_parties);
-            for j in 0..num_parties {
-                let mut extract = parties[j].sk_sss[i][party_i].clone();
-                extract.0 = j + 1 as usize;
-                sss_vec.push(extract);
-            }
-            pi_sks.push(sss_vec);
+    // swap shares mocking network comms
+    // party 1 sends share 2 to party 2 etc
+    for i in 0..num_parties {
+        for j in 0..num_parties {
+            let party_shares_vec = parties[j].sk_sss[i].clone();
+            parties[i].sk_sss_collected.push(party_shares_vec);
         }
-        sk_collect_bigint.push(pi_sks);
     }
-    //println!("{:?}", sk_collect_bigint[1][0]);
+    println!("{:?}", parties[0].sk_sss_collected.len());
 
-    // let mut p1_sks: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
-    // for i in 0..degree {
-    //     let mut sss_vec = Vec::with_capacity(num_parties); // rather than store these as bigint vects, create the poly here?
-    //     for j in 0..num_parties {
-    //         let mut extract = parties[j].sk_sss[i][1].clone();
-    //         extract.0 = j + 1 as usize;
-    //         sss_vec.push(extract);
+    // // for each party, convert shares to polys and sum the collected shares
+    // for i in 0..num_parties {
+    //     // for each moduli
+    //     for j in 0..moduli.len() {
+    //         let poly = parties[i].trbfv.convert_shares_to_polys(
+    //             moduli[j],
+    //             &parties[i].sk_sss_collected
+    //         );
+    //         // sum each party share
+    //         for k in 0..num_parties {
+
+    //         }
+    //         parties[i].sk_poly_sum.push(poly_sum);
     //     }
-    //     p1_sks.push(sss_vec);
     // }
-    // println!("{:?}", p1_sks[0]);
-
-    let mut smudge_collect_bigint: Vec<Vec<Vec<(usize, BigInt)>>> = Vec::with_capacity(num_parties);
-    for party_i in 0..num_parties {
-        let mut pi_smudge: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
-        for i in 0..degree {
-            let mut sss_vec = Vec::with_capacity(num_parties); // rather than store these as bigint vects, create the poly here?
-            //let mut collect_bigint_coeffs: Vec<BigInt> = Vec::with_capacity(num_parties);
-            for j in 0..num_parties {
-                let mut extract = parties[j].smudge_sss[i][party_i].clone();
-                extract.0 = j + 1 as usize;
-                sss_vec.push(extract);
-            }
-            pi_smudge.push(sss_vec);
-        }
-        smudge_collect_bigint.push(pi_smudge);
-    }
-    println!("{:?}", smudge_collect_bigint[0][0]);
-
-    // // collect smudge shares: all parties will share the same set of shares after sharing
-    // // replace with same method as sk
-    // let mut p0_smudges: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
-    // for i in 0..degree {
-    //     let mut sss_vec = Vec::with_capacity(num_parties);
-    //     for j in 0..num_parties {
-    //         sss_vec.push(parties[j].smudge_sss[i][0].clone());
-    //     }
-    //     p0_smudges.push(sss_vec);
-    // }
-
-    // println!("{:?}", p0_smudges[0]);
-    //println!("{:?}", parties[0].smudge_sss[1000]);
 
     // Aggregation: same as previous mbfv aggregations
     let pk = timeit!("Public key aggregation", {
@@ -252,57 +195,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Arc::new(sum)
     });
-
-    // threshold decrypt. We will assume the last two parties in the set drop out
-    let t = num_parties - 2;
-
-    //let mut threshold_decryption_shares = Vec::with_capacity(t);
-    let mut sum_esm: Vec<(BigInt)> = Vec::with_capacity(degree);
-    let mut esm_open: Vec<(BigInt)> = Vec::with_capacity(degree); // remove
-    let mut _i = 0;
-    // sum esm
-    timeit_n!("Summing smudge noise (per party up to threshold)", degree as u32, {
-        // summ smudge from collected shares in p0_smudge
-        let mut esm_i_sum = 0.to_bigint().unwrap();
-        // sum esm up to the threshold of honest nodes
-        for j in 0..threshold {
-            esm_i_sum = smudge_collect_bigint[0][_i][j].1.clone() + esm_i_sum;
-        }
-        sum_esm.push(esm_i_sum);
-        esm_open.push(sss.recover(&smudge_collect_bigint[0][_i][0..threshold as usize]));
-        _i += 1;
-    });
-    //println!("{:?}", sum_esm[0]);
-    //println!("{:?}", esm_open[100]);
-    let open_p0_esm = sss.recover(&parties[0].smudge_sss[0][0..threshold as usize]); // don't open
-    //println!("{:?}", open_p0_esm);
-
-    // sum sk
-    let mut sum_sk: Vec<(BigInt)> = Vec::with_capacity(degree);
-    let mut _i = 0;
-    // sum esm
-    timeit_n!("Summing sk shares (per party up to threshold)", degree as u32, {
-        // sum sk from collected shares in p0_sks
-        let mut sk_i_sum = 0.to_bigint().unwrap();
-        // sum sk up to the threshold of honest nodes
-        for j in 0..threshold {
-            //sk_i_sum = p0_sks[_i][j].1.clone() + sk_i_sum;
-            sk_i_sum = sk_collect_bigint[0][_i][j].1.clone() + sk_i_sum; // some sk for party 0
-        }
-        sum_sk.push(sk_i_sum);
-        _i += 1;
-    });
-    // turn sum_sk into poly
-    println!("{:?}", sum_sk[2000]);
-    //println!("{:?}", tally);
-
-    // convert esm and sk summed shares into polynomals
-
-    timeit_n!("Decryption (per party up to threshold)", 1 as u32, {
-
-        let sh = TrBFVShare::decryption_share(tally.clone(), sum_esm.clone(), sum_sk.clone())?;
-        _i += 1;
-    });   
 
     //decrypt
     let mut decryption_shares = Vec::with_capacity(num_parties);
