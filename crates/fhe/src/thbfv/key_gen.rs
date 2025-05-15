@@ -222,7 +222,7 @@ mod tests {
     use zeroize::{Zeroizing};
     use fhe_math::rq::{traits::TryConvertFrom, Context, Poly, Representation};
     use num_traits::ToPrimitive;
-    use ndarray::{array, Array2, Axis};
+    use ndarray::{array, Array, Array2, Axis, concatenate, ArrayView};
 
     #[test]
     fn convert_poly_to_shared_poly() {
@@ -246,12 +246,12 @@ mod tests {
         let mut s_raw: SecretKey = SecretKey::random(&sk_par, &mut rng);
         //println!("{:?}", s_raw);
 
-        let mut s = Zeroizing::new(Poly::try_convert_from(
+        let mut s = Poly::try_convert_from(
             s_raw.coeffs.as_ref(),
             &sk_par.ctx_at_level(0).unwrap(),
             false,
             Representation::PowerBasis,
-        ).unwrap());
+        ).unwrap();
 
 
         // ----------
@@ -275,15 +275,7 @@ mod tests {
             // 2 dim array, rows = fhe coeffs, columns = party members shamir share coeff
             let mut shamir_coeffs: Vec<Vec<u64>> = Vec::with_capacity(degree);
             // arr2 version
-            let ncols = n;
             let mut data: Vec<u64> = Vec::new();
-            let nrows = degree;
-            // for i in 0..2 {
-            //     // Compute `row` and append it to `data`; this is a trivial example:
-            //     let row = vec![i; ncols];
-            //     data.extend_from_slice(&row);
-            // }
-            // let arr = Array2::from_shape_vec((nrows, ncols), data)?
 
             // For each coeff in the polynomial p under the current modulus m
             for (i, c) in p.iter().enumerate() {
@@ -298,18 +290,18 @@ mod tests {
                     // create a setter function
                     //s_shares[j].coefficients_mut()[k][i] = c_share.to_u64().unwrap();
                 }
+                // extend 1D flat vec for each shamir set
                 data.extend_from_slice(&c_vec);
 
                 shamir_coeffs.push(c_vec);
             }
-            println!("{:?}", data.len());
-            let arr_matrix = Array2::from_shape_vec((nrows, ncols), data).unwrap();
-            println!("{:?}", arr_matrix);
-            // create a arr2 of the vec<vec<u64>>
-            //let array_vecs = ndarray::arr2(&shamir_coeffs);
+            // create an array2 from vec
+            let arr_matrix = Array2::from_shape_vec((degree, n), data).unwrap();
+            //println!("{:?}", arr_matrix);
             println!("{:?}", m);
             // get the context for current modulus
             let ctx_m = Context::new_arc(&[*m], degree).unwrap();
+
             // collect n vectors down the degree of coeffs (can probably collect better above)
             // rows = party members shamir share coeff, columns = fhe coeffs
             let mut collect_vec_n: Vec<Vec<u64>> = Vec::with_capacity(n);
@@ -320,6 +312,33 @@ mod tests {
                 }
                 collect_vec_n.push(collect_vec_degree);
             }
+            // use matrix transpose to shift axis instead of copy loop above
+            let reversed_axes = arr_matrix.t();
+            println!("{:?}", reversed_axes[[0,1]]);
+            println!("{:?}", reversed_axes);
+            // grab the row for each node at given moduli
+            let node_n_share_one_mod = reversed_axes.row(0);
+            println!("{:?}", node_n_share_one_mod);
+            //let newarr = get_row.insert_axis(Axis(0));
+            //newarr.push_row(ArrayView::from(&get_row)).unwrap();
+            // create a new array to push each moduli share into for each node
+            // TODO get these rows from each moduli. will need n of these
+            let mut node_n_shares_all_mods = Array::zeros((0, 2048));
+            node_n_shares_all_mods.push_row(ArrayView::from(&node_n_share_one_mod)).unwrap();
+            node_n_shares_all_mods.push_row(ArrayView::from(&node_n_share_one_mod)).unwrap();
+            node_n_shares_all_mods.push_row(ArrayView::from(&node_n_share_one_mod)).unwrap();
+            println!("after row axis 0 insert");
+            println!("---");
+            println!("{:?}", node_n_shares_all_mods);
+            let test_coeffs_view = s.coefficients();
+            println!("---");
+            println!("{:?}", test_coeffs_view);
+            println!("---");
+            println!("after setting new coeffs");
+            let mut s2 = s.clone();
+            s2.set_coefficients(node_n_shares_all_mods);
+            println!("{:?}", s2);
+
             // convert to n polys for each m
             let mut s_share_poly_k: Vec<Poly> = Vec::with_capacity(n);
             for i in 0..n {
@@ -337,11 +356,11 @@ mod tests {
 
             // sum polys
             //let mut sum_poly
-            println!("{:?}", s_shares[k][0]);
+            //println!("{:?}", s_shares[k][0]);
             for i in 1..n {
                 s_shares[k][0] = &s_shares[k][0] + &s_shares[k][i];
             }
-            println!("{:?}", s_shares[k][0]);
+            //println!("{:?}", s_shares[k][0]);
             println!("----");
             //println!("{:?}", shamir_coeffs[2047]);
         }
