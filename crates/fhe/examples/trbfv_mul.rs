@@ -16,6 +16,8 @@ use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rn
 use util::timeit::{timeit, timeit_n};
 use num_bigint_old::{BigInt, ToBigInt};
 use shamir_secret_sharing::ShamirSecretSharing as SSS;
+use ndarray::{array, Array2, Array3, Axis, Array, ArrayView};
+use zeroize::{Zeroizing};
 
 fn print_notice_and_exit(error: Option<String>) {
     println!(
@@ -107,9 +109,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     struct Party{
         sk_share: SecretKey,
         pk_share: PublicKeyShare,
-        sk_sss: Vec<Vec<u64>>,
-        sk_sss_collected: Vec<Vec<u64>>,
-        sk_poly_sum: Vec<Poly>,
+        sk_sss: Vec<Array2<u64>>,
+        sk_sss_collected: Vec<Array2<u64>>,
+        sk_poly_sum: Poly,
+        d_share_poly: Poly,
         trbfv: TrBFVShare,
     }
     let mut parties = Vec::with_capacity(num_parties);
@@ -131,38 +134,78 @@ fn main() -> Result<(), Box<dyn Error>> {
             params.clone(),
             sk_share.clone()
         ).unwrap();
-        let mut sk_sss_collected: Vec<Vec<u64>> = Vec::with_capacity(num_parties);
-        let mut sk_poly_sum: Vec<Poly> = Vec::with_capacity(moduli.len());
-        parties.push(Party { sk_share, pk_share, sk_sss, sk_sss_collected, sk_poly_sum, trbfv });
+        // vec of 3 moduli and array2 for 16 rows of coeffs
+        let mut sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
+        let mut sk_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        let mut d_share_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        parties.push(Party { sk_share, pk_share, sk_sss, sk_sss_collected, sk_poly_sum, d_share_poly, trbfv });
     });
     println!("{:?}", parties[0].sk_sss.len());
-    println!("{:?}", parties[0].sk_sss[9].len());
+    println!("{:?}", parties[0].sk_sss[0].row(0).len());
 
     // swap shares mocking network comms
     // party 1 sends share 2 to party 2 etc
     for i in 0..num_parties {
         for j in 0..num_parties {
-            let party_shares_vec = parties[j].sk_sss[i].clone();
-            parties[i].sk_sss_collected.push(party_shares_vec);
+            let mut node_share_m = Array::zeros((0, 2048));
+            for m in 0..moduli.len() {
+                node_share_m.push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).clone())).unwrap();
+                //let party_shares_array2 = parties[j].sk_sss[m].row(i).clone();
+                //parties[i].sk_sss_collected.push(party_shares_array2);
+            }
+            //println!("{:?}", node_share_m);
+            parties[i].sk_sss_collected.push(node_share_m);
         }
+        //println!("----------");
     }
-    println!("{:?}", parties[0].sk_sss_collected.len());
+    // row = moduli, index = party_id
+    println!("{:?}", parties[0].sk_sss_collected[2].row(2));
+    // row = party id, index = moduli
+    println!("{:?}", parties[2].sk_sss[2].row(0));
+    // sk_sss
+    // [moduli_1, moduli_2, moduli_3]
+    // [
+    //  [[party_0_coeffs], [party_1_coeffs]],
+    //  [[party_0_coeffs], [party_1_coeffs]],
+    //  [[party_0_coeffs], [party_1_coeffs]]
+    // ]
+    //
+    // sk_sss_collected
+    // [party_0, party_1, party_2...]
+    // [
+    //   [[moduli_1], [moduli_2], [moduli_3]],
+    //   [[moduli_1], [moduli_2], [moduli_3]],
+    //   [[moduli_1], [moduli_2], [moduli_3]],
+    //   ... n_times
+    // ]
 
-    // // for each party, convert shares to polys and sum the collected shares
-    // for i in 0..num_parties {
-    //     // for each moduli
-    //     for j in 0..moduli.len() {
-    //         let poly = parties[i].trbfv.convert_shares_to_polys(
-    //             moduli[j],
-    //             &parties[i].sk_sss_collected
-    //         );
-    //         // sum each party share
-    //         for k in 0..num_parties {
+    // for each party, convert shares to polys and sum the collected shares
+    for i in 0..num_parties {
+        let mut sum_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        for j in 0..num_parties {
+            // if i == 0 {
+            //     println!("----------");
+            //     println!("{:?}", sum_poly);
+            // }
+            let mut poly_j = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+            poly_j.set_coefficients(parties[i].sk_sss_collected[j].clone());
+            sum_poly = &sum_poly + &poly_j;
+        }
+        parties[i].sk_poly_sum = sum_poly;
+    }
+    // println!("----------");
+    // println!("{:?}", parties[0].sk_poly_sum);
 
-    //         }
-    //         parties[i].sk_poly_sum.push(poly_sum);
-    //     }
-    // }
+    // println!("----------");
+    // println!("{:?}", parties[0].sk_poly_sum);
+    // println!("----------");
+    //     let mut poly_t = Poly::try_convert_from(
+    //         parties[0].sk_share.coeffs.as_ref(),
+    //         &params.ctx_at_level(0).unwrap(),
+    //         false,
+    //         Representation::PowerBasis,
+    //     ).unwrap();
+    // println!("{:?}", poly_t);
 
     // Aggregation: same as previous mbfv aggregations
     let pk = timeit!("Public key aggregation", {
@@ -197,6 +240,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
 
     //decrypt
+    // compute decryption share!
+    let mut c0c1 = tally.c[0].as_ref() + &tally.c[1];
+    c0c1.change_representation(Representation::Ntt);
+    for i in 0..num_parties {
+        //let mut d_share_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        parties[i].sk_poly_sum.change_representation(Representation::Ntt);
+        let mut d_share_poly = &c0c1 * &parties[i].sk_poly_sum;
+        d_share_poly.change_representation(Representation::PowerBasis);
+        parties[i].d_share_poly = d_share_poly;
+    }
+    //println!("{:?}", parties[0].d_share_poly);
+    // -------------------------
+
     let mut decryption_shares = Vec::with_capacity(num_parties);
     let mut _i = 0;
     timeit_n!("Decryption (per party)", num_parties as u32, {
