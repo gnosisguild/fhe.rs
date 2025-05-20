@@ -3,9 +3,9 @@ use std::sync::Arc;
 use crate::bfv::BfvParameters;
 use crate::Result;
 use fhe_math::rq::Poly;
+use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use fhe_traits::{DeserializeParametrized, DeserializeWithContext, FheEncrypter, FheParametrized, Serialize};
 
 /// A polynomial sampled from a random _common reference string_.
 // TODO CRS->CRP implementation. For now just a random polynomial.
@@ -21,7 +21,10 @@ impl CommonRandomPoly {
     }
 
     /// Generate a new CRP from a shared deterministic seed.
-    pub fn new_deterministic(par: &Arc<BfvParameters>, seed: <ChaCha8Rng as SeedableRng>::Seed,) -> Result<Self> {
+    pub fn new_deterministic(
+        par: &Arc<BfvParameters>,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+    ) -> Result<Self> {
         Self::new_leveled_deterministic(par, 0, seed)
     }
 
@@ -60,6 +63,7 @@ impl CommonRandomPoly {
         Ok(Self { poly })
     }
 
+    /// Deserialize a CRP from bytes
     pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
         let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
         Ok(Self {

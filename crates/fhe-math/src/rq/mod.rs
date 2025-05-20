@@ -79,11 +79,17 @@ impl SubstitutionExponent {
 /// Struct that holds a polynomial for a specific context.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Poly {
-    ctx: Arc<Context>,
+    /// The context containing the polynomial's parameters
+    pub ctx: Arc<Context>,
+    /// The current representation of the polynomial
     representation: Representation,
+    /// Whether the coefficients are in lazy reduced form
     has_lazy_coefficients: bool,
+    /// Whether variable time computations are allowed
     allow_variable_time_computations: bool,
+    /// The polynomial coefficients in RNS form
     coefficients: Array2<u64>,
+    /// Optional Shoup representation of coefficients for faster multiplication
     coefficients_shoup: Option<Array2<u64>>,
 }
 
@@ -503,6 +509,14 @@ impl Poly {
         self.coefficients.remove_index(Axis(0), q_len - 1);
         self.ctx = next_context.clone();
 
+        Ok(())
+    }
+
+    /// Switch the polynomial to the next level.
+    pub fn mod_switch_to_next_level(&mut self) -> Result<()> {
+        self.change_representation(Representation::PowerBasis);
+        self.mod_switch_down_next()?;
+        self.change_representation(Representation::Ntt);
         Ok(())
     }
 

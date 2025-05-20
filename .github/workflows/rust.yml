@@ -59,19 +59,36 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly
+          toolchain: stable
           override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --no-fail-fast
+      - name: Add llvm-tools
+        run: rustup component add llvm-tools-preview
+      - name: Run tests with coverage instrumentation
         env:
-          RUSTFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off'
-          RUSTDOCFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off'
-      - uses: actions-rs/grcov@v0.1
+          LLVM_PROFILE_FILE: "target/coverage/coverage-%p-%m.profraw"
+          RUSTFLAGS: '-Cinstrument-coverage -Ccodegen-units=1 -Cllvm-args=--inline-threshold=0 -Clink-dead-code -Coverflow-checks=off'
+          RUSTDOCFLAGS: '-Cinstrument-coverage -Ccodegen-units=1 -Cllvm-args=--inline-threshold=0 -Clink-dead-code -Coverflow-checks=off'
+        run: |
+          mkdir -p target/coverage
+          cargo test --no-fail-fast
+      - name: List generated coverage files
+        run: find target/coverage -name "*.profraw" || true
+      - name: Install grcov
+        run: cargo install grcov
+      - name: Generate coverage report with grcov
+        run: |
+          grcov target/coverage \
+            --binary-path ./target/debug \
+            --source-dir . \
+            -t cobertura \
+            --branch \
+            --ignore-not-existing \
+            --ignore "crates/fhe/src/bfv/proto/*" \
+            --ignore "crates/fhe-math/src/proto/*" \
+            -o cobertura.xml
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          file: ${{ steps.coverage.outputs.report }}
+          files: cobertura.xml
           fail_ci_if_error: true

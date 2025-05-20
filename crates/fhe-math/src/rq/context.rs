@@ -7,15 +7,24 @@ use crate::{ntt::NttOperator, rns::RnsContext, zq::Modulus, Error, Result};
 /// Struct that holds the context associated with elements in rq.
 #[derive(Default, Clone, PartialEq, Eq)]
 pub struct Context {
-    pub(crate) moduli: Box<[u64]>,
-    pub(crate) q: Box<[Modulus]>,
-    pub(crate) rns: Arc<RnsContext>,
-    pub(crate) ops: Box<[NttOperator]>,
-    pub(crate) degree: usize,
-    pub(crate) bitrev: Box<[usize]>,
-    pub(crate) inv_last_qi_mod_qj: Box<[u64]>,
-    pub(crate) inv_last_qi_mod_qj_shoup: Box<[u64]>,
-    pub(crate) next_context: Option<Arc<Context>>,
+    /// List of prime moduli
+    pub moduli: Box<[u64]>,
+    /// Modulus operators for each prime
+    pub q: Box<[Modulus]>,
+    /// RNS context for CRT operations
+    pub rns: Arc<RnsContext>,
+    /// NTT operators for each prime
+    pub ops: Box<[NttOperator]>,
+    /// Polynomial degree (must be power of 2)
+    pub degree: usize,
+    /// Bit-reversed indices for NTT operations
+    pub bitrev: Box<[usize]>,
+    /// Inverse of last qi modulo qj for modulus switching
+    pub inv_last_qi_mod_qj: Box<[u64]>,
+    /// Shoup representation of inv_last_qi_mod_qj
+    pub inv_last_qi_mod_qj_shoup: Box<[u64]>,
+    /// Link to context with one less modulus (for level management)
+    pub next_context: Option<Arc<Context>>,
 }
 
 impl Debug for Context {

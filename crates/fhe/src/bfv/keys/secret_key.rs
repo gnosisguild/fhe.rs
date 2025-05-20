@@ -18,7 +18,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 /// Secret key for the BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SecretKey {
+    /// The BFV parameters
     pub(crate) par: Arc<BfvParameters>,
+    /// The secret key coefficients
     pub coeffs: Box<[i64]>,
 }
 

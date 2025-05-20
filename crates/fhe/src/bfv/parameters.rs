@@ -40,7 +40,7 @@ pub struct BfvParameters {
     pub(crate) variance: usize,
 
     /// Context for the underlying polynomials
-    pub(crate) ctx: Vec<Arc<Context>>,
+    pub ctx: Vec<Arc<Context>>,
 
     /// Ntt operator for the SIMD plaintext, if possible.
     pub(crate) op: Option<Arc<NttOperator>>,
@@ -108,13 +108,23 @@ impl BfvParameters {
         self.plaintext_modulus
     }
 
+    /// Returns the variance
+    pub const fn variance(&self) -> usize {
+        self.variance
+    }
+
+    /// Returns the ctx
+    pub fn ctx(&self) -> &[Arc<Context>] {
+        &self.ctx
+    }
+
     /// Returns the maximum level allowed by these parameters.
     pub fn max_level(&self) -> usize {
         self.moduli.len() - 1
     }
 
     /// Returns the context corresponding to the level.
-    pub(crate) fn ctx_at_level(&self, level: usize) -> Result<&Arc<Context>> {
+    pub fn ctx_at_level(&self, level: usize) -> Result<&Arc<Context>> {
         self.ctx
             .get(level)
             .ok_or_else(|| Error::DefaultError("No context".to_string()))
@@ -125,13 +135,13 @@ impl BfvParameters {
         self.ctx[0].niterations_to(ctx).map_err(Error::MathError)
     }
 
-    /// Vector of default parameters providing about 128 bits of quantum security
-    /// according to the <https://eprint.iacr.org/2024/463> standard. The number
-    /// of bits represented by the moduli vector sum to the maximum logQ in table
-    /// 4.2 under the quantum, gaussian secret key distribution column. Note this
-    /// library uses a centered binomial distribution with variance 10≈3.19² by
-    /// default for its secret and error distributions and checks that the bounds
-    /// match 6σ.
+    /// Vector of default parameters providing about 128 bits of quantum
+    /// security according to the <https://eprint.iacr.org/2024/463> standard. The number
+    /// of bits represented by the moduli vector sum to the maximum logQ in
+    /// table 4.2 under the quantum, gaussian secret key distribution
+    /// column. Note this library uses a centered binomial distribution with
+    /// variance 10≈3.19² by default for its secret and error distributions
+    /// and checks that the bounds match 6σ.
     pub fn default_parameters_128(plaintext_nbits: usize) -> Vec<Arc<BfvParameters>> {
         debug_assert!(plaintext_nbits < 64);
 
@@ -209,6 +219,7 @@ impl BfvParameters {
     }
 
     #[cfg(test)]
+    #[allow(missing_docs)]
     pub fn default_arc(num_moduli: usize, degree: usize) -> Arc<Self> {
         if !degree.is_power_of_two() || degree < 8 {
             panic!("Invalid degree");
@@ -544,7 +555,8 @@ mod tests {
     // 		.set_degree(1024)
     // 		.set_plaintext_modulus(0)
     // 		.build()
-    // 		.is_err_and(|e| e.to_string() == "modulus should be between 2 and 2^62-1"));
+    // 		.is_err_and(|e| e.to_string() == "modulus should be between 2 and
+    // 2^62-1"));
 
     // 	let params = BfvParametersBuilder::new()
     // 		.set_degree(1024)
@@ -574,15 +586,16 @@ mod tests {
     // 		.set_plaintext_modulus(2)
     // 		.set_moduli(&[1])
     // 		.build()
-    // 		.is_err_and(|e| e.to_string() == "modulus should be between 2 and 2^62-1"));
+    // 		.is_err_and(|e| e.to_string() == "modulus should be between 2 and
+    // 2^62-1"));
 
     // 	let params = BfvParametersBuilder::new()
     // 		.set_degree(8)
     // 		.set_plaintext_modulus(2)
     // 		.set_moduli(&[2])
     // 		.build();
-    // 	assert!(params.is_err_and(|e| e.to_string() == "Impossible to construct a Ntt
-    // operator"));
+    // 	assert!(params.is_err_and(|e| e.to_string() == "Impossible to construct a
+    // Ntt operator"));
 
     // 	let params = BfvParametersBuilder::new()
     // 		.set_degree(8)
