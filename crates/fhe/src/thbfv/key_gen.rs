@@ -286,10 +286,9 @@ mod tests {
                 let mut c_vec: Vec<u64> = Vec::with_capacity(n);
                 for (j, (_, c_share)) in c_shares.iter().enumerate() {
                     c_vec.push(c_share.to_u64().unwrap());
-                    // Set the coefficient in the corresponding polynomial matrix of s_shares
-                    // create a setter function
                     //s_shares[j].coefficients_mut()[k][i] = c_share.to_u64().unwrap();
                 }
+                // Set the coefficient in the corresponding polynomial matrix of s_shares
                 // extend 1D flat vec for each shamir set
                 data.extend_from_slice(&c_vec);
 
@@ -297,7 +296,6 @@ mod tests {
             }
             // create an array2 from vec
             let arr_matrix = Array2::from_shape_vec((degree, n), data).unwrap();
-            //println!("{:?}", arr_matrix);
             println!("{:?}", m);
             // get the context for current modulus
             let ctx_m = Context::new_arc(&[*m], degree).unwrap();
@@ -320,7 +318,6 @@ mod tests {
             let node_n_share_one_mod = reversed_axes.row(0);
             println!("{:?}", node_n_share_one_mod);
             //let newarr = get_row.insert_axis(Axis(0));
-            //newarr.push_row(ArrayView::from(&get_row)).unwrap();
             // create a new array to push each moduli share into for each node
             // TODO get these rows from each moduli. will need n of these
             let mut node_n_shares_all_mods = Array::zeros((0, 2048));
