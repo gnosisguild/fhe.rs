@@ -302,6 +302,11 @@ impl Poly {
         self.coefficients.view()
     }
 
+    /// Set a new array2 coeffs
+    pub fn set_coefficients(&mut self, new_coeffs: Array2<u64>) {
+        self.coefficients = new_coeffs;
+    }
+
     /// Computes the forward Ntt on the coefficients
     fn ntt_forward(&mut self) {
         if self.allow_variable_time_computations {
