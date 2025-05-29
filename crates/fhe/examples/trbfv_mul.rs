@@ -292,40 +292,41 @@ fn main() -> Result<(), Box<dyn Error>> {
     // }
 
     // open shamir with di
-    // for i in 0..threshold {
-    //     // 2 dim array, rows = fhe coeffs (degree), columns = party members shamir share coeff (n)
-    //     //let mut shamir_coeffs: Vec<Vec<u64>> = Vec::with_capacity(self.degree * params.moduli.len()); // TODO: need to store m of these
-    //     let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(params.moduli.len());
-    //     //let mut a = Array3::<u64>::zeros([3, 4, 2]);
+    // vec<module.len> shamir [vec<threshold> vec<index, bigint coeffs>]
+    for i in 0..threshold {
+        // 2 dim array, rows = fhe coeffs (degree), columns = party members shamir share coeff (n)
+        //let mut shamir_coeffs: Vec<Vec<u64>> = Vec::with_capacity(self.degree * params.moduli.len()); // TODO: need to store m of these
+        let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(params.moduli.len());
+        //let mut a = Array3::<u64>::zeros([3, 4, 2]);
 
-    //     // for each coeff generate an SSS of degree n and threshold n = 2t + 1
-    //     for (k, (m, p)) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()).enumerate() {
-    //         // Create shamir object
-    //         let shamir = SSS {
-    //             threshold: self.threshold,
-    //             share_amount: self.n,
-    //             prime: BigInt::from(*m)
-    //         };
-    //         let mut m_data: Vec<u64> = Vec::new();
+        // for each coeff generate an SSS of degree n and threshold n = 2t + 1
+        for (k, (m, p)) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()).enumerate() {
+            // Create shamir object
+            let shamir = SSS {
+                threshold: self.threshold,
+                share_amount: self.n,
+                prime: BigInt::from(*m)
+            };
+            let mut m_data: Vec<u64> = Vec::new();
 
-    //         // For each coeff in the polynomial p under the current modulus m
-    //         for (i, c) in p.iter().enumerate() {
-    //             // Split the coeff into n shares
-    //             let secret = c.to_bigint().unwrap();
-    //             let c_shares = shamir.split(secret.clone());
-    //             // For each share convert to u64
-    //             let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
-    //             for (j, (_, c_share)) in c_shares.iter().enumerate() {
-    //                 c_vec.push(c_share.to_u64().unwrap());
-    //             }
-    //             m_data.extend_from_slice(&c_vec);
-    //             //shamir_coeffs.push(c_vec);
-    //         }
-    //         let arr_matrix = Array2::from_shape_vec((self.degree, self.n), m_data).unwrap();
-    //         let reversed_axes = arr_matrix.t();
-    //         return_vec.push(reversed_axes.to_owned());
-    //     }
-    // }
+            // For each coeff in the polynomial p under the current modulus m
+            for (i, c) in p.iter().enumerate() {
+                // Split the coeff into n shares
+                let secret = c.to_bigint().unwrap();
+                let c_shares = shamir.split(secret.clone());
+                // For each share convert to u64
+                let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
+                for (j, (_, c_share)) in c_shares.iter().enumerate() {
+                    c_vec.push(c_share.to_u64().unwrap());
+                }
+                m_data.extend_from_slice(&c_vec);
+                //shamir_coeffs.push(c_vec);
+            }
+            let arr_matrix = Array2::from_shape_vec((self.degree, self.n), m_data).unwrap();
+            let reversed_axes = arr_matrix.t();
+            return_vec.push(reversed_axes.to_owned());
+        }
+    }
     // -------------------------
 
     let mut decryption_shares = Vec::with_capacity(num_parties);
