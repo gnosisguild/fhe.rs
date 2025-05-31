@@ -187,6 +187,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             //     println!("----------");
             //     println!("{:?}", sum_poly);
             // }
+            // Initialize empty poly with correct context (moduli and level)
             let mut poly_j = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
             poly_j.set_coefficients(parties[i].sk_sss_collected[j].clone());
             sum_poly = &sum_poly + &poly_j;
@@ -195,7 +196,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!("{:?}", parties[0].sk_poly_sum);
-    // println!("----------");
+    println!("----------");
     // println!("{:?}", parties[0].sk_poly_sum);
 
     // println!("----------");
@@ -293,40 +294,77 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // open shamir with di
     // vec<module.len> shamir [vec<threshold> vec<index, bigint coeffs>]
-    for i in 0..threshold {
-        // 2 dim array, rows = fhe coeffs (degree), columns = party members shamir share coeff (n)
-        //let mut shamir_coeffs: Vec<Vec<u64>> = Vec::with_capacity(self.degree * params.moduli.len()); // TODO: need to store m of these
-        let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(params.moduli.len());
-        //let mut a = Array3::<u64>::zeros([3, 4, 2]);
 
-        // for each coeff generate an SSS of degree n and threshold n = 2t + 1
-        for (k, (m, p)) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()).enumerate() {
-            // Create shamir object
-            let shamir = SSS {
-                threshold: self.threshold,
-                share_amount: self.n,
-                prime: BigInt::from(*m)
-            };
-            let mut m_data: Vec<u64> = Vec::new();
+    let mut mod_vec: Vec<Vec<Vec<(usize, BigInt)>>> = Vec::with_capacity(moduli.len());
+    // vec[party1 vec[(1 , bigint coeff_1), (1, bigint coeff_2)... (1, bigint coeff_degree), party2 vec[2, bigint]... party_n vec[]]
+    let mut threshold_vec: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
 
-            // For each coeff in the polynomial p under the current modulus m
-            for (i, c) in p.iter().enumerate() {
-                // Split the coeff into n shares
-                let secret = c.to_bigint().unwrap();
-                let c_shares = shamir.split(secret.clone());
-                // For each share convert to u64
-                let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
-                for (j, (_, c_share)) in c_shares.iter().enumerate() {
-                    c_vec.push(c_share.to_u64().unwrap());
+    let mut shamir_open_vec: Vec<(usize, BigInt)> = Vec::with_capacity(moduli.len()); // use array2 for this
+    let mut shamir_open_vec_mod: Vec<(usize, BigInt)> = Vec::with_capacity(degree);
+
+    // collect shamir openings
+    for m in 0..moduli.len() {
+        let sss = SSS {
+            threshold: threshold,
+            share_amount: num_parties,
+            prime: BigInt::from(moduli[m])
+        };
+        for i in 0..degree {
+            // degree i
+            let mut shamir_open_vec: Vec<(usize, BigInt)> = Vec::with_capacity(moduli.len());
+            let mut shamir_open_vec_mod: Vec<(usize, BigInt)> = Vec::with_capacity(degree);
+
+            for j in 0..threshold {
+                // party j
+                let coeffs = parties[j].d_share_poly.coefficients();
+                if j==0 && i==0 {
+                    println!("{:?}", coeffs.row(m));
                 }
-                m_data.extend_from_slice(&c_vec);
-                //shamir_coeffs.push(c_vec);
+                let coeff_arr = coeffs.row(m);
+                let coeff = coeff_arr[i];
+                let coeff_formatted = (j+1, coeff.to_bigint().unwrap());
+                shamir_open_vec_mod.push(coeff_formatted);
             }
-            let arr_matrix = Array2::from_shape_vec((self.degree, self.n), m_data).unwrap();
-            let reversed_axes = arr_matrix.t();
-            return_vec.push(reversed_axes.to_owned());
+           if i==0 {
+                println!("{:?}", shamir_open_vec_mod);
+            }
+            // open shamir
+            let shamir_result = sss.recover(&shamir_open_vec_mod[0..threshold as usize]);
+            println!("{:?}", shamir_result);
         }
     }
+
+
+
+
+    //     // for each coeff generate an SSS of degree n and threshold n = 2t + 1
+    //     for (k, (m, p)) in izip!(parties[i].d_share_poly.ctx().moduli().iter(), parties[i].d_share_poly.coefficients().outer_iter()).enumerate() {
+    //         // Create shamir object
+    //         let shamir = SSS {
+    //             threshold: self.threshold,
+    //             share_amount: self.n,
+    //             prime: BigInt::from(*m)
+    //         };
+    //         let mut m_data: Vec<u64> = Vec::new();
+
+    //         // For each coeff in the polynomial p under the current modulus m
+    //         for (i, c) in p.iter().enumerate() {
+    //             // Split the coeff into n shares
+    //             let secret = c.to_bigint().unwrap();
+    //             let c_shares = shamir.split(secret.clone());
+    //             // For each share convert to u64
+    //             let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
+    //             for (j, (_, c_share)) in c_shares.iter().enumerate() {
+    //                 c_vec.push(c_share.to_u64().unwrap());
+    //             }
+    //             m_data.extend_from_slice(&c_vec);
+    //             //shamir_coeffs.push(c_vec);
+    //         }
+    //         let arr_matrix = Array2::from_shape_vec((self.degree, self.n), m_data).unwrap();
+    //         let reversed_axes = arr_matrix.t();
+    //         return_vec.push(reversed_axes.to_owned());
+    //     }
+    // }
     // -------------------------
 
     let mut decryption_shares = Vec::with_capacity(num_parties);
@@ -342,6 +380,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let pt: Plaintext = decryption_shares.into_iter().aggregate()?;
         pt
     });
+    println!("{:?}", tally_pt);
     let tally_vec = Vec::<u64>::try_decode(&tally_pt, Encoding::poly())?;
     let tally_result = tally_vec[0];
 
