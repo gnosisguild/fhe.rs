@@ -303,8 +303,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut result_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
     result_poly.set_coefficients(arr_matrix);
     println!("{:?}", result_poly);
-    result_poly..change_representation(Representation::Ntt);
+    result_poly.change_representation(Representation::Ntt);
     println!("{:?}", result_poly);
+
+    // test shamir and poly math
+    let mut poly_0 = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+    let mut poly_1 = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+    for j in 1..3 {
+        let mut d_vec: Vec<u64> = Vec::new();
+        for m in 0..moduli.len() {
+            for i in 0..degree {
+                d_vec.push(j as u64);
+            }
+        }
+        let test_matrix = Array2::from_shape_vec((moduli.len(), degree), d_vec).unwrap();
+        if j==1 {
+            poly_0.set_coefficients(test_matrix);
+        } else {
+            poly_1.set_coefficients(test_matrix);
+        }
+    }
+    //println!("{:?}", poly_0);
+    //println!("{:?}", poly_1);
+    let mut poly_sum = &poly_0 + &poly_1;
+    //println!("{:?}", poly_sum);
 
     let mut decryption_shares = Vec::with_capacity(num_parties);
     let mut _i = 0;
