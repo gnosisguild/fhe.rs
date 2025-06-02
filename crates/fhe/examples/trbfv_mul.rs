@@ -130,11 +130,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             16,
             moduli.clone()
         ).unwrap();
-        let sk_sss = trbfv.gen_sss_shares_v2(
+        let sk_sss = trbfv.gen_sss_shares(
             params.clone(),
             sk_share.clone()
         ).unwrap();
-        // vec of 3 moduli and array2 for 16 rows of coeffs
+        // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
         let mut sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
         let mut sk_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
         let mut d_share_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
@@ -150,18 +150,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut node_share_m = Array::zeros((0, 2048));
             for m in 0..moduli.len() {
                 node_share_m.push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).clone())).unwrap();
-                //let party_shares_array2 = parties[j].sk_sss[m].row(i).clone();
-                //parties[i].sk_sss_collected.push(party_shares_array2);
             }
             //println!("{:?}", node_share_m);
             parties[i].sk_sss_collected.push(node_share_m);
         }
-        //println!("----------");
     }
     // row = moduli, index = party_id
     println!("{:?}", parties[0].sk_sss_collected[2].row(2));
     // row = party id, index = moduli
     println!("{:?}", parties[2].sk_sss[2].row(0));
+
     // sk_sss
     // [moduli_1, moduli_2, moduli_3]
     // [
@@ -197,17 +195,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("{:?}", parties[0].sk_poly_sum);
     println!("----------");
-    // println!("{:?}", parties[0].sk_poly_sum);
 
-    // println!("----------");
-    // println!("{:?}", parties[0].sk_poly_sum);
-    // println!("----------");
-    //     let mut poly_t = Poly::try_convert_from(
-    //         parties[0].sk_share.coeffs.as_ref(),
-    //         &params.ctx_at_level(0).unwrap(),
-    //         false,
-    //         Representation::PowerBasis,
-    //     ).unwrap();
+    // let mut poly_t = Poly::try_convert_from(
+    //     parties[0].sk_share.coeffs.as_ref(),
+    //     &params.ctx_at_level(0).unwrap(),
+    //     false,
+    //     Representation::PowerBasis,
+    // ).unwrap();
     // println!("{:?}", poly_t);
 
     // Aggregation: same as previous mbfv aggregations
@@ -242,7 +236,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Arc::new(sum)
     });
 
-    //decrypt
+    // decrypt
     // compute decryption share!
     // mul c1 * sk
     // then add c0 + (c1*sk)
@@ -286,12 +280,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // [value, value, value... degree_value]
     // [value, value, value... degree_value]
 
-    // aggregate decryption shares, sum d_i only with threshold participating
-    // let mut sum_d_i = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-    // for i in 0..threshold {
-    //     sum_d_i = &parties[i].d_share_poly + &sum_d_i;
-    // }
-
     // open shamir with di
     // vec<module.len> shamir [vec<threshold> vec<index, bigint coeffs>]
 
@@ -310,12 +298,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             prime: BigInt::from(moduli[m])
         };
         for i in 0..degree {
-            // degree i
-            let mut shamir_open_vec: Vec<(usize, BigInt)> = Vec::with_capacity(moduli.len());
             let mut shamir_open_vec_mod: Vec<(usize, BigInt)> = Vec::with_capacity(degree);
 
             for j in 0..threshold {
-                // party j
                 let coeffs = parties[j].d_share_poly.coefficients();
                 if j==0 && i==0 {
                     println!("{:?}", coeffs.row(m));
@@ -333,39 +318,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("{:?}", shamir_result);
         }
     }
-
-
-
-
-    //     // for each coeff generate an SSS of degree n and threshold n = 2t + 1
-    //     for (k, (m, p)) in izip!(parties[i].d_share_poly.ctx().moduli().iter(), parties[i].d_share_poly.coefficients().outer_iter()).enumerate() {
-    //         // Create shamir object
-    //         let shamir = SSS {
-    //             threshold: self.threshold,
-    //             share_amount: self.n,
-    //             prime: BigInt::from(*m)
-    //         };
-    //         let mut m_data: Vec<u64> = Vec::new();
-
-    //         // For each coeff in the polynomial p under the current modulus m
-    //         for (i, c) in p.iter().enumerate() {
-    //             // Split the coeff into n shares
-    //             let secret = c.to_bigint().unwrap();
-    //             let c_shares = shamir.split(secret.clone());
-    //             // For each share convert to u64
-    //             let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
-    //             for (j, (_, c_share)) in c_shares.iter().enumerate() {
-    //                 c_vec.push(c_share.to_u64().unwrap());
-    //             }
-    //             m_data.extend_from_slice(&c_vec);
-    //             //shamir_coeffs.push(c_vec);
-    //         }
-    //         let arr_matrix = Array2::from_shape_vec((self.degree, self.n), m_data).unwrap();
-    //         let reversed_axes = arr_matrix.t();
-    //         return_vec.push(reversed_axes.to_owned());
-    //     }
-    // }
-    // -------------------------
 
     let mut decryption_shares = Vec::with_capacity(num_parties);
     let mut _i = 0;
