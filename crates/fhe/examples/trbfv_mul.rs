@@ -122,7 +122,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     timeit_n!("Party setup (per party)", num_parties as u32, {
         let sk_share = SecretKey::random(&params, &mut OsRng);
         let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
-        // encode away negative coeffs for secret key shamir shares
         let mut trbfv = TrBFVShare::new(
             num_parties,
             threshold,
@@ -140,8 +139,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut d_share_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
         parties.push(Party { sk_share, pk_share, sk_sss, sk_sss_collected, sk_poly_sum, d_share_poly, trbfv });
     });
-    println!("{:?}", parties[0].sk_sss.len());
-    println!("{:?}", parties[0].sk_sss[0].row(0).len());
 
     // swap shares mocking network comms
     // party 1 sends share 2 to party 2 etc
@@ -151,14 +148,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             for m in 0..moduli.len() {
                 node_share_m.push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).clone())).unwrap();
             }
-            //println!("{:?}", node_share_m);
             parties[i].sk_sss_collected.push(node_share_m);
         }
     }
-    // row = moduli, index = party_id
-    println!("{:?}", parties[0].sk_sss_collected[2].row(2));
+
     // row = party id, index = moduli
-    println!("{:?}", parties[2].sk_sss[2].row(0));
+    // println!("{:?}", parties[2].sk_sss[2].row(0));
 
     // sk_sss
     // [moduli_1, moduli_2, moduli_3]
@@ -181,10 +176,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     for i in 0..num_parties {
         let mut sum_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
         for j in 0..num_parties {
-            // if i == 0 {
-            //     println!("----------");
-            //     println!("{:?}", sum_poly);
-            // }
             // Initialize empty poly with correct context (moduli and level)
             let mut poly_j = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
             poly_j.set_coefficients(parties[i].sk_sss_collected[j].clone());
@@ -192,17 +183,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         parties[i].sk_poly_sum = sum_poly;
     }
-
-    println!("{:?}", parties[0].sk_poly_sum);
-    println!("----------");
-
-    // let mut poly_t = Poly::try_convert_from(
-    //     parties[0].sk_share.coeffs.as_ref(),
-    //     &params.ctx_at_level(0).unwrap(),
-    //     false,
-    //     Representation::PowerBasis,
-    // ).unwrap();
-    // println!("{:?}", poly_t);
 
     // Aggregation: same as previous mbfv aggregations
     let pk = timeit!("Public key aggregation", {
@@ -243,16 +223,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut c0 = tally.c[0].clone();
     c0.change_representation(Representation::PowerBasis);
     for i in 0..num_parties {
-        //let mut d_share_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        parties[i].sk_poly_sum.change_representation(Representation::Ntt);
+        let mut sk_i = parties[i].sk_poly_sum.clone();
+        sk_i.change_representation(Representation::Ntt);
         let mut c1 = tally.c[1].clone();
         c1.change_representation(Representation::Ntt);
-        let mut c1sk = &c1 * &parties[i].sk_poly_sum;
+        let mut c1sk = &c1 * &sk_i;
         c1sk.change_representation(Representation::PowerBasis);
         let mut d_share_poly = &c0 + &c1sk;
         parties[i].d_share_poly = d_share_poly;
     }
-    //println!("{:?}", parties[0].d_share_poly);
+
     // party_0 d_0 =
     // [shamir, shamir, shamir... degree_shamir]
     // [shamir, shamir, shamir... degree_shamir]
@@ -283,10 +263,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // open shamir with di
     // vec<module.len> shamir [vec<threshold> vec<index, bigint coeffs>]
 
-    let mut mod_vec: Vec<Vec<Vec<(usize, BigInt)>>> = Vec::with_capacity(moduli.len());
-    // vec[party1 vec[(1 , bigint coeff_1), (1, bigint coeff_2)... (1, bigint coeff_degree), party2 vec[2, bigint]... party_n vec[]]
-    let mut threshold_vec: Vec<Vec<(usize, BigInt)>> = Vec::with_capacity(degree);
-
     let mut shamir_open_vec: Vec<(usize, BigInt)> = Vec::with_capacity(moduli.len()); // use array2 for this
     let mut shamir_open_vec_mod: Vec<(usize, BigInt)> = Vec::with_capacity(degree);
 
@@ -315,7 +291,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             // open shamir
             let shamir_result = sss.recover(&shamir_open_vec_mod[0..threshold as usize]);
-            println!("{:?}", shamir_result);
+            //println!("{:?}", shamir_result);
         }
     }
 
