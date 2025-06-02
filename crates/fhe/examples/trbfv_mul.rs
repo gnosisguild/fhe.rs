@@ -15,6 +15,7 @@ use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use util::timeit::{timeit, timeit_n};
 use num_bigint_old::{BigInt, ToBigInt};
+use num_traits::ToPrimitive;
 use shamir_secret_sharing::ShamirSecretSharing as SSS;
 use ndarray::{array, Array2, Array3, Axis, Array, ArrayView};
 use zeroize::{Zeroizing};
@@ -265,9 +266,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut shamir_open_vec: Vec<(usize, BigInt)> = Vec::with_capacity(moduli.len()); // use array2 for this
     let mut shamir_open_vec_mod: Vec<(usize, BigInt)> = Vec::with_capacity(degree);
+    let mut m_data: Vec<u64> = Vec::new();
 
     // collect shamir openings
     for m in 0..moduli.len() {
+
         let sss = SSS {
             threshold: threshold,
             share_amount: num_parties,
@@ -291,9 +294,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             // open shamir
             let shamir_result = sss.recover(&shamir_open_vec_mod[0..threshold as usize]);
+            m_data.push(shamir_result.to_u64().unwrap());
             //println!("{:?}", shamir_result);
         }
     }
+    let arr_matrix = Array2::from_shape_vec((moduli.len(), degree), m_data).unwrap();
+    //println!("{:?}", arr_matrix);
+    let mut result_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+    result_poly.set_coefficients(arr_matrix);
+    println!("{:?}", result_poly);
+    result_poly..change_representation(Representation::Ntt);
+    println!("{:?}", result_poly);
 
     let mut decryption_shares = Vec::with_capacity(num_parties);
     let mut _i = 0;
@@ -308,7 +319,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let pt: Plaintext = decryption_shares.into_iter().aggregate()?;
         pt
     });
-    println!("{:?}", tally_pt);
+    //println!("{:?}", tally_pt);
     let tally_vec = Vec::<u64>::try_decode(&tally_pt, Encoding::poly())?;
     let tally_result = tally_vec[0];
 
