@@ -70,6 +70,11 @@ impl CommonRandomPoly {
             poly: test.unwrap(),
         })
     }
+
+    /// Get a reference to the internal polynomial
+    pub fn poly(&self) -> &Poly {
+        &self.poly
+    }
 }
 
 impl Serialize for CommonRandomPoly {

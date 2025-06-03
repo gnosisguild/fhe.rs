@@ -52,7 +52,7 @@ pub struct BfvParameters {
     pub(crate) q_mod_t: Box<[u64]>,
 
     /// Down scaler for the plaintext
-    pub(crate) scalers: Box<[Scaler]>,
+    pub scalers: Box<[Scaler]>,
 
     /// Plaintext Modulus
     pub(crate) plaintext: Modulus,
