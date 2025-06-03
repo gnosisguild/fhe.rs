@@ -10,11 +10,17 @@ use fhe::{
     mbfv::{AggregateIter, CommonRandomPoly, DecryptionShare, PublicKeyShare},
     thbfv::{TrBFVShare},
 };
-use fhe_math::rq::{traits::TryConvertFrom, Context, Poly, Representation};
+use fhe_math::{
+    ntt::NttOperator,
+    rns::{RnsContext, ScalingFactor},
+    rq::{scaler::Scaler, traits::TryConvertFrom, Context, Poly, Representation},
+    zq::{primes::generate_prime, Modulus},
+};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use util::timeit::{timeit, timeit_n};
 use num_bigint_old::{BigInt, ToBigInt};
+use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use shamir_secret_sharing::ShamirSecretSharing as SSS;
 use ndarray::{array, Array2, Array3, Axis, Array, ArrayView};
@@ -45,7 +51,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let degree = 2048;
     let plaintext_modulus: u64 = 4096;
     let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
-    let sss_prime = BigInt::parse_bytes(b"40",16).unwrap();
 
     // This executable is a command line tool which enables to specify
     // voter/election worker sizes.
@@ -191,6 +196,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         pk
     });
 
+    // todo check that pk agg is just summing
+    // check after swapping shamir shares with others parties taht they open and get the correct coeffs
+    // check crp is ok
+    // abstract ideas into lib for api even without correct values
+
     // encrypted mul
     let amount = 5;
     let dist = Uniform::new_inclusive(0, 1);
@@ -302,9 +312,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     //println!("{:?}", arr_matrix);
     let mut result_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
     result_poly.set_coefficients(arr_matrix);
+    println!("RESULT POLY");
     println!("{:?}", result_poly);
-    result_poly.change_representation(Representation::Ntt);
-    println!("{:?}", result_poly);
+    //result_poly.change_representation(Representation::Ntt);
+    //println!("{:?}", result_poly);
+
+    let ct = tally.clone();
+    //let par = ct.par;
+
+    let plaintext_ctx = Context::new_arc(&moduli[..1], degree).unwrap();
+    let mut scalers = Vec::with_capacity(moduli.len());
+    for i in 0..moduli.len() {
+        let rns = RnsContext::new(&moduli[..moduli.len() - i]).unwrap();
+        let ctx_i = Context::new_arc(&moduli[..moduli.len() - i], degree).unwrap();
+        scalers.push(Scaler::new(
+            &ctx_i,
+            &plaintext_ctx,
+            ScalingFactor::new(&BigUint::from(plaintext_modulus), rns.modulus()),
+        ).unwrap());
+    }
+
+    let d = Zeroizing::new(result_poly.scale(&scalers[ct.level]).unwrap());
+    println!("SCALED RESULT POLY");
+    println!("{:?}", d);
+    //let d = Zeroizing::new(c.scale(&par.scalers[ct.level])?);
+    //let result_vec = Vec::<u64>::try_decode(&result_poly, Encoding::poly())?;
+    //println!("{:?}", result_vec);
 
     // test shamir and poly math
     let mut poly_0 = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
