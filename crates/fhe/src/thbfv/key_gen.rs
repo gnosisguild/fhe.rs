@@ -98,6 +98,7 @@ impl TrBFVShare {
             let reversed_axes = arr_matrix.t();
             return_vec.push(reversed_axes.to_owned());
         }
+        // return vec = rows are party members, columns are degree length of shamir values
         Ok(return_vec)
     }
 
