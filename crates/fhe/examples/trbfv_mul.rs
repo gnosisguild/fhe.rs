@@ -396,56 +396,105 @@ fn compute_decryption_shares(
 
 /// Perform threshold reconstruction from decryption shares using Lagrange
 /// interpolation
+/// Following Shamir.md: d = Dec(c) = Σ λⱼ · d^j for j in S
+/// where d^j are the decryption shares and λⱼ are Lagrange coefficients
 fn threshold_reconstruct(
     decryption_shares: &[(usize, Poly)],
     party_ids: &[usize],
     sum_ciphertext: &Arc<Ciphertext>,
     params: &Arc<bfv::BfvParameters>,
 ) -> Result<u64, Box<dyn Error>> {
-    let degree = params.degree();
-    let moduli = params.moduli();
-
     let ctx = params.ctx_at_level(0).unwrap();
     let mut reconstructed = Poly::zero(&ctx, Representation::PowerBasis);
-    let mut reconstructed_coeffs = Array2::zeros((moduli.len(), degree));
 
-    // For each modulus level and each coefficient, perform Lagrange interpolation
-    for m in 0..moduli.len() {
-        let prime = BigInt::from(moduli[m]);
+    // Following Shamir.md: reconstruct d = Σ λⱼ · d^j
+    // This should be done as polynomial-level reconstruction, not coefficient-wise
+    // Each d^j is a full polynomial, multiply by λⱼ and sum all results
 
-        for j in 0..degree {
-            let mut interpolated_coeff = BigInt::from(0);
+    // Use the first modulus for Lagrange coefficient computation (standard
+    // approach)
+    let prime = BigInt::from(params.moduli()[0]);
 
-            // Lagrange interpolation to reconstruct at x=0 (the secret)
-            for &party_id in party_ids {
-                let party_idx = party_ids.iter().position(|&x| x == party_id).unwrap();
-                let (_, ref di) = decryption_shares[party_idx];
+    for (i, &party_id) in party_ids.iter().enumerate() {
+        let (_, ref di) = decryption_shares[i];
 
-                // Get coefficient value from decryption share
-                let di_coeff = di.coefficients()[(m, j)];
-                let di_bigint = BigInt::from(di_coeff);
+        // Compute Lagrange coefficient λⱼ for this party
+        let lambda = compute_lagrange_coefficient_at_zero(party_id, party_ids, &prime);
 
-                // Compute Lagrange coefficient λj for interpolation at x=0
-                let lambda = compute_lagrange_coefficient_at_zero(party_id, party_ids, &prime);
+        // Make sure lambda is properly reduced modulo the prime
+        let lambda_reduced = &lambda % &prime;
+        let lambda_u64 = lambda_reduced
+            .to_u64()
+            .expect("Lambda coefficient should fit in u64");
 
-                // Add λj * di to the interpolated result
-                interpolated_coeff = (interpolated_coeff + lambda * di_bigint) % &prime;
+        // Debug: print lambda coefficient and first coefficient of di
+        println!(
+            "Debug - Party {}: lambda = {}, di_coeff = {}",
+            party_id,
+            lambda_u64,
+            di.coefficients()[(0, 0)]
+        );
+
+        // Multiply the entire decryption share polynomial by the Lagrange coefficient
+        // We need to be careful about modular arithmetic here
+        let mut lambda_di = di.clone();
+
+        // Convert to coefficient representation for scalar multiplication
+        lambda_di.change_representation(Representation::PowerBasis); // Perform coefficient-wise multiplication by lambda
+        let coeffs = lambda_di.coefficients();
+        let mut new_coeffs = coeffs.to_owned();
+
+        for m in 0..params.moduli().len() {
+            let modulus = BigInt::from(params.moduli()[m]);
+            for j in 0..params.degree() {
+                let old_coeff = BigInt::from(coeffs[(m, j)]);
+                let new_coeff = (lambda_reduced.clone() * old_coeff) % &modulus;
+                new_coeffs[(m, j)] = new_coeff.to_u64().unwrap_or(0);
             }
-
-            reconstructed_coeffs[(m, j)] = interpolated_coeff.to_u64().unwrap_or(0);
         }
+        lambda_di.set_coefficients(new_coeffs);
+
+        // Add to the reconstruction: reconstructed += λⱼ · d^j
+        reconstructed = &reconstructed + &lambda_di;
     }
 
-    reconstructed.set_coefficients(reconstructed_coeffs.clone());
-
-    // Apply BFV decryption scaling
+    // Extract the first coefficient from the reconstructed polynomial
     reconstructed.change_representation(Representation::PowerBasis);
-    let scaled = reconstructed.scale(&params.scalers[sum_ciphertext.level])?;
+    let coeffs = reconstructed.coefficients();
+    let reconstructed_coeff = coeffs[(0, 0)];
 
-    // Extract the first coefficient and reduce modulo plaintext modulus
-    let coeffs = scaled.coefficients();
-    let first_coeff = coeffs[(0, 0)];
-    let result = first_coeff % params.plaintext();
+    println!(
+        "Debug - reconstructed first coeff (before scaling): {}",
+        reconstructed_coeff
+    );
+
+    // Debug: print first few coefficients to verify consistency
+    for i in 0..6.min(coeffs.dim().1) {
+        println!("Debug - reconstructed coeff[{}]: {}", i, coeffs[(0, i)]);
+    }
+
+    // Simple and consistent scaling approach for threshold BFV
+    // Based on the BFV decryption formula: m = [(c0 + c1*s + e) * t / q] mod t
+    // For threshold decryption, we've reconstructed (c0 + c1*s + e) through
+    // Lagrange interpolation Now we need to scale by t/q and reduce mod t
+
+    let plaintext_mod = params.plaintext();
+    let ciphertext_mod = params.moduli()[0];
+
+    // Use BigInt for precise arithmetic to avoid any floating point issues
+    let reconstructed_big = BigInt::from(reconstructed_coeff);
+    let plaintext_big = BigInt::from(plaintext_mod);
+    let ciphertext_big = BigInt::from(ciphertext_mod);
+
+    // Compute [reconstructed * t / q] = [reconstructed * t / q + 1/2] (rounding)
+    // This is equivalent to: (reconstructed * t + q/2) / q
+    let scaled_big = (reconstructed_big * &plaintext_big + &ciphertext_big / 2) / &ciphertext_big;
+    let result_big: BigInt = scaled_big % &plaintext_big;
+
+    // Convert back to u64
+    let result = result_big.to_u64().unwrap_or(0);
+
+    println!("Debug - BFV scaled result: {}", result);
 
     Ok(result)
 }
