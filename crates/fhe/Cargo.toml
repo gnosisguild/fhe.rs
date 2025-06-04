@@ -42,6 +42,7 @@ itertools.workspace = true
 ndarray.workspace = true
 rand.workspace = true
 console.workspace = true
+rayon.workspace = true
 
 [[bench]]
 name = "bfv"

@@ -16,6 +16,7 @@ use ndarray::Array2;
 use num_bigint_old::BigInt;
 use num_traits::{ToPrimitive, Zero};
 use rand::{thread_rng, Rng};
+use rayon::prelude::*;
 use shamir_secret_sharing::ShamirSecretSharing as SSS;
 use util::timeit::timeit;
 
@@ -64,7 +65,7 @@ struct Party {
 
 impl Party {
     /// Create a new party with the given ID and BFV parameters
-    fn new(party_id: usize, params: &Arc<bfv::BfvParameters>) -> Result<Self, Box<dyn Error>> {
+    fn new(party_id: usize, params: &Arc<bfv::BfvParameters>) -> Result<Self, Box<dyn Error + Send + Sync>> {
         // Generate pi: random polynomial with coefficients in {-1, 0, 1}
         let mut rng = thread_rng();
         let degree = params.degree();
@@ -109,7 +110,7 @@ impl Party {
         &mut self,
         crp: &Poly,
         params: &Arc<bfv::BfvParameters>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Generate error polynomial ei from error distribution
         let mut rng = thread_rng();
         let degree = params.degree();
@@ -160,7 +161,7 @@ impl Party {
         num_parties: usize,
         threshold: usize,
         params: &Arc<bfv::BfvParameters>,
-    ) -> Result<Vec<Vec<Vec<BigInt>>>, Box<dyn Error>> {
+    ) -> Result<Vec<Vec<Vec<BigInt>>>, Box<dyn Error + Send + Sync>> {
         let degree = params.degree();
         let moduli = params.moduli();
         let mut all_shares = Vec::new();
@@ -207,7 +208,7 @@ impl Party {
         threshold: usize,
         params: &Arc<bfv::BfvParameters>,
         smudging_bound: i64,
-    ) -> Result<Vec<Vec<Vec<BigInt>>>, Box<dyn Error>> {
+    ) -> Result<Vec<Vec<Vec<BigInt>>>, Box<dyn Error + Send + Sync>> {
         let degree = params.degree();
         let moduli = params.moduli();
         let mut rng = thread_rng();
@@ -322,7 +323,7 @@ fn mod_inverse(a: &BigInt, m: &BigInt) -> Option<BigInt> {
     }
 }
 
-/// Compute decryption shares for a given set of parties
+/// Compute decryption shares for a given set of parties (parallelized)
 /// Following Shamir.md algorithm: di = c0 + c1*si + esi
 /// where si is the party's secret key share (not their individual polynomial
 /// pi)
@@ -331,67 +332,69 @@ fn compute_decryption_shares(
     party_ids: &[usize],
     sum_ciphertext: &Arc<Ciphertext>,
     params: &Arc<bfv::BfvParameters>,
-) -> Result<Vec<(usize, Poly)>, Box<dyn Error>> {
+) -> Result<Vec<(usize, Poly)>, Box<dyn Error + Send + Sync>> {
     let degree = params.degree();
     let moduli = params.moduli();
-    let mut shares = Vec::new();
 
-    // Extract ciphertext components
+    // Extract ciphertext components (shared by all parties)
     let mut c0 = sum_ciphertext.c[0].clone();
     let mut c1 = sum_ciphertext.c[1].clone();
     c0.change_representation(Representation::PowerBasis);
     c1.change_representation(Representation::Ntt);
 
-    for &party_id in party_ids {
-        let party_idx = party_id - 1; // Convert to 0-based index
-        let party = &parties[party_idx];
+    // Parallelize computation across parties
+    party_ids
+        .par_iter()
+        .map(|&party_id| -> Result<(usize, Poly), Box<dyn Error + Send + Sync>> {
+            let party_idx = party_id - 1; // Convert to 0-based index
+            let party = &parties[party_idx];
 
-        // Following Shamir.md: use party's secret key share si (their share of the
-        // collective secret key) Construct si polynomial from the party's
-        // sk_shares
-        let ctx = params.ctx_at_level(0).unwrap();
-        let mut si = Poly::zero(&ctx, Representation::PowerBasis);
-        let mut si_coeffs = Array2::zeros((moduli.len(), degree));
+            // Following Shamir.md: use party's secret key share si (their share of the
+            // collective secret key) Construct si polynomial from the party's
+            // sk_shares
+            let ctx = params.ctx_at_level(0).unwrap();
+            let mut si = Poly::zero(&ctx, Representation::PowerBasis);
+            let mut si_coeffs = Array2::zeros((moduli.len(), degree));
 
-        for m in 0..moduli.len() {
-            for j in 0..degree {
-                // Convert BigInt to u64 for polynomial coefficients
-                let share_value = &party.sk_shares[m][j];
-                let modulus = moduli[m];
-                let coeff_value = (share_value % BigInt::from(modulus)).to_u64().unwrap_or(0);
-                si_coeffs[(m, j)] = coeff_value;
+            for m in 0..moduli.len() {
+                for j in 0..degree {
+                    // Convert BigInt to u64 for polynomial coefficients
+                    let share_value = &party.sk_shares[m][j];
+                    let modulus = moduli[m];
+                    let coeff_value = (share_value % BigInt::from(modulus)).to_u64().unwrap_or(0);
+                    si_coeffs[(m, j)] = coeff_value;
+                }
             }
-        }
-        si.set_coefficients(si_coeffs);
-        si.change_representation(Representation::Ntt);
+            si.set_coefficients(si_coeffs);
+            si.change_representation(Representation::Ntt);
 
-        // Compute c1*si
-        let mut c1_si = &c1 * &si;
-        c1_si.change_representation(Representation::PowerBasis);
+            // Compute c1*si
+            let mut c1_si = &c1 * &si;
+            c1_si.change_representation(Representation::PowerBasis);
 
-        // Following Shamir.md: use party's smudging error share esi
-        let mut esi = Poly::zero(&ctx, Representation::PowerBasis);
-        let mut esi_coeffs = Array2::zeros((moduli.len(), degree));
+            // Following Shamir.md: use party's smudging error share esi
+            let mut esi = Poly::zero(&ctx, Representation::PowerBasis);
+            let mut esi_coeffs = Array2::zeros((moduli.len(), degree));
 
-        for m in 0..moduli.len() {
-            for j in 0..degree {
-                // Convert BigInt to u64 for polynomial coefficients
-                let smudging_value = &party.smudging_shares[m][j];
-                let modulus = moduli[m];
-                let coeff_value = (smudging_value % BigInt::from(modulus))
-                    .to_u64()
-                    .unwrap_or(0);
-                esi_coeffs[(m, j)] = coeff_value;
+            for m in 0..moduli.len() {
+                for j in 0..degree {
+                    // Convert BigInt to u64 for polynomial coefficients
+                    let smudging_value = &party.smudging_shares[m][j];
+                    let modulus = moduli[m];
+                    let coeff_value = (smudging_value % BigInt::from(modulus))
+                        .to_u64()
+                        .unwrap_or(0);
+                    esi_coeffs[(m, j)] = coeff_value;
+                }
             }
-        }
-        esi.set_coefficients(esi_coeffs);
+            esi.set_coefficients(esi_coeffs);
 
-        // Compute decryption share: di = c0 + c1*si + esi
-        let di = &(&c0 + &c1_si) + &esi;
-        shares.push((party_id, di));
-    }
+            // Compute decryption share: di = c0 + c1*si + esi
+            let di = &(&c0 + &c1_si) + &esi;
 
-    Ok(shares)
+            Ok((party_id, di))
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error + Send + Sync>>>()
 }
 
 /// Perform threshold reconstruction from decryption shares using Lagrange
@@ -402,7 +405,7 @@ fn threshold_reconstruct(
     decryption_shares: &[(usize, Poly)],
     party_ids: &[usize],
     params: &Arc<bfv::BfvParameters>,
-) -> Result<u64, Box<dyn Error>> {
+) -> Result<u64, Box<dyn Error + Send + Sync>> {
     let ctx = params.ctx_at_level(0).unwrap();
     let mut reconstructed = Poly::zero(&ctx, Representation::PowerBasis);
 
@@ -475,7 +478,7 @@ fn threshold_reconstruct(
     Ok(result)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // ========================================================================
     // PARAMETER SETUP
     // ========================================================================
@@ -603,56 +606,59 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("\n## Phase 1: Distributed Key Generation");
 
-    // Step 1: Initialize parties and generate secret polynomials
+    // Step 1: Initialize parties and generate secret polynomials (parallelized)
     let mut parties = timeit!("Party initialization", {
-        let mut parties = Vec::with_capacity(num_parties);
-        for i in 0..num_parties {
-            let party = Party::new(i + 1, &params)?; // Party IDs start from 1
-            parties.push(party);
-        }
-        parties
+        (0..num_parties)
+            .into_par_iter()
+            .map(|i| Party::new(i + 1, &params)) // Party IDs start from 1
+            .collect::<Result<Vec<Party>, Box<dyn Error + Send + Sync>>>()?
     });
 
-    // Step 2: Compute public key shares eki = -a*pi + ei
+    // Step 2: Compute public key shares eki = -a*pi + ei (parallelized)
     timeit!("Public key share computation", {
-        for party in &mut parties {
-            party.compute_public_key_share(crp.poly(), &params)?;
-        }
+        parties
+            .par_iter_mut()
+            .try_for_each(|party| party.compute_public_key_share(crp.poly(), &params))?;
     });
 
-    // Step 3: Generate Shamir secret shares for secret key coefficients
+    // Step 3: Generate Shamir secret shares for secret key coefficients (parallelized)
     // For each party i, for each coefficient pij of pi, generate polynomial fij
     // with constant term pij and share fij(k) to party k
     let all_secret_shares = timeit!("Secret key share generation", {
-        let mut all_shares = Vec::new();
-        for party in &mut parties {
-            let shares = party.generate_secret_shares(num_parties, threshold, &params)?;
-            all_shares.push(shares);
-        }
-        all_shares
+        parties
+            .par_iter_mut()
+            .map(|party| party.generate_secret_shares(num_parties, threshold, &params))
+            .collect::<Result<Vec<_>, Box<dyn Error + Send + Sync>>>()?
     });
 
-    // Step 4: Distribute and collect secret shares (simulating network
-    // communication) In practice, each party would send their shares securely
-    // to other parties
+    // Step 4: Distribute and collect secret shares (simulating parallel network communication)
+    // In practice, each party would send their shares securely to other parties
     timeit!("Secret share distribution", {
-        for receiver_id in 0..num_parties {
-            let mut collected_shares = vec![vec![BigInt::zero(); degree]; moduli.len()];
+        let collected_shares: Vec<_> = (0..num_parties)
+            .into_par_iter()
+            .map(|receiver_id| {
+                let mut collected_shares = vec![vec![BigInt::zero(); degree]; moduli.len()];
 
-            // Collect shares from all parties for this receiver
-            for sender_id in 0..num_parties {
-                for m in 0..moduli.len() {
-                    for j in 0..degree {
-                        // Add sender's share for receiver at coefficient j, modulus m
-                        // Note: In threshold BFV, we sum all parties' contributions for the same
-                        // coefficient Each party generates shares of their
-                        // own polynomial coefficients
-                        collected_shares[m][j] += &all_secret_shares[sender_id][m][j][receiver_id];
+                // Collect shares from all parties for this receiver
+                for sender_id in 0..num_parties {
+                    for m in 0..moduli.len() {
+                        for j in 0..degree {
+                            // Add sender's share for receiver at coefficient j, modulus m
+                            // Note: In threshold BFV, we sum all parties' contributions for the same
+                            // coefficient Each party generates shares of their
+                            // own polynomial coefficients
+                            collected_shares[m][j] += &all_secret_shares[sender_id][m][j][receiver_id];
+                        }
                     }
                 }
-            }
 
-            parties[receiver_id].sk_shares = collected_shares;
+                collected_shares
+            })
+            .collect();
+
+        // Assign collected shares to parties
+        for (receiver_id, shares) in collected_shares.into_iter().enumerate() {
+            parties[receiver_id].sk_shares = shares;
         }
     });
 
@@ -855,32 +861,37 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("\n## Phase 3: Threshold Decryption");
 
-    // Step 1: Generate smudging error shares for threshold decryption security
+    // Step 1: Generate smudging error shares for threshold decryption security (parallelized)
     let all_smudging_shares = timeit!("Smudging error share generation", {
-        let mut all_shares = Vec::new();
-        for party in &mut parties {
-            let shares =
-                party.generate_smudging_shares(num_parties, threshold, &params, smudging_bound)?;
-            all_shares.push(shares);
-        }
-        all_shares
+        parties
+            .par_iter_mut()
+            .map(|party| party.generate_smudging_shares(num_parties, threshold, &params, smudging_bound))
+            .collect::<Result<Vec<_>, Box<dyn Error + Send + Sync>>>()?
     });
 
-    // Step 2: Distribute smudging shares (simulating network communication)
+    // Step 2: Distribute smudging shares (simulating parallel network communication)
     timeit!("Smudging share distribution", {
-        for receiver_id in 0..num_parties {
-            let mut collected_shares = vec![vec![BigInt::zero(); degree]; moduli.len()];
+        let collected_shares: Vec<_> = (0..num_parties)
+            .into_par_iter()
+            .map(|receiver_id| {
+                let mut collected_shares = vec![vec![BigInt::zero(); degree]; moduli.len()];
 
-            for sender_id in 0..num_parties {
-                for m in 0..moduli.len() {
-                    for j in 0..degree {
-                        collected_shares[m][j] +=
-                            &all_smudging_shares[sender_id][m][j][receiver_id];
+                for sender_id in 0..num_parties {
+                    for m in 0..moduli.len() {
+                        for j in 0..degree {
+                            collected_shares[m][j] +=
+                                &all_smudging_shares[sender_id][m][j][receiver_id];
+                        }
                     }
                 }
-            }
 
-            parties[receiver_id].smudging_shares = collected_shares;
+                collected_shares
+            })
+            .collect();
+
+        // Assign collected shares to parties
+        for (receiver_id, shares) in collected_shares.into_iter().enumerate() {
+            parties[receiver_id].smudging_shares = shares;
         }
     });
 
