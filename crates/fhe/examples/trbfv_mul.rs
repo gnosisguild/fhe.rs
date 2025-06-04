@@ -167,39 +167,46 @@ impl Party {
     ) -> Result<Vec<Vec<Vec<BigInt>>>, Box<dyn Error + Send + Sync>> {
         let degree = params.degree();
         let moduli = params.moduli();
-        let mut all_shares = Vec::new();
 
-        // For each modulus level
-        for m in 0..moduli.len() {
-            let prime = BigInt::from(moduli[m]);
-            let sss = SSS {
-                threshold,
-                share_amount: num_parties,
-                prime: prime.clone(),
-            };
+        // Parallelize across modulus levels
+        let all_shares: Result<Vec<_>, Box<dyn Error + Send + Sync>> = (0..moduli.len())
+            .into_par_iter()
+            .map(
+                |m| -> Result<Vec<Vec<BigInt>>, Box<dyn Error + Send + Sync>> {
+                    let prime = BigInt::from(moduli[m]);
+                    let sss = SSS {
+                        threshold,
+                        share_amount: num_parties,
+                        prime: prime.clone(),
+                    };
 
-            let mut shares_for_modulus = Vec::new();
+                    // Parallelize coefficient processing within each modulus level
+                    let shares_for_modulus: Result<Vec<_>, Box<dyn Error + Send + Sync>> = (0
+                        ..degree)
+                        .into_par_iter()
+                        .map(|j| -> Result<Vec<BigInt>, Box<dyn Error + Send + Sync>> {
+                            let coeff = self.secret_poly.coefficients()[(m, j)];
+                            let secret_value = BigInt::from(coeff);
 
-            // For each coefficient of the polynomial at this modulus level
-            for j in 0..degree {
-                let coeff = self.secret_poly.coefficients()[(m, j)];
-                let secret_value = BigInt::from(coeff);
+                            // Generate Shamir shares for this coefficient
+                            let shares = sss.split(secret_value);
 
-                // Generate Shamir shares for this coefficient
-                let shares = sss.split(secret_value);
+                            // Convert Vec<(usize, BigInt)> to Vec<BigInt> indexed by party_id
+                            let mut shares_vec = vec![BigInt::zero(); num_parties];
+                            for (party_id, share_value) in shares {
+                                // party_id is 1-based, convert to 0-based index
+                                shares_vec[party_id - 1] = share_value;
+                            }
+                            Ok(shares_vec)
+                        })
+                        .collect();
 
-                // Convert Vec<(usize, BigInt)> to Vec<BigInt> indexed by party_id
-                let mut shares_vec = vec![BigInt::zero(); num_parties];
-                for (party_id, share_value) in shares {
-                    // party_id is 1-based, convert to 0-based index
-                    shares_vec[party_id - 1] = share_value;
-                }
-                shares_for_modulus.push(shares_vec);
-            }
-            all_shares.push(shares_for_modulus);
-        }
+                    shares_for_modulus
+                },
+            )
+            .collect();
 
-        Ok(all_shares)
+        all_shares
     }
 
     /// Generate smudging error shares for threshold decryption
@@ -236,39 +243,45 @@ impl Party {
         }
         smudging_poly.set_coefficients(smudging_coeffs);
 
-        let mut all_shares = Vec::new();
+        // Parallelize share generation across modulus levels
+        let all_shares: Result<Vec<_>, Box<dyn Error + Send + Sync>> = (0..moduli.len())
+            .into_par_iter()
+            .map(
+                |m| -> Result<Vec<Vec<BigInt>>, Box<dyn Error + Send + Sync>> {
+                    let prime = BigInt::from(moduli[m]);
+                    let sss = SSS {
+                        threshold,
+                        share_amount: num_parties,
+                        prime: prime.clone(),
+                    };
 
-        // For each modulus level
-        for m in 0..moduli.len() {
-            let prime = BigInt::from(moduli[m]);
-            let sss = SSS {
-                threshold,
-                share_amount: num_parties,
-                prime: prime.clone(),
-            };
+                    // Parallelize coefficient processing within each modulus level
+                    let shares_for_modulus: Result<Vec<_>, Box<dyn Error + Send + Sync>> = (0
+                        ..degree)
+                        .into_par_iter()
+                        .map(|j| -> Result<Vec<BigInt>, Box<dyn Error + Send + Sync>> {
+                            let coeff = smudging_poly.coefficients()[(m, j)];
+                            let secret_value = BigInt::from(coeff);
 
-            let mut shares_for_modulus = Vec::new();
+                            // Generate Shamir shares for this coefficient
+                            let shares = sss.split(secret_value);
 
-            // For each coefficient of the smudging polynomial
-            for j in 0..degree {
-                let coeff = smudging_poly.coefficients()[(m, j)];
-                let secret_value = BigInt::from(coeff);
+                            // Convert Vec<(usize, BigInt)> to Vec<BigInt> indexed by party_id
+                            let mut shares_vec = vec![BigInt::zero(); num_parties];
+                            for (party_id, share_value) in shares {
+                                // party_id is 1-based, convert to 0-based index
+                                shares_vec[party_id - 1] = share_value;
+                            }
+                            Ok(shares_vec)
+                        })
+                        .collect();
 
-                // Generate Shamir shares for this coefficient
-                let shares = sss.split(secret_value);
+                    shares_for_modulus
+                },
+            )
+            .collect();
 
-                // Convert Vec<(usize, BigInt)> to Vec<BigInt> indexed by party_id
-                let mut shares_vec = vec![BigInt::zero(); num_parties];
-                for (party_id, share_value) in shares {
-                    // party_id is 1-based, convert to 0-based index
-                    shares_vec[party_id - 1] = share_value;
-                }
-                shares_for_modulus.push(shares_vec);
-            }
-            all_shares.push(shares_for_modulus);
-        }
-
-        Ok(all_shares)
+        all_shares
     }
 }
 
