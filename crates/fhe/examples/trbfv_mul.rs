@@ -401,7 +401,6 @@ fn compute_decryption_shares(
 fn threshold_reconstruct(
     decryption_shares: &[(usize, Poly)],
     party_ids: &[usize],
-    sum_ciphertext: &Arc<Ciphertext>,
     params: &Arc<bfv::BfvParameters>,
 ) -> Result<u64, Box<dyn Error>> {
     let ctx = params.ctx_at_level(0).unwrap();
@@ -423,17 +422,6 @@ fn threshold_reconstruct(
 
         // Make sure lambda is properly reduced modulo the prime
         let lambda_reduced = &lambda % &prime;
-        let lambda_u64 = lambda_reduced
-            .to_u64()
-            .expect("Lambda coefficient should fit in u64");
-
-        // Debug: print lambda coefficient and first coefficient of di
-        println!(
-            "Debug - Party {}: lambda = {}, di_coeff = {}",
-            party_id,
-            lambda_u64,
-            di.coefficients()[(0, 0)]
-        );
 
         // Multiply the entire decryption share polynomial by the Lagrange coefficient
         // We need to be careful about modular arithmetic here
@@ -463,16 +451,6 @@ fn threshold_reconstruct(
     let coeffs = reconstructed.coefficients();
     let reconstructed_coeff = coeffs[(0, 0)];
 
-    println!(
-        "Debug - reconstructed first coeff (before scaling): {}",
-        reconstructed_coeff
-    );
-
-    // Debug: print first few coefficients to verify consistency
-    for i in 0..6.min(coeffs.dim().1) {
-        println!("Debug - reconstructed coeff[{}]: {}", i, coeffs[(0, i)]);
-    }
-
     // Simple and consistent scaling approach for threshold BFV
     // Based on the BFV decryption formula: m = [(c0 + c1*s + e) * t / q] mod t
     // For threshold decryption, we've reconstructed (c0 + c1*s + e) through
@@ -493,8 +471,6 @@ fn threshold_reconstruct(
 
     // Convert back to u64
     let result = result_big.to_u64().unwrap_or(0);
-
-    println!("Debug - BFV scaled result: {}", result);
 
     Ok(result)
 }
@@ -985,12 +961,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 0
     let threshold_result = timeit!(
         "Threshold reconstruction",
-        threshold_reconstruct(
-            &decryption_shares,
-            &decryption_parties,
-            &sum_ciphertext,
-            &params
-        )?
+        threshold_reconstruct(&decryption_shares, &decryption_parties, &params)?
     );
 
     println!("Threshold decryption result: {}", threshold_result);
@@ -1011,12 +982,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let alt_decryption_shares =
             compute_decryption_shares(&parties, &alt_decryption_parties, &sum_ciphertext, &params)?;
-        let alt_threshold_result = threshold_reconstruct(
-            &alt_decryption_shares,
-            &alt_decryption_parties,
-            &sum_ciphertext,
-            &params,
-        )?;
+        let alt_threshold_result =
+            threshold_reconstruct(&alt_decryption_shares, &alt_decryption_parties, &params)?;
 
         assert_eq!(
             threshold_result, alt_threshold_result,
