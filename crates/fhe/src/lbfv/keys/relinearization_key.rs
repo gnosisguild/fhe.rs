@@ -1,7 +1,8 @@
 /*!
  * Implementation of the l-BFV relinearization algorithm as described in
- * [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
- *
+ * Robust Multiparty Computation from Threshold Encryption Based on RLWE
+ * [1](https://eprint.iacr.org/2024/1285.pdf).
+ * 
  * This module contains the relinearization key for the l-BFV scheme, along with the relinearization key 
  * relinearization algorithm.
  */
@@ -36,6 +37,7 @@ pub struct LBFVRelinearizationKey {
     /// ciphertexts encrypted under s ((d0, d1), where d0 is the c0 component,
     /// and d1 is the c1 component of the key switch key). Mathematically,
     /// this is equivalent to (-sk*d1 + e + r*g, d1).
+    /// This key serves us while performing Step 4 from Algorithm 1 of [1](https://eprint.iacr.org/2024/1285.pdf)
     ksk_r_to_s: KeySwitchingKey,
     /// Key switching key that transforms ciphertexts encrypted under s to
     /// ciphertexts encrypted under r ((d2, -a), where d2 is the c0 component,
@@ -44,6 +46,7 @@ pub struct LBFVRelinearizationKey {
     /// not want to go into the code and negate 'a' itself. We are using c0
     /// of this key switching key anyways so a positive 'a' is not a big
     /// deal. We get (r*a + e + sk*g, a).
+    /// This key serves us while performing Step 5 from Algorithm 1 of [1](https://eprint.iacr.org/2024/1285.pdf)
     ksk_s_to_r: KeySwitchingKey,
     /// The polynomial b_vec used in the relinearization process. This is the
     /// l-BFV public key b-values associated with the secret key.
