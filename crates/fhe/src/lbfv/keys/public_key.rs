@@ -22,7 +22,10 @@ pub struct LBFVPublicKey {
     pub par: Arc<BfvParameters>,
     /// The public key ciphertexts, one for each RNS modulus
     pub c: Vec<Ciphertext>,
-    /// The decomposition size which is the number of RNS moduli (the l in lBFV)
+    /// The decomposition size which is the number of RNS moduli (the l in lBFV). 
+    /// Note while l in https://eprint.iacr.org/2024/1285.pdf is equal to the size
+    /// chosen of the Gadget vector, here it is equal the number of RNS moduli
+    /// as the library uses the optmization of https://eprint.iacr.org/2018/117.pdf
     pub l: usize,
     /// The seed used to generate all ciphertexts deterministically
     pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
