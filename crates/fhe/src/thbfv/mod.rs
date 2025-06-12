@@ -1,6 +1,6 @@
-//! The Multiparty BFV scheme, as described by Christian Mouchet et. al.
-//! in [Multiparty Homomorphic Encryption from Ring-Learning-with-Errors](https://eprint.iacr.org/2020/304.pdf).
+//! The Threshold BFV scheme, as described by Antoine Urban and Matthieu Rambaud.
+//! in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
 
-mod key_gen;
+mod trbfv;
 
-pub use key_gen::TrBFVShare;
+pub use trbfv::TrBFVShare;

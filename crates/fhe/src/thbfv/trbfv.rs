@@ -1,15 +1,20 @@
 use std::{sync::Arc};
 
-use crate::bfv::{PublicKey, SecretKey, Ciphertext, BfvParameters};
+use crate::bfv::{PublicKey, SecretKey, Ciphertext, Plaintext, BfvParameters};
 use zeroize::{Zeroizing};
 use fhe_util::sample_vec_cbd_unbounded;
-use crate::errors::Result;
+use crate::{Error, Result};
 use rand::{CryptoRng, RngCore};
 use shamir_secret_sharing::ShamirSecretSharing as SSS;
 use num_bigint_old::{BigInt, ToBigInt};
-use fhe_math::rq::{traits::TryConvertFrom, Context, Poly, Representation};
+use num_bigint::BigUint;
+use fhe_math::{
+    rns::{RnsContext, ScalingFactor},
+    rq::{scaler::Scaler, traits::TryConvertFrom, Context, Poly, Representation},
+    zq::Modulus
+};
 use num_traits::ToPrimitive;
-use itertools::{izip, zip};
+use itertools::{izip, zip, Itertools};
 use ndarray::{array, Array2, Array3, Axis};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -17,58 +22,49 @@ pub struct TrBFVShare {
     n: usize,
     threshold: usize,
     degree: usize,
+    plaintext_modulus: u64,
     sumdging_variance: u64,
-    moduli: Vec<u64>
+    moduli: Vec<u64>,
+    params: Arc<BfvParameters>
 }
 
 impl TrBFVShare {
-    // TODO: take params and store, get moduli and degree from ctx
+    // TODO: take params and store, get moduli, plaintext_moduli, and degree from ctx
     pub fn new(
         n: usize,
         threshold: usize,
         degree: usize,
+        plaintext_modulus: u64,
         sumdging_variance: u64,
-        moduli: Vec<u64>
+        moduli: Vec<u64>,
+        params: Arc<BfvParameters>
     ) -> Result<Self> {
         // generate random secret
         Ok(Self { 
             n,
             threshold,
             degree,
+            plaintext_modulus,
             sumdging_variance,
-            moduli
+            moduli,
+            params
         })
     }
 
-    pub fn gen_sk_poly(
-        sk: SecretKey,
-        params: BfvParameters
-    ) -> Result<Zeroizing<Poly>> {
-        // convert sk into polynomial RNS form
-        let mut sk_poly = Zeroizing::new(Poly::try_convert_from(
-            sk.coeffs.as_ref(),
-            &params.ctx_at_level(0).unwrap(),
-            false,
-            Representation::PowerBasis,
-        ).unwrap());
-        Ok(sk_poly)
-    }
-
-    // convert_poly_to_shares
-    pub fn gen_sss_shares(
+    // Generate Shamir Secret Shares
+    pub fn generate_secret_shares(
         &mut self,
-        params: Arc<BfvParameters>,
         sk: SecretKey
     ) -> Result<Vec<(Array2<u64>)>> {
         let mut poly = Zeroizing::new(Poly::try_convert_from(
             sk.coeffs.as_ref(),
-            &params.ctx_at_level(0).unwrap(),
+            &self.params.ctx_at_level(0).unwrap(),
             false,
             Representation::PowerBasis,
         ).unwrap());
 
         // 2 dim array, columns = fhe coeffs (degree), rows = party members shamir share coeff (n)
-        let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(params.moduli.len());
+        let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(self.params.moduli.len());
 
         // for each moduli, for each coeff generate an SSS of degree n and threshold n = 2t + 1
         for (k, (m, p)) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()).enumerate() {
@@ -102,32 +98,19 @@ impl TrBFVShare {
         Ok(return_vec)
     }
 
-    // This is only for one moduli, call this moduli.len times?
-    pub fn convert_shares_to_polys(
+    // Go from collect sss shares to summed SK_i polynomial.
+    pub fn sum_sk_i(
         &mut self,
-        modulus: u64,
-        secret_share_coeffs: &Vec<Vec<u64>>, // num_party shares of u64 shamir coeffs
-    ) -> Result<Vec<Poly>> {
-        //let mut s_shares: Vec<Poly> = vec![Poly::zero(&sk_par.ctx_at_level(0).unwrap(), Representation::PowerBasis); n]; // think we need m of these
-        //s_shares[j].coefficients_mut()[k][i] = c_share.to_u64().unwrap();
-        //create array2 from vec<vec<u64>
-        //s_shares[j].set_coefficients(array2);
-
-        // moduli.len * share_amount * degree // do this a level up
-        let ctx_m = Context::new_arc(&[modulus], self.degree).unwrap();
-        // for each modulus there are num_party vecs of degree coeff length u64 shamir coeffs
-        let mut s_share_polys: Vec<Poly> = Vec::with_capacity(self.n);
-        for i in 0..self.n {
-            let mut s_share_poly = Poly::try_convert_from(
-                &secret_share_coeffs[i],
-                &ctx_m,
-                false,
-                Representation::PowerBasis,
-            ).unwrap();
-            s_share_polys.push(s_share_poly)
+        sk_sss_collected: &Vec<Array2<u64>>, // collected sk sss shares from other parties
+    ) -> Result<Poly> {
+        let mut sum_poly = Poly::zero(&self.params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        for j in 0..self.n {
+            // Initialize empty poly with correct context (moduli and level)
+            let mut poly_j = Poly::zero(&self.params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+            poly_j.set_coefficients(sk_sss_collected[j].clone());
+            sum_poly = &sum_poly + &poly_j;
         }
-        // return vec of num_party polys
-        Ok(s_share_polys)
+        Ok(sum_poly)
     }
 
     pub fn gen_smudging_error<R: RngCore + CryptoRng>(
@@ -141,17 +124,101 @@ impl TrBFVShare {
         Ok(s_coefficients)
     }
 
-    pub fn decryption_share(ciphertext: Arc<Ciphertext>, smudge: Vec<(BigInt)>, sk: Vec<(BigInt)>) -> Result<i64> {
-        // sum c0 + c1
-        let mut c0c1 = ciphertext.c[0].as_ref() + &ciphertext.c[1];
-        // mul c0 + c1 * sk
-        //let poly_sk = Poly::try_convert_from(m_v.as_ref(), ctx, false, Representation::PowerBasis).unwrap();
-        //poly_sk.change_representation(Representation::Ntt);
-        //Poly::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time
-        //let cxs = c0c1 * &sk;
-        //println!("{:?}", sk[0]);
-        // add esm
-        Ok(0)
+    // compute decryption share
+    pub fn decryption_share(
+        &mut self,
+        ciphertext: Arc<Ciphertext>,
+        mut sk_i: Poly
+    ) -> Result<Poly> {
+        // decrypt
+        // mul c1 * sk
+        // then add c0 + (c1*sk)
+        let mut c0 = ciphertext.c[0].clone();
+        c0.change_representation(Representation::PowerBasis);
+        sk_i.change_representation(Representation::Ntt);
+        let mut c1 = ciphertext.c[1].clone();
+        c1.change_representation(Representation::Ntt);
+        let mut c1sk = &c1 * &sk_i;
+        c1sk.change_representation(Representation::PowerBasis);
+        let mut d_share_poly = &c0 + &c1sk;
+        Ok(d_share_poly)
+    }
+
+    // compute decryption to plaintext from collected decryption shares
+    // threshold number of shares required
+    pub fn decrypt(
+        &mut self,
+        d_share_polys: Vec<Poly>,
+        ciphertext: Arc<Ciphertext>
+    ) -> Result<Plaintext> {
+        let mut shamir_open_vec: Vec<(usize, BigInt)> = Vec::with_capacity(self.moduli.len()); // use array2 for this
+        let mut shamir_open_vec_mod: Vec<(usize, BigInt)> = Vec::with_capacity(self.degree);
+        let mut m_data: Vec<u64> = Vec::new();
+
+        // collect shamir openings
+        for m in 0..self.moduli.len() {
+            let sss = SSS {
+                threshold: self.threshold,
+                share_amount: self.n,
+                prime: BigInt::from(self.moduli[m])
+            };
+            for i in 0..self.degree {
+                let mut shamir_open_vec_mod: Vec<(usize, BigInt)> = Vec::with_capacity(self.degree);
+                for j in 0..self.threshold {
+                    let coeffs = d_share_polys[j].coefficients();
+                    let coeff_arr = coeffs.row(m);
+                    let coeff = coeff_arr[i];
+                    let coeff_formatted = (j+1, coeff.to_bigint().unwrap());
+                    shamir_open_vec_mod.push(coeff_formatted);
+                }
+                // open shamir
+                let shamir_result = sss.recover(&shamir_open_vec_mod[0..self.threshold as usize]);
+                m_data.push(shamir_result.to_u64().unwrap());
+            }
+        }
+
+        // scale result poly
+        let arr_matrix = Array2::from_shape_vec((self.moduli.len(), self.degree), m_data).unwrap();
+        let mut result_poly = Poly::zero(&self.params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        result_poly.set_coefficients(arr_matrix);
+
+        let plaintext_ctx = Context::new_arc(&self.moduli[..1], self.degree).unwrap();
+        let mut scalers = Vec::with_capacity(self.moduli.len());
+        for i in 0..self.moduli.len() {
+            let rns = RnsContext::new(&self.moduli[..self.moduli.len() - i]).unwrap();
+            let ctx_i = Context::new_arc(&self.moduli[..self.moduli.len() - i], self.degree).unwrap();
+            scalers.push(Scaler::new(
+                &ctx_i,
+                &plaintext_ctx,
+                ScalingFactor::new(&BigUint::from(self.plaintext_modulus), rns.modulus()),
+            ).unwrap());
+        }
+
+        let par = ciphertext.par.clone();
+        let d = Zeroizing::new(result_poly.scale(&scalers[ciphertext.level])?);
+        let v = Zeroizing::new(
+            Vec::<u64>::from(d.as_ref())
+                .iter_mut()
+                .map(|vi| *vi + par.plaintext.modulus())
+                .collect_vec(),
+        );
+        let mut w = v[..par.degree()].to_vec();
+        let q = Modulus::new(par.moduli[0]).map_err(Error::MathError)?;
+        q.reduce_vec(&mut w);
+        par.plaintext.reduce_vec(&mut w);
+
+        let mut poly =
+            Poly::try_convert_from(&w, ciphertext.c[0].ctx(), false, Representation::PowerBasis)?;
+        poly.change_representation(Representation::Ntt);
+
+        let pt = Plaintext {
+            par: par.clone(),
+            value: w.into_boxed_slice(),
+            encoding: None,
+            poly_ntt: poly,
+            level: ciphertext.level,
+        };
+        Ok(pt)
     }
 }
 
@@ -306,7 +373,7 @@ mod tests {
         //println!("{:?}", s);
         // ----------
         let mut trbfv = TrBFVShare::new(n, threshold, degree, 9, moduli.clone()).unwrap();
-        let get_coeff_matrix = trbfv.gen_sss_shares(sk_par.clone(), s_raw.clone()).unwrap();
+        let get_coeff_matrix = trbfv.generate_secret_shares(sk_par.clone(), s_raw.clone()).unwrap();
         println!("{:?}", get_coeff_matrix[1].row(0));
 
         // gather seceret coeffs
