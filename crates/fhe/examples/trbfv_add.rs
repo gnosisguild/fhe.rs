@@ -1,4 +1,4 @@
-// Implementation of multiparty voting using the `fhe` crate.
+// Implementation of threshold addition using the `fhe` and `trbfv` crate.
 
 mod util;
 
@@ -7,32 +7,22 @@ use std::{env, error::Error, process::exit, sync::Arc};
 use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
-    mbfv::{AggregateIter, CommonRandomPoly, DecryptionShare, PublicKeyShare},
+    mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
     thbfv::{TrBFVShare},
 };
-use fhe_math::{
-    ntt::NttOperator,
-    rns::{RnsContext, ScalingFactor},
-    rq::{scaler::Scaler, traits::TryConvertFrom, Context, Poly, Representation},
-    zq::{primes::generate_prime, Modulus},
-};
+use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use util::timeit::{timeit, timeit_n};
-use num_bigint_old::{BigInt, ToBigInt};
-use num_bigint::BigUint;
-use num_traits::ToPrimitive;
-use shamir_secret_sharing::ShamirSecretSharing as SSS;
-use ndarray::{array, Array2, Array3, Axis, Array, ArrayView};
-use zeroize::{Zeroizing};
+use ndarray::{Array2, Array, ArrayView};
 
 fn print_notice_and_exit(error: Option<String>) {
     println!(
-        "{} Multiplication with threshold BFV",
+        "{} Addition with threshold BFV",
         style("  overview:").magenta().bold()
     );
     println!(
-        "{} multiply [-h] [--help] [--num_summed=<value>] [--num_parties=<value>] [--threshold=<value>]",
+        "{} add [-h] [--help] [--num_summed=<value>] [--num_parties=<value>] [--threshold=<value>]",
         style("     usage:").magenta().bold()
     );
     println!(
@@ -67,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut num_parties = 10;
     let mut threshold = 7;
 
-    // Update the number of users and/or number of parties depending on the
+    // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.
     for arg in &args {
         if arg.starts_with("--num_summed") {
@@ -106,8 +96,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // The parameters are within bound, let's go! Let's first display some
-    // information about the vote.
-    println!("# Multiplication with trBFV");
+    // information about the threshold sum.
+    println!("# Addition with trBFV");
     println!("\tnum_summed = {num_summed}");
     println!("\tnum_parties = {num_parties}");
     println!("\tthreshold = {threshold}");
@@ -125,7 +115,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Party setup: each party generates a secret key and shares of a collective
     // public key.
     struct Party{
-        sk_share: SecretKey,
         pk_share: PublicKeyShare,
         sk_sss: Vec<Array2<u64>>,
         sk_sss_collected: Vec<Array2<u64>>,
@@ -154,10 +143,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
         let sk_sss = trbfv.generate_secret_shares(sk_share.clone()).unwrap();
         // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
-        let mut sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-        let mut sk_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        let mut d_share_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        parties.push(Party { sk_share, pk_share, sk_sss, sk_sss_collected, sk_poly_sum, d_share_poly });
+        let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
+        let sk_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        let d_share_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        parties.push(Party { pk_share, sk_sss, sk_sss_collected, sk_poly_sum, d_share_poly });
     });
 
     // Swap shares mocking network comms, party 1 sends share 2 to party 2 etc.
