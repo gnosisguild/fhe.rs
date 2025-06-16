@@ -23,7 +23,8 @@ pub struct RnsContext {
     q_tilde_shoup: Vec<u64>,
     q_star: Vec<BigUint>,
     garner: Vec<BigUint>,
-    product: BigUint,
+    /// The product of all moduli in the RNS basis
+    pub product: BigUint,
 }
 
 impl Debug for RnsContext {

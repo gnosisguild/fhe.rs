@@ -393,14 +393,39 @@ impl Modulus {
     /// # Safety
     /// This function is not constant time and its timing may reveal information
     /// about the value being centered.
+    /// Note centering here was modified so as to be consistent with Greco
     const unsafe fn center_vt(&self, a: u64) -> i64 {
         debug_assert!(a < self.p);
 
-        if a >= self.p >> 1 {
+        //if a >= self.p >> 1 {
+        if a > (self.p - 1) >> 1 {
             (a as i64) - (self.p as i64)
         } else {
             a as i64
         }
+    }
+
+    /// Centers a `u64` value into the range `[[-(self.p - 1)]/2, (self.p -
+    /// 1)/2]` according to the modulus `self.p`, in constant time.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The `u64` value to be centered.
+    ///
+    /// # Returns
+    ///
+    /// An `i64` value centered around zero with respect to the modulus
+    /// `self.p`. Note centering here was modified so as to be consistent
+    /// with Greco
+    pub fn center(&self, a: u64) -> i64 {
+        assert!(a < self.p, "Value must be less than modulus.");
+
+        let half_p = (self.p - 1) >> 1; // Equivalent to (p - 1)/ 2
+
+        // Compute centered value using bitwise operations
+        let offset = (a > half_p) as i64; // This will be 1 if true, 0 if false
+
+        a as i64 - (offset * self.p as i64)
     }
 
     /// Center a vector in variable time.
@@ -992,6 +1017,19 @@ mod tests {
             let b = p.serialize_vec(&a);
             let c = p.deserialize_vec(&b);
             prop_assert_eq!(a, c);
+        }
+
+        // Property-based test for the `center` function
+        #[test]
+        fn center_correctness(p in valid_moduli(), a: u64) {
+            let a = a % p.modulus(); // Ensure `a` is within [0, p)
+            let expected = if a >= p.modulus() >> 1 {
+                a as i64 - p.modulus() as i64
+            } else {
+                a as i64
+            };
+            let result = p.center(a);
+            prop_assert_eq!(result, expected);
         }
     }
 

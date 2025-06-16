@@ -48,6 +48,11 @@ message PublicKey {
     Ciphertext c = 1;
 }
 
+message LBFVPublicKey {
+    repeated Ciphertext c = 1;
+    uint32 l = 2;
+}
+
 message PublicKeyShare {
     Poly p0 = 1;
 }

@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
-use crate::proto::bfv::{Ciphertext as CiphertextProto, PublicKeyShare as PublicKeyShareProto};
-use fhe_traits::{DeserializeWithContext, Serialize};
 use crate::errors::Result;
 use crate::Error;
 use fhe_math::rq::{traits::TryConvertFrom, Poly, Representation};
+use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 //use serde::{Serialize, Deserialize};
@@ -63,7 +62,13 @@ impl PublicKeyShare {
         Ok(Self { par, crp, p0_share })
     }
 
-    pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>, crp: CommonRandomPoly) -> Result<Self> {
+    /// Deserialize a PublicKeyShare from bytes with the given parameters and
+    /// CRP
+    pub fn deserialize(
+        bytes: &[u8],
+        par: &Arc<BfvParameters>,
+        crp: CommonRandomPoly,
+    ) -> Result<Self> {
         let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
         Ok(Self {
             par: par.clone(),
@@ -116,8 +121,8 @@ impl Serialize for PublicKeyShare {
 // impl DeserializeWithCRP for PublicKeyShare {
 //     type Error = Error;
 
-//     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>, crp: CommonRandomPoly) -> Result<Self> {
-//         Ok(Self {
+//     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>, crp:
+// CommonRandomPoly) -> Result<Self> {         Ok(Self {
 //             par: par.clone(),
 //             crp: crp.clone(),
 //             p0_share,

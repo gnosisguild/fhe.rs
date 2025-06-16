@@ -88,7 +88,13 @@ impl SecretKeySwitchShare {
         Ok(Self { par, ct, h_share })
     }
 
-    pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>, ct: Arc<Ciphertext>) -> Result<Self> {
+    /// Deserialize a SecretKeySwitchShare from bytes with the given parameters
+    /// and ciphertext
+    pub fn deserialize(
+        bytes: &[u8],
+        par: &Arc<BfvParameters>,
+        ct: Arc<Ciphertext>,
+    ) -> Result<Self> {
         let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
         Ok(Self {
             par: par.clone(),
@@ -150,8 +156,14 @@ impl DecryptionShare {
         Ok(DecryptionShare { sks_share })
     }
 
-    pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>, ct: Arc<Ciphertext>) -> Result<Self> {
-        let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
+    /// Deserialize a DecryptionShare from bytes with the given parameters and
+    /// ciphertext
+    pub fn deserialize(
+        bytes: &[u8],
+        par: &Arc<BfvParameters>,
+        ct: Arc<Ciphertext>,
+    ) -> Result<Self> {
+        let _test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
         Ok(Self {
             sks_share: SecretKeySwitchShare::deserialize(bytes, par, ct).unwrap(),
         })

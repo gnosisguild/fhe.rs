@@ -18,7 +18,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 /// Secret key for the BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SecretKey {
+    /// The BFV parameters
     pub(crate) par: Arc<BfvParameters>,
+    /// The secret key coefficients
     pub coeffs: Box<[i64]>,
 }
 
@@ -91,17 +93,15 @@ impl SecretKey {
         Ok(noise)
     }
 
-    pub(crate) fn encrypt_poly<R: RngCore + CryptoRng>(
+    pub(crate) fn encrypt_poly_with_seed<R: RngCore + CryptoRng>(
         &self,
         p: &Poly,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Ciphertext> {
         assert_eq!(p.representation(), &Representation::Ntt);
 
         let level = self.par.level_of_ctx(p.ctx())?;
-
-        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        thread_rng().fill(&mut seed);
 
         // Let's create a secret key with the ciphertext context
         let mut s = Zeroizing::new(Poly::try_convert_from(
@@ -132,6 +132,30 @@ impl SecretKey {
             c: vec![b, a],
             level,
         })
+    }
+
+    pub(crate) fn encrypt_poly<R: RngCore + CryptoRng>(
+        &self,
+        p: &Poly,
+        rng: &mut R,
+    ) -> Result<Ciphertext> {
+        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        thread_rng().fill(&mut seed);
+
+        self.encrypt_poly_with_seed(p, seed, rng)
+    }
+
+    /// Encrypt a plaintext using a provided seed for deterministic generation
+    /// of random polynomials
+    pub fn try_encrypt_with_seed<R: RngCore + CryptoRng>(
+        &self,
+        pt: &Plaintext,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+        rng: &mut R,
+    ) -> Result<Ciphertext> {
+        assert_eq!(self.par, pt.par);
+        let m = Zeroizing::new(pt.to_poly());
+        self.encrypt_poly_with_seed(m.as_ref(), seed, rng)
     }
 }
 
@@ -220,7 +244,8 @@ mod tests {
     use super::SecretKey;
     use crate::bfv::{parameters::BfvParameters, Encoding, Plaintext};
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
-    use rand::thread_rng;
+    use rand::{thread_rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
     use std::error::Error;
 
     #[test]
@@ -260,6 +285,39 @@ mod tests {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_deterministic_encryption() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        // Create a test plaintext
+        let pt = Plaintext::try_encode(
+            &params.plaintext.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+
+        // Create a fixed seed
+        let seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+
+        // Encrypt the same plaintext twice with the same seed
+        let ct1 = sk.try_encrypt_with_seed(&pt, seed, &mut rng)?;
+        let ct2 = sk.try_encrypt_with_seed(&pt, seed, &mut rng)?;
+
+        // The ciphertexts should be identical except for the error terms
+        assert_eq!(ct1.c[1], ct2.c[1]); // The 'a' polynomials should be identical
+        assert_ne!(ct1.c[0], ct2.c[0]); // The 'b' polynomials should differ due to random error
+
+        // Both should decrypt to the same plaintext
+        let pt1 = sk.try_decrypt(&ct1)?;
+        let pt2 = sk.try_decrypt(&ct2)?;
+        assert_eq!(pt1, pt2);
+        assert_eq!(pt1, pt);
 
         Ok(())
     }
