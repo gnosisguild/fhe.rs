@@ -1,6 +1,6 @@
 use std::{sync::Arc};
 
-use crate::bfv::{PublicKey, SecretKey, Ciphertext, Plaintext, BfvParameters};
+use crate::bfv::{SecretKey, Ciphertext, Plaintext, BfvParameters};
 use zeroize::{Zeroizing};
 use fhe_util::sample_vec_cbd_unbounded;
 use crate::{Error, Result};
@@ -14,8 +14,8 @@ use fhe_math::{
     zq::Modulus
 };
 use num_traits::ToPrimitive;
-use itertools::{izip, zip, Itertools};
-use ndarray::{array, Array2, Array3, Axis};
+use itertools::{izip, Itertools};
+use ndarray::Array2;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct TrBFVShare {
@@ -55,8 +55,8 @@ impl TrBFVShare {
     pub fn generate_secret_shares(
         &mut self,
         sk: SecretKey
-    ) -> Result<Vec<(Array2<u64>)>> {
-        let mut poly = Zeroizing::new(Poly::try_convert_from(
+    ) -> Result<Vec<Array2<u64>>> {
+        let poly = Zeroizing::new(Poly::try_convert_from(
             sk.coeffs.as_ref(),
             &self.params.ctx_at_level(0).unwrap(),
             false,
@@ -67,7 +67,7 @@ impl TrBFVShare {
         let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(self.params.moduli.len());
 
         // for each moduli, for each coeff generate an SSS of degree n and threshold n = 2t + 1
-        for (k, (m, p)) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()).enumerate() {
+        for (_k, (m, p)) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()).enumerate() {
             // Create shamir object
             let shamir = SSS {
                 threshold: self.threshold,
@@ -77,13 +77,13 @@ impl TrBFVShare {
             let mut m_data: Vec<u64> = Vec::new();
 
             // For each coeff in the polynomial p under the current modulus m
-            for (i, c) in p.iter().enumerate() {
+            for (_i, c) in p.iter().enumerate() {
                 // Split the coeff into n shares
                 let secret = c.to_bigint().unwrap();
                 let c_shares = shamir.split(secret.clone());
                 // For each share convert to u64
                 let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
-                for (j, (_, c_share)) in c_shares.iter().enumerate() {
+                for (_j, (_, c_share)) in c_shares.iter().enumerate() {
                     c_vec.push(c_share.to_u64().unwrap());
                 }
                 m_data.extend_from_slice(&c_vec);
@@ -140,7 +140,7 @@ impl TrBFVShare {
         c1.change_representation(Representation::Ntt);
         let mut c1sk = &c1 * &sk_i;
         c1sk.change_representation(Representation::PowerBasis);
-        let mut d_share_poly = &c0 + &c1sk;
+        let d_share_poly = &c0 + &c1sk;
         Ok(d_share_poly)
     }
 
@@ -151,8 +151,6 @@ impl TrBFVShare {
         d_share_polys: Vec<Poly>,
         ciphertext: Arc<Ciphertext>
     ) -> Result<Plaintext> {
-        let mut shamir_open_vec: Vec<(usize, BigInt)> = Vec::with_capacity(self.moduli.len()); // use array2 for this
-        let mut shamir_open_vec_mod: Vec<(usize, BigInt)> = Vec::with_capacity(self.degree);
         let mut m_data: Vec<u64> = Vec::new();
 
         // collect shamir openings

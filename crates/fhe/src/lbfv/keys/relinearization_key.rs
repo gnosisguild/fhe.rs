@@ -16,20 +16,13 @@
  *    inherently provides robustness in the threshold setting.
  */
 
-use std::sync::Arc;
-
 use crate::bfv::keys::key_switching_key::KeySwitchingKey;
-use crate::bfv::{traits::TryConvertFrom, BfvParameters, Ciphertext, SecretKey};
-use crate::proto::bfv::{
-    KeySwitchingKey as KeySwitchingKeyProto, RelinearizationKey as RelinearizationKeyProto,
-};
+use crate::bfv::{Ciphertext, SecretKey};
 use crate::{Error, Result};
 use fhe_math::rq::{
     switcher::Switcher, traits::TryConvertFrom as TryConvertFromPoly, Poly, Representation,
 };
-use fhe_traits::{DeserializeParametrized, FheParametrized, Serialize};
 use itertools::izip;
-use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
