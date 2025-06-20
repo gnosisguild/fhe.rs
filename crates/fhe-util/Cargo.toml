@@ -16,6 +16,7 @@ num-traits.workspace = true
 prime_factorization.workspace = true
 rand.workspace = true
 rayon.workspace = true
+rand_distr.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

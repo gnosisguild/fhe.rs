@@ -7,13 +7,14 @@
 #[cfg(test)]
 extern crate proptest;
 
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, RngCore, Rng};
 
 use num_bigint_dig::{prime::probably_prime, BigUint, ModInverse};
 use num_traits::{cast::ToPrimitive, PrimInt};
 use prime_factorization::Factorization;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use std::{error::Error, fmt, panic::UnwindSafe};
+use rand_distr::{Normal, Distribution};
 
 /// Define catch_unwind to silence the panic in unit tests.
 pub fn catch_unwind<F, R>(f: F) -> std::thread::Result<R>
@@ -158,38 +159,19 @@ pub fn sample_vec_cbd<R: RngCore + CryptoRng>(
     Ok(out)
 }
 
-/// Sample a vector of independent centered binomial distributions of a given
-/// variance. Returns an error if the variance is strictly larger than 16.
-pub fn sample_vec_cbd_unbounded<R: RngCore + CryptoRng>(
+/// Sample a vector of normal distributions of a given variance.
+pub fn sample_vec_normal<R: Rng + CryptoRng>(
     vector_size: usize,
     variance: usize,
     rng: &mut R,
 ) -> Result<Vec<i64>, &'static str> {
-    if !(1..=64).contains(&variance) {
-        return Err("The variance should be between 1 and 16");
-    }
-
+    // convert variance to standard deviation
+    let standard_deviation = (variance as f64).sqrt();
     let mut out = Vec::with_capacity(vector_size);
-    // TODO: ensure higher bounds work here
-    let number_bits = 4 * variance;
-    let mask_add = ((u64::MAX >> (64 - number_bits)) >> (2 * variance)) as u128;
-    let mask_sub = mask_add << (2 * variance);
-
-    let mut current_pool = 0u128;
-    let mut current_pool_nbits = 0;
-
+    let normal = Normal::new(0.0, standard_deviation).unwrap();
     for _ in 0..vector_size {
-        if current_pool_nbits < number_bits {
-            current_pool |= (rng.next_u64() as u128) << current_pool_nbits;
-            current_pool_nbits += 64;
-        }
-        debug_assert!(current_pool_nbits >= number_bits);
-        out.push(
-            ((current_pool & mask_add).count_ones() as i64)
-                - ((current_pool & mask_sub).count_ones() as i64),
-        );
-        current_pool >>= number_bits;
-        current_pool_nbits -= number_bits;
+        let sample = normal.sample(rng);
+        out.push(sample as i64); // Store the sampled value in the output vector
     }
 
     Ok(out)
