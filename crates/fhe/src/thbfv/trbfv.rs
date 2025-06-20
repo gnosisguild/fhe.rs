@@ -2,7 +2,7 @@ use std::{sync::Arc};
 
 use crate::bfv::{SecretKey, Ciphertext, Plaintext, BfvParameters};
 use zeroize::{Zeroizing};
-use fhe_util::sample_vec_cbd_unbounded;
+use fhe_util::sample_vec_normal;
 use crate::{Error, Result};
 use rand::{CryptoRng, RngCore};
 use shamir_secret_sharing::ShamirSecretSharing as SSS;
@@ -120,7 +120,7 @@ impl TrBFVShare {
     ) -> Result<Vec<i64>> {
         // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
         // in [−Bsm, Bsm]
-        let s_coefficients = sample_vec_cbd_unbounded(degree, variance, rng).unwrap();
+        let s_coefficients = sample_vec_normal(degree, variance, rng).unwrap();
         Ok(s_coefficients)
     }
 
