@@ -8,7 +8,7 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
-    thbfv::{TrBFVShare},
+    trbfv::{TrBFVShare},
 };
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
@@ -117,8 +117,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     struct Party{
         pk_share: PublicKeyShare,
         sk_sss: Vec<Array2<u64>>,
+        esi_sss: Vec<Array2<u64>>,
         sk_sss_collected: Vec<Array2<u64>>,
+        es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly,
+        es_poly_sum: Poly,
         d_share_poly: Poly,
     }
     let mut parties = Vec::with_capacity(num_parties);
@@ -132,7 +135,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         threshold,
         degree,
         plaintext_modulus,
-        16,
+        160,
         moduli.clone(),
         params.clone()
     ).unwrap();
@@ -141,23 +144,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     timeit_n!("Party setup (per party)", num_parties as u32, {
         let sk_share = SecretKey::random(&params, &mut OsRng);
         let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
-        let sk_sss = trbfv.generate_secret_shares(sk_share.clone()).unwrap();
+        let sk_sss = trbfv.generate_secret_shares(sk_share.coeffs.clone())?;
+        let esi_coeffs = trbfv.generate_smudging_error(&mut OsRng)?;
+        let esi_sss = trbfv.generate_secret_shares(esi_coeffs.into_boxed_slice())?;
         // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
         let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
+        let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
         let sk_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        let es_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
         let d_share_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        parties.push(Party { pk_share, sk_sss, sk_sss_collected, sk_poly_sum, d_share_poly });
+        parties.push(Party { pk_share, sk_sss, esi_sss, sk_sss_collected, es_sss_collected, sk_poly_sum, es_poly_sum, d_share_poly });
     });
 
     // Swap shares mocking network comms, party 1 sends share 2 to party 2 etc.
     let mut i = 0;
-    timeit_n!("Simunlating network (share swapping per party)", num_parties as u32, {
+    timeit_n!("Simulating network (share swapping per party)", num_parties as u32, {
         for j in 0..num_parties {
             let mut node_share_m = Array::zeros((0, 2048));
+            let mut es_node_share_m = Array::zeros((0, 2048));
             for m in 0..moduli.len() {
                 node_share_m.push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).clone())).unwrap();
+                es_node_share_m.push_row(ArrayView::from(&parties[j].esi_sss[m].row(i).clone())).unwrap();
             }
             parties[i].sk_sss_collected.push(node_share_m);
+            parties[i].es_sss_collected.push(es_node_share_m);
         }
         i+=1;
     });
@@ -166,6 +176,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // For each party, convert shares to polys and sum the collected shares.
     timeit_n!("Sum collected shares (per party)", num_parties as u32, {
         parties[i].sk_poly_sum = trbfv.sum_sk_i(&parties[i].sk_sss_collected).unwrap();
+        parties[i].es_poly_sum = trbfv.sum_sk_i(&parties[i].es_sss_collected).unwrap();
         i += 1;
     });
 
@@ -203,7 +214,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // decrypt
     i = 0;
     timeit_n!("Generate Decrypt Share (per party)", num_parties as u32, {
-        parties[i].d_share_poly = trbfv.decryption_share(tally.clone(), parties[i].sk_poly_sum.clone()).unwrap();
+        parties[i].d_share_poly = trbfv.decryption_share(tally.clone(), parties[i].sk_poly_sum.clone(), parties[i].es_poly_sum.clone()).unwrap();
         i += 1;
     });
 
