@@ -23,7 +23,7 @@ pub struct TrBFVShare {
     threshold: usize,
     degree: usize,
     plaintext_modulus: u64,
-    sumdging_variance: u64,
+    sumdging_variance: usize,
     moduli: Vec<u64>,
     params: Arc<BfvParameters>
 }
@@ -35,7 +35,7 @@ impl TrBFVShare {
         threshold: usize,
         degree: usize,
         plaintext_modulus: u64,
-        sumdging_variance: u64,
+        sumdging_variance: usize,
         moduli: Vec<u64>,
         params: Arc<BfvParameters>
     ) -> Result<Self> {
@@ -54,10 +54,10 @@ impl TrBFVShare {
     // Generate Shamir Secret Shares
     pub fn generate_secret_shares(
         &mut self,
-        sk: SecretKey
+        coeffs: Box<[i64]>
     ) -> Result<Vec<Array2<u64>>> {
         let poly = Zeroizing::new(Poly::try_convert_from(
-            sk.coeffs.as_ref(),
+            coeffs.as_ref(),
             &self.params.ctx_at_level(0).unwrap(),
             false,
             Representation::PowerBasis,
@@ -113,14 +113,13 @@ impl TrBFVShare {
         Ok(sum_poly)
     }
 
-    pub fn gen_smudging_error<R: RngCore + CryptoRng>(
-        degree: usize, // todo get this from self
-        variance: usize, // todo get this from self
+    pub fn generate_smudging_error<R: RngCore + CryptoRng>(
+        &mut self,
         rng: &mut R
     ) -> Result<Vec<i64>> {
         // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
         // in [−Bsm, Bsm]
-        let s_coefficients = sample_vec_normal(degree, variance, rng).unwrap();
+        let s_coefficients = sample_vec_normal(self.degree, self.sumdging_variance, rng).unwrap();
         Ok(s_coefficients)
     }
 
@@ -128,11 +127,12 @@ impl TrBFVShare {
     pub fn decryption_share(
         &mut self,
         ciphertext: Arc<Ciphertext>,
-        mut sk_i: Poly
+        mut sk_i: Poly,
+        mut es_i: Poly
     ) -> Result<Poly> {
         // decrypt
         // mul c1 * sk
-        // then add c0 + (c1*sk)
+        // then add c0 + (c1*sk) + es
         let mut c0 = ciphertext.c[0].clone();
         c0.change_representation(Representation::PowerBasis);
         sk_i.change_representation(Representation::Ntt);
@@ -140,7 +140,7 @@ impl TrBFVShare {
         c1.change_representation(Representation::Ntt);
         let mut c1sk = &c1 * &sk_i;
         c1sk.change_representation(Representation::PowerBasis);
-        let d_share_poly = &c0 + &c1sk;
+        let d_share_poly = &c0 + &c1sk + es_i;
         Ok(d_share_poly)
     }
 

@@ -9,7 +9,7 @@ pub mod bfv;
 pub mod lbfv;
 pub mod mbfv;
 pub mod proto;
-pub mod thbfv;
+pub mod trbfv;
 pub use errors::{Error, ParametersError, Result};
 
 // Test the source code included in the README.
