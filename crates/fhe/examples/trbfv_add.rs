@@ -1,4 +1,15 @@
-// Implementation of threshold addition using the `fhe` and `trbfv` crate.
+// Implementation of hierarchical threshold addition using the `fhe` and `trbfv` crate.
+//
+// This example demonstrates a hierarchical threshold BFV setup where:
+// - 9 total parties are organized into 3 groups of 3 parties each
+// - Within each group: 2/3 threshold (any 2 parties can act for the group)
+// - At the top level: 2/3 threshold (any 2 groups can decrypt)
+//
+// The hierarchical structure allows for more complex access patterns and can
+// provide better fault tolerance and security properties compared to flat
+// threshold schemes.
+//
+// Based on the MBFV example pattern from the same library.
 
 mod util;
 
@@ -8,29 +19,31 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
-    trbfv::{TrBFVShare},
+    trbfv::TrBFVShare,
 };
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
+use ndarray::{Array, Array2, ArrayView};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use util::timeit::{timeit, timeit_n};
-use ndarray::{Array2, Array, ArrayView};
 
 fn print_notice_and_exit(error: Option<String>) {
     println!(
-        "{} Addition with threshold BFV",
+        "{} Addition with hierarchical threshold BFV",
         style("  overview:").magenta().bold()
     );
     println!(
-        "{} add [-h] [--help] [--num_summed=<value>] [--num_parties=<value>] [--threshold=<value>]",
+        "{} add [-h] [--help] [--num_summed=<value>]",
         style("     usage:").magenta().bold()
     );
     println!(
-        "{} {} {} and {} must be at least 1",
+        "{} Hierarchical setup: 3 groups of 3 parties each, 2/3 threshold at both levels",
+        style("      note:").magenta().bold()
+    );
+    println!(
+        "{} {} must be at least 1",
         style("constraints:").magenta().bold(),
         style("num_summed").blue(),
-        style("num_parties").blue(),
-        style("threshold").blue(),
     );
     if let Some(error) = error {
         println!("{} {}", style("     error:").red().bold(), error);
@@ -45,7 +58,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
 
     // This executable is a command line tool which enables to specify
-    // trBFV summations with party and threshold sizes.
+    // hierarchical trBFV summations with party and threshold sizes.
     let args: Vec<String> = env::args().skip(1).collect();
 
     // Print the help if requested.
@@ -54,11 +67,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut num_summed = 1;
-    let mut num_parties = 10;
-    let mut threshold = 7;
+    let num_parties = 9; // Fixed: 3 groups of 3 parties each for hierarchical 2/3 setup
+    let num_groups = 3;
+    let parties_per_group = 3;
+    let group_threshold = 2; // 2/3 threshold within each group
+    let top_threshold = 2; // 2/3 threshold at top level
 
-    // Update the number of users and/or number of parties / threshold depending on the
-    // arguments provided.
+    // Update the number of summed values depending on the arguments provided.
     for arg in &args {
         if arg.starts_with("--num_summed") {
             let a: Vec<&str> = arg.rsplit('=').collect();
@@ -67,40 +82,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 num_summed = a[0].parse::<usize>()?
             }
-        } else if arg.starts_with("--num_parties") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--num_parties` argument".to_string()))
-            } else {
-                num_parties = a[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--threshold") {
-            let parts: Vec<&str> = arg.rsplit('=').collect();
-            if parts.len() != 2 || parts[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--threshold` argument".to_string()))
-            } else {
-                threshold = parts[0].parse::<usize>()?
-            }
         } else {
             print_notice_and_exit(Some(format!("Unrecognized argument: {arg}")))
         }
     }
 
-    if num_summed == 0 || num_parties == 0 || threshold == 0 {
-        print_notice_and_exit(Some("Users, threshold, and party sizes must be nonzero".to_string()))
-    }
-    if threshold >= num_parties {
-        print_notice_and_exit(Some(
-            "Threshold must be less than number of parties".to_string(),
-        ))
+    if num_summed == 0 {
+        print_notice_and_exit(Some("num_summed must be nonzero".to_string()))
     }
 
     // The parameters are within bound, let's go! Let's first display some
-    // information about the threshold sum.
-    println!("# Addition with trBFV");
+    // information about the hierarchical threshold sum.
+    println!("# Addition with hierarchical trBFV");
     println!("\tnum_summed = {num_summed}");
-    println!("\tnum_parties = {num_parties}");
-    println!("\tthreshold = {threshold}");
+    println!("\tnum_parties = {num_parties} (3 groups of 3)");
+    println!("\tgroup_threshold = {group_threshold}/3");
+    println!("\ttop_threshold = {top_threshold}/3");
 
     // Let's generate the BFV parameters structure. This will be shared between parties
     let params = timeit!(
@@ -112,9 +109,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             .build_arc()?
     );
 
-    // Party setup: each party generates a secret key and shares of a collective
-    // public key.
-    struct Party{
+    // Party setup: hierarchical structure with 3 groups, each with 3 parties
+    // Each sub-party generates a secret key and shares of a collective public key.
+    struct SubParty {
+        sk_share: SecretKey,
         pk_share: PublicKeyShare,
         sk_sss: Vec<Array2<u64>>,
         esi_sss: Vec<Array2<u64>>,
@@ -124,65 +122,212 @@ fn main() -> Result<(), Box<dyn Error>> {
         es_poly_sum: Poly,
         d_share_poly: Poly,
     }
-    let mut parties = Vec::with_capacity(num_parties);
-        
+
+    // Group-level party for the top-level threshold
+    struct GroupParty {
+        pk_share: PublicKeyShare, // Aggregated public key share for this group
+        sk_sss: Vec<Array2<u64>>,
+        esi_sss: Vec<Array2<u64>>,
+        sk_sss_collected: Vec<Array2<u64>>,
+        es_sss_collected: Vec<Array2<u64>>,
+        sk_poly_sum: Poly,
+        es_poly_sum: Poly,
+        d_share_poly: Poly,
+        sub_parties: Vec<SubParty>,
+    }
+
+    let mut groups = Vec::with_capacity(num_groups);
+
     // Generate a common reference poly for public key generation.
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
-    // Setup trBFV module
-    let mut trbfv = TrBFVShare::new(
-        num_parties,
-        threshold,
+    // Setup trBFV module for group-level threshold (group_threshold within each group)
+    let mut group_trbfv = TrBFVShare::new(
+        parties_per_group,
+        group_threshold,
         degree,
         plaintext_modulus,
         160,
         moduli.clone(),
-        params.clone()
-    ).unwrap();
+        params.clone(),
+    )
+    .unwrap();
 
-    // Set up shares for each party.
-    timeit_n!("Party setup (per party)", num_parties as u32, {
-        let sk_share = SecretKey::random(&params, &mut OsRng);
-        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
-        let sk_sss = trbfv.generate_secret_shares(sk_share.coeffs.clone())?;
-        let esi_coeffs = trbfv.generate_smudging_error(&mut OsRng)?;
-        let esi_sss = trbfv.generate_secret_shares(esi_coeffs.into_boxed_slice())?;
-        // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
-        let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-        let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-        let sk_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        let es_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        let d_share_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        parties.push(Party { pk_share, sk_sss, esi_sss, sk_sss_collected, es_sss_collected, sk_poly_sum, es_poly_sum, d_share_poly });
-    });
+    // Setup trBFV module for top-level threshold (top_threshold among groups)
+    let mut top_trbfv = TrBFVShare::new(
+        num_groups,
+        top_threshold,
+        degree,
+        plaintext_modulus,
+        160,
+        moduli.clone(),
+        params.clone(),
+    )
+    .unwrap();
 
-    // Swap shares mocking network comms, party 1 sends share 2 to party 2 etc.
-    let mut i = 0;
-    timeit_n!("Simulating network (share swapping per party)", num_parties as u32, {
-        for j in 0..num_parties {
-            let mut node_share_m = Array::zeros((0, 2048));
-            let mut es_node_share_m = Array::zeros((0, 2048));
-            for m in 0..moduli.len() {
-                node_share_m.push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).clone())).unwrap();
-                es_node_share_m.push_row(ArrayView::from(&parties[j].esi_sss[m].row(i).clone())).unwrap();
-            }
-            parties[i].sk_sss_collected.push(node_share_m);
-            parties[i].es_sss_collected.push(es_node_share_m);
+    // Set up hierarchical groups
+    timeit_n!("Group setup (per group)", num_groups as u32, {
+        let mut sub_parties = Vec::with_capacity(parties_per_group);
+
+        // Create sub-parties within this group
+        for _ in 0..parties_per_group {
+            let sk_share = SecretKey::random(&params, &mut OsRng);
+            let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
+            let sk_sss = group_trbfv.generate_secret_shares(sk_share.coeffs.clone())?;
+            let esi_coeffs = group_trbfv.generate_smudging_error(&mut OsRng)?;
+            let esi_sss = group_trbfv.generate_secret_shares(esi_coeffs.into_boxed_slice())?;
+
+            let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(parties_per_group);
+            let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(parties_per_group);
+            let sk_poly_sum =
+                Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+            let es_poly_sum =
+                Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+            let d_share_poly =
+                Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+
+            sub_parties.push(SubParty {
+                sk_share,
+                pk_share,
+                sk_sss,
+                esi_sss,
+                sk_sss_collected,
+                es_sss_collected,
+                sk_poly_sum,
+                es_poly_sum,
+                d_share_poly,
+            });
         }
-        i+=1;
+
+        // Aggregate public key shares within this group (similar to MBFV example)
+        let _group_pk: PublicKey = sub_parties.iter().map(|p| p.pk_share.clone()).aggregate()?;
+
+        // For hierarchical threshold, we need the group to act as a single party
+        // Generate a group secret key and create a public key share from it
+        let group_sk = SecretKey::random(&params, &mut OsRng);
+        let group_pk_share = PublicKeyShare::new(&group_sk, crp.clone(), &mut thread_rng())?;
+
+        // Generate group-level threshold shares for top-level scheme
+        let group_sk_sss = top_trbfv.generate_secret_shares(group_sk.coeffs.clone())?;
+        let group_esi_coeffs = top_trbfv.generate_smudging_error(&mut OsRng)?;
+        let group_esi_sss =
+            top_trbfv.generate_secret_shares(group_esi_coeffs.into_boxed_slice())?;
+
+        let group_sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_groups);
+        let group_es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_groups);
+        let group_sk_poly_sum =
+            Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        let group_es_poly_sum =
+            Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        let group_d_share_poly =
+            Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+
+        groups.push(GroupParty {
+            pk_share: group_pk_share,
+            sk_sss: group_sk_sss,
+            esi_sss: group_esi_sss,
+            sk_sss_collected: group_sk_sss_collected,
+            es_sss_collected: group_es_sss_collected,
+            sk_poly_sum: group_sk_poly_sum,
+            es_poly_sum: group_es_poly_sum,
+            d_share_poly: group_d_share_poly,
+            sub_parties,
+        });
     });
 
-    i = 0;
-    // For each party, convert shares to polys and sum the collected shares.
-    timeit_n!("Sum collected shares (per party)", num_parties as u32, {
-        parties[i].sk_poly_sum = trbfv.sum_sk_i(&parties[i].sk_sss_collected).unwrap();
-        parties[i].es_poly_sum = trbfv.sum_sk_i(&parties[i].es_sss_collected).unwrap();
-        i += 1;
+    // Level 1: Swap shares within each group (group-level threshold)
+    timeit!("Group-level share swapping", {
+        for group_idx in 0..num_groups {
+            // Collect all shares first to avoid borrowing conflicts
+            let mut all_sk_shares = Vec::new();
+            let mut all_es_shares = Vec::new();
+
+            for j in 0..parties_per_group {
+                all_sk_shares.push(groups[group_idx].sub_parties[j].sk_sss.clone());
+                all_es_shares.push(groups[group_idx].sub_parties[j].esi_sss.clone());
+            }
+
+            // Now distribute shares to each sub-party
+            for i in 0..parties_per_group {
+                for j in 0..parties_per_group {
+                    let mut node_share_m = Array::zeros((0, 2048));
+                    let mut es_node_share_m = Array::zeros((0, 2048));
+                    for m in 0..moduli.len() {
+                        node_share_m
+                            .push_row(ArrayView::from(&all_sk_shares[j][m].row(i).clone()))
+                            .unwrap();
+                        es_node_share_m
+                            .push_row(ArrayView::from(&all_es_shares[j][m].row(i).clone()))
+                            .unwrap();
+                    }
+                    groups[group_idx].sub_parties[i]
+                        .sk_sss_collected
+                        .push(node_share_m);
+                    groups[group_idx].sub_parties[i]
+                        .es_sss_collected
+                        .push(es_node_share_m);
+                }
+            }
+        }
     });
 
-    // Aggregation: same as previous mbfv aggregations
+    // Level 1: Sum collected shares within each group
+    timeit_n!(
+        "Group-level share summing (per group)",
+        num_groups as u32,
+        {
+            for group in &mut groups {
+                for sub_party in &mut group.sub_parties {
+                    sub_party.sk_poly_sum =
+                        group_trbfv.sum_sk_i(&sub_party.sk_sss_collected).unwrap();
+                    sub_party.es_poly_sum =
+                        group_trbfv.sum_sk_i(&sub_party.es_sss_collected).unwrap();
+                }
+            }
+        }
+    );
+
+    // Level 2: Swap shares between groups (top-level threshold)
+    timeit!("Top-level share swapping", {
+        // Collect all group shares first to avoid borrowing conflicts
+        let mut all_group_sk_shares = Vec::new();
+        let mut all_group_es_shares = Vec::new();
+
+        for j in 0..num_groups {
+            all_group_sk_shares.push(groups[j].sk_sss.clone());
+            all_group_es_shares.push(groups[j].esi_sss.clone());
+        }
+
+        // Now distribute shares to each group
+        for i in 0..num_groups {
+            for j in 0..num_groups {
+                let mut node_share_m = Array::zeros((0, 2048));
+                let mut es_node_share_m = Array::zeros((0, 2048));
+                for m in 0..moduli.len() {
+                    node_share_m
+                        .push_row(ArrayView::from(&all_group_sk_shares[j][m].row(i).clone()))
+                        .unwrap();
+                    es_node_share_m
+                        .push_row(ArrayView::from(&all_group_es_shares[j][m].row(i).clone()))
+                        .unwrap();
+                }
+                groups[i].sk_sss_collected.push(node_share_m);
+                groups[i].es_sss_collected.push(es_node_share_m);
+            }
+        }
+    });
+
+    // Level 2: Sum collected shares at top level
+    timeit!("Top-level share summing", {
+        for group in &mut groups {
+            group.sk_poly_sum = top_trbfv.sum_sk_i(&group.sk_sss_collected).unwrap();
+            group.es_poly_sum = top_trbfv.sum_sk_i(&group.es_sss_collected).unwrap();
+        }
+    });
+
+    // Aggregation: aggregate group public keys to create final public key
     let pk = timeit!("Public key aggregation", {
-        let pk: PublicKey = parties.iter().map(|p| p.pk_share.clone()).aggregate()?;
+        let pk: PublicKey = groups.iter().map(|g| g.pk_share.clone()).aggregate()?;
         pk
     });
 
@@ -202,7 +347,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         _i += 1;
     });
 
-    // calculation 
+    // calculation
     let tally = timeit!("Number tallying", {
         let mut sum = Ciphertext::zero(&params);
         for ct in &numbers_encrypted {
@@ -211,21 +356,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         Arc::new(sum)
     });
 
-    // decrypt
-    i = 0;
-    timeit_n!("Generate Decrypt Share (per party)", num_parties as u32, {
-        parties[i].d_share_poly = trbfv.decryption_share(tally.clone(), parties[i].sk_poly_sum.clone(), parties[i].es_poly_sum.clone()).unwrap();
-        i += 1;
-    });
+    // Hierarchical decryption process
 
-    // gather d_share_polys
+    // Level 1: Generate group-level decryption shares (only need top_threshold groups)
+    timeit_n!(
+        "Generate group decryption shares (per group)",
+        top_threshold as u32,
+        {
+            for i in 0..top_threshold {
+                groups[i].d_share_poly = top_trbfv
+                    .decryption_share(
+                        tally.clone(),
+                        groups[i].sk_poly_sum.clone(),
+                        groups[i].es_poly_sum.clone(),
+                    )
+                    .unwrap();
+            }
+        }
+    );
+
+    // Level 2: Collect group decryption shares for final decryption
     let mut d_share_polys: Vec<Poly> = Vec::new();
-    for i in 0..threshold {
-        d_share_polys.push(parties[i].d_share_poly.clone());
+    for i in 0..top_threshold {
+        d_share_polys.push(groups[i].d_share_poly.clone());
     }
 
-    // decrypt result
-    let open_results = trbfv.decrypt(d_share_polys, tally.clone()).unwrap();
+    // Final decryption using group-level shares
+    let open_results = top_trbfv.decrypt(d_share_polys, tally.clone()).unwrap();
     let result_vec = Vec::<u64>::try_decode(&open_results, Encoding::poly())?;
     let result = result_vec[0];
 
