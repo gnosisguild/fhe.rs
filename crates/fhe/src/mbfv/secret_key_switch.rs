@@ -219,6 +219,47 @@ impl Aggregate<DecryptionShare> for Plaintext {
     }
 }
 
+impl Aggregate<DecryptionShare> for DecryptionShare {
+    fn from_shares<T>(iter: T) -> Result<Self>
+    where
+        T: IntoIterator<Item = DecryptionShare>,
+    {
+        let mut shares_iter = iter.into_iter();
+        let first_share = shares_iter.next().ok_or(Error::TooFewValues(0, 1))?;
+
+        // Start with the first share's h_share
+        let mut aggregated_h_share = first_share.sks_share.h_share.clone();
+        let par = first_share.sks_share.par.clone();
+        let ct = first_share.sks_share.ct.clone();
+
+        // Add all subsequent h_shares
+        for share in shares_iter {
+            // Verify compatibility
+            if share.sks_share.par != par {
+                return Err(Error::DefaultError("Incompatible parameters".to_string()));
+            }
+            // Check that the ciphertexts are actually the same, not just same length
+            if !Arc::ptr_eq(&share.sks_share.ct, &ct) {
+                return Err(Error::DefaultError(
+                    "Decryption shares must be from the same ciphertext".to_string(),
+                ));
+            }
+
+            aggregated_h_share += &share.sks_share.h_share;
+        }
+
+        let aggregated_sks_share = SecretKeySwitchShare {
+            par,
+            ct,
+            h_share: aggregated_h_share,
+        };
+
+        Ok(DecryptionShare {
+            sks_share: aggregated_sks_share,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

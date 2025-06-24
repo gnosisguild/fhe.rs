@@ -97,6 +97,41 @@ impl Aggregate<PublicKeyShare> for PublicKey {
     }
 }
 
+impl Aggregate<PublicKeyShare> for PublicKeyShare {
+    fn from_shares<T>(iter: T) -> Result<Self>
+    where
+        T: IntoIterator<Item = PublicKeyShare>,
+    {
+        let mut shares = iter.into_iter();
+        let first_share = shares.next().ok_or(Error::TooFewValues(0, 1))?;
+
+        let mut aggregated_p0_share = first_share.p0_share.clone();
+        let par = first_share.par.clone();
+        let crp = first_share.crp.clone();
+
+        // Add all subsequent p0_shares
+        for share in shares {
+            // Verify compatibility
+            if share.par != par {
+                return Err(Error::DefaultError("Incompatible parameters".to_string()));
+            }
+            if share.crp != crp {
+                return Err(Error::DefaultError(
+                    "Incompatible common random polynomials".to_string(),
+                ));
+            }
+
+            aggregated_p0_share += &share.p0_share;
+        }
+
+        Ok(PublicKeyShare {
+            par,
+            crp,
+            p0_share: aggregated_p0_share,
+        })
+    }
+}
+
 // impl From<&PublicKeyShare> for PublicKeyShare {
 //     fn from(pks: &PublicKeyShare) -> Self {
 //         PublicKeyShareProto {
