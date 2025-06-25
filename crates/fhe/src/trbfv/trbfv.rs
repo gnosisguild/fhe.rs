@@ -1,6 +1,7 @@
 use std::{sync::Arc};
 
-use crate::bfv::{SecretKey, Ciphertext, Plaintext, BfvParameters};
+use crate::bfv::{Ciphertext, Plaintext, BfvParameters};
+use crate::mbfv::{Aggregate, CommonRandomPoly, PublicKeyShare};
 use zeroize::{Zeroizing};
 use fhe_util::sample_vec_normal;
 use crate::{Error, Result};
@@ -17,6 +18,143 @@ use num_traits::ToPrimitive;
 use itertools::{izip, Itertools};
 use ndarray::Array2;
 
+/// A threshold public key share that can be aggregated hierarchically
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrBFVPublicKeyShare {
+    /// BFV parameters
+    pub par: Arc<BfvParameters>,
+    /// Common random polynomial used for key generation
+    pub crp: CommonRandomPoly,
+    /// The threshold public key share polynomial 
+    pub pk_share: PublicKeyShare,
+    /// Threshold configuration
+    pub threshold: usize,
+    /// Number of parties at this level
+    pub n: usize,
+}
+
+/// A threshold decryption share that can be aggregated hierarchically  
+#[derive(Debug, Clone)]
+pub struct TrBFVDecryptionShare {
+    /// BFV parameters
+    pub par: Arc<BfvParameters>,
+    /// The decryption share polynomial
+    pub d_share: Poly,
+    /// The ciphertext being decrypted
+    pub ciphertext: Arc<Ciphertext>,
+    /// Threshold configuration
+    pub threshold: usize,
+    /// Number of parties at this level  
+    pub n: usize,
+}
+
+impl Aggregate<TrBFVPublicKeyShare> for TrBFVPublicKeyShare {
+    fn from_shares<T>(iter: T) -> Result<Self>
+    where
+        T: IntoIterator<Item = TrBFVPublicKeyShare>,
+    {
+        let mut shares = iter.into_iter();
+        let first_share = shares.next().ok_or(Error::TooFewValues(0, 1))?;
+        
+        // Collect all PublicKeyShares for aggregation
+        let mut pk_shares = vec![first_share.pk_share.clone()];
+        let par = first_share.par.clone();
+        let crp = first_share.crp.clone();
+        let threshold = first_share.threshold;
+        let n = first_share.n;
+        
+        // Verify compatibility and collect shares
+        for share in shares {
+            if share.par != par {
+                return Err(Error::DefaultError("Incompatible parameters".to_string()));
+            }
+            if share.crp != crp {
+                return Err(Error::DefaultError("Incompatible CRP".to_string()));
+            }
+            pk_shares.push(share.pk_share);
+        }
+        
+        // Aggregate the underlying PublicKeyShares
+        let aggregated_pk_share = PublicKeyShare::from_shares(pk_shares)?;
+        
+        Ok(TrBFVPublicKeyShare {
+            par,
+            crp,
+            pk_share: aggregated_pk_share,
+            threshold,
+            n,
+        })
+    }
+}
+
+impl Aggregate<TrBFVDecryptionShare> for TrBFVDecryptionShare {
+    fn from_shares<T>(iter: T) -> Result<Self>
+    where
+        T: IntoIterator<Item = TrBFVDecryptionShare>,
+    {
+        let mut shares = iter.into_iter();
+        let first_share = shares.next().ok_or(Error::TooFewValues(0, 1))?;
+        
+        let mut aggregated_d_share = first_share.d_share.clone();
+        let par = first_share.par.clone();
+        let ciphertext = first_share.ciphertext.clone();
+        let threshold = first_share.threshold;
+        let n = first_share.n;
+        
+        // Add all subsequent decryption shares
+        for share in shares {
+            // Verify compatibility
+            if share.par != par {
+                return Err(Error::DefaultError("Incompatible parameters".to_string()));
+            }
+            if !Arc::ptr_eq(&share.ciphertext, &ciphertext) {
+                return Err(Error::DefaultError(
+                    "Decryption shares must be from the same ciphertext".to_string(),
+                ));
+            }
+            
+            aggregated_d_share += &share.d_share;
+        }
+        
+        Ok(TrBFVDecryptionShare {
+            par,
+            d_share: aggregated_d_share,
+            ciphertext,
+            threshold,
+            n,
+        })
+    }
+}
+
+impl Aggregate<TrBFVDecryptionShare> for Plaintext {
+    fn from_shares<T>(iter: T) -> Result<Self>
+    where
+        T: IntoIterator<Item = TrBFVDecryptionShare>,
+    {
+        // Convert TrBFVDecryptionShares to MBFV DecryptionShares
+        use crate::mbfv::{DecryptionShare, SecretKeySwitchShare};
+        
+        let shares: Vec<TrBFVDecryptionShare> = iter.into_iter().collect();
+        if shares.is_empty() {
+            return Err(Error::TooFewValues(0, 1));
+        }
+        
+        // Convert to MBFV DecryptionShares 
+        let mbfv_shares: Vec<DecryptionShare> = shares.into_iter().map(|tr_share| {
+            let sks_share = SecretKeySwitchShare {
+                par: tr_share.par.clone(),
+                ct: tr_share.ciphertext.clone(),
+                h_share: tr_share.d_share,
+            };
+            DecryptionShare { sks_share }
+        }).collect();
+        
+        // Use the proven MBFV aggregation logic
+        Plaintext::from_shares(mbfv_shares)
+    }
+}
+
+/// Documentation for TrBFVShare struct  
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct TrBFVShare {
     n: usize,
@@ -29,7 +167,7 @@ pub struct TrBFVShare {
 }
 
 impl TrBFVShare {
-    // TODO: take params and store, get moduli, plaintext_moduli, and degree from ctx
+    /// Create a new TrBFVShare instance
     pub fn new(
         n: usize,
         threshold: usize,
@@ -39,7 +177,6 @@ impl TrBFVShare {
         moduli: Vec<u64>,
         params: Arc<BfvParameters>
     ) -> Result<Self> {
-        // generate random secret
         Ok(Self { 
             n,
             threshold,
@@ -51,7 +188,79 @@ impl TrBFVShare {
         })
     }
 
-    // Generate Shamir Secret Shares
+    /// Generate a threshold public key share from a secret key and CRP
+    pub fn generate_public_key_share<R: RngCore + CryptoRng>(
+        &self,
+        sk_coeffs: Box<[i64]>,
+        crp: CommonRandomPoly,
+        rng: &mut R,
+    ) -> Result<TrBFVPublicKeyShare> {
+        // Convert secret key coefficients to SecretKey
+        use crate::bfv::SecretKey;
+        let sk = SecretKey::new(sk_coeffs.to_vec(), &self.params);
+        
+        // Generate PublicKeyShare using MBFV protocol
+        let pk_share = PublicKeyShare::new(&sk, crp.clone(), rng)?;
+        
+        Ok(TrBFVPublicKeyShare {
+            par: self.params.clone(),
+            crp,
+            pk_share,
+            threshold: self.threshold,
+            n: self.n,
+        })
+    }
+
+    /// Generate a threshold decryption share using MBFV DecryptionShare approach
+    pub fn generate_decryption_share<R: RngCore + CryptoRng>(
+        &self,
+        sk_coeffs: Box<[i64]>,
+        ciphertext: Arc<Ciphertext>,
+        rng: &mut R,
+    ) -> Result<TrBFVDecryptionShare> {
+        // Convert secret key coefficients to SecretKey for MBFV compatibility
+        use crate::bfv::SecretKey;
+        use crate::mbfv::DecryptionShare;
+        
+        let sk = SecretKey::new(sk_coeffs.to_vec(), &self.params);
+        
+        // Use MBFV DecryptionShare protocol which is already proven to work
+        let mbfv_decryption_share = DecryptionShare::new(&sk, &ciphertext, rng)?;
+        
+        // Extract the underlying polynomial from the MBFV decryption share
+        let d_share = mbfv_decryption_share.sks_share.h_share.clone();
+        
+        Ok(TrBFVDecryptionShare {
+            par: self.params.clone(),
+            d_share,
+            ciphertext,
+            threshold: self.threshold,
+            n: self.n,
+        })
+    }
+
+    /// Internal method to compute decryption share
+    fn decryption_share_internal(
+        &self,
+        ciphertext: Arc<Ciphertext>,
+        mut sk_i: Poly,
+        es_i: Poly
+    ) -> Result<Poly> {
+        // decrypt
+        // mul c1 * sk
+        // then add c0 + (c1*sk) + es
+        let mut c0 = ciphertext.c[0].clone();
+        c0.change_representation(Representation::PowerBasis);
+        sk_i.change_representation(Representation::Ntt);
+        let mut c1 = ciphertext.c[1].clone();
+        c1.change_representation(Representation::Ntt);
+        let mut c1sk = &c1 * &sk_i;
+        c1sk.change_representation(Representation::PowerBasis);
+        let d_share_poly = &c0 + &c1sk + es_i;
+        Ok(d_share_poly)
+    }
+
+    /// Generate Shamir Secret Shares - for backwards compatibility
     pub fn generate_secret_shares(
         &mut self,
         coeffs: Box<[i64]>
@@ -128,7 +337,7 @@ impl TrBFVShare {
         &mut self,
         ciphertext: Arc<Ciphertext>,
         mut sk_i: Poly,
-        mut es_i: Poly
+        es_i: Poly
     ) -> Result<Poly> {
         // decrypt
         // mul c1 * sk
@@ -354,7 +563,7 @@ mod tests {
                 ).unwrap();
                 //println!("{:?}", s_share_poly);
                 s_share_poly_k.push(s_share_poly)
-                //s_shares[k].push(s_share_poly);
+                //s_shares.push(s_share_poly);
             }
             s_shares.push(s_share_poly_k);
 
