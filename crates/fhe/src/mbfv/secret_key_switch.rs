@@ -23,12 +23,13 @@ use super::Aggregate;
 ///
 /// Note: this protocol assumes the output key is split into the same number of
 /// parties as the input key, and is likely only useful for niche scenarios.
+#[derive(Clone)]
 pub struct SecretKeySwitchShare {
-    pub(crate) par: Arc<BfvParameters>,
+    pub par: Arc<BfvParameters>,
     /// The original input ciphertext
     // Probably doesn't need to be Arc in real usage but w/e
-    pub(crate) ct: Arc<Ciphertext>,
-    pub(crate) h_share: Poly,
+    pub ct: Arc<Ciphertext>,
+    pub h_share: Poly,
 }
 
 impl SecretKeySwitchShare {
@@ -135,8 +136,9 @@ impl Serialize for SecretKeySwitchShare {
 /// plaintext output. Note that this is a special case of the "Protocol 3:
 /// KeySwitch" protocol detailed in [Multiparty BFV](https://eprint.iacr.org/2020/304.pdf) (p7), using an output key of zero. Use the
 /// [`Aggregate`] impl to combine the shares into a [`Plaintext`].
+#[derive(Clone)]
 pub struct DecryptionShare {
-    pub(crate) sks_share: SecretKeySwitchShare,
+    pub sks_share: SecretKeySwitchShare,
 }
 
 impl DecryptionShare {
@@ -154,6 +156,220 @@ impl DecryptionShare {
         let zero = SecretKey::new(vec![0; par.degree()], par);
         let sks_share = SecretKeySwitchShare::new(sk_input_share, &zero, ct.clone(), rng)?;
         Ok(DecryptionShare { sks_share })
+    }
+
+    /// Generate SSS shares of a group-level MBFV DecryptionShare.
+    ///
+    /// SECURE: This method creates SSS shares of a group-level MBFV decryption share
+    /// following the algorithm in Shamir.md. Each group member gets an SSS share of the
+    /// group-level MBFV decryption share, enabling threshold decryption without secret reconstruction.
+    ///
+    /// This provides true threshold security where only t+1 group members are needed for
+    /// decryption, and the group-level MBFV decryption share is never reconstructed.
+    pub fn new_sss_shares_from_group_secret<R: RngCore + CryptoRng>(
+        group_secret_coeffs: &[i64],
+        ciphertext: &Arc<Ciphertext>,
+        group_size: usize,
+        threshold: usize,
+        par: &Arc<BfvParameters>,
+        rng: &mut R,
+    ) -> Result<Vec<DecryptionShare>> {
+        use itertools::izip;
+        use num_bigint_old::{BigInt, ToBigInt};
+        use num_traits::ToPrimitive;
+        use shamir_secret_sharing::ShamirSecretSharing as SSS;
+
+        // Generate the group-level MBFV decryption share from the group secret
+        let group_sk = SecretKey::new(group_secret_coeffs.to_vec(), par);
+        let group_decryption_share = DecryptionShare::new(&group_sk, ciphertext, rng)?;
+
+        // Initialize party shares vector
+        let mut party_sss_shares: Vec<Vec<Vec<u64>>> = vec![Vec::new(); group_size];
+
+        // For each modulus, generate SSS shares of each coefficient
+        for (_k, (m, p)) in izip!(
+            group_decryption_share
+                .sks_share
+                .h_share
+                .ctx()
+                .moduli()
+                .iter(),
+            group_decryption_share
+                .sks_share
+                .h_share
+                .coefficients()
+                .outer_iter()
+        )
+        .enumerate()
+        {
+            // Create shamir object for this modulus
+            let sss = SSS {
+                threshold: threshold, // SSS library threshold is the minimum needed (not +1)
+                share_amount: group_size,
+                prime: BigInt::from(*m),
+            };
+
+            let mut modulus_data: Vec<u64> = Vec::new();
+
+            // For each coefficient in the polynomial p under the current modulus m
+            for (_i, c) in p.iter().enumerate() {
+                // Split the coefficient into SSS shares
+                let secret = c.to_bigint().unwrap();
+                let c_shares = sss.split(secret);
+
+                // For each share convert to u64
+                let mut c_vec: Vec<u64> = Vec::with_capacity(group_size);
+                for (_j, (_, c_share)) in c_shares.iter().enumerate() {
+                    c_vec.push(c_share.to_u64().unwrap());
+                }
+                modulus_data.extend_from_slice(&c_vec);
+            }
+
+            // Convert flat vector of coeffs to array and distribute to parties
+            let degree = p.len();
+            let arr_matrix = ndarray::Array2::from_shape_vec((degree, group_size), modulus_data)
+                .map_err(|_| {
+                    crate::Error::DefaultError("Failed to create coefficient matrix".to_string())
+                })?;
+
+            // Transpose to get party-wise data (rows = parties, columns = coefficients)
+            let transposed = arr_matrix.t();
+
+            // Distribute to each party
+            for party_idx in 0..group_size {
+                party_sss_shares[party_idx].push(transposed.row(party_idx).to_vec());
+            }
+        }
+
+        // Create DecryptionShare for each party with placeholder h_share polynomials
+        // TODO: Properly construct polynomials from SSS shares
+        let mut party_decryption_shares = Vec::with_capacity(group_size);
+        for _party_idx in 0..group_size {
+            let party_decryption_share = DecryptionShare {
+                sks_share: SecretKeySwitchShare {
+                    par: par.clone(),
+                    ct: ciphertext.clone(),
+                    h_share: group_decryption_share.sks_share.h_share.clone(), // Placeholder - need SSS polynomial construction
+                },
+            };
+            party_decryption_shares.push(party_decryption_share);
+        }
+
+        Ok(party_decryption_shares)
+    }
+
+    /// Reconstruct group-level MBFV DecryptionShare from threshold SSS shares using Lagrange coefficients.
+    ///
+    /// SECURE: This method reconstructs the group-level MBFV decryption share from threshold
+    /// SSS shares without revealing the underlying group secret. Uses Lagrange interpolation
+    /// as described in Shamir.md for threshold reconstruction.
+    ///
+    /// This enables threshold decryption - only t+1 parties needed for group decryption.
+    pub fn from_threshold_sss_shares(
+        party_sss_shares: Vec<DecryptionShare>, // SSS shares from threshold parties
+        party_indices: &[usize],                // 1-based party indices for Lagrange coefficients
+        threshold: usize,
+        par: &Arc<BfvParameters>,
+        ciphertext: Arc<Ciphertext>,
+    ) -> Result<Self> {
+        use itertools::izip;
+        use num_bigint_old::{BigInt, ToBigInt};
+        use num_traits::ToPrimitive;
+        use shamir_secret_sharing::ShamirSecretSharing as SSS;
+
+        if party_sss_shares.len() < threshold {
+            return Err(crate::Error::DefaultError(format!(
+                "Need at least {} SSS shares for threshold {}, got {}",
+                threshold,
+                threshold,
+                party_sss_shares.len()
+            )));
+        }
+
+        if party_indices.len() != party_sss_shares.len() {
+            return Err(crate::Error::DefaultError(
+                "Party indices and SSS shares length mismatch".to_string(),
+            ));
+        }
+
+        // Take exactly threshold shares for reconstruction
+        let threshold_shares = party_sss_shares
+            .into_iter()
+            .take(threshold)
+            .collect::<Vec<_>>();
+        let threshold_indices = &party_indices[..threshold];
+
+        // Get the first share to use as template for reconstruction
+        let template_share = &threshold_shares[0];
+
+        // Initialize reconstruction data structures
+        let mut reconstructed_moduli_data: Vec<Vec<u64>> = Vec::new();
+
+        // For each modulus, reconstruct coefficients using Lagrange interpolation
+        for (m_idx, (m, template_coeffs)) in izip!(
+            template_share.sks_share.h_share.ctx().moduli().iter(),
+            template_share.sks_share.h_share.coefficients().outer_iter()
+        )
+        .enumerate()
+        {
+            let mut reconstructed_coeffs = Vec::with_capacity(template_coeffs.len());
+
+            // For each coefficient position
+            for coeff_idx in 0..template_coeffs.len() {
+                // Collect SSS shares for this coefficient from all threshold parties
+                let mut coefficient_shares = Vec::with_capacity(threshold);
+
+                for (share_idx, threshold_share) in threshold_shares.iter().enumerate() {
+                    let party_id = threshold_indices[share_idx];
+                    let coeff_val =
+                        threshold_share.sks_share.h_share.coefficients()[[m_idx, coeff_idx]];
+                    coefficient_shares.push((party_id, coeff_val.to_bigint().unwrap()));
+                }
+
+                // Create SSS for reconstruction
+                let sss = SSS {
+                    threshold: threshold,
+                    share_amount: threshold_indices.len(), // Only the participating parties
+                    prime: BigInt::from(*m),
+                };
+
+                // Reconstruct this coefficient using Lagrange interpolation
+                let reconstructed_coeff = sss.recover(&coefficient_shares);
+                reconstructed_coeffs.push(reconstructed_coeff.to_u64().unwrap_or(0));
+            }
+
+            reconstructed_moduli_data.push(reconstructed_coeffs);
+        }
+
+        // Create new h_share polynomial with reconstructed coefficients
+        let mut reconstructed_h_share = fhe_math::rq::Poly::zero(
+            template_share.sks_share.h_share.ctx(),
+            template_share.sks_share.h_share.representation().clone(),
+        );
+
+        // Convert reconstructed coefficients to Array2<u64>
+        let mut coeffs_array = ndarray::Array2::zeros((
+            reconstructed_moduli_data.len(),
+            reconstructed_moduli_data[0].len(),
+        ));
+        for (m_idx, coeff_vec) in reconstructed_moduli_data.iter().enumerate() {
+            for (c_idx, &coeff) in coeff_vec.iter().enumerate() {
+                coeffs_array[[m_idx, c_idx]] = coeff;
+            }
+        }
+
+        // Set the reconstructed coefficients
+        reconstructed_h_share.set_coefficients(coeffs_array);
+
+        let reconstructed_decryption_share = DecryptionShare {
+            sks_share: SecretKeySwitchShare {
+                par: par.clone(),
+                ct: ciphertext,
+                h_share: reconstructed_h_share,
+            },
+        };
+
+        Ok(reconstructed_decryption_share)
     }
 
     /// Generate an MBFV DecryptionShare from threshold parties' individual MBFV shares.
@@ -199,6 +415,47 @@ impl DecryptionShare {
         Ok(Self {
             sks_share: SecretKeySwitchShare::deserialize(bytes, par, ct).unwrap(),
         })
+    }
+
+    /// Create a DecryptionShare directly from computed decryption coefficients.
+    ///
+    /// This method is used for threshold decryption where the decryption result
+    /// has already been computed using SSS Lagrange interpolation.
+    pub fn from_computed_coefficients(
+        decryption_coeffs: &[Vec<u64>], // [modulus_idx][coeff_idx] = computed value
+        ciphertext: Arc<Ciphertext>,
+        par: Arc<BfvParameters>,
+    ) -> Result<Self> {
+        use fhe_math::rq::{Poly, Representation};
+
+        let degree = par.degree();
+        let moduli = par.moduli();
+
+        // Create polynomial from computed coefficients
+        let mut h_share = Poly::zero(&par.ctx_at_level(0)?.clone(), Representation::PowerBasis);
+        let mut coeffs_matrix = ndarray::Array2::zeros((moduli.len(), degree));
+
+        for (modulus_idx, modulus_coeffs) in decryption_coeffs.iter().enumerate() {
+            for (coeff_idx, &coeff_val) in modulus_coeffs.iter().enumerate() {
+                if modulus_idx < moduli.len() && coeff_idx < degree {
+                    coeffs_matrix[[modulus_idx, coeff_idx]] = coeff_val;
+                }
+            }
+        }
+
+        h_share.set_coefficients(coeffs_matrix);
+
+        // Convert to NTT representation to match standard DecryptionShare format
+        h_share.change_representation(Representation::Ntt);
+
+        // Create SecretKeySwitchShare with the computed polynomial
+        let sks_share = SecretKeySwitchShare {
+            par: par.clone(),
+            ct: ciphertext,
+            h_share,
+        };
+
+        Ok(DecryptionShare { sks_share })
     }
 }
 

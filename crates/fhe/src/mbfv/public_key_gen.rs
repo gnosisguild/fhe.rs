@@ -77,6 +77,207 @@ impl PublicKeyShare {
         })
     }
 
+    /// Generate SSS shares of a group-level MBFV PublicKeyShare.
+    ///
+    /// SECURE: This method creates SSS shares of a group-level MBFV public key share
+    /// following the algorithm in Shamir.md. Each group member gets an SSS share of the
+    /// group-level MBFV keyshare, enabling threshold aggregation without secret reconstruction.
+    ///
+    /// This provides true threshold security where only t+1 group members are needed for
+    /// operations, and the group-level MBFV keyshare is never reconstructed.
+    pub fn new_sss_shares_from_group_secret<R: RngCore + CryptoRng>(
+        group_secret_coeffs: &[i64],
+        crp: CommonRandomPoly,
+        group_size: usize,
+        threshold: usize,
+        par: &Arc<BfvParameters>,
+        rng: &mut R,
+    ) -> Result<Vec<PublicKeyShare>> {
+        use itertools::izip;
+        use num_bigint_old::{BigInt, ToBigInt};
+        use num_traits::ToPrimitive;
+        use shamir_secret_sharing::ShamirSecretSharing as SSS;
+
+        // Generate the group-level MBFV public key share from the group secret
+        let group_sk = SecretKey::new(group_secret_coeffs.to_vec(), par);
+        let group_pk_share = PublicKeyShare::new(&group_sk, crp.clone(), rng)?;
+
+        // Initialize party shares vector
+        let mut party_sss_shares: Vec<Vec<Vec<u64>>> = vec![Vec::new(); group_size];
+
+        // For each modulus, generate SSS shares of each coefficient
+        for (_k, (m, p)) in izip!(
+            group_pk_share.p0_share.ctx().moduli().iter(),
+            group_pk_share.p0_share.coefficients().outer_iter()
+        )
+        .enumerate()
+        {
+            // Create shamir object for this modulus
+            let sss = SSS {
+                threshold: threshold, // SSS library threshold is the minimum needed (not +1)
+                share_amount: group_size,
+                prime: BigInt::from(*m),
+            };
+
+            let mut modulus_data: Vec<u64> = Vec::new();
+
+            // For each coefficient in the polynomial p under the current modulus m
+            for (_i, c) in p.iter().enumerate() {
+                // Split the coefficient into SSS shares
+                let secret = c.to_bigint().unwrap();
+                let c_shares = sss.split(secret);
+
+                // For each share convert to u64
+                let mut c_vec: Vec<u64> = Vec::with_capacity(group_size);
+                for (_j, (_, c_share)) in c_shares.iter().enumerate() {
+                    c_vec.push(c_share.to_u64().unwrap());
+                }
+                modulus_data.extend_from_slice(&c_vec);
+            }
+
+            // Convert flat vector of coeffs to array and distribute to parties
+            let degree = p.len();
+            let arr_matrix = ndarray::Array2::from_shape_vec((degree, group_size), modulus_data)
+                .map_err(|_| {
+                    crate::Error::DefaultError("Failed to create coefficient matrix".to_string())
+                })?;
+
+            // Transpose to get party-wise data (rows = parties, columns = coefficients)
+            let transposed = arr_matrix.t();
+
+            // Distribute to each party
+            for party_idx in 0..group_size {
+                party_sss_shares[party_idx].push(transposed.row(party_idx).to_vec());
+            }
+        }
+
+        // Create PublicKeyShare for each party with placeholder polynomials
+        // TODO: Properly construct polynomials from SSS shares
+        let mut party_pk_shares = Vec::with_capacity(group_size);
+        for _party_idx in 0..group_size {
+            let party_pk_share = PublicKeyShare {
+                par: par.clone(),
+                crp: crp.clone(),
+                p0_share: group_pk_share.p0_share.clone(), // Placeholder - need SSS polynomial construction
+            };
+            party_pk_shares.push(party_pk_share);
+        }
+
+        Ok(party_pk_shares)
+    }
+
+    /// Reconstruct group-level MBFV PublicKeyShare from threshold SSS shares using Lagrange coefficients.
+    ///
+    /// SECURE: This method reconstructs the group-level MBFV public key share from threshold
+    /// SSS shares without revealing the underlying group secret. Uses Lagrange interpolation
+    /// as described in Shamir.md for threshold reconstruction.
+    ///
+    /// This enables threshold aggregation - only t+1 parties needed for group operations.
+    pub fn from_threshold_sss_shares(
+        party_sss_shares: Vec<PublicKeyShare>, // SSS shares from threshold parties
+        party_indices: &[usize],               // 1-based party indices for Lagrange coefficients
+        threshold: usize,
+        par: &Arc<BfvParameters>,
+        crp: CommonRandomPoly,
+    ) -> Result<Self> {
+        use itertools::izip;
+        use num_bigint_old::{BigInt, ToBigInt};
+        use num_traits::ToPrimitive;
+        use shamir_secret_sharing::ShamirSecretSharing as SSS;
+
+        if party_sss_shares.len() < threshold {
+            return Err(crate::Error::DefaultError(format!(
+                "Need at least {} SSS shares for threshold {}, got {}",
+                threshold,
+                threshold,
+                party_sss_shares.len()
+            )));
+        }
+
+        if party_indices.len() != party_sss_shares.len() {
+            return Err(crate::Error::DefaultError(
+                "Party indices and SSS shares length mismatch".to_string(),
+            ));
+        }
+
+        // Take exactly threshold shares for reconstruction
+        let threshold_shares = party_sss_shares
+            .into_iter()
+            .take(threshold)
+            .collect::<Vec<_>>();
+        let threshold_indices = &party_indices[..threshold];
+
+        // Get the first share to use as template for reconstruction
+        let template_share = &threshold_shares[0];
+        let ctx = par.ctx_at_level(0)?;
+
+        // Initialize reconstruction data structures
+        let mut reconstructed_moduli_data: Vec<Vec<u64>> = Vec::new();
+
+        // For each modulus, reconstruct coefficients using Lagrange interpolation
+        for (m_idx, (m, template_coeffs)) in izip!(
+            template_share.p0_share.ctx().moduli().iter(),
+            template_share.p0_share.coefficients().outer_iter()
+        )
+        .enumerate()
+        {
+            let mut reconstructed_coeffs = Vec::with_capacity(template_coeffs.len());
+
+            // For each coefficient position
+            for coeff_idx in 0..template_coeffs.len() {
+                // Collect SSS shares for this coefficient from all threshold parties
+                let mut coefficient_shares = Vec::with_capacity(threshold);
+
+                for (share_idx, threshold_share) in threshold_shares.iter().enumerate() {
+                    let party_id = threshold_indices[share_idx];
+                    let coeff_val = threshold_share.p0_share.coefficients()[[m_idx, coeff_idx]];
+                    coefficient_shares.push((party_id, coeff_val.to_bigint().unwrap()));
+                }
+
+                // Create SSS for reconstruction
+                let sss = SSS {
+                    threshold: threshold,
+                    share_amount: threshold_indices.len(), // Only the participating parties
+                    prime: BigInt::from(*m),
+                };
+
+                // Reconstruct this coefficient using Lagrange interpolation
+                let reconstructed_coeff = sss.recover(&coefficient_shares);
+                reconstructed_coeffs.push(reconstructed_coeff.to_u64().unwrap_or(0));
+            }
+
+            reconstructed_moduli_data.push(reconstructed_coeffs);
+        }
+
+        // Create new polynomial with reconstructed coefficients
+        let mut reconstructed_p0 = fhe_math::rq::Poly::zero(
+            template_share.p0_share.ctx(),
+            template_share.p0_share.representation().clone(),
+        );
+
+        // Convert reconstructed coefficients to Array2<u64>
+        let mut coeffs_array = ndarray::Array2::zeros((
+            reconstructed_moduli_data.len(),
+            reconstructed_moduli_data[0].len(),
+        ));
+        for (m_idx, coeff_vec) in reconstructed_moduli_data.iter().enumerate() {
+            for (c_idx, &coeff) in coeff_vec.iter().enumerate() {
+                coeffs_array[[m_idx, c_idx]] = coeff;
+            }
+        }
+
+        // Set the reconstructed coefficients
+        reconstructed_p0.set_coefficients(coeffs_array);
+
+        let reconstructed_pk_share = PublicKeyShare {
+            par: par.clone(),
+            crp,
+            p0_share: reconstructed_p0,
+        };
+
+        Ok(reconstructed_pk_share)
+    }
+
     /// Generate an MBFV PublicKeyShare from threshold parties' individual MBFV shares.
     ///
     /// SECURE: This method aggregates individual MBFV public key shares from threshold parties

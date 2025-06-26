@@ -53,9 +53,12 @@ impl fmt::Display for DisplayDuration {
             write!(f, "{duration_ns} ns")
         } else if duration_ns < 1_000_000_u128 {
             write!(f, "{} μs", (duration_ns + 500) / 1_000)
-        } else {
+        } else if duration_ns < 1_000_000_000_u128 {
             let duration_ms_times_10 = (duration_ns + 50_000) / (100_000);
             write!(f, "{} ms", (duration_ms_times_10 as f64) / 10.0)
+        } else {
+            let duration_s_times_100 = (duration_ns + 5_000_000) / (10_000_000);
+            write!(f, "{} s", (duration_s_times_100 as f64) / 100.0)
         }
     }
 }
