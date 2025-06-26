@@ -93,6 +93,8 @@ impl SecretKey {
         Ok(noise)
     }
 
+    /// Encrypt a plaintext using a provided seed for deterministic generation
+    /// of random polynomials aᵢ.
     pub(crate) fn encrypt_poly_with_seed<R: RngCore + CryptoRng>(
         &self,
         p: &Poly,
@@ -134,6 +136,8 @@ impl SecretKey {
         })
     }
 
+    /// Encrypt a plaintext using a random seed for deterministic generation
+    /// of random polynomials aᵢ.
     pub(crate) fn encrypt_poly<R: RngCore + CryptoRng>(
         &self,
         p: &Poly,

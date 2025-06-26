@@ -1,4 +1,4 @@
-//! Key-switching keys for the BFV encryption scheme. Adapts the
+//! Key-switching keys for the BFV encryption scheme. Implements the
 //! Brakerski-Vaikuntanathan key switching through decomposition technique
 //! adapted to RNS as described in the HPS optimization paper (https://eprint.iacr.org/2018/117)
 
@@ -22,27 +22,34 @@ use zeroize::Zeroizing;
 /// Key switching key for the BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct KeySwitchingKey {
-    /// The parameters of the underlying BFV encryption scheme.
+    /// BFV encryption scheme parameters.
     pub par: Arc<BfvParameters>,
 
-    /// The (optional) seed that generated the polynomials c1.
+    /// Seed used to generate c1 polynomials.
     pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
 
-    /// The key switching elements c0.
+    /// Key switching elements c0.
     pub c0: Box<[Poly]>,
 
-    /// The key switching elements c1.
+    /// Key switching elements c1.
     pub c1: Box<[Poly]>,
 
-    /// The level and context of the polynomials that will be key switched.
+    /// Max level and context of polynomials that can be key switched. This
+    /// defines the decomposition basis of the key switching key.
     pub ciphertext_level: usize,
+
+    /// Context of the ciphertext being key switched.
     pub ctx_ciphertext: Arc<Context>,
 
-    /// The level and context of the key switching key.
+    /// Level and context of the key switching key polynomials. These can be
+    /// mod switched down to be multiplied during keyswitching with a ciphertext
+    /// that is of a different level.
     pub ksk_level: usize,
+
+    /// Context of the key switching key polynomials.
     pub ctx_ksk: Arc<Context>,
 
-    // For level with only one modulus, we will use basis
+    /// For level with only one modulus, we will use basis.
     pub log_base: usize,
 }
 
@@ -118,7 +125,12 @@ impl KeySwitchingKey {
         }
     }
 
-    /// Generate the c1's from the seed
+    /// Generate the c1's from the seed. The context is used to define the
+    /// number of RNS moduli that the polynomials are represented by. When key
+    /// switching, there is a multiplication between the decomposed polynomial
+    /// for each RNS modulus up to 'size' and the c1's which occurs between
+    /// polynomials. These polynomials should be of the same context even
+    /// though the decomposition 'size' may be different.
     fn generate_c1(
         ctx: &Arc<Context>,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
@@ -154,15 +166,22 @@ impl KeySwitchingKey {
     /// - g_i is the RNS basis conversion factor (q̃_i · q*_i) for the current
     ///   modulus q_i
     ///
+    /// The size of the KS_0 vector is the same as the number of RNS moduli in
+    /// the ciphertext context, meaning polynomials, when they are key switched,
+    /// are decomposed by each modulus in the ciphertext context. This key
+    /// already has the basis of the decomposition that the deocmposed
+    /// polynomials then dot-product with to perform the key switching.
+    ///
     /// Each element of KS_0 therefore corresponds to operations performed in
     /// RNS, with its own error polynomial e_i and random polynomial a_i,
     /// resulting in a collection of RNS polynomials that form the complete
-    /// KS_0 component.
+    /// KS_0 component. Each element of KS_0 is a polynomial with context equal
+    /// to the key switching key context.
     ///
     /// # Arguments
     ///
     /// * `sk` - The secret key
-    /// * `from` - The polynomial to be switched (in RNS representation)
+    /// * `from` - The original key to switch from (in RNS representation).
     /// * `c1` - The KS_1 polynomials (containing a_i for i in 0..k-1)
     /// * `rng` - Random number generator
     ///
@@ -191,8 +210,6 @@ impl KeySwitchingKey {
             ));
         }
 
-        let size = c1.len();
-
         let mut s = Zeroizing::new(Poly::try_convert_from(
             sk.coeffs.as_ref(),
             c1[0].ctx(),
@@ -201,7 +218,9 @@ impl KeySwitchingKey {
         )?);
         s.change_representation(Representation::Ntt);
 
-        let rns = RnsContext::new(&sk.par.moduli[..size])?;
+        // Up to size because that is the decomposition basis set by c1. We only need
+        // the garner coefficients for the moduli we are using (g₁, ..., g_size).
+        let rns = RnsContext::new(&sk.par.moduli[..c1.len()])?;
 
         // For each of the RNS moduli qi, we compute the following:
         // a_s = a*s
@@ -246,7 +265,8 @@ impl KeySwitchingKey {
         Ok(c0)
     }
 
-    /// Generate the c0's from the c1's and the secret key
+    /// Generate the c0's from the c1's, the secret key, and the 'from' secret
+    /// key polynomial.
     fn generate_c0_decomposition<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         from: &Poly,
@@ -340,7 +360,7 @@ impl KeySwitchingKey {
 
         if p.ctx().as_ref() != self.ctx_ciphertext.as_ref() {
             return Err(Error::DefaultError(
-                "The input polynomial does not have the correct context.".to_string(),
+                "The input polynomial does not have the correct context. Its RNS representation needs to match that of the key switching key decomposition context, or in other words, the key switching key ciphertext context.".to_string(),
             ));
         }
         if p.representation() != &Representation::PowerBasis {

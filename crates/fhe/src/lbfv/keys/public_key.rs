@@ -1,16 +1,21 @@
-//! Public keys for the l-BFV encryption scheme
+/*!
+ * This module contains the public key for the l-BFV encryption scheme.
+ */
 
-use crate::bfv::traits::TryConvertFrom;
-use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
-use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
 use crate::{Error, Result};
-use fhe_math::rq::{Poly, Representation};
-use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
+use std::sync::Arc;
+
 use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use std::sync::Arc;
 use zeroize::Zeroizing;
+
+use crate::bfv::{
+    traits::TryConvertFrom, BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey,
+};
+use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
+use fhe_math::rq::{switcher::Switcher, Poly, Representation};
+use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 
 /// Public key for the L-BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -19,7 +24,10 @@ pub struct LBFVPublicKey {
     pub par: Arc<BfvParameters>,
     /// The public key ciphertexts, one for each RNS modulus
     pub c: Vec<Ciphertext>,
-    /// The decomposition size which is the number of RNS moduli (the l in lBFV)
+    /// The decomposition size which is the number of RNS moduli (the l in lBFV).
+    /// Note while l in https://eprint.iacr.org/2024/1285.pdf is equal to the size
+    /// chosen of the Gadget vector, here it is equal the number of RNS moduli
+    /// as the library uses the optimization of https://eprint.iacr.org/2018/117.pdf
     pub l: usize,
     /// The seed used to generate all ciphertexts deterministically
     pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
@@ -27,7 +35,9 @@ pub struct LBFVPublicKey {
 
 impl LBFVPublicKey {
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a provided
-    /// seed.
+    /// seed. The seed is used to generate l seeds for the ciphertexts which are
+    /// used to generate the random polynomials aᵢ for each ciphertext
+    /// deterministically.
     pub fn new_with_seed<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
@@ -35,9 +45,11 @@ impl LBFVPublicKey {
     ) -> Self {
         let zero = Plaintext::zero(Encoding::poly(), &sk.par).unwrap();
         let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.par.moduli().len());
-        let mut seed_rng = ChaCha8Rng::from_seed(seed);
+        let mut seed_rng = ChaCha8Rng::from_seed(seed); // This is used to generate the seeds for the ciphertexts by creating a new
+                                                        // ChaCha8Rng from the input seed
 
-        // Create a ciphertext for each RNS modulus
+        // Create a vector of ciphertexts, each encrypting zero, for each RNS modulus
+        // [(b₁, a₁), ..., (bₗ, aₗ)].
         for _ in 0..sk.par.moduli().len() {
             let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
             seed_rng.fill(&mut seed_i);
@@ -113,30 +125,71 @@ impl LBFVPublicKey {
         Ok((ciphertext, u, e1, e2))
     }
 
-    /// Extract the b polynomials from the ciphertexts in the public key.
-    /// These are the c[0] components of each ciphertext.
-    pub fn extract_b_polynomials(&self) -> Result<Vec<Poly>> {
-        self.c.iter().map(|ct| Ok(ct.c[0].clone())).collect()
-    }
+    /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
+    ///
+    /// This method extracts the first l = # moduli - ciphertext level, c[0] components from each ciphertext in the public key,
+    /// mod switches them to the key level, and converts them to the specified representation.
+    ///
+    /// # Arguments
+    /// * `ciphertext_level` - The level of the ciphertext that will use these polynomials
+    /// * `key_level` - The level of the key that will be used (currently must be 0)
+    /// * `rep` - The desired representation for the output polynomials
+    ///
+    /// # Returns
+    /// * `Ok(Vec<Poly>)` - A vector of polynomials in the specified representation at the target level
+    /// * `Err` if:
+    ///   - The requested ciphertext level is greater than the maximum level
+    ///   - The key level is not 0 (current limitation)
+    ///   - The public key is not at level 0
+    ///   - Any polynomial operations fail during mod switching or representation changes
+    pub fn extract_b_polynomials(
+        &self,
+        ciphertext_level: usize,
+        key_level: usize,
+        rep: Representation,
+    ) -> Result<Vec<Poly>> {
+        // Necessary checks
+        if ciphertext_level > self.par.max_level() {
+            return Err(Error::DefaultError(
+                "Level is greater than the maximum level".to_string(),
+            ));
+        }
 
-    /// Extract the b polynomials from the ciphertexts in the public key and
-    /// convert them to NTTShoup representation. These are the c[0]
-    /// components of each ciphertext.
-    pub fn extract_b_polynomials_ntt_shoup(&self) -> Result<Vec<Poly>> {
-        self.c
-            .iter()
-            .map(|ct| {
-                let mut poly = ct.c[0].clone();
-                poly.change_representation(Representation::NttShoup);
-                Ok(poly)
-            })
-            .collect()
-    }
+        // Note: this may seem redundant, but it's because in the future, we want to experiment with different key levels
+        // for the public key.
+        if key_level != 0 {
+            return Err(Error::DefaultError("Key level must be 0".to_string()));
+        }
 
-    /// Extract the a polynomials from the ciphertexts in the public key.
-    /// These are the c[1] components of each ciphertext.
-    pub fn extract_a_polynomials(&self) -> Result<Vec<Poly>> {
-        self.c.iter().map(|ct| Ok(ct.c[1].clone())).collect()
+        let key_ctx = self.par.ctx_at_level(key_level)?;
+        if self.c[0].c[0].ctx() != key_ctx {
+            return Err(Error::DefaultError(
+                "Public key is not at level 0".to_string(),
+            ));
+        }
+
+        // Note: key switching is redundant for now.
+        // Create switcher to mod switch from initial to final context (for when public key is at different level than ciphertext)
+        let ciphertext_ctx = self.par.ctx_at_level(ciphertext_level)?;
+        let switcher = Switcher::new(ciphertext_ctx, key_ctx)?;
+
+        // Extract (l - level) b polynomials and change representation accordingly
+        let new_l = self.l - ciphertext_level;
+        let mut b_polynomials = Vec::with_capacity(new_l);
+        for i in 0..new_l {
+            let mut poly = self.c[i].c[0].clone();
+            if poly.ctx() != key_ctx {
+                println!(
+                    "Switching from level {} to level {}",
+                    ciphertext_level, key_level
+                );
+                poly.change_representation(Representation::PowerBasis);
+                poly = poly.mod_switch_to(&switcher)?;
+            }
+            poly.change_representation(rep.clone());
+            b_polynomials.push(poly);
+        }
+        Ok(b_polynomials)
     }
 }
 
@@ -211,6 +264,7 @@ impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
         LBFVPublicKeyProto {
             c: pk.c.iter().map(CiphertextProto::from).collect(),
             l: pk.l as u32,
+            seed: pk.seed.map_or_else(Vec::new, |s| s.to_vec()),
         }
     }
 }
@@ -245,11 +299,23 @@ impl DeserializeParametrized for LBFVPublicKey {
             c.push(ct);
         }
 
+        // Import the seed if it exists
+        let seed = if !proto.seed.is_empty() {
+            let mut seed_array = <ChaCha8Rng as SeedableRng>::Seed::default();
+            if proto.seed.len() != seed_array.len() {
+                return Err(Error::SerializationError);
+            }
+            seed_array.copy_from_slice(&proto.seed);
+            Some(seed_array)
+        } else {
+            None
+        };
+
         Ok(Self {
             par: par.clone(),
             c,
             l: proto.l as usize,
-            seed: None,
+            seed,
         })
     }
 }
@@ -258,7 +324,6 @@ impl DeserializeParametrized for LBFVPublicKey {
 mod tests {
     use super::LBFVPublicKey;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
-    use fhe_math::rq::{Poly, Representation};
     use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
     use rand::{thread_rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;

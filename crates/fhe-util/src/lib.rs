@@ -7,14 +7,14 @@
 #[cfg(test)]
 extern crate proptest;
 
-use rand::{CryptoRng, RngCore, Rng};
+use rand::{CryptoRng, Rng, RngCore};
 
 use num_bigint_dig::{prime::probably_prime, BigUint, ModInverse};
 use num_traits::{cast::ToPrimitive, PrimInt};
 use prime_factorization::Factorization;
+use rand_distr::{Distribution, Normal};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use std::{error::Error, fmt, panic::UnwindSafe};
-use rand_distr::{Normal, Distribution};
 
 /// Define catch_unwind to silence the panic in unit tests.
 pub fn catch_unwind<F, R>(f: F) -> std::thread::Result<R>

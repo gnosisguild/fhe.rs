@@ -1,5 +1,4 @@
 #![allow(missing_docs)]
-
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Ciphertext {
@@ -39,6 +38,16 @@ pub struct KeySwitchingKey {
 pub struct RelinearizationKey {
     #[prost(message, optional, tag = "1")]
     pub ksk: ::core::option::Option<KeySwitchingKey>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LbfvRelinearizationKey {
+    #[prost(message, optional, tag = "1")]
+    pub ksk_r_to_s: ::core::option::Option<KeySwitchingKey>,
+    #[prost(message, optional, tag = "2")]
+    pub ksk_s_to_r: ::core::option::Option<KeySwitchingKey>,
+    #[prost(bytes = "vec", repeated, tag = "3")]
+    pub b_vec: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -83,10 +92,18 @@ pub struct LbfvPublicKey {
     pub c: ::prost::alloc::vec::Vec<Ciphertext>,
     #[prost(uint32, tag = "2")]
     pub l: u32,
+    #[prost(bytes = "vec", tag = "3")]
+    pub seed: ::prost::alloc::vec::Vec<u8>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PublicKeyShare {
     #[prost(message, optional, tag = "1")]
-    pub c: ::core::option::Option<Ciphertext>,
+    pub p0: ::core::option::Option<Poly>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Poly {
+    #[prost(message, optional, boxed, tag = "1")]
+    pub p0: ::core::option::Option<::prost::alloc::boxed::Box<Poly>>,
 }
