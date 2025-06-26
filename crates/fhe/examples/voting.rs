@@ -57,9 +57,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_voters = 100;
-    let mut num_officials = 7;
-    let mut threshold = 5;
+    let mut num_voters = 5;
+    let mut num_officials = 3;
+    let mut threshold = 2;
 
     // Parse command line arguments
     for arg in &args {

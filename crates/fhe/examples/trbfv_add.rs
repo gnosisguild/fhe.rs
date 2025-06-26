@@ -58,8 +58,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut num_summed = 1;
-    let mut num_parties = 5;
-    let mut threshold = 3;
+    let mut num_parties = 3;
+    let mut threshold = 2;
 
     // Parse command line arguments
     for arg in &args {
