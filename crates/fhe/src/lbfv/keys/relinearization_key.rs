@@ -2,29 +2,26 @@
  * Implementation of the l-BFV relinearization algorithm as described in
  * Robust Multiparty Computation from Threshold Encryption Based on RLWE
  * [1](https://eprint.iacr.org/2024/1285.pdf).
- * 
- * This module contains the relinearization key for the l-BFV scheme, along with the relinearization key 
+ *
+ * This module contains the relinearization key for the l-BFV scheme, along with the relinearization key
  * relinearization algorithm.
  */
 
 use crate::bfv::traits::TryConvertFrom;
-use crate::bfv::{BfvParameters, Ciphertext, SecretKey, KeySwitchingKey};
+use crate::bfv::{BfvParameters, Ciphertext, KeySwitchingKey, SecretKey};
 use crate::proto::bfv::{
-    KeySwitchingKey as KeySwitchingKeyProto,
-    LbfvRelinearizationKey as LBFVRelinearizationKeyProto
+    KeySwitchingKey as KeySwitchingKeyProto, LbfvRelinearizationKey as LBFVRelinearizationKeyProto,
 };
+use crate::{Error, Result};
 use fhe_math::rq::{
-    switcher::Switcher, traits::TryConvertFrom as TryConvertFromPoly, Poly, Representation, Context
+    switcher::Switcher, traits::TryConvertFrom as TryConvertFromPoly, Context, Poly, Representation,
 };
-use fhe_traits::{
-    DeserializeParametrized, DeserializeWithContext, FheParametrized, Serialize,
-};
+use fhe_traits::{DeserializeParametrized, DeserializeWithContext, FheParametrized, Serialize};
 use itertools::izip;
 use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
-use crate::{Error, Result};
 
 use super::LBFVPublicKey;
 
@@ -101,12 +98,12 @@ impl LBFVRelinearizationKey {
         if ctx_ciphertext.moduli().len() == 1 {
             return Err(Error::DefaultError(
                 "These parameters do not support key switching".to_string(),
-            )); 
+            ));
         }
 
         // Generate random polynomial 'r' from the key distribution
         let r: SecretKey = SecretKey::random(&sk.par, rng);
-        let r_poly = Poly::try_convert_from( 
+        let r_poly = Poly::try_convert_from(
             r.coeffs.as_ref(),
             ctx_ciphertext,
             false,
@@ -156,10 +153,11 @@ impl LBFVRelinearizationKey {
         )?;
 
         // Extract b_vec from pk.c[i][0] at the ciphertext level
-        // TODO: we are not switching to the key level here, but since the ciphertext 
+        // TODO: we are not switching to the key level here, but since the ciphertext
         // level defines l (the number of ciphertexts in the public key), this may be fine.
         // We should probably think about this more carefully.
-        let b_vec = pk.extract_b_polynomials(ciphertext_level, key_level, Representation::NttShoup)?;
+        let b_vec =
+            pk.extract_b_polynomials(ciphertext_level, key_level, Representation::NttShoup)?;
 
         Ok(Self {
             ksk_r_to_s,
@@ -168,12 +166,12 @@ impl LBFVRelinearizationKey {
         })
     }
 
-    /// Get "l" in "l-BFV" based on members of the [`LBFVRelinearizationKey`] struct, 
+    /// Get "l" in "l-BFV" based on members of the [`LBFVRelinearizationKey`] struct,
     /// which is equal to the number of ciphertexts in the public key.
-    /// 
+    ///
     /// # Returns
     /// * `Ok(usize)` - The number of ciphertexts in the public key
-    /// * `Err` if the number of moduli in the ciphertext context is not equal 
+    /// * `Err` if the number of moduli in the ciphertext context is not equal
     /// to the number of polynomials in `b_vec`, which should be equal to "l".
     pub fn l(&self) -> Result<usize> {
         if self.ksk_r_to_s.par.max_level() + 1 - self.ciphertext_level() != self.b_vec.len() {
@@ -195,13 +193,13 @@ impl LBFVRelinearizationKey {
         rng: &mut R,
     ) -> Result<Self> {
         Self::new_leveled(sk, pk, d1_seed, 0, 0, rng)
-    }   
+    }
 
     /// Relinearizes a ciphertext of degree 2 to degree 1 using the l-BFV relinearization algorithm.
-    /// 
-    /// This function implements the relinearization algorithm from [Robust Multiparty Computation from 
+    ///
+    /// This function implements the relinearization algorithm from [Robust Multiparty Computation from
     /// Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
-    /// 
+    ///
     /// Note: Key switching operations are done in the key switching key context, not the ciphertext context.
     /// When necessary, the ciphertext is converted to the key switching key context. Then, it is converted back
     /// to the ciphertext context to perform necessary mathematical operations.
@@ -217,8 +215,7 @@ impl LBFVRelinearizationKey {
             Err(Error::DefaultError(
                 "Only supports relinearization of ciphertext with 3 parts".to_string(),
             ))
-        } else if ct.level != self.ciphertext_level()
-        {
+        } else if ct.level != self.ciphertext_level() {
             Err(Error::DefaultError(
                 "Ciphertext has incorrect level".to_string(),
             ))
@@ -264,46 +261,46 @@ impl LBFVRelinearizationKey {
     }
 
     /// Get the ciphertext level of the relinearization key.
-    /// 
+    ///
     /// # Returns
-    /// * `usize` - The ciphertext level of the relinearization key which is the same 
-    /// as the ciphertext level of the key switching key. 
+    /// * `usize` - The ciphertext level of the relinearization key which is the same
+    /// as the ciphertext level of the key switching key.
     pub fn ciphertext_level(&self) -> usize {
         self.ksk_r_to_s.ciphertext_level
     }
 
     /// Get the ciphertext context of the relinearization key.
-    /// 
+    ///
     /// # Returns
-    /// * `Arc<Context>` - The ciphertext context of the relinearization key which is the same 
-    /// as the ciphertext context of the key switching key. 
+    /// * `Arc<Context>` - The ciphertext context of the relinearization key which is the same
+    /// as the ciphertext context of the key switching key.
     pub fn ciphertext_ctx(&self) -> Arc<Context> {
         self.ksk_r_to_s.ctx_ciphertext.clone()
     }
 
     /// Get the key level of the relinearization key.
-    /// 
+    ///
     /// # Returns
-    /// * `usize` - The key level of the relinearization key which is the same 
-    /// as the key level of the key switching key. 
-    pub fn key_level(&self) -> usize {  
+    /// * `usize` - The key level of the relinearization key which is the same
+    /// as the key level of the key switching key.
+    pub fn key_level(&self) -> usize {
         self.ksk_r_to_s.ksk_level
     }
 
     /// Get the key context of the relinearization key.
-    /// 
+    ///
     /// # Returns
-    /// * `Arc<Context>` - The key context of the relinearization key which is the same 
-    /// as the key context of the key switching key. 
+    /// * `Arc<Context>` - The key context of the relinearization key which is the same
+    /// as the key context of the key switching key.
     pub fn key_ctx(&self) -> Arc<Context> {
         self.ksk_r_to_s.ctx_ksk.clone()
     }
 
     /// Get the BFV parameters of the relinearization key.
-    /// 
+    ///
     /// # Returns
-    /// * `Arc<BfvParameters>` - The BFV parameters of the relinearization key which is the same 
-    /// as the BFV parameters of the key switching key. 
+    /// * `Arc<BfvParameters>` - The BFV parameters of the relinearization key which is the same
+    /// as the BFV parameters of the key switching key.
     pub fn parameters(&self) -> Arc<BfvParameters> {
         self.ksk_r_to_s.par.clone()
     }
@@ -313,8 +310,8 @@ impl LBFVRelinearizationKey {
     /// This function takes a polynomial in power basis representation and an array of polynomials in NTT-Shoup representation.
     /// It decomposes the input polynomial into its RNS components and computes the sum of products between each component
     /// and the corresponding polynomial in the array.
-    /// 
-    /// The input polynomial should be in the context of the ciphertext being relinearized and the array of polynomials should be in 
+    ///
+    /// The input polynomial should be in the context of the ciphertext being relinearized and the array of polynomials should be in
     /// the context of the key.
     ///
     /// # Arguments
@@ -400,14 +397,21 @@ impl From<&LBFVRelinearizationKey> for LBFVRelinearizationKeyProto {
 /// * `Ok(LBFVRelinearizationKey)` if conversion succeeds
 /// * `Err` if the protobuf is invalid or conversion fails
 impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
-    fn try_convert_from(value: &LBFVRelinearizationKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_convert_from(
+        value: &LBFVRelinearizationKeyProto,
+        par: &Arc<BfvParameters>,
+    ) -> Result<Self> {
         if value.ksk_r_to_s.is_none() || value.ksk_s_to_r.is_none() {
-            return Err(Error::DefaultError("Invalid serialization: missing key switching keys".to_string()));
+            return Err(Error::DefaultError(
+                "Invalid serialization: missing key switching keys".to_string(),
+            ));
         }
-        
-        let ksk_r_to_s = KeySwitchingKey::try_convert_from(value.ksk_r_to_s.as_ref().unwrap(), par)?;
-        let ksk_s_to_r = KeySwitchingKey::try_convert_from(value.ksk_s_to_r.as_ref().unwrap(), par)?;
-        
+
+        let ksk_r_to_s =
+            KeySwitchingKey::try_convert_from(value.ksk_r_to_s.as_ref().unwrap(), par)?;
+        let ksk_s_to_r =
+            KeySwitchingKey::try_convert_from(value.ksk_s_to_r.as_ref().unwrap(), par)?;
+
         // Deserialize b_vec
         let key_ctx = ksk_r_to_s.ctx_ksk.clone();
         let mut b_vec = Vec::with_capacity(value.b_vec.len());
@@ -415,7 +419,7 @@ impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
             let poly = Poly::from_bytes(poly_bytes, &key_ctx)?;
             b_vec.push(poly);
         }
-        
+
         Ok(LBFVRelinearizationKey {
             ksk_r_to_s,
             ksk_s_to_r,
@@ -474,35 +478,35 @@ mod tests {
         let params = BfvParameters::default_arc(6, 8);
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng);
-        
+
         // Create relinearization key
         let relin_key = LBFVRelinearizationKey::new(&sk, &pk, None, &mut rng)?;
-        
+
         // Serialize and deserialize
         let bytes = relin_key.to_bytes();
         let deserialized_key = LBFVRelinearizationKey::from_bytes(&bytes, &params)?;
-        
+
         // Test that the deserialized key works correctly
         let pt = Plaintext::try_encode(&[2u64], Encoding::poly(), &params)?;
         let ct = pk.try_encrypt(&pt, &mut rng)?;
         let mut ct_squared = &ct.clone() * &ct;
-        
+
         // Relinearize with original key
         let mut ct_squared_original = ct_squared.clone();
         relin_key.relinearizes(&mut ct_squared_original)?;
-        
+
         // Relinearize with deserialized key
         deserialized_key.relinearizes(&mut ct_squared)?;
-        
+
         // Decrypt and verify both give the same result
         let pt_original = sk.try_decrypt(&ct_squared_original)?;
         let pt_deserialized = sk.try_decrypt(&ct_squared)?;
-        
+
         assert_eq!(pt_original, pt_deserialized);
-        
+
         let result = Vec::<u64>::try_decode(&pt_deserialized, Encoding::poly())?;
         assert_eq!(result[0], 4);
-        
+
         Ok(())
     }
 
@@ -512,10 +516,10 @@ mod tests {
         let params = BfvParameters::default_arc(6, 8);
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng);
-        
+
         // Create relinearization key
         let relin_key = LBFVRelinearizationKey::new(&sk, &pk, None, &mut rng)?;
-        
+
         // Test multiplication with different encodings
         for encoding in [Encoding::poly(), Encoding::simd()] {
             // Encode and encrypt values
@@ -523,21 +527,21 @@ mod tests {
             let pt2 = Plaintext::try_encode(&[5u64], encoding.clone(), &params)?;
             let ct1 = pk.try_encrypt(&pt1, &mut rng)?;
             let ct2 = pk.try_encrypt(&pt2, &mut rng)?;
-            
+
             // Multiply ciphertexts
             let mut ct_product = &ct1 * &ct2;
-            
+
             // Relinearize
             relin_key.relinearizes(&mut ct_product)?;
-            
+
             // Decrypt and verify
             let pt_result = sk.try_decrypt(&ct_product)?;
             let result = Vec::<u64>::try_decode(&pt_result, encoding.clone())?;
-            
+
             // Check result (3 * 5 = 15)
             assert_eq!(result[0], 15);
         }
-        
+
         Ok(())
     }
 }

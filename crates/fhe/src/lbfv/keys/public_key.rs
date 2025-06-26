@@ -10,9 +10,11 @@ use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
-use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom};
+use crate::bfv::{
+    traits::TryConvertFrom, BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey,
+};
 use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
-use fhe_math::rq::{Poly, Representation, switcher::Switcher};
+use fhe_math::rq::{switcher::Switcher, Poly, Representation};
 use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 
 /// Public key for the L-BFV encryption scheme.
@@ -22,7 +24,7 @@ pub struct LBFVPublicKey {
     pub par: Arc<BfvParameters>,
     /// The public key ciphertexts, one for each RNS modulus
     pub c: Vec<Ciphertext>,
-    /// The decomposition size which is the number of RNS moduli (the l in lBFV). 
+    /// The decomposition size which is the number of RNS moduli (the l in lBFV).
     /// Note while l in https://eprint.iacr.org/2024/1285.pdf is equal to the size
     /// chosen of the Gadget vector, here it is equal the number of RNS moduli
     /// as the library uses the optmization of https://eprint.iacr.org/2018/117.pdf
@@ -125,7 +127,7 @@ impl LBFVPublicKey {
 
     /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
     ///
-    /// This method extracts the first l = # moduli - ciphertext level, c[0] components from each ciphertext in the public key, 
+    /// This method extracts the first l = # moduli - ciphertext level, c[0] components from each ciphertext in the public key,
     /// mod switches them to the key level, and converts them to the specified representation.
     ///
     /// # Arguments
@@ -140,12 +142,19 @@ impl LBFVPublicKey {
     ///   - The key level is not 0 (current limitation)
     ///   - The public key is not at level 0
     ///   - Any polynomial operations fail during mod switching or representation changes
-    pub fn extract_b_polynomials(&self, ciphertext_level: usize, key_level: usize, rep: Representation) -> Result<Vec<Poly>> {
+    pub fn extract_b_polynomials(
+        &self,
+        ciphertext_level: usize,
+        key_level: usize,
+        rep: Representation,
+    ) -> Result<Vec<Poly>> {
         // Necessary checks
         if ciphertext_level > self.par.max_level() {
-            return Err(Error::DefaultError("Level is greater than the maximum level".to_string()));
+            return Err(Error::DefaultError(
+                "Level is greater than the maximum level".to_string(),
+            ));
         }
-        
+
         // Note: this may seem redundant, but it's because in the future, we want to experiment with different key levels
         // for the public key.
         if key_level != 0 {
@@ -154,7 +163,9 @@ impl LBFVPublicKey {
 
         let key_ctx = self.par.ctx_at_level(key_level)?;
         if self.c[0].c[0].ctx() != key_ctx {
-            return Err(Error::DefaultError("Public key is not at level 0".to_string()));
+            return Err(Error::DefaultError(
+                "Public key is not at level 0".to_string(),
+            ));
         }
 
         // Note: key switching is redundant for now.
@@ -168,7 +179,10 @@ impl LBFVPublicKey {
         for i in 0..new_l {
             let mut poly = self.c[i].c[0].clone();
             if poly.ctx() != key_ctx {
-                println!("Switching from level {} to level {}", ciphertext_level, key_level);
+                println!(
+                    "Switching from level {} to level {}",
+                    ciphertext_level, key_level
+                );
                 poly.change_representation(Representation::PowerBasis);
                 poly = poly.mod_switch_to(&switcher)?;
             }

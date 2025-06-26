@@ -3,8 +3,8 @@
 use crate::bfv::{BfvParameters, Ciphertext, RelinearizationKey as BfvRelinearizationKey};
 use crate::lbfv::LBFVRelinearizationKey;
 use crate::Result;
-use std::sync::Arc;
 use std::fmt::Debug;
+use std::sync::Arc;
 
 /// Conversions.
 ///

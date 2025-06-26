@@ -1,7 +1,7 @@
-use std::io::Result;
 use std::env;
-use std::path::PathBuf;
 use std::fs;
+use std::io::Result;
+use std::path::PathBuf;
 
 fn main() -> Result<()> {
     let proto_dir = PathBuf::from("src/proto");
