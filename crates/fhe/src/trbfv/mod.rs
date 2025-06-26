@@ -3,4 +3,4 @@
 
 mod trbfv;
 
-pub use trbfv::{TrBFVShare, TrBFVPublicKeyShare, TrBFVDecryptionShare};
+pub use trbfv::{TrBFVDecryptionShare, TrBFVPublicKeyShare, TrBFVShare};

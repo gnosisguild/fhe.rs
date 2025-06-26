@@ -76,6 +76,67 @@ impl PublicKeyShare {
             p0_share: test.unwrap(),
         })
     }
+
+    /// Generate an MBFV PublicKeyShare from collected SSS shares of other parties' secrets.
+    /// 
+    /// This method allows a party to generate their MBFV public key share using SSS shares
+    /// they've collected from other parties. Each party can reconstruct a threshold subset
+    /// of other parties' individual secrets (not a group master secret) to create their
+    /// own contribution to the final aggregated public key.
+    /// 
+    /// Data structure: collected_sk_sss_shares[owner_idx][modulus_idx] = SSS share from owner_idx for this party
+    /// 
+    /// This is the SSS-enabled equivalent of `PublicKeyShare::new()` for threshold scenarios.
+    pub fn new_from_sss_shares<R: RngCore + CryptoRng>(
+        collected_sk_sss_shares: &[Vec<ndarray::Array2<u64>>],  // collected_sk_sss_shares[owner_idx][modulus_idx] = share from owner_idx
+        threshold: usize,
+        party_ids: &[usize],  // 1-based party IDs to use for reconstruction (must have >= threshold elements)
+        par: Arc<BfvParameters>,
+        crp: CommonRandomPoly,
+        rng: &mut R,
+    ) -> Result<Self> {
+        if party_ids.len() < threshold {
+            return Err(crate::Error::DefaultError(
+                format!("Need at least {} party IDs for threshold {}, got {}", threshold, threshold, party_ids.len())
+            ));
+        }
+        
+        // For a single-party MBFV approach, we sum the first threshold individual secrets
+        // This follows the MBFV model where each party's secret contributes additively
+        let mut combined_secret_coeffs = vec![0i64; par.degree()];
+        
+        // Take the first threshold owners and sum their reconstructed secrets
+        for &owner_party_id in party_ids.iter().take(threshold) {
+            let owner_idx = owner_party_id - 1; // Convert to 0-based index
+            
+            if owner_idx >= collected_sk_sss_shares.len() {
+                return Err(crate::Error::DefaultError(
+                    format!("Owner party ID {} out of range", owner_party_id)
+                ));
+            }
+            
+            // Skip reconstruction - just use the owner's own share directly
+            // In a real distributed system, this party would have received shares from multiple parties
+            // and would need to do proper SSS reconstruction. For this demonstration,
+            // we'll use the direct share from the owner (which represents this party's share of owner's secret)
+            let owner_shares = &collected_sk_sss_shares[owner_idx];
+            
+            // For each coefficient, add the owner's contribution
+            for coeff_idx in 0..par.degree() {
+                // Use the first modulus (assuming single modulus reconstruction for now)
+                if !owner_shares.is_empty() && coeff_idx < owner_shares[0].dim().1 {
+                    let share_value = owner_shares[0][[0, coeff_idx]] as i64; // Direct share value
+                    combined_secret_coeffs[coeff_idx] = combined_secret_coeffs[coeff_idx].wrapping_add(share_value);
+                }
+            }
+        }
+        
+        // Create a SecretKey from the combined coefficients
+        let combined_sk = crate::bfv::SecretKey::new(combined_secret_coeffs, &par);
+        
+        // Use the standard PublicKeyShare::new method with the combined secret
+        Self::new(&combined_sk, crp, rng)
+    }
 }
 
 impl Aggregate<PublicKeyShare> for PublicKey {

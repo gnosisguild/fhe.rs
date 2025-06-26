@@ -156,6 +156,99 @@ impl DecryptionShare {
         Ok(DecryptionShare { sks_share })
     }
 
+    /// Generate an MBFV DecryptionShare from collected SSS shares of other parties' secrets.
+    /// 
+    /// This method allows a party to generate their MBFV decryption share using SSS shares
+    /// they've collected from other parties. Each party can reconstruct a threshold subset
+    /// of other parties' individual secrets (not a group master secret) to create their
+    /// own contribution to the final aggregated decryption.
+    /// 
+    /// This is the SSS-enabled equivalent of `DecryptionShare::new()` for threshold scenarios.
+    pub fn new_from_sss_shares<R: RngCore + CryptoRng>(
+        collected_sk_sss_shares: &[Vec<ndarray::Array2<u64>>],  // collected_sk_sss_shares[party_idx][modulus_idx] = shares from party_idx
+        threshold: usize,
+        party_ids: &[usize],  // 1-based party IDs to use for reconstruction (must have >= threshold elements)
+        par: Arc<BfvParameters>,
+        ct: &Arc<Ciphertext>,
+        rng: &mut R,
+    ) -> Result<Self> {
+        use shamir_secret_sharing::ShamirSecretSharing as SSS;
+        use num_bigint_old::{BigInt, ToBigInt};
+        use num_traits::ToPrimitive;
+        
+        if party_ids.len() < threshold {
+            return Err(crate::Error::DefaultError(
+                format!("Need at least {} party IDs for threshold {}, got {}", threshold, threshold, party_ids.len())
+            ));
+        }
+        
+        // Reconstruct individual secrets from the first `threshold` parties and sum them
+        // This follows the MBFV model where each party's secret contributes additively
+        let mut combined_secret_coeffs = vec![0i64; par.degree()];
+        
+        for &party_id in party_ids.iter().take(threshold) {
+            let party_idx = party_id - 1; // Convert to 0-based index
+            
+            if party_idx >= collected_sk_sss_shares.len() {
+                return Err(crate::Error::DefaultError(
+                    format!("Party ID {} out of range", party_id)
+                ));
+            }
+            
+            let party_shares = &collected_sk_sss_shares[party_idx];
+            
+            // Reconstruct this party's secret using SSS interpolation
+            let mut party_secret_coeffs = Vec::with_capacity(par.degree());
+            
+            for coeff_idx in 0..par.degree() {
+                // For each modulus, reconstruct the coefficient using SSS
+                for (modulus_idx, modulus) in par.moduli.iter().enumerate() {
+                    let sss = SSS {
+                        threshold,
+                        share_amount: party_ids.len(), 
+                        prime: BigInt::from(*modulus),
+                    };
+                    
+                    // Collect shares for this coefficient from different parties
+                    let mut coefficient_shares: Vec<(usize, BigInt)> = Vec::new();
+                    for (share_idx, &share_party_id) in party_ids.iter().enumerate() {
+                        if share_idx >= threshold { break; } // Only need threshold shares
+                        
+                        let share_party_idx = share_party_id - 1;
+                        if share_party_idx < collected_sk_sss_shares.len() && modulus_idx < party_shares.len() {
+                            let share_array = &collected_sk_sss_shares[share_party_idx][modulus_idx];
+                            if party_idx < share_array.dim().0 && coeff_idx < share_array.dim().1 {
+                                let share_value = share_array[[party_idx, coeff_idx]];
+                                coefficient_shares.push((share_party_id, share_value.to_bigint().unwrap()));
+                            }
+                        }
+                    }
+                    
+                    if coefficient_shares.len() >= threshold {
+                        let reconstructed = sss.recover(&coefficient_shares[0..threshold]);
+                        // Use first modulus for the coefficient (assuming single modulus for now)
+                        if modulus_idx == 0 {
+                            party_secret_coeffs.push(reconstructed.to_i64().unwrap_or(0));
+                        }
+                    }
+                }
+            }
+            
+            // Add this party's reconstructed secret to the combined secret (MBFV additive model)
+            for (i, &coeff) in party_secret_coeffs.iter().enumerate() {
+                if i < combined_secret_coeffs.len() {
+                    combined_secret_coeffs[i] = combined_secret_coeffs[i].wrapping_add(coeff);
+                }
+            }
+        }
+        
+        // Create a SecretKey from the combined coefficients
+        let combined_sk = crate::bfv::SecretKey::new(combined_secret_coeffs, &par);
+        
+        // Use the standard DecryptionShare::new method with the combined secret
+        Self::new(&combined_sk, ct, rng)
+    }
+
     /// Deserialize a DecryptionShare from bytes with the given parameters and
     /// ciphertext
     pub fn deserialize(

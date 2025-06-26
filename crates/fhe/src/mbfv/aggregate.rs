@@ -45,3 +45,8 @@ impl<I: Iterator<Item = S>, S> AggregateIter for I {
         Aggregate::from_shares(self)
     }
 }
+
+// NOTE: The previous Aggregate<TrBFVPublicKeyShare> implementation was removed
+// because it was untested, unused by the examples, and potentially insecure.
+// TrBFV public key aggregation should follow standard MBFV patterns using
+// individual PublicKeyShare aggregation, not SSS-based aggregation.
