@@ -81,9 +81,9 @@ impl LBFVPublicKey {
         }
 
         let ctx = pk.par.ctx_at_level(pk.c[0].level)?;
-        let u = Poly::small(ctx, Representation::Ntt, pk.par.variance, rng)?;
+        let e_ek = Poly::small(ctx, Representation::Ntt, pk.par.variance, rng)?;
 
-        Ok((pk, u))
+        Ok((pk, e_ek))
     }
 
     /// Encrypt a plaintext with the public key.
