@@ -53,9 +53,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 1;
-    let mut num_parties = 10;
-    let mut threshold = 7;
+    let mut num_summed = 5;
+    let mut num_parties = 3;
+    let mut threshold = 2;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.
