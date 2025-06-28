@@ -509,7 +509,11 @@ impl DecryptionShare {
         // For each modulus, create SSS shares of each coefficient of THIS party's contribution
         for (_k, (m, p)) in izip!(
             party_dec_share.sks_share.h_share.ctx().moduli().iter(),
-            party_dec_share.sks_share.h_share.coefficients().outer_iter()
+            party_dec_share
+                .sks_share
+                .h_share
+                .coefficients()
+                .outer_iter()
         )
         .enumerate()
         {
@@ -560,7 +564,9 @@ impl DecryptionShare {
         use num_traits::ToPrimitive;
 
         if received_shares.is_empty() {
-            return Err(crate::Error::DefaultError("No received shares provided".to_string()));
+            return Err(crate::Error::DefaultError(
+                "No received shares provided".to_string(),
+            ));
         }
 
         let num_parties = received_shares.len();
@@ -572,14 +578,19 @@ impl DecryptionShare {
             if party_shares.len() != num_moduli {
                 return Err(crate::Error::DefaultError(format!(
                     "Party {} has {} moduli, expected {}",
-                    party_idx, party_shares.len(), num_moduli
+                    party_idx,
+                    party_shares.len(),
+                    num_moduli
                 )));
             }
             for (mod_idx, mod_shares) in party_shares.iter().enumerate() {
                 if mod_shares.len() != num_coeffs {
                     return Err(crate::Error::DefaultError(format!(
                         "Party {} modulus {} has {} coefficients, expected {}",
-                        party_idx, mod_idx, mod_shares.len(), num_coeffs
+                        party_idx,
+                        mod_idx,
+                        mod_shares.len(),
+                        num_coeffs
                     )));
                 }
             }
@@ -606,7 +617,7 @@ impl DecryptionShare {
                 // Reduce modulo the current modulus
                 let modulus_big = BigInt::from(modulus);
                 coefficient_sum %= &modulus_big;
-                
+
                 // Ensure positive result
                 if coefficient_sum < BigInt::from(0) {
                     coefficient_sum += &modulus_big;
@@ -628,12 +639,9 @@ impl DecryptionShare {
 
         // Create the polynomial from combined coefficients
         let ctx = ct.par.ctx_at_level(ct.level)?;
-        
+
         // Create new polynomial with combined coefficients
-        let mut combined_h = fhe_math::rq::Poly::zero(
-            ctx,
-            Representation::PowerBasis,
-        );
+        let mut combined_h = fhe_math::rq::Poly::zero(ctx, Representation::PowerBasis);
 
         // Convert combined coefficients to Array2<u64>
         let num_moduli = combined_moduli_data.len();

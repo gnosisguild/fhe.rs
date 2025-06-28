@@ -414,7 +414,9 @@ impl PublicKeyShare {
         use num_traits::ToPrimitive;
 
         if received_shares.is_empty() {
-            return Err(crate::Error::DefaultError("No received shares provided".to_string()));
+            return Err(crate::Error::DefaultError(
+                "No received shares provided".to_string(),
+            ));
         }
 
         let num_parties = received_shares.len();
@@ -426,14 +428,19 @@ impl PublicKeyShare {
             if party_shares.len() != num_moduli {
                 return Err(crate::Error::DefaultError(format!(
                     "Party {} has {} moduli, expected {}",
-                    party_idx, party_shares.len(), num_moduli
+                    party_idx,
+                    party_shares.len(),
+                    num_moduli
                 )));
             }
             for (mod_idx, mod_shares) in party_shares.iter().enumerate() {
                 if mod_shares.len() != num_coeffs {
                     return Err(crate::Error::DefaultError(format!(
                         "Party {} modulus {} has {} coefficients, expected {}",
-                        party_idx, mod_idx, mod_shares.len(), num_coeffs
+                        party_idx,
+                        mod_idx,
+                        mod_shares.len(),
+                        num_coeffs
                     )));
                 }
             }
@@ -460,7 +467,7 @@ impl PublicKeyShare {
                 // Reduce modulo the current modulus
                 let modulus_big = BigInt::from(modulus);
                 coefficient_sum %= &modulus_big;
-                
+
                 // Ensure positive result
                 if coefficient_sum < BigInt::from(0) {
                     coefficient_sum += &modulus_big;
@@ -482,12 +489,9 @@ impl PublicKeyShare {
 
         // Create the polynomial from combined coefficients
         let ctx = par.ctx_at_level(0)?;
-        
+
         // Create new polynomial with combined coefficients
-        let mut combined_p0 = fhe_math::rq::Poly::zero(
-            ctx,
-            Representation::PowerBasis,
-        );
+        let mut combined_p0 = fhe_math::rq::Poly::zero(ctx, Representation::PowerBasis);
 
         // Convert combined coefficients to Array2<u64>
         let num_moduli = combined_moduli_data.len();
@@ -764,6 +768,4 @@ mod tests {
             let _combined_share = PublicKeyShare::from_shares(shares_vec).unwrap();
         }
     }
-
-
 }
