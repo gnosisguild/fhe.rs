@@ -875,13 +875,12 @@ impl TrBFVShare {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bfv::{BfvParametersBuilder, SecretKey};
+    use crate::bfv::{BfvParametersBuilder, PublicKey, SecretKey};
     use fhe_math::rq::{traits::TryConvertFrom, Context, Poly, Representation};
-    use itertools::{izip, zip};
-    use ndarray::{array, concatenate, Array, Array2, ArrayView, Axis};
+    use itertools::izip;
+    use ndarray::{array, Array, Array2, ArrayView, Axis};
     use num_traits::ToPrimitive;
-    use rand::thread_rng;
-    use zeroize::Zeroizing;
+    use rand::{thread_rng, Rng};
 
     #[test]
     fn convert_poly_to_shared_poly() {
@@ -1030,9 +1029,16 @@ mod tests {
         }
         //println!("{:?}", s);
         // ----------
-        let mut trbfv = TrBFVShare::new(n, threshold, degree, 9, moduli.clone()).unwrap();
+        let sk_par = BfvParametersBuilder::new()
+            .set_degree(degree)
+            .set_plaintext_modulus(9)
+            .set_moduli(&moduli)
+            .build_arc()
+            .unwrap();
+        let mut trbfv =
+            TrBFVShare::new(n, threshold, degree, 9, 16, moduli.clone(), sk_par.clone()).unwrap();
         let get_coeff_matrix = trbfv
-            .generate_secret_shares(sk_par.clone(), s_raw.clone())
+            .generate_secret_shares(s_raw.coeffs.as_ref().to_vec().into_boxed_slice())
             .unwrap();
         println!("{:?}", get_coeff_matrix[1].row(0));
 
@@ -1140,7 +1146,9 @@ mod tests {
 
         // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
         // in [−Bsm, Bsm]
-        let mut s_coefficients = sample_vec_cbd_unbounded(sk_par.degree(), 16, &mut rng).unwrap();
+        let mut s_coefficients: Vec<i64> = (0..sk_par.degree())
+            .map(|_| rng.gen_range(-16..=16))
+            .collect();
 
         // Shamir secret share params
         let sss = SSS {
