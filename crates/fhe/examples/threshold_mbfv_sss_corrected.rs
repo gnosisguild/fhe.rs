@@ -9,15 +9,51 @@
 //! 3. Each party gets shares of the distributed secret (never the secret itself)
 //! 4. Test both SSS-based methods and traditional methods for comparison
 
+use std::env;
 use std::sync::Arc;
 
 use fhe::bfv::{BfvParametersBuilder, Encoding, Plaintext, SecretKey};
 use fhe::mbfv::{AggregateIter, CommonRandomPoly, DecryptionShare, PublicKeyShare};
-use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
+use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use rand::{thread_rng, Rng};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = thread_rng();
+
+    // Parse command line arguments
+    let args: Vec<String> = env::args().collect();
+    let (num_parties, party_size, threshold) = if args.len() >= 4 {
+        let num_parties = args[1]
+            .parse::<usize>()
+            .map_err(|_| "Invalid num_parties: must be a positive integer")?;
+        let party_size = args[2]
+            .parse::<usize>()
+            .map_err(|_| "Invalid party_size: must be a positive integer")?;
+        let threshold = args[3]
+            .parse::<usize>()
+            .map_err(|_| "Invalid threshold: must be a positive integer")?;
+
+        // Validate arguments
+        if num_parties < 1 {
+            return Err("num_parties must be at least 1".into());
+        }
+        if party_size < threshold {
+            return Err("party_size must be at least threshold".into());
+        }
+        if threshold < 1 {
+            return Err("threshold must be at least 1".into());
+        }
+        // if party_size > num_parties {
+        //     return Err("party_size cannot be larger than num_parties".into());
+        // }
+
+        (num_parties, party_size, threshold)
+    } else {
+        // Default values
+        println!("Usage: {} <num_parties> <party_size> <threshold>", args[0]);
+        println!("Using default values: num_parties=10, party_size=5, threshold=3");
+        (10, 5, 3)
+    };
 
     // Setup parameters (using the same as voting example which works)
     let par = BfvParametersBuilder::new()
@@ -26,31 +62,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
         .build_arc()?;
     let crp = CommonRandomPoly::new(&par, &mut rng)?;
-    let group_size = 5;
-    let threshold = 3;
 
     println!("=== SSS-based DKG Implementation ===");
     println!("Following the threshold BFV algorithm specification with SSS");
+    println!(
+        "Parameters: {} total parties, {} in group, {} threshold",
+        num_parties, party_size, threshold
+    );
 
     // Step 1: Each party generates their polynomial contribution p_i
-    println!("\n🔑 Step 1: Each party generates their contribution p_i...");
     let mut party_contributions = Vec::new();
 
-    for party_id in 0..group_size {
+    for _party_id in 0..party_size {
         // Generate random polynomial p_i with coefficients in {-1, 0, 1}
         let p_i: Vec<i64> = (0..par.degree()).map(|_| rng.gen_range(-1..=1)).collect();
         party_contributions.push(p_i.clone());
-        println!(
-            "   ✓ Party {} generated p_{}: {:?}",
-            party_id + 1,
-            party_id + 1,
-            &p_i[..4]
-        );
     }
 
     // Step 2: Simulate the SSS distribution process for each coefficient
-    println!("\n🔗 Step 2: SSS distribution for each coefficient of s = Σ p_i...");
-
     // Compute the theoretical secret key s = Σ p_i (for verification only)
     let mut theoretical_s = vec![0i64; par.degree()];
     for p_i in &party_contributions {
@@ -58,23 +87,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             theoretical_s[j] += coeff;
         }
     }
-    println!(
-        "   📊 Theoretical s (first 4 coeffs): {:?}",
-        &theoretical_s[..4]
-    );
 
     // Now implement proper SSS for each coefficient
     // Step 2.1: For each coefficient s_j, create SSS shares and distribute them
-    println!("   🔗 Creating SSS shares for each coefficient...");
 
     // For each coefficient position, we'll store the SSS shares that each party receives
     // Format: party_sss_shares[party_id][modulus_idx][coefficient_idx]
     let moduli = par.moduli();
     let num_moduli = moduli.len();
-    let mut party_sss_shares: Vec<Vec<Vec<num_bigint_old::BigInt>>> = vec![Vec::new(); group_size];
+    let mut party_sss_shares: Vec<Vec<Vec<num_bigint_old::BigInt>>> = vec![Vec::new(); party_size];
 
     // Initialize the structure for each party
-    for party_id in 0..group_size {
+    for party_id in 0..party_size {
         party_sss_shares[party_id] = vec![Vec::new(); num_moduli];
         for mod_idx in 0..num_moduli {
             party_sss_shares[party_id][mod_idx] =
@@ -95,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Evaluate polynomial at each party's x-coordinate (1-indexed)
-        for party_id in 1..=group_size {
+        for party_id in 1..=party_size {
             let mut share_value = poly_coeffs[0]; // Start with constant term s_j
             let x = party_id as i64;
             let mut x_power = x;
@@ -109,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Distribute shares: each party gets their share for this coefficient
         // For simplicity, we'll put the same share value in all moduli (this is just for testing)
-        for party_id in 0..group_size {
+        for party_id in 0..party_size {
             for mod_idx in 0..num_moduli {
                 party_sss_shares[party_id][mod_idx][coeff_idx] = shares_for_coeff[party_id].clone();
             }
@@ -123,14 +147,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 2.2: Each party now has SSS shares for all coefficients
     // Let's test reconstruction using threshold parties
-    let participating_parties: Vec<usize> = vec![0, 1, 2]; // Use first 3 parties
-    println!(
-        "   🔍 Testing SSS reconstruction with parties: {:?}",
-        participating_parties
-            .iter()
-            .map(|&i| i + 1)
-            .collect::<Vec<_>>()
-    ); // Reconstruct the secret coefficients using SSS from threshold parties
+    let participating_parties: Vec<usize> = (0..threshold).collect(); // Use first threshold parties
+                                                                      // Reconstruct the secret coefficients using SSS from threshold parties
     let mut reconstructed_s = vec![0i64; par.degree()];
     for coeff_idx in 0..par.degree() {
         // Get the shares for this coefficient from participating parties (using first modulus)
@@ -157,20 +175,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // result += y_i * (lagrange_coeff / denominator)
-            result += y_i * lagrange_coeff / denominator;
+            let term = y_i * &lagrange_coeff / &denominator;
+            result += &term;
         }
 
         reconstructed_s[coeff_idx] = result.to_string().parse::<i64>().unwrap_or(0);
     }
-
-    println!(
-        "   📊 SSS reconstructed s (first 4 coeffs): {:?}",
-        &reconstructed_s[..4]
-    );
-    println!(
-        "   📊 Original theoretical s (first 4 coeffs): {:?}",
-        &theoretical_s[..4]
-    );
 
     // Verify SSS reconstruction matches the theoretical secret
     let sss_matches = reconstructed_s == theoretical_s;
@@ -223,11 +233,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Encrypt with SSS-derived public key
     let sss_ciphertext = Arc::new(sss_pk.try_encrypt(&plaintext, &mut rng)?);
-    println!("   ✓ Encrypted with SSS-derived public key");
 
     // Encrypt with traditional public key
     let traditional_ciphertext = Arc::new(traditional_pk.try_encrypt(&plaintext, &mut rng)?);
-    println!("   ✓ Encrypted with traditional public key");
+
+    println!("   ✓ Encrypted with both approaches");
+
+    // Step 5.5: Test homomorphic operations
+    println!("\n➕ Step 5.5: Testing homomorphic addition...");
+
+    // Create a second message for homomorphic addition
+    let message2 = vec![10i64, 20, 30, 40, 50];
+    let plaintext2 = Plaintext::try_encode(&message2, Encoding::poly(), &par)?;
+    let sss_ciphertext2 = Arc::new(sss_pk.try_encrypt(&plaintext2, &mut rng)?);
+
+    // Perform homomorphic addition: ciphertext_sum = ciphertext1 + ciphertext2
+    let sss_ciphertext_sum = &*sss_ciphertext + &*sss_ciphertext2;
+    println!("   ✓ Performed homomorphic addition on SSS-encrypted data");
+
+    // Expected result: message1 + message2
+    let expected_sum: Vec<i64> = message
+        .iter()
+        .zip(message2.iter())
+        .map(|(a, b)| a + b)
+        .collect();
+    println!("   📊 Expected sum: {:?}", expected_sum);
 
     // Step 6: Test decryption using SSS-based DecryptionShare
     println!("\n🔓 Step 6: Testing SSS-based decryption...");
@@ -245,9 +275,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [sss_dec_share].iter().cloned().aggregate()?;
     let sss_decrypted_message = Vec::<i64>::try_decode(&sss_decrypted_plaintext, Encoding::poly())?;
 
+    // Also test decryption of the homomorphic sum
+    let sss_sum_ciphertext = Arc::new(sss_ciphertext_sum);
+    let sss_sum_dec_share = DecryptionShare::from_threshold_sss_shares(
+        threshold_shares.clone(),
+        &party_indices,
+        threshold,
+        &par,
+        sss_sum_ciphertext.clone(),
+    )?;
+
+    let sss_sum_decrypted_plaintext: fhe::bfv::Plaintext =
+        [sss_sum_dec_share].iter().cloned().aggregate()?;
+    let sss_sum_decrypted_message =
+        Vec::<i64>::try_decode(&sss_sum_decrypted_plaintext, Encoding::poly())?;
+
     println!(
-        "   📊 SSS decrypted message: {:?}",
-        &sss_decrypted_message[..message.len()]
+        "   📊 SSS homomorphic sum result: {:?}",
+        &sss_sum_decrypted_message[..expected_sum.len()]
     );
 
     // Step 7: Test decryption using traditional approach
@@ -260,35 +305,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let traditional_decrypted_message =
         Vec::<i64>::try_decode(&traditional_decrypted_plaintext, Encoding::poly())?;
 
-    println!(
-        "   📊 Traditional decrypted message: {:?}",
-        &traditional_decrypted_message[..message.len()]
-    );
-
     // Step 8: Verify both approaches work
     println!("\n🎯 Step 8: Verification results...");
 
     let sss_works = &sss_decrypted_message[..message.len()] == &message;
     let traditional_works = &traditional_decrypted_message[..message.len()] == &message;
+    let homomorphic_works = &sss_sum_decrypted_message[..expected_sum.len()] == &expected_sum;
 
     println!("   📊 Original message: {:?}", message);
-    println!("   🔍 SSS approach works: {}", sss_works);
-    println!("   🔍 Traditional approach works: {}", traditional_works);
+    println!("   ✅ SSS approach works: {}", sss_works);
+    println!("   ✅ Traditional approach works: {}", traditional_works);
+    println!("   ➕ Homomorphic addition works: {}", homomorphic_works);
 
-    if sss_works && traditional_works {
-        println!("\n🎉 SUCCESS: Both SSS and traditional approaches work correctly!");
+    if sss_works && traditional_works && homomorphic_works {
+        println!("\n🎉 SUCCESS: All approaches including homomorphic operations work correctly!");
     } else if traditional_works && !sss_works {
         println!("\n⚠️  Traditional works but SSS fails - issue in SSS implementation");
         return Err("SSS approach verification failed".into());
     } else if sss_works && !traditional_works {
         println!("\n⚠️  SSS works but traditional fails - unexpected!");
         return Err("Traditional approach verification failed".into());
+    } else if !homomorphic_works {
+        println!("\n⚠️  Basic decryption works but homomorphic operations fail");
+        return Err("Homomorphic operation verification failed".into());
     } else {
-        println!("\n❌ FAILURE: Both approaches fail");
-        return Err("Both decryption approaches failed".into());
+        println!("\n❌ FAILURE: Multiple approaches fail");
+        return Err("Multiple decryption approaches failed".into());
     }
 
-    println!("\n=== 📊 Analysis ===");
+    println!("\n=== 📊 Summary ===");
     println!("✅ SSS coefficient reconstruction: WORKS");
     println!(
         "✅ SSS-based PublicKeyShare creation: {}",
@@ -302,8 +347,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "✅ Traditional approach: {}",
         if traditional_works { "WORKS" } else { "FAILS" }
     );
-    println!("📝 Both approaches use the same reconstructed secret coefficients");
-    println!("📝 This validates the SSS reconstruction logic");
+    println!(
+        "➕ Homomorphic addition: {}",
+        if homomorphic_works { "WORKS" } else { "FAILS" }
+    );
+    println!("\n=== 🔢 Parameters Used ===");
+    println!("• Total parties: {}", num_parties);
+    println!("• Total party members: {}", party_size * num_parties);
+    println!("• Party size: {}", party_size);
+    println!("• Party threshold: {}", threshold);
 
     Ok(())
 }
