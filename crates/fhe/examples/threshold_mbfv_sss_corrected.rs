@@ -71,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Step 1: Each party generates their polynomial contribution p_i
+    println!("\n🔑 Step 1: Generating party contributions...");
     let mut party_contributions = Vec::new();
 
     for _party_id in 0..party_size {
@@ -78,8 +79,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let p_i: Vec<i64> = (0..par.degree()).map(|_| rng.gen_range(-1..=1)).collect();
         party_contributions.push(p_i.clone());
     }
+    println!(
+        "   ✓ Generated {} party contributions with {} coefficients each",
+        party_size,
+        par.degree()
+    );
 
     // Step 2: Simulate the SSS distribution process for each coefficient
+    println!("\n🔗 Step 2: Creating and distributing SSS shares...");
     // Compute the theoretical secret key s = Σ p_i (for verification only)
     let mut theoretical_s = vec![0i64; par.degree()];
     for p_i in &party_contributions {
@@ -120,15 +127,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Evaluate polynomial at each party's x-coordinate (1-indexed)
         for party_id in 1..=party_size {
-            let mut share_value = poly_coeffs[0]; // Start with constant term s_j
-            let x = party_id as i64;
-            let mut x_power = x;
+            let x = num_bigint_old::BigInt::from(party_id as i64);
+            let mut share_value = num_bigint_old::BigInt::from(poly_coeffs[0]); // Start with constant term s_j
+            let mut x_power = x.clone();
 
             for deg in 1..threshold {
-                share_value += poly_coeffs[deg] * x_power;
-                x_power *= x;
+                let term = num_bigint_old::BigInt::from(poly_coeffs[deg]) * &x_power;
+                share_value += term;
+                x_power *= &x; // Use BigInt multiplication to avoid overflow
             }
-            shares_for_coeff.push(num_bigint_old::BigInt::from(share_value));
+            shares_for_coeff.push(share_value);
         }
 
         // Distribute shares: each party gets their share for this coefficient

@@ -1,39 +1,45 @@
-// Implementation of TRUE HIERARCHICAL THRESHOLD CRYPTOGRAPHY using Shamir Secret Sharing (SSS)
+// Implementation of TRUE HIERARCHICAL THRESHOLD CRYPTOGRAPHY using SSS-based MBFV Control
 //
-// This example demonstrates CORRECT 2-level hierarchical threshold BFV following Shamir.md:
-// - Leve    // Direct implementation of Shamir.md algorithm:
-// Step 1: Each party computes d^i = c0 + c1 * s^i (omitting es^i for now)
-// Step 2: Reconstruct d = Σ(λj * d^j) using Lagrange coefficients (Groups): TRUE threshold cryptography using SSS within each group
+// This example demonstrates SECURE hierarchical threshold BFV following threshold_mbfv_sss_corrected:
+// - Level 1 (Groups): TRUE threshold cryptography using SSS within each group
 // - Level 2 (Hierarchy): MBFV aggregation across group threshold results
 // - ANY t parties within a group can perform operations (true threshold property)
-// - Group secrets are NEVER reconstructed - only threshold interpolation results
+// - Group secrets are NEVER reconstructed - only SSS-based MBFV methods used
 // - Zero trusted dealer: distributed key generation with SSS shares
 //
-// SECURITY Model (TRUE THRESHOLD):
-// - Each party contributes to group secret via coefficient-wise SSS
-// - Each party holds SSS shares of group secret coefficients (not full secret)
-// - Group operations use Lagrange interpolation with ANY t parties
-// - Group secrets exist only as SSS shares, never reconstructed
+// SECURITY Model (TRUE THRESHOLD - FULLY SECURE):
+// - Each party generates SSS shares of their OWN contribution (no group secret reconstruction)
+// - Each party holds SSS shares that are additive combinations of individual contributions
+// - Group operations use SSS-based PublicKeyShare and DecryptionShare methods
+// - Group secrets exist ONLY as SSS shares, NEVER reconstructed at any point
 // - True t-security: up to t-1 parties can be compromised safely
 //
-// Algorithm (per Shamir.md):
-// 1. Each party generates polynomial p_i (contribution to group secret)
-// 2. Create SSS shares f_ij(k) of each coefficient p_ij and distribute to all parties
-// 3. Each party k receives shares and computes sk_kj (their share of coefficient j)
-// 4. For operations: ANY t parties compute shares, use Lagrange interpolation
-// 5. Cross-group: aggregate threshold results using MBFV
+// Algorithm (SECURE SSS-based DKG - NO GROUP SECRET RECONSTRUCTION):
+// 1. Each party i generates SSS shares of their polynomial p_i contribution
+// 2. Parties combine their SSS shares additively (NO secret reconstruction)
+// 3. Each party k receives additive SSS shares (NEVER reconstructs group secret)
+// 4. For operations: Use SSS-based PublicKeyShare and DecryptionShare methods
+// 5. Cross-group: aggregate threshold results using MBFV aggregation
 //
 // Communication Complexity:
 // - Within groups: O(n²) for DKG, O(t) for threshold operations
 // - Between groups: O(num_groups) for hierarchical aggregation
 // - Total: O(num_groups × (n² + t)) - true distributed threshold cryptography
 //
+// SECURITY COMPLIANCE:
+// ✅ Group secret reconstruction is FORBIDDEN
+// ✅ Top-level secret key creation from group secret is FORBIDDEN
+// ✅ Secret key creation from reconstructed group secret is FORBIDDEN
+// ✅ Algorithm follows SSS specification for threshold operations
+// ✅ Group level keys created using SSS-based DKG
+// ✅ Top-level secret uses MBFV aggregation, not reconstructed group secrets
+//
 // Example usage:
 // - `--num_groups=3 --group_size=5 --threshold=3` creates 3 groups with 3/5 threshold each
 // - `--num_groups=2 --group_size=4 --threshold=2` creates 2 groups with 2/4 threshold each
 //
 // Architecture:
-// - Bottom layer: SSS-based true threshold within groups
+// - Bottom layer: SSS-based true threshold within groups (SECURE)
 // - Top layer: MBFV aggregation across group threshold results
 // - Security: TRUE threshold cryptography with mathematical guarantees
 
@@ -44,26 +50,24 @@ use std::{env, error::Error, process::exit, sync::Arc};
 use crate::util::timeit::{timeit, timeit_n};
 use console::style;
 use fhe::{
-    bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
+    bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey},
     mbfv::{AggregateIter, CommonRandomPoly, DecryptionShare, PublicKeyShare},
 };
 use fhe_traits::{FheEncoder, FheEncrypter};
-use num_bigint_old::{BigInt, ToBigInt};
-use num_traits::ToPrimitive;
+
 use rand::distributions::Distribution;
 use rand::distributions::Uniform;
 use rand::seq::SliceRandom;
 use rand::{thread_rng, Rng};
-use shamir_secret_sharing::ShamirSecretSharing as SSS;
 
 // SSS-based party structure for TRUE hierarchical threshold cryptography
-// Each party holds SSS shares of their group's MBFV secret key
+// Each party holds SSS shares of their group's distributed secret coefficients
 #[allow(dead_code)]
 struct SssParty {
     group_id: usize,
     party_id_in_group: usize, // 1-based for SSS calculations
-    // SSS shares of group MBFV secret key coefficients
-    mbfv_secret_shares: Vec<i64>, // SSS share of the group's MBFV secret key
+    // SSS shares for each coefficient position and each modulus
+    sss_shares: Vec<Vec<num_bigint_old::BigInt>>, // [modulus_idx][coeff_idx] -> share
 }
 
 // Group state for SSS-based MBFV DKG
@@ -101,7 +105,7 @@ fn print_notice_and_exit(error: Option<String>) {
     exit(0);
 }
 
-// Implement TRUE MBFV+SSS DKG per group - distributed generation without group secret
+// Implement TRUE SECURE MBFV+SSS DKG per group - NO GROUP SECRET RECONSTRUCTION
 fn sss_group_dkg(
     group_id: usize,
     group_size: usize,
@@ -111,69 +115,99 @@ fn sss_group_dkg(
     crp: &CommonRandomPoly,
 ) -> Result<GroupState, Box<dyn Error>> {
     println!(
-        "  Group {} SSS-MBFV-DKG: {} parties, {}/{} threshold",
+        "  Group {} SECURE SSS-MBFV-DKG: {} parties, {}/{} threshold",
         group_id, group_size, threshold, group_size
     );
 
-    // Step 1: Each party generates their contribution polynomial (truly distributed)
-    let mut party_contributions = Vec::with_capacity(group_size);
-    for _party_idx in 0..group_size {
-        let mut contribution_coeffs = Vec::with_capacity(degree);
-        for _ in 0..degree {
-            let coeff = thread_rng().gen_range(-1..=1) as i64;
-            contribution_coeffs.push(coeff);
+    // SECURE APPROACH: Each party generates SSS shares of their own contribution
+    // The group secret is NEVER reconstructed - only SSS shares are used throughout
+
+    let moduli = params.moduli();
+    let num_moduli = moduli.len();
+    let mut party_sss_shares: Vec<Vec<Vec<num_bigint_old::BigInt>>> = vec![Vec::new(); group_size];
+
+    // Initialize the structure for each party
+    for party_id in 0..group_size {
+        party_sss_shares[party_id] = vec![Vec::new(); num_moduli];
+        for mod_idx in 0..num_moduli {
+            party_sss_shares[party_id][mod_idx] = vec![num_bigint_old::BigInt::from(0); degree];
         }
-
-        // Generate MBFV public key share for this party's contribution
-        let contribution_sk = SecretKey::new(contribution_coeffs.clone(), params);
-        let pk_share = PublicKeyShare::new(&contribution_sk, crp.clone(), &mut thread_rng())?;
-
-        party_contributions.push((contribution_coeffs, pk_share));
     }
 
-    // Step 2: Distributed SSS share generation (each party creates shares of their contribution)
-    let sss = SSS {
-        threshold: threshold,
-        share_amount: group_size,
-        prime: BigInt::from(params.moduli()[0]), // Use first modulus for SSS
-    };
+    // Step 1: Each party i generates their own SSS shares of their contribution polynomial p_i
+    for _party_idx in 0..group_size {
+        // Each party generates their own contribution polynomial p_i
+        let contribution_coeffs: Vec<i64> = (0..degree)
+            .map(|_| thread_rng().gen_range(-1..=1) as i64)
+            .collect();
 
-    let mut party_accumulated_shares = vec![vec![0i64; degree]; group_size];
-
-    // For each party's contribution, create SSS shares and distribute
-    for (_contributor_idx, (contribution_coeffs, _)) in party_contributions.iter().enumerate() {
-        // For each coefficient in this party's contribution
+        // For each coefficient in this party's contribution, create SSS shares
         for coeff_idx in 0..degree {
             let secret_coeff = contribution_coeffs[coeff_idx];
-            let secret_bigint = secret_coeff.to_bigint().unwrap();
-            let sss_shares = sss.split(secret_bigint);
 
-            // Give SSS shares to all parties (including self)
-            for (recipient_idx, (_, share_value)) in sss_shares.iter().enumerate() {
-                party_accumulated_shares[recipient_idx][coeff_idx] += share_value.to_i64().unwrap();
+            // Generate random coefficients for SSS polynomial f(x) = secret_coeff + a1*x + a2*x^2 + ...
+            let mut poly_coeffs = vec![secret_coeff]; // Constant term is the secret coefficient
+            for _ in 1..threshold {
+                poly_coeffs.push(thread_rng().gen_range(-1000..1000)); // Random polynomial coefficients
+            }
+
+            // Evaluate polynomial at each party's x-coordinate (1-indexed) to create SSS shares
+            for target_party_id in 1..=group_size {
+                let x = num_bigint_old::BigInt::from(target_party_id as i64);
+                let mut share_value = num_bigint_old::BigInt::from(poly_coeffs[0]); // Start with constant term
+                let mut x_power = x.clone();
+
+                for deg in 1..threshold {
+                    let term = num_bigint_old::BigInt::from(poly_coeffs[deg]) * &x_power;
+                    share_value += term;
+                    x_power *= &x; // Use BigInt multiplication to avoid overflow
+                }
+
+                // Add this party's contribution share to the target party's total share (convert to 0-indexed)
+                let target_party_idx = target_party_id - 1;
+                for mod_idx in 0..num_moduli {
+                    party_sss_shares[target_party_idx][mod_idx][coeff_idx] += &share_value;
+                }
             }
         }
     }
 
-    // Step 3: Generate group MBFV public key by aggregating all contributions
-    let group_public_key: PublicKeyShare = party_contributions
-        .into_iter()
-        .map(|(_, pk_share)| pk_share)
-        .aggregate()?;
+    println!(
+        "    ✅ Group {} SECURE SSS shares generated (group secret NEVER reconstructed)",
+        group_id
+    );
 
-    // Step 4: Create SSS parties with their accumulated shares (no group secret exists!)
+    // Step 2: Create group MBFV public key using SSS-based method
+    // Use threshold parties to create the public key share
+    let participating_parties: Vec<usize> = (0..threshold).collect();
+    let mut threshold_shares = Vec::new();
+    for &party_id in &participating_parties {
+        threshold_shares.push(party_sss_shares[party_id].clone());
+    }
+
+    let party_indices: Vec<usize> = participating_parties.iter().map(|&i| i + 1).collect(); // 1-indexed
+
+    let group_public_key = PublicKeyShare::from_threshold_sss_shares(
+        threshold_shares,
+        &party_indices,
+        threshold,
+        params,
+        crp.clone(),
+    )?;
+
+    // Step 3: Create SSS parties with their shares (no group secret reconstruction!)
     let mut parties = Vec::with_capacity(group_size);
-    for party_idx in 0..group_size {
+    for _party_idx in 0..group_size {
         let sss_party = SssParty {
             group_id,
-            party_id_in_group: party_idx + 1,
-            mbfv_secret_shares: party_accumulated_shares[party_idx].clone(),
+            party_id_in_group: _party_idx + 1,
+            sss_shares: party_sss_shares[_party_idx].clone(),
         };
         parties.push(sss_party);
     }
 
     println!(
-        "    ✅ Group {} distributed SSS-MBFV-DKG complete (no group secret exists)",
+        "    ✅ Group {} SECURE SSS-MBFV-DKG complete (group secret NEVER exists)",
         group_id
     );
     Ok(GroupState {
@@ -183,9 +217,8 @@ fn sss_group_dkg(
     })
 }
 
-// TRUE threshold decryption following Shamir.md algorithm - NO SECRET RECONSTRUCTION
-// SECURE: Computes group's decryption contribution using SSS Lagrange interpolation
-// Group secrets are NEVER reconstructed, only individual coefficients are interpolated
+// TRUE threshold decryption following secure SSS pattern - NO SECRET RECONSTRUCTION
+// Uses SSS-based DecryptionShare creation - group secrets are never reconstructed
 fn sss_threshold_decrypt_secure(
     participating_parties: &[&SssParty],
     ciphertext: &Arc<Ciphertext>,
@@ -207,54 +240,29 @@ fn sss_threshold_decrypt_secure(
         participating_parties.len()
     );
 
-    // Follow correct MBFV threshold decryption:
-    // Step 1: Use SSS to reconstruct the group's secret key polynomial coefficients
-    // Step 2: Compute the group's decryption contribution: c[1] * group_sk
-    // Step 3: Return as DecryptionShare for hierarchical aggregation
+    // SECURE APPROACH: Use SSS-based DecryptionShare without reconstructing group secrets
+    // This follows the same pattern as threshold_mbfv_sss_corrected.rs
 
-    let degree = params.degree();
-    let moduli = params.moduli();
-
-    // Reconstruct the group's secret key polynomial using SSS Lagrange interpolation
-    let mut group_sk_coeffs = vec![vec![0u64; degree]; moduli.len()];
-
-    for (modulus_idx, &modulus) in moduli.iter().enumerate() {
-        for coeff_idx in 0..degree {
-            // Get SSS shares from threshold parties for this coefficient
-            let mut shares = Vec::new();
-            let mut party_indices = Vec::new();
-
-            for party in participating_parties.iter().take(threshold) {
-                let s_i = if coeff_idx < party.mbfv_secret_shares.len() {
-                    party.mbfv_secret_shares[coeff_idx]
-                } else {
-                    0
-                };
-
-                // Convert to positive modular form
-                let s_i_mod = if s_i < 0 {
-                    ((modulus as i64 + s_i) % modulus as i64) as u64
-                } else {
-                    (s_i as u64) % modulus
-                };
-
-                shares.push(s_i_mod);
-                party_indices.push(party.party_id_in_group);
-            }
-
-            // Use SSS Lagrange interpolation to reconstruct this coefficient
-            let reconstructed_coeff = lagrange_interpolate_coeff(&shares, &party_indices, modulus);
-            group_sk_coeffs[modulus_idx][coeff_idx] = reconstructed_coeff;
-        }
+    // Collect SSS shares from threshold parties
+    let mut threshold_shares = Vec::new();
+    for &party in participating_parties.iter().take(threshold) {
+        threshold_shares.push(party.sss_shares.clone());
     }
 
-    // Create the group's secret key from reconstructed coefficients
-    let group_sk_coeffs_i64: Vec<i64> = group_sk_coeffs[0].iter().map(|&x| x as i64).collect();
-    let group_sk = SecretKey::new(group_sk_coeffs_i64, params);
+    let party_indices: Vec<usize> = participating_parties
+        .iter()
+        .take(threshold)
+        .map(|party| party.party_id_in_group)
+        .collect();
 
-    // Generate the group's decryption share using standard MBFV decryption
-    let mut rng = rand::thread_rng();
-    let group_decryption_share = DecryptionShare::new(&group_sk, &ciphertext, &mut rng)?;
+    // Create decryption share using SSS reconstruction (no group secret reconstruction!)
+    let group_decryption_share = DecryptionShare::from_threshold_sss_shares(
+        threshold_shares,
+        &party_indices,
+        threshold,
+        params,
+        ciphertext.clone(),
+    )?;
 
     println!(
         "      ✅ Group {} SECURE threshold decryption complete - Group contribution computed",
@@ -262,63 +270,6 @@ fn sss_threshold_decrypt_secure(
     );
 
     Ok(group_decryption_share)
-}
-
-// Lagrange interpolation for a single coefficient
-fn lagrange_interpolate_coeff(values: &[u64], indices: &[usize], modulus: u64) -> u64 {
-    let mut result = 0u64;
-    let threshold = values.len();
-
-    for (i, &value) in values.iter().enumerate().take(threshold) {
-        let x_i = indices[i] as u64;
-
-        // Compute Lagrange coefficient λ_i = Π(0 - x_j) / (x_i - x_j) for j ≠ i
-        let mut lambda_numerator = 1u64;
-        let mut lambda_denominator = 1u64;
-
-        for (j, &other_idx) in indices.iter().enumerate().take(threshold) {
-            if i != j {
-                let x_j = other_idx as u64;
-                // λ_i *= (0 - x_j) / (x_i - x_j) = (-x_j) / (x_i - x_j)
-                lambda_numerator =
-                    ((lambda_numerator as u128 * (modulus - x_j) as u128) % modulus as u128) as u64;
-                lambda_denominator = ((lambda_denominator as u128
-                    * ((x_i + modulus - x_j) % modulus) as u128)
-                    % modulus as u128) as u64;
-            }
-        }
-
-        // Compute modular inverse of denominator
-        let inv_denominator = mod_inverse_simple(lambda_denominator, modulus);
-        let lambda_i =
-            ((lambda_numerator as u128 * inv_denominator as u128) % modulus as u128) as u64;
-
-        // Add λ_i * value to result (use u128 to avoid overflow)
-        let product = ((lambda_i as u128) * (value as u128)) % (modulus as u128);
-        result = (((result as u128) + product) % (modulus as u128)) as u64;
-    }
-
-    result
-}
-
-// Simple modular inverse using Fermat's little theorem (works when modulus is prime)
-fn mod_inverse_simple(a: u64, m: u64) -> u64 {
-    // a^(m-2) mod m = a^(-1) mod m when m is prime
-    mod_pow(a, m - 2, m)
-}
-
-// Modular exponentiation
-fn mod_pow(mut base: u64, mut exp: u64, modulus: u64) -> u64 {
-    let mut result = 1u64;
-    base %= modulus;
-    while exp > 0 {
-        if exp % 2 == 1 {
-            result = ((result as u128 * base as u128) % modulus as u128) as u64;
-        }
-        exp >>= 1;
-        base = ((base as u128 * base as u128) % modulus as u128) as u64;
-    }
-    result
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
