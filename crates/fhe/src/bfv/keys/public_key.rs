@@ -81,25 +81,18 @@ impl PublicKey {
     /// New PK for PVSS
     pub fn new_extended<R: RngCore + CryptoRng>(
         sk: &SecretKey,
-        pt: &Plaintext,
         rng: &mut R,
     ) -> Result<(Ciphertext, Poly, Poly)> {
         let pk = Self::new(sk, rng);
-        let mut ct = pk.c.clone();
-        while ct.level != pt.level {
-            ct.mod_switch_to_next_level()?;
-        }
-
+        let ct = pk.c.clone();
         let ctx = pk.par.ctx_at_level(ct.level)?;
 
         // TODO: Ask sk.par, could be wrong
         let sk = Poly::small(ctx, Representation::Ntt, sk.par.variance, rng)?;
         let e = Poly::small(ctx, Representation::Ntt, pk.par.variance, rng)?;
 
-        let m = Zeroizing::new(pt.to_poly());
         let mut c0 = sk.as_ref() * &ct.c[1];
         c0 += &e;
-        c0 += &m;
         let mut c1 = pk.c.c[1].clone();
 
         // It is now safe to enable variable time computations.
