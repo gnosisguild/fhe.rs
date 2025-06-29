@@ -65,27 +65,6 @@ impl LBFVPublicKey {
         Self::new_with_seed(sk, seed, rng)
     }
 
-    /// Generate a new [`PublicKey`] from a [`SecretKey`] and return with error polynomial.
-    pub fn new_extended<R: RngCore + CryptoRng>(
-        sk: &SecretKey,
-        rng: &mut R,
-    ) -> Result<(Self, Poly)> {
-        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        rng.fill(&mut seed);
-        let pk = Self::new_with_seed(sk, seed, rng);
-
-        if pk.c.is_empty() {
-            return Err(Error::DefaultError(
-                "Public key has no ciphertexts available".to_string(),
-            ));
-        }
-
-        let ctx = pk.par.ctx_at_level(pk.c[0].level)?;
-        let e_ek = Poly::small(ctx, Representation::Ntt, pk.par.variance, rng)?;
-
-        Ok((pk, e_ek))
-    }
-
     /// Encrypt a plaintext with the public key.
     /// The encryption is done in the same level as the plaintext.
     /// Returns the ciphertext and the noise polynomials.
