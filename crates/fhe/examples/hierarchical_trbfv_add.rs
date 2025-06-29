@@ -150,13 +150,15 @@ fn sss_group_dkg(
             let contribution_coeffs: Vec<i64> = (0..degree)
                 .map(|_| thread_rng().gen_range(-1..=1) as i64)
                 .collect();
-            
+
             // Generate SSS shares for this party's contribution
-            let mut party_shares: Vec<Vec<Vec<num_bigint_old::BigInt>>> = vec![Vec::new(); group_size];
+            let mut party_shares: Vec<Vec<Vec<num_bigint_old::BigInt>>> =
+                vec![Vec::new(); group_size];
             for target_party_id in 0..group_size {
                 party_shares[target_party_id] = vec![Vec::new(); num_moduli];
                 for mod_idx in 0..num_moduli {
-                    party_shares[target_party_id][mod_idx] = vec![num_bigint_old::BigInt::from(0); degree];
+                    party_shares[target_party_id][mod_idx] =
+                        vec![num_bigint_old::BigInt::from(0); degree];
                 }
             }
 
@@ -198,7 +200,8 @@ fn sss_group_dkg(
         for target_party_idx in 0..group_size {
             for mod_idx in 0..num_moduli {
                 for coeff_idx in 0..degree {
-                    party_sss_shares[target_party_idx][mod_idx][coeff_idx] += &party_contrib[target_party_idx][mod_idx][coeff_idx];
+                    party_sss_shares[target_party_idx][mod_idx][coeff_idx] +=
+                        &party_contrib[target_party_idx][mod_idx][coeff_idx];
                 }
             }
         }
@@ -461,7 +464,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             })
             .collect();
 
-        let group_partial_results = group_partial_results.map_err(|e| -> Box<dyn Error> { e.into() })?;
+        let group_partial_results =
+            group_partial_results.map_err(|e| -> Box<dyn Error> { e.into() })?;
 
         // Aggregate DecryptionShares from all groups into final Plaintext
         let final_plaintext: Plaintext = group_partial_results.into_iter().aggregate()?;
