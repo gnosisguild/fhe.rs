@@ -136,6 +136,7 @@ struct SSSHierarchyNode {
     children: Vec<SSSHierarchyNode>, // Children (empty if leaf node = individual party)
     is_leaf: bool,       // True if this is a leaf node (individual party)
     party_id: Option<usize>, // Flat party ID if this is a leaf node
+    party_sss_shares: Vec<Vec<Vec<num_bigint_old::BigInt>>>, // For depth=1: [party_idx][modulus_idx][coeff_idx] -> SSS share
 }
 
 /// Global coordinator for arbitrary-depth SSS hierarchy
@@ -165,6 +166,7 @@ impl ArbitraryDepthSSSCoordinator {
             children: Vec::new(),
             is_leaf: false,
             party_id: None,
+            party_sss_shares: Vec::new(),
         };
 
         Ok(ArbitraryDepthSSSCoordinator {
@@ -194,6 +196,13 @@ impl ArbitraryDepthSSSCoordinator {
     ) -> Result<(), Box<dyn Error>> {
         let level = node.level;
 
+        // Special case for depth=1: flat threshold cryptography
+        if config.depth == 1 {
+            // For depth=1, the root node IS the leaf level containing all parties
+            node.is_leaf = true;
+            return Ok(());
+        }
+
         // If this is a leaf level (parties), mark as leaf
         if level == config.depth - 1 {
             node.is_leaf = true;
@@ -219,6 +228,7 @@ impl ArbitraryDepthSSSCoordinator {
                 children: Vec::new(),
                 is_leaf: false,
                 party_id: None,
+                party_sss_shares: Vec::new(),
             };
 
             Self::build_node_recursive(config, &mut child, child_path)?;
@@ -271,39 +281,106 @@ impl ArbitraryDepthSSSCoordinator {
     /// Perform bottom-up hierarchical SSS-based DKG
     fn hierarchical_sss_dkg(&mut self) -> Result<(), Box<dyn Error>> {
         println!("🔑 Starting bottom-up hierarchical SSS-based DKG");
+        let total_dkg_start = std::time::Instant::now();
+
+        // Special case for depth=1: flat threshold cryptography
+        if self.config.depth == 1 {
+            let result = self.flat_threshold_dkg();
+            let total_dkg_time = total_dkg_start.elapsed();
+            println!("📊 Total DKG time: {:.3}s", total_dkg_time.as_secs_f64());
+            return result;
+        }
 
         // For 2-level hierarchy: generate DKG for each group at level 1 (groups containing parties)
         if self.config.depth == 2 {
-            return self.two_level_hierarchical_dkg();
+            let result = self.two_level_hierarchical_dkg();
+            let total_dkg_time = total_dkg_start.elapsed();
+            println!("📊 Total DKG time: {:.3}s", total_dkg_time.as_secs_f64());
+            return result;
         }
 
         // For multi-level hierarchy: process levels from bottom (leaves) to top (root)
         for level in (0..self.config.depth).rev() {
             println!("\n📶 Processing level {} (bottom-up DKG)", level);
+            let level_start = std::time::Instant::now();
             self.process_level_dkg(level)?;
+            let level_time = level_start.elapsed();
+            println!(
+                "   ⏱️  Level {} DKG time: {:.3}s",
+                level,
+                level_time.as_secs_f64()
+            );
         }
 
+        let total_dkg_time = total_dkg_start.elapsed();
         println!("\n✅ Bottom-up hierarchical DKG complete");
+        println!("📊 Total DKG time: {:.3}s", total_dkg_time.as_secs_f64());
+        Ok(())
+    }
+
+    /// Flat threshold DKG for depth=1 (standard threshold cryptography)
+    fn flat_threshold_dkg(&mut self) -> Result<(), Box<dyn Error>> {
+        println!("\n📶 Processing flat threshold DKG (depth=1)");
+        let flat_dkg_start = std::time::Instant::now();
+
+        let total_parties = self.config.group_sizes[0];
+        let threshold = self.config.thresholds[0];
+
+        println!(
+            "  Processing {} parties with threshold {}/{}",
+            total_parties, threshold, total_parties
+        );
+
+        // Generate flat threshold DKG using the root as a single group
+        let root_path = vec![];
+        let group_start = std::time::Instant::now();
+        self.generate_group_contributions_with_size(&root_path, total_parties, threshold)?;
+        let group_time = group_start.elapsed();
+
+        let flat_dkg_time = flat_dkg_start.elapsed();
+        println!("   ⏱️  Group DKG time: {:.3}s", group_time.as_secs_f64());
+        println!(
+            "   ⏱️  Per-party DKG time: {:.3}ms",
+            (group_time.as_secs_f64() * 1000.0) / total_parties as f64
+        );
+        println!(
+            "\n✅ Flat threshold DKG complete in {:.3}s",
+            flat_dkg_time.as_secs_f64()
+        );
         Ok(())
     }
 
     /// Specialized DKG for 2-level hierarchy (matches pure_sss_hierarchical.rs pattern)
     fn two_level_hierarchical_dkg(&mut self) -> Result<(), Box<dyn Error>> {
         println!("\n📶 Processing 2-level hierarchical DKG");
+        let two_level_start = std::time::Instant::now();
 
         let num_groups = self.root.children.len();
         println!("  Processing {} groups at level 1", num_groups);
 
         // Process each group: generate party contributions and aggregate them
         for group_idx in 0..num_groups {
+            let group_start = std::time::Instant::now();
             println!(
                 "    Processing group {} with {} parties",
                 group_idx, self.config.group_sizes[1]
             );
             self.generate_group_dkg_two_level(group_idx)?;
+            let group_time = group_start.elapsed();
+            println!(
+                "       ⏱️  Group {} DKG time: {:.3}s",
+                group_idx,
+                group_time.as_secs_f64()
+            );
         }
 
-        println!("\n✅ Bottom-up hierarchical DKG complete");
+        let two_level_time = two_level_start.elapsed();
+        let avg_group_time = two_level_time.as_secs_f64() / num_groups as f64;
+        println!("   ⏱️  Average per-group DKG time: {:.3}s", avg_group_time);
+        println!(
+            "\n✅ Bottom-up hierarchical DKG complete in {:.3}s",
+            two_level_time.as_secs_f64()
+        );
         Ok(())
     }
 
@@ -321,32 +398,6 @@ impl ArbitraryDepthSSSCoordinator {
         Ok(())
     }
 
-    // ✅ SECURE: Generate proper SSS shares using the exact library pattern
-    // This function is no longer needed - we use the secure pattern directly in generate_group_contributions
-    // Keeping for potential future use in deep hierarchies
-    fn generate_secure_party_sss_shares(
-        &self,
-        _party_idx: usize,
-        _threshold: usize,
-        _group_size: usize,
-    ) -> Result<Vec<Vec<num_bigint_old::BigInt>>, Box<dyn Error>> {
-        // This function is now obsolete - the secure DKG is done directly
-        // in generate_group_contributions following the reference pattern
-        Err("This function is obsolete - use the secure DKG pattern directly".into())
-    }
-
-    // ✅ SECURE: Aggregate using library functions (no coefficient reconstruction)
-    // This function is no longer needed - we use the secure aggregation pattern directly
-    fn aggregate_party_sss_contributions(
-        &self,
-        _party_contributions: Vec<Vec<Vec<num_bigint_old::BigInt>>>,
-        _threshold: usize,
-    ) -> Result<(Vec<Vec<Vec<num_bigint_old::BigInt>>>, PublicKeyShare), Box<dyn Error>> {
-        // This function is now obsolete - the secure aggregation is done directly
-        // in generate_group_contributions following the reference pattern
-        Err("This function is obsolete - use the secure aggregation pattern directly".into())
-    }
-
     fn process_level_dkg(&mut self, level: usize) -> Result<(), Box<dyn Error>> {
         let nodes_at_level = self.count_nodes_at_level(level);
         println!("  Processing {} nodes at level {}", nodes_at_level, level);
@@ -357,16 +408,42 @@ impl ArbitraryDepthSSSCoordinator {
                 "  🔑 Generating individual party contributions at leaf level {}",
                 level
             );
+            let leaf_start = std::time::Instant::now();
             self.generate_leaf_level_contributions(level)?;
+            let leaf_time = leaf_start.elapsed();
+            println!(
+                "     ⏱️  Leaf level contributions time: {:.3}s",
+                leaf_time.as_secs_f64()
+            );
+            println!(
+                "     ⏱️  Average per-node time: {:.3}ms",
+                (leaf_time.as_secs_f64() * 1000.0) / nodes_at_level as f64
+            );
         } else {
             // Internal level: Aggregate contributions from children
             println!("  🔄 Processing internal level {} DKG", level);
+            let internal_start = std::time::Instant::now();
             self.aggregate_level_contributions(level)?;
+            let internal_time = internal_start.elapsed();
+            println!(
+                "     ⏱️  Internal level aggregation time: {:.3}s",
+                internal_time.as_secs_f64()
+            );
+            println!(
+                "     ⏱️  Average per-node time: {:.3}ms",
+                (internal_time.as_secs_f64() * 1000.0) / nodes_at_level as f64
+            );
         }
 
         // Inter-group SSS communication at this level
         println!("  📡 Inter-group SSS communication at level {}", level);
+        let comm_start = std::time::Instant::now();
         self.inter_group_sss_communication(level)?;
+        let comm_time = comm_start.elapsed();
+        println!(
+            "     ⏱️  Inter-group communication time: {:.3}s",
+            comm_time.as_secs_f64()
+        );
         println!(
             "    ✅ Inter-group SSS communication complete at level {}",
             level
@@ -439,9 +516,6 @@ impl ArbitraryDepthSSSCoordinator {
             group_path
         );
 
-        let num_moduli = self.params.moduli().len();
-        let degree = self.degree;
-
         // Find the group node
         let (group_size, threshold) = if let Some(group_node) = self.find_node_by_path(group_path) {
             (group_node.group_size, group_node.threshold)
@@ -458,6 +532,7 @@ impl ArbitraryDepthSSSCoordinator {
         group_size: usize,
         threshold: usize,
     ) -> Result<(), Box<dyn Error>> {
+        let group_start_time = std::time::Instant::now();
         let num_moduli = self.params.moduli().len();
         let degree = self.degree;
 
@@ -568,37 +643,62 @@ impl ArbitraryDepthSSSCoordinator {
         )?;
 
         // ✅ SECURE: Store results in the hierarchy (group contribution + party shares)
+        let is_depth_one = self.config.depth == 1;
+        let is_root_path = group_path.is_empty();
+
         if let Some(group_node) = self.find_node_by_path_mut(group_path) {
             // Store group's contribution shares for parent-level aggregation
             group_node.level_sss_shares = group_contribution_shares;
 
-            // Ensure group has the right number of children (individual parties)
-            if group_node.children.len() != group_size {
-                group_node.children.clear();
-                for party_idx in 0..group_size {
-                    let party = SSSHierarchyNode {
-                        level: group_node.level + 1,
-                        node_id: {
-                            let mut id = group_path.to_vec();
-                            id.push(party_idx);
-                            id
-                        },
-                        threshold,
-                        group_size: 1, // Individual party
-                        level_sss_shares: party_sss_shares[party_idx].clone(),
-                        children: Vec::new(),
-                        is_leaf: true,
-                        party_id: Some(party_idx),
-                    };
-                    group_node.children.push(party);
-                }
+            // For depth=1, store party shares directly in root's party_sss_shares
+            if is_depth_one && is_root_path {
+                group_node.party_sss_shares = party_sss_shares;
+                let group_time = group_start_time.elapsed();
+                println!(
+                    "      ✅ Flat threshold (depth=1) DKG complete - {} party shares stored in {:.3}s ({:.1}ms per party)",
+                    group_node.party_sss_shares.len(),
+                    group_time.as_secs_f64(),
+                    (group_time.as_secs_f64() * 1000.0) / group_size as f64
+                );
             } else {
-                // Update existing children with their SSS shares
-                for (party_idx, party_shares) in party_sss_shares.into_iter().enumerate() {
-                    if let Some(party) = group_node.children.get_mut(party_idx) {
-                        party.level_sss_shares = party_shares;
+                // For multi-level hierarchies, create/update children as before
+                // Ensure group has the right number of children (individual parties)
+                if group_node.children.len() != group_size {
+                    group_node.children.clear();
+                    for party_idx in 0..group_size {
+                        let party = SSSHierarchyNode {
+                            level: group_node.level + 1,
+                            node_id: {
+                                let mut id = group_path.to_vec();
+                                id.push(party_idx);
+                                id
+                            },
+                            threshold,
+                            group_size: 1, // Individual party
+                            level_sss_shares: party_sss_shares[party_idx].clone(),
+                            children: Vec::new(),
+                            is_leaf: true,
+                            party_id: Some(party_idx),
+                            party_sss_shares: Vec::new(),
+                        };
+                        group_node.children.push(party);
+                    }
+                } else {
+                    // Update existing children with their SSS shares
+                    for (party_idx, party_shares) in party_sss_shares.into_iter().enumerate() {
+                        if let Some(party) = group_node.children.get_mut(party_idx) {
+                            party.level_sss_shares = party_shares;
+                        }
                     }
                 }
+
+                let group_time = group_start_time.elapsed();
+                println!(
+                    "      ✅ Group {:?} DKG complete in {:.3}s ({:.1}ms per party)",
+                    group_path,
+                    group_time.as_secs_f64(),
+                    (group_time.as_secs_f64() * 1000.0) / group_size as f64
+                );
             }
 
             println!(
@@ -816,6 +916,47 @@ impl ArbitraryDepthSSSCoordinator {
         println!("🔑 Creating global public key from hierarchical aggregation");
 
         let top_threshold = self.config.thresholds[0];
+
+        // Special case for depth=1: use party shares directly from root
+        if self.config.depth == 1 {
+            println!("  Using flat threshold (depth=1) - creating from party shares");
+
+            if self.root.party_sss_shares.len() < top_threshold {
+                return Err(format!(
+                    "Insufficient party shares for flat threshold: need {}, got {}",
+                    top_threshold,
+                    self.root.party_sss_shares.len()
+                )
+                .into());
+            }
+
+            // Use threshold number of party shares
+            let mut threshold_shares = Vec::new();
+            let mut party_indices = Vec::new();
+
+            for party_idx in 0..top_threshold {
+                threshold_shares.push(self.root.party_sss_shares[party_idx].clone());
+                party_indices.push(party_idx + 1); // 1-indexed for SSS
+            }
+
+            let global_pk_share = PublicKeyShare::from_threshold_sss_shares(
+                threshold_shares,
+                &party_indices,
+                top_threshold,
+                &self.params,
+                self.crp.clone(),
+            )?;
+
+            let global_pk: PublicKey = [global_pk_share].into_iter().aggregate()?;
+
+            println!(
+                "  ✅ Global public key created from {} party shares using flat threshold SSS",
+                top_threshold
+            );
+            return Ok(global_pk);
+        }
+
+        // For multi-level hierarchies: use group shares
         let participating_groups: Vec<usize> =
             (0..top_threshold.min(self.root.children.len())).collect();
 
@@ -867,30 +1008,128 @@ impl ArbitraryDepthSSSCoordinator {
         ciphertext: &Arc<Ciphertext>,
     ) -> Result<Plaintext, Box<dyn Error>> {
         println!("🔓 Starting hierarchical threshold decryption");
-        let start_time = std::time::Instant::now();
+        let total_decrypt_start = std::time::Instant::now();
+
+        // Special case for depth=1: flat threshold cryptography
+        if self.config.depth == 1 {
+            let result = self.flat_threshold_decrypt(ciphertext, total_decrypt_start);
+            let total_decrypt_time = total_decrypt_start.elapsed();
+            println!(
+                "📊 Total decryption time: {:.3}s",
+                total_decrypt_time.as_secs_f64()
+            );
+            return result;
+        }
 
         // For 2-level hierarchy: use the proven working algorithm
         if self.config.depth == 2 {
-            return self.two_level_threshold_decrypt(ciphertext, start_time);
+            let result = self.two_level_threshold_decrypt(ciphertext, total_decrypt_start);
+            let total_decrypt_time = total_decrypt_start.elapsed();
+            println!(
+                "📊 Total decryption time: {:.3}s",
+                total_decrypt_time.as_secs_f64()
+            );
+            return result;
         }
 
         // For multi-level hierarchy: use recursive leaf-to-root aggregation
-        let result = self.multi_level_threshold_decrypt(ciphertext, start_time);
+        let result = self.multi_level_threshold_decrypt(ciphertext, total_decrypt_start);
 
-        let elapsed = start_time.elapsed();
+        let total_decrypt_time = total_decrypt_start.elapsed();
         println!(
-            "✅ Hierarchical threshold decryption complete in {:.2}s",
-            elapsed.as_secs_f64()
+            "✅ Hierarchical threshold decryption complete in {:.3}s",
+            total_decrypt_time.as_secs_f64()
+        );
+        println!(
+            "📊 Total decryption time: {:.3}s",
+            total_decrypt_time.as_secs_f64()
         );
 
         result
     }
 
-    fn two_level_threshold_decrypt(
+    fn flat_threshold_decrypt(
         &self,
         ciphertext: &Arc<Ciphertext>,
         start_time: std::time::Instant,
     ) -> Result<Plaintext, Box<dyn Error>> {
+        println!("🔓 Performing flat threshold decryption (depth=1)");
+
+        let total_parties = self.config.group_sizes[0];
+        let threshold = self.config.thresholds[0];
+
+        println!(
+            "  Using {} parties with threshold {}/{}",
+            threshold, threshold, total_parties
+        );
+
+        // For depth=1, party shares are stored in root.party_sss_shares
+        // Each party has individual SSS shares that we need to collect
+        let mut threshold_shares = Vec::new();
+        let mut party_indices = Vec::new();
+
+        let decryption_start = std::time::Instant::now();
+
+        // Use threshold number of parties from the available party shares
+        for party_idx in 0..threshold.min(total_parties) {
+            if party_idx < self.root.party_sss_shares.len()
+                && !self.root.party_sss_shares[party_idx].is_empty()
+            {
+                threshold_shares.push(self.root.party_sss_shares[party_idx].clone());
+                party_indices.push(party_idx + 1); // 1-indexed for SSS
+            }
+        }
+
+        if threshold_shares.len() < threshold {
+            return Err(format!(
+                "Insufficient parties for flat threshold: need {}, got {} (total parties: {}, party_sss_shares: {})",
+                threshold,
+                threshold_shares.len(),
+                total_parties,
+                self.root.party_sss_shares.len()
+            )
+            .into());
+        }
+
+        // Perform threshold decryption using SSS shares from all participating parties
+        let final_decryption_share = DecryptionShare::from_threshold_sss_shares(
+            threshold_shares,
+            &party_indices,
+            threshold,
+            &self.params,
+            ciphertext.clone(),
+        )?;
+
+        // Aggregate the single DecryptionShare to get the plaintext
+        let decryption_shares = vec![final_decryption_share];
+        let plaintext: Plaintext = decryption_shares.into_iter().aggregate()?;
+
+        let decryption_time = decryption_start.elapsed();
+        let elapsed = start_time.elapsed();
+        println!(
+            "   ⏱️  Party threshold computation time: {:.3}s",
+            decryption_time.as_secs_f64()
+        );
+        println!(
+            "   ⏱️  Average per-party decryption time: {:.3}ms",
+            (decryption_time.as_secs_f64() * 1000.0) / threshold as f64
+        );
+        println!(
+            "✅ Flat threshold decryption complete in {:.3}s",
+            elapsed.as_secs_f64()
+        );
+
+        Ok(plaintext)
+    }
+
+    fn two_level_threshold_decrypt(
+        &self,
+        ciphertext: &Arc<Ciphertext>,
+        _start_time: std::time::Instant,
+    ) -> Result<Plaintext, Box<dyn Error>> {
+        println!("🔓 Performing 2-level threshold decryption");
+        let two_level_start = std::time::Instant::now();
+
         // ✅ PROVEN: Use the working 2-level algorithm
         let top_threshold = self.config.thresholds[0];
         let participating_groups: Vec<usize> =
@@ -905,12 +1144,22 @@ impl ArbitraryDepthSSSCoordinator {
             .into());
         }
 
+        println!(
+            "  Using {} groups with threshold {}/{}",
+            participating_groups.len(),
+            top_threshold,
+            self.root.children.len()
+        );
+
         // Step 1: Each participating group performs threshold decryption among its parties
+        let group_decrypt_start = std::time::Instant::now();
         let group_partial_results: Result<Vec<_>, String> = participating_groups
             .par_iter()
             .take(top_threshold)
             .map(|&group_idx| {
-                if let Some(group) = self.root.children.get(group_idx) {
+                let party_start = std::time::Instant::now();
+
+                let result = if let Some(group) = self.root.children.get(group_idx) {
                     // Use actual party group size and threshold from config
                     let party_group_size = self.config.group_sizes.last().copied().unwrap_or(1);
                     let party_threshold = self.config.thresholds.last().copied().unwrap_or(1);
@@ -962,18 +1211,45 @@ impl ArbitraryDepthSSSCoordinator {
                     .map_err(|e| format!("Group {} decryption failed: {}", group_idx, e))
                 } else {
                     Err(format!("Group {} not found", group_idx))
-                }
+                };
+
+                let party_time = party_start.elapsed();
+                println!(
+                    "     ⏱️  Group {} decryption time: {:.3}s",
+                    group_idx,
+                    party_time.as_secs_f64()
+                );
+
+                result
             })
             .collect();
+
+        let group_decrypt_time = group_decrypt_start.elapsed();
+        println!(
+            "   ⏱️  All group decryptions time: {:.3}s",
+            group_decrypt_time.as_secs_f64()
+        );
+        println!(
+            "   ⏱️  Average per-group decryption time: {:.3}ms",
+            (group_decrypt_time.as_secs_f64() * 1000.0) / participating_groups.len() as f64
+        );
 
         let group_partial_results =
             group_partial_results.map_err(|e| -> Box<dyn Error> { e.into() })?;
 
         // Step 2: Aggregate the DecryptionShares using library function
+        let aggregate_start = std::time::Instant::now();
         let final_plaintext: Plaintext = group_partial_results.into_iter().aggregate()?;
+        let aggregate_time = aggregate_start.elapsed();
 
+        let two_level_time = two_level_start.elapsed();
         println!(
-            "    ✅ PURE SSS threshold decryption complete using {} groups",
+            "   ⏱️  Final aggregation time: {:.3}s",
+            aggregate_time.as_secs_f64()
+        );
+        println!(
+            "✅ 2-level threshold decryption complete in {:.3}s using {} groups",
+            two_level_time.as_secs_f64(),
             participating_groups.len()
         );
         Ok(final_plaintext)
@@ -1060,20 +1336,13 @@ impl ArbitraryDepthSSSCoordinator {
         // Start from leaf level and aggregate up to root
         let mut current_level = self.config.depth - 1;
 
-        // Group leaf shares by their parent at level (depth-2)
+        // Create a mapping of shares to their current node paths
+        let mut current_node_paths: Vec<Vec<usize>> =
+            leaf_groups.iter().map(|g| g.node_id.clone()).collect();
+
+        // Group shares by their parent at each level, bottom-up
         while current_level > 0 {
             let parent_level = current_level - 1;
-
-            // CRITICAL FIX: If we're aggregating to root level (level 0),
-            // don't do parent grouping - just pass shares directly to root threshold
-            if parent_level == 0 {
-                println!(
-                    "  Reached root level - passing {} shares directly to root threshold",
-                    current_level_shares.len()
-                );
-                break;
-            }
-
             let parent_threshold = self.config.thresholds[parent_level];
 
             println!(
@@ -1081,39 +1350,43 @@ impl ArbitraryDepthSSSCoordinator {
                 current_level, parent_level, parent_threshold
             );
 
-            // Group current shares by their parent nodes
-            let mut parent_groups: std::collections::HashMap<Vec<usize>, Vec<DecryptionShare>> =
-                std::collections::HashMap::new();
+            // Group current shares by their parent nodes at parent_level
+            let mut parent_groups: std::collections::HashMap<
+                Vec<usize>,
+                (Vec<DecryptionShare>, Vec<usize>),
+            > = std::collections::HashMap::new();
 
             // For each current share, determine its parent path and group accordingly
-            for (share_idx, share) in current_level_shares.into_iter().enumerate() {
-                let leaf_node_path = if share_idx < leaf_groups.len() {
-                    &leaf_groups[share_idx].node_id
-                } else {
-                    return Err("Share index out of bounds".into());
-                };
-
-                // Parent path calculation: remove last (current_level - parent_level) elements
-                let elements_to_remove = current_level - parent_level;
-                let parent_path = if leaf_node_path.len() >= elements_to_remove {
-                    leaf_node_path[..leaf_node_path.len() - elements_to_remove].to_vec()
+            for (share_idx, (share, node_path)) in current_level_shares
+                .into_iter()
+                .zip(current_node_paths.into_iter())
+                .enumerate()
+            {
+                // Parent path: remove the last element to get the parent at parent_level
+                // For depth 4: level 3→2: [0,0,0] → [0,0], [0,1,2] → [0,1], etc.
+                let parent_path = if node_path.len() > 0 {
+                    node_path[..node_path.len() - 1].to_vec()
                 } else {
                     vec![]
                 };
 
                 println!(
-                    "    Share {} from leaf {:?} → parent {:?}",
-                    share_idx, leaf_node_path, parent_path
+                    "    Share {} from node {:?} → parent {:?}",
+                    share_idx, node_path, parent_path
                 );
-                parent_groups
-                    .entry(parent_path)
-                    .or_insert_with(Vec::new)
-                    .push(share);
+
+                let entry = parent_groups
+                    .entry(parent_path.clone())
+                    .or_insert_with(|| (Vec::new(), Vec::new()));
+                entry.0.push(share);
+                entry.1.push(share_idx);
             }
 
             // Aggregate shares within each parent group
             let mut next_level_shares = Vec::new();
-            for (parent_path, group_shares) in parent_groups {
+            let mut next_level_paths = Vec::new();
+
+            for (parent_path, (group_shares, _share_indices)) in parent_groups {
                 if group_shares.len() >= parent_threshold {
                     // Take threshold shares and aggregate
                     let threshold_shares: Vec<_> =
@@ -1130,6 +1403,7 @@ impl ArbitraryDepthSSSCoordinator {
                     let aggregated_share: DecryptionShare =
                         threshold_shares.into_iter().aggregate()?;
                     next_level_shares.push(aggregated_share);
+                    next_level_paths.push(parent_path);
                 } else {
                     return Err(format!(
                         "Parent {:?} has insufficient shares: need {}, got {}",
@@ -1142,10 +1416,33 @@ impl ArbitraryDepthSSSCoordinator {
             }
 
             current_level_shares = next_level_shares;
+            current_node_paths = next_level_paths;
             current_level = parent_level;
         }
 
         // Final aggregation at root level
+        // If we've aggregated all the way to level 0, we should have exactly 1 final share
+        if current_level == 0 {
+            if current_level_shares.len() != 1 {
+                return Err(format!(
+                    "Expected exactly 1 final aggregated share at root, got {}",
+                    current_level_shares.len()
+                )
+                .into());
+            }
+
+            println!("  Root aggregation complete - extracting final plaintext from single aggregated share");
+
+            // Extract plaintext from the single aggregated share
+            let final_plaintext: Plaintext = current_level_shares.into_iter().aggregate()?;
+
+            println!(
+                "    ✅ PURE SSS threshold decryption complete using hierarchical aggregation"
+            );
+            return Ok(final_plaintext);
+        }
+
+        // This case should not happen with the corrected aggregation logic
         let root_threshold = self.config.thresholds[0];
         if current_level_shares.len() < root_threshold {
             return Err(format!(
@@ -1202,6 +1499,9 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Start total timing
+    let total_start_time = std::time::Instant::now();
+
     // Parameters
     let degree = 2048;
     let plaintext_modulus: u64 = 10007;
@@ -1307,10 +1607,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         coordinator.build_hierarchy_tree()
     })?;
 
-    // Perform hierarchical DKG
+    // Perform hierarchical DKG (with detailed timing)
+    let dkg_start_time = std::time::Instant::now();
     timeit!("🔑 Bottom-up hierarchical DKG", {
         coordinator.hierarchical_sss_dkg()
     })?;
+    let dkg_total_time = dkg_start_time.elapsed();
 
     // Create global public key
     let final_pk = timeit!("🔑 Creating global public key from DKG results", {
@@ -1326,10 +1628,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         Arc::new(final_pk.try_encrypt(&test_plaintext, &mut thread_rng())?)
     });
 
-    // Perform hierarchical threshold decryption
+    // Perform hierarchical threshold decryption (with detailed timing)
+    let decryption_start_time = std::time::Instant::now();
     let decrypted_plaintext = timeit!("🔓 Hierarchical threshold decryption", {
         coordinator.hierarchical_threshold_decrypt(&test_ciphertext)
     })?;
+    let decryption_total_time = decryption_start_time.elapsed();
 
     // Verify result (compare only the original data length)
     use fhe_traits::FheDecoder;
@@ -1357,6 +1661,93 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("❌ Decryption mismatch detected");
         return Err("Decryption verification failed".into());
     }
+
+    // Final timing summary
+    let total_time = total_start_time.elapsed();
+
+    // Calculate total leaf nodes (actual parties) for fair comparison with flat approach
+    let total_leaf_nodes = if depth == 1 {
+        total_parties // For depth=1, parties are at the root level
+    } else {
+        // For multi-level: total leaf nodes = product of all group sizes
+        group_sizes.iter().product::<usize>()
+    };
+
+    // Calculate total nodes in hierarchy tree (for DKG timing analysis)
+    let total_hierarchy_nodes = if depth == 1 {
+        total_parties
+    } else {
+        group_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &_size)| group_sizes[0..=i].iter().product::<usize>())
+            .sum::<usize>()
+    };
+    let participating_nodes = thresholds.iter().product::<usize>();
+
+    println!("\n📊 Performance Summary:");
+    println!("  Total execution time: {:.3}s", total_time.as_secs_f64());
+    println!("  Total DKG time: {:.3}s", dkg_total_time.as_secs_f64());
+    println!(
+        "  DKG time per node: {:.3}ms",
+        (dkg_total_time.as_secs_f64() * 1000.0) / total_leaf_nodes as f64
+    );
+    println!(
+        "  Total decryption time: {:.3}s",
+        decryption_total_time.as_secs_f64()
+    );
+    println!(
+        "  Decryption time per participating node: {:.3}ms",
+        (decryption_total_time.as_secs_f64() * 1000.0) / participating_nodes as f64
+    );
+    println!("  Total leaf nodes (parties): {}", total_leaf_nodes);
+    println!(
+        "  Total hierarchy nodes (all levels): {}",
+        total_hierarchy_nodes
+    );
+    println!(
+        "  Participating nodes in decryption: {} ({:.1}%)",
+        participating_nodes,
+        (participating_nodes as f64 / total_leaf_nodes as f64) * 100.0
+    );
+
+    // Calculate fault tolerance: minimum leaf nodes needed to prevent decryption
+    let fault_tolerance = if depth == 1 {
+        // For flat threshold: need to prevent threshold parties from cooperating
+        total_parties - thresholds[0] + 1
+    } else {
+        // For hierarchical: calculate minimum leaf nodes to break threshold at any level
+        // Recursive function to calculate minimum leaf nodes needed to break a subtree
+        fn min_leaf_nodes_to_break_subtree(
+            level: usize,
+            depth: usize,
+            group_sizes: &[usize],
+            thresholds: &[usize],
+        ) -> usize {
+            if level == depth - 1 {
+                // At leaf level: to break threshold, need to compromise (group_size - threshold + 1) parties
+                group_sizes[level] - thresholds[level] + 1
+            } else {
+                // At intermediate level: to break threshold, need to break (group_size - threshold + 1) subgroups
+                let subgroups_to_break = group_sizes[level] - thresholds[level] + 1;
+
+                // Each subgroup needs min_leaf_nodes_to_break_subtree(level + 1) leaf nodes to break
+                let leaf_nodes_per_subgroup_break =
+                    min_leaf_nodes_to_break_subtree(level + 1, depth, group_sizes, thresholds);
+
+                // Total: need to break subgroups_to_break subgroups
+                subgroups_to_break * leaf_nodes_per_subgroup_break
+            }
+        }
+
+        min_leaf_nodes_to_break_subtree(0, depth, &group_sizes, &thresholds)
+    };
+
+    let security_percentage = (fault_tolerance as f64 / total_leaf_nodes as f64) * 100.0;
+    println!(
+        "  Fault tolerance: {} nodes ({:.1}%) must coordinate to prevent decryption",
+        fault_tolerance, security_percentage
+    );
 
     Ok(())
 }
