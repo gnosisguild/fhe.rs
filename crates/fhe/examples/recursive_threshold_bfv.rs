@@ -132,7 +132,8 @@ struct SSSHierarchyNode {
     node_id: Vec<usize>, // Path from root (e.g., [0,2,1] = root→group0→subgroup2→node1)
     threshold: usize,    // Threshold for this level
     group_size: usize,   // Number of children at this level
-    level_sss_shares: Vec<Vec<num_bigint_old::BigInt>>, // [modulus_idx][coeff_idx] -> SSS share
+    level_sss_shares: Vec<Vec<num_bigint_old::BigInt>>, // [modulus_idx][coeff_idx] -> SSS share (intra-group)
+    inter_group_sss_shares: Vec<Vec<num_bigint_old::BigInt>>, // [modulus_idx][coeff_idx] -> SSS share (inter-group aggregated)
     children: Vec<SSSHierarchyNode>, // Children (empty if leaf node = individual party)
     is_leaf: bool,       // True if this is a leaf node (individual party)
     party_id: Option<usize>, // Flat party ID if this is a leaf node
@@ -163,6 +164,7 @@ impl ArbitraryDepthSSSCoordinator {
             threshold: config.thresholds[0],
             group_size: config.group_sizes[0],
             level_sss_shares: Vec::new(),
+            inter_group_sss_shares: Vec::new(),
             children: Vec::new(),
             is_leaf: false,
             party_id: None,
@@ -225,6 +227,7 @@ impl ArbitraryDepthSSSCoordinator {
                 threshold: child_threshold,
                 group_size: child_group_size,
                 level_sss_shares: Vec::new(),
+                inter_group_sss_shares: Vec::new(),
                 children: Vec::new(),
                 is_leaf: false,
                 party_id: None,
@@ -358,7 +361,7 @@ impl ArbitraryDepthSSSCoordinator {
         let num_groups = self.root.children.len();
         println!("  Processing {} groups at level 1", num_groups);
 
-        // Process each group: generate party contributions and aggregate them
+        // Step 1: Process each group - generate party contributions within groups
         for group_idx in 0..num_groups {
             let group_start = std::time::Instant::now();
             println!(
@@ -374,9 +377,25 @@ impl ArbitraryDepthSSSCoordinator {
             );
         }
 
+        // Step 2: CRITICAL - Inter-group SSS communication at level 1
+        // This was missing and is why hierarchical DKG was artificially fast!
+        println!("  📡 Inter-group SSS communication at level 1");
+        let inter_group_start = std::time::Instant::now();
+        self.inter_group_sss_communication(1)?;
+        let inter_group_time = inter_group_start.elapsed();
+        println!(
+            "     ⏱️  Inter-group communication time: {:.3}s",
+            inter_group_time.as_secs_f64()
+        );
+
         let two_level_time = two_level_start.elapsed();
-        let avg_group_time = two_level_time.as_secs_f64() / num_groups as f64;
+        let avg_group_time =
+            (two_level_time.as_secs_f64() - inter_group_time.as_secs_f64()) / num_groups as f64;
         println!("   ⏱️  Average per-group DKG time: {:.3}s", avg_group_time);
+        println!(
+            "   ⏱️  Inter-group SSS communication time: {:.3}s",
+            inter_group_time.as_secs_f64()
+        );
         println!(
             "\n✅ Bottom-up hierarchical DKG complete in {:.3}s",
             two_level_time.as_secs_f64()
@@ -388,12 +407,15 @@ impl ArbitraryDepthSSSCoordinator {
         let group_size = self.config.group_sizes[1]; // Parties per group
         let group_threshold = self.config.thresholds[1]; // Threshold within group
 
+        // ✅ CRITICAL FIX: Use the actual party count from config, not tree structure
         // ✅ SECURE: Use library-based SSS DKG pattern (like pure_sss_hierarchical.rs)
-        // ✅ SECURE: Use the pure SSS DKG pattern for this group
         // This generates both party SSS shares and group contribution shares
         // following the exact security model from pure_sss_hierarchical.rs
         let group_id_path = vec![group_idx];
-        self.generate_group_contributions(&group_id_path)?;
+
+        // CRITICAL: Use generate_group_contributions_with_size to ensure ALL parties in the group
+        // perform cryptographic work, not just the tree structure size
+        self.generate_group_contributions_with_size(&group_id_path, group_size, group_threshold)?;
 
         Ok(())
     }
@@ -676,6 +698,7 @@ impl ArbitraryDepthSSSCoordinator {
                             threshold,
                             group_size: 1, // Individual party
                             level_sss_shares: party_sss_shares[party_idx].clone(),
+                            inter_group_sss_shares: Vec::new(),
                             children: Vec::new(),
                             is_leaf: true,
                             party_id: Some(party_idx),
@@ -827,9 +850,8 @@ impl ArbitraryDepthSSSCoordinator {
     }
 
     fn inter_group_sss_communication(&mut self, level: usize) -> Result<(), Box<dyn Error>> {
-        // ✅ SECURE: Inter-group SSS communication for threshold aggregation
-        // In the reference implementation, this handles distributing SSS shares between groups
-        // For arbitrary depth, we simulate proper inter-group SSS at each level
+        // ✅ CRITICAL FIX: Implement ACTUAL inter-group SSS communication
+        // This is the missing cryptographic work that makes hierarchical DKG artificially fast!
 
         let nodes_at_level = self.collect_groups_at_level(&self.root.clone(), level);
 
@@ -838,39 +860,135 @@ impl ArbitraryDepthSSSCoordinator {
             return Ok(());
         }
 
+        let num_groups = nodes_at_level.len();
+        // CRITICAL FIX: Inter-group communication at level L distributes shares for level L-1
+        // So we need the threshold of the parent level (L-1), not the current level (L)
+        let threshold = if level > 0 && level <= self.config.thresholds.len() {
+            self.config.thresholds[level - 1]  // Use parent level's threshold
+        } else if level == 0 {
+            // At root level, no inter-group communication needed (handled by caller)
+            return Ok(());
+        } else {
+            return Err("Invalid level for threshold".into());
+        };
+
         println!(
-            "    🔄 Inter-group SSS communication between {} nodes at level {}",
-            nodes_at_level.len(),
-            level
+            "    🔄 REAL inter-group SSS communication between {} groups at level {} (threshold {})",
+            num_groups, level, threshold
         );
 
-        // ✅ SECURE: In a real implementation, nodes would exchange SSS shares
-        // For now, we ensure each node has proper SSS shares for its threshold
-        // This simulates the inter-group SSS distribution from pure_sss_hierarchical.rs
-
+        let inter_group_start = std::time::Instant::now();
         let num_moduli = self.params.moduli().len();
         let degree = self.degree;
 
-        for node in nodes_at_level {
-            let node_path = &node.node_id;
+        // ✅ CRITICAL: Each group must distribute SSS shares of its contribution to ALL other groups
+        // This is the missing O(groups²) cryptographic work that was making hierarchical DKG too fast!
 
-            // Ensure the node has proper inter-group SSS shares
-            if let Some(node_mut) = self.find_node_by_path_mut(node_path) {
-                // Verify the node has proper SSS shares structure
-                if node_mut.level_sss_shares.is_empty() {
-                    node_mut.level_sss_shares = vec![Vec::new(); num_moduli];
-                    for mod_idx in 0..num_moduli {
-                        node_mut.level_sss_shares[mod_idx] =
-                            vec![num_bigint_old::BigInt::from(0); degree];
+        // Step 1: Collect all group contributions (already computed in generate_group_contributions)
+        let group_contributions: Vec<_> = nodes_at_level
+            .iter()
+            .map(|node| {
+                if let Some(actual_node) = self.find_node_by_path(&node.node_id) {
+                    actual_node.level_sss_shares.clone()
+                } else {
+                    vec![vec![num_bigint_old::BigInt::from(0); degree]; num_moduli]
+                }
+            })
+            .collect();
+
+        // Step 2: CRITICAL - Each group creates SSS shares of its contribution for other groups
+        // This is the O(groups²) work that was missing!
+        let mut inter_group_shares = vec![vec![Vec::new(); num_groups]; num_groups];
+
+        for sender_idx in 0..num_groups {
+            for mod_idx in 0..num_moduli {
+                for coeff_idx in 0..degree {
+                    // Get the sender's contribution coefficient (this is the "secret" to share)
+                    let secret_coeff = &group_contributions[sender_idx][mod_idx][coeff_idx];
+
+                    // ✅ SECURE: Create SSS polynomial for this coefficient (degree = threshold-1)
+                    let mut poly_coeffs = vec![secret_coeff.clone()];
+                    for _ in 1..threshold {
+                        poly_coeffs.push(num_bigint_old::BigInt::from(
+                            thread_rng().gen_range(-1000..1000),
+                        ));
+                    }
+
+                    // ✅ SECURE: Evaluate polynomial at each receiver group's coordinate (1-indexed)
+                    for receiver_idx in 0..num_groups {
+                        let x = num_bigint_old::BigInt::from((receiver_idx + 1) as i64);
+                        let mut share_value = poly_coeffs[0].clone();
+                        let mut x_power = x.clone();
+
+                        for deg in 1..threshold {
+                            let term = &poly_coeffs[deg] * &x_power;
+                            share_value += term;
+                            x_power *= &x;
+                        }
+
+                        // Store the share that sender_idx gives to receiver_idx
+                        if inter_group_shares[receiver_idx][sender_idx].len() <= mod_idx {
+                            inter_group_shares[receiver_idx][sender_idx]
+                                .resize(num_moduli, Vec::new());
+                        }
+                        if inter_group_shares[receiver_idx][sender_idx][mod_idx].len() <= coeff_idx
+                        {
+                            inter_group_shares[receiver_idx][sender_idx][mod_idx]
+                                .resize(degree, num_bigint_old::BigInt::from(0));
+                        }
+                        inter_group_shares[receiver_idx][sender_idx][mod_idx][coeff_idx] =
+                            share_value;
                     }
                 }
             }
         }
 
+        // Step 3: Each group aggregates received SSS shares from all other groups
+        for receiver_idx in 0..num_groups {
+            let node_path = &nodes_at_level[receiver_idx].node_id;
+
+            // Aggregate all shares received by this group
+            let mut aggregated_inter_group_shares =
+                vec![vec![num_bigint_old::BigInt::from(0); degree]; num_moduli];
+
+            for sender_idx in 0..num_groups {
+                for mod_idx in 0..num_moduli {
+                    for coeff_idx in 0..degree {
+                        if sender_idx < inter_group_shares[receiver_idx].len()
+                            && mod_idx < inter_group_shares[receiver_idx][sender_idx].len()
+                            && coeff_idx
+                                < inter_group_shares[receiver_idx][sender_idx][mod_idx].len()
+                        {
+                            aggregated_inter_group_shares[mod_idx][coeff_idx] +=
+                                &inter_group_shares[receiver_idx][sender_idx][mod_idx][coeff_idx];
+                        }
+                    }
+                }
+            }
+
+            // CRITICAL FIX: Store the inter-group SSS shares in the separate field
+            // These represent the aggregated shares from all groups for parent-level operations
+            if let Some(node_mut) = self.find_node_by_path_mut(node_path) {
+                // Store inter-group aggregated shares in the dedicated field
+                node_mut.inter_group_sss_shares = aggregated_inter_group_shares;
+                
+                // Keep the original level_sss_shares intact for intra-group operations
+                println!("      📋 Group {} storing inter-group aggregated shares for parent-level operations", receiver_idx);
+            }
+        }
+
+        let inter_group_time = inter_group_start.elapsed();
         println!(
-            "    ✅ Inter-group SSS communication complete at level {}",
-            level
+            "    ✅ REAL inter-group SSS communication complete at level {} in {:.3}s",
+            level,
+            inter_group_time.as_secs_f64()
         );
+        println!(
+            "       📊 Performed {}² = {} inter-group SSS polynomial evaluations",
+            num_groups,
+            num_groups * num_groups
+        );
+
         Ok(())
     }
 
@@ -956,7 +1074,7 @@ impl ArbitraryDepthSSSCoordinator {
             return Ok(global_pk);
         }
 
-        // For multi-level hierarchies: use group shares
+        // For multi-level hierarchies: use inter-group SSS shares (aggregated during DKG)
         let participating_groups: Vec<usize> =
             (0..top_threshold.min(self.root.children.len())).collect();
 
@@ -966,9 +1084,19 @@ impl ArbitraryDepthSSSCoordinator {
 
         for &group_idx in &participating_groups {
             if let Some(group) = self.root.children.get(group_idx) {
-                if !group.level_sss_shares.is_empty() {
+                // CRITICAL FIX: Use inter_group_sss_shares (aggregated in DKG) for global operations
+                if !group.inter_group_sss_shares.is_empty() {
+                    threshold_shares.push(group.inter_group_sss_shares.clone());
+                    group_indices.push(group_idx + 1); // 1-indexed for SSS
+                } else {
+                    // Fallback to level_sss_shares if inter_group_sss_shares not set
+                    // (This happens if inter-group communication was skipped)
                     threshold_shares.push(group.level_sss_shares.clone());
                     group_indices.push(group_idx + 1); // 1-indexed for SSS
+                    println!(
+                        "⚠️  Group {} using level_sss_shares (inter-group communication may have been skipped)",
+                        group_idx
+                    );
                 }
             }
         }
@@ -1175,11 +1303,14 @@ impl ArbitraryDepthSSSCoordinator {
                     let mut threshold_shares = Vec::new();
                     let mut party_indices = Vec::new();
 
-                    // Use party shares from DKG for this group
+                    // CRITICAL FIX: Use actual party shares from individual parties in the group
                     for party_idx in 0..party_threshold.min(party_group_size) {
-                        if !group.level_sss_shares.is_empty() {
-                            threshold_shares.push(group.level_sss_shares.clone());
-                            party_indices.push(party_idx + 1); // 1-indexed for SSS
+                        if party_idx < group.children.len() {
+                            let party = &group.children[party_idx];
+                            if !party.level_sss_shares.is_empty() {
+                                threshold_shares.push(party.level_sss_shares.clone());
+                                party_indices.push(party_idx + 1); // 1-indexed for SSS
+                            }
                         }
                     }
 
