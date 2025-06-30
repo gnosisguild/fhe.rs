@@ -12,7 +12,8 @@
 // ✅ True threshold at ALL levels (t_i/n_i at each level i)
 // ✅ Maximum fault tolerance across multiple organizational levels
 // ✅ Flexible hierarchical modeling (departments → teams → individuals)
-// ✅ Communication complexity: O(Σ group_size_i²) vs flat O(total_parties²)
+// ✅ DKG communication: O(Σ group_size_i²) vs flat O(total_parties²)
+// ✅ Decryption communication: O(Π threshold_i) vs flat O(threshold)
 // ✅ Consistent SSS security model throughout entire hierarchy
 //
 // SECURITY Model (PURE SSS - FULLY SECURE):
@@ -28,9 +29,56 @@
 // 4. Operations use SSS threshold at all levels
 //
 // Communication Complexity Examples:
-// - 2-Level: --group_sizes=4,3 --thresholds=3,2 → O(4² + 3²) = O(25) vs flat O(144) = 5.7x improvement
-// - 3-Level: --group_sizes=3,4,5 --thresholds=2,3,3 → O(3² + 4² + 5²) = O(50) vs flat O(3600) = 72x improvement
-// - 4-Level: --group_sizes=2,3,4,5 --thresholds=2,2,3,3 → O(2² + 3² + 4² + 5²) = O(54) vs flat O(14400) = 266x improvement
+//
+// DKG PHASE (Distributed Key Generation - ALL parties participate):
+// - All parties must participate in DKG regardless of threshold
+// - Hierarchical DKG: O(Σ group_size_i²) at each level
+// - Flat DKG: O(total_parties²)
+//
+// Examples:
+// - 2-Level: --group_sizes=4,3 → DKG O(4² + 3²) = O(25) vs flat O(144) = 5.7x improvement
+// - 3-Level: --group_sizes=3,4,5 → DKG O(3² + 4² + 5²) = O(50) vs flat O(3600) = 72x improvement
+//
+// DECRYPTION PHASE (Only threshold parties participate):
+// - Hierarchical decryption: O(Π threshold_i) participating nodes
+// - Flat decryption: O(threshold) participating nodes
+//
+// CORRECT COMPARISON: Equivalent Decryption Participation
+// =====================================================
+// Compare structures requiring the SAME number of nodes to decrypt:
+//
+// Example: Both requiring 18 nodes to decrypt
+// - Hierarchical (3-level): thresholds=[2,3,3] → 2×3×3 = 18 nodes
+// - Flat equivalent: threshold=18 out of total parties
+//
+// Trade-offs with equivalent decryption participation:
+// ✅ Fault Tolerance: Hierarchical provides distributed failure resistance
+// ✅ Organization: Natural hierarchical structure (depts→teams→individuals)
+// ❌ Coordination: More complex decryption coordination across levels
+//
+// KEY INSIGHT: DKG vs Decryption Trade-offs
+// ========================================
+//
+// DKG PHASE: Hierarchical is ALWAYS better for communication complexity
+// - Hierarchical: O(Σ group_size_i²) - scales linearly with number of levels
+// - Flat: O(total_parties²) - scales quadratically with total parties
+// - Improvement factor: (total_parties²) / (Σ group_size_i²)
+//
+// DECRYPTION PHASE: Trade-off depends on threshold structure
+// - Hierarchical: Π threshold_i participating nodes (product of thresholds)
+// - Flat: Single threshold participating nodes
+// - Trade-off: Higher fault tolerance vs more participants needed
+//
+// WHEN TO USE HIERARCHICAL:
+// ✅ Large number of total parties (DKG communication dominates)
+// ✅ Natural organizational hierarchy exists
+// ✅ Distributed fault tolerance across levels is desired
+// ✅ Different trust/threshold requirements at different levels
+//
+// WHEN TO USE FLAT:
+// ✅ Minimizing decryption participants is critical
+// ✅ Simple threshold structure is sufficient
+// ✅ Small total number of parties
 
 mod util;
 
@@ -1944,11 +1992,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Parse arguments
     for arg in &args {
         if arg.starts_with("--group_sizes") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
+            let a: Vec<&str> = arg.split('=').collect();
             if a.len() != 2 {
                 print_notice_and_exit(Some("Invalid `--group_sizes` argument".to_string()))
             } else {
-                let sizes_str = a[0];
+                let sizes_str = a[1];
                 let parsed_sizes: Result<Vec<usize>, _> =
                     sizes_str.split(',').map(|s| s.trim().parse()).collect();
                 match parsed_sizes {
@@ -1959,11 +2007,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         } else if arg.starts_with("--thresholds") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
+            let a: Vec<&str> = arg.split('=').collect();
             if a.len() != 2 {
                 print_notice_and_exit(Some("Invalid `--thresholds` argument".to_string()))
             } else {
-                let thresholds_str = a[0];
+                let thresholds_str = a[1];
                 let parsed_thresholds: Result<Vec<usize>, _> = thresholds_str
                     .split(',')
                     .map(|s| s.trim().parse())
@@ -2012,10 +2060,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  Thresholds: {:?}", thresholds);
     println!("  Total parties: {}", total_parties);
 
-    // Calculate communication complexity improvement
-    let flat_complexity = total_parties * total_parties;
-    let hierarchical_complexity: usize = group_sizes.iter().map(|&s| s * s).sum();
-    let improvement = flat_complexity as f64 / hierarchical_complexity as f64;
+    // Calculate DKG communication complexity improvement
+    let flat_dkg_complexity = total_parties * total_parties;
+    let hierarchical_dkg_complexity: usize = group_sizes.iter().map(|&s| s * s).sum();
+    let dkg_improvement = flat_dkg_complexity as f64 / hierarchical_dkg_complexity as f64;
+
+    // Calculate decryption communication complexity (participating nodes)
+    let hierarchical_decryption_participants = thresholds.iter().product::<usize>();
+
+    // For fair comparison with equivalent security:
+    // Flat threshold = hierarchical participating nodes
+    // Flat total nodes = hierarchical participating nodes + hierarchical fault tolerance
+    let flat_threshold = hierarchical_decryption_participants;
+    let flat_decryption_participants = flat_threshold; // Same as hierarchical for decryption
+
+    let decryption_ratio =
+        hierarchical_decryption_participants as f64 / flat_decryption_participants as f64;
 
     println!();
 
@@ -2080,12 +2140,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("  - True threshold properties at all {} levels", depth);
         println!("  - Maximum fault tolerance with distributed failure resistance");
         println!(
-            "  - Communication complexity: O({}) vs flat O({})",
-            hierarchical_complexity, flat_complexity
+            "  - DKG communication: O({}) vs flat O({}) = {:.1}x improvement",
+            hierarchical_dkg_complexity, flat_dkg_complexity, dkg_improvement
         );
         println!(
-            "  - Savings: {:.1}x improvement over flat approach",
-            improvement
+            "  - Decryption participants: {} vs flat {} = {:.1}x ratio",
+            hierarchical_decryption_participants, flat_decryption_participants, decryption_ratio
         );
         println!("  - Consistent SSS security model throughout entire hierarchy");
     } else {
@@ -2131,15 +2191,43 @@ fn main() -> Result<(), Box<dyn Error>> {
         "  Decryption time per participating node: {:.3}ms",
         (decryption_total_time.as_secs_f64() * 1000.0) / participating_nodes as f64
     );
+    println!();
+    println!("📊 Complexity Analysis:");
+    println!(
+        "  DKG Phase (all {} parties participate):",
+        total_leaf_nodes
+    );
+    println!(
+        "    - Hierarchical: O({}) communication",
+        hierarchical_dkg_complexity
+    );
+    println!(
+        "    - Flat equivalent: O({}) communication",
+        flat_dkg_complexity
+    );
+    println!("    - DKG improvement: {:.1}x better", dkg_improvement);
+    println!("  Decryption Phase (threshold parties only):");
+    println!(
+        "    - Hierarchical: {} participating nodes",
+        hierarchical_decryption_participants
+    );
+    println!(
+        "    - Flat equivalent: {} participating nodes",
+        flat_decryption_participants
+    );
+    println!(
+        "    - Decryption ratio: {:.1}x {} nodes",
+        decryption_ratio.abs(),
+        if decryption_ratio > 1.0 {
+            "more"
+        } else {
+            "fewer"
+        }
+    );
     println!("  Total leaf nodes (parties): {}", total_leaf_nodes);
     println!(
         "  Total hierarchy nodes (all levels): {}",
         total_hierarchy_nodes
-    );
-    println!(
-        "  Participating nodes in decryption: {} ({:.1}%)",
-        participating_nodes,
-        (participating_nodes as f64 / total_leaf_nodes as f64) * 100.0
     );
 
     // Calculate fault tolerance: minimum leaf nodes needed to prevent decryption
@@ -2179,6 +2267,70 @@ fn main() -> Result<(), Box<dyn Error>> {
         "  Fault tolerance: {} nodes ({:.1}%) must coordinate to prevent decryption",
         fault_tolerance, security_percentage
     );
+
+    // Calculate equivalent flat structure for comparison
+    let flat_total_nodes = hierarchical_decryption_participants + fault_tolerance;
+    println!();
+    println!("🔄 Hierarchical vs Flat Structure Comparison:");
+    println!("  For equivalent decryption participation and fault tolerance:");
+    println!(
+        "    - Hierarchical: {} participating nodes, {} total leaf nodes",
+        hierarchical_decryption_participants, total_leaf_nodes
+    );
+    println!(
+        "    - Flat equivalent: {} participating nodes (threshold), {} total nodes",
+        flat_threshold, flat_total_nodes
+    );
+
+    // Note: Hierarchical structures almost always require more total nodes
+    if total_leaf_nodes > flat_total_nodes {
+        let overhead_percentage =
+            ((total_leaf_nodes - flat_total_nodes) as f64 / flat_total_nodes as f64) * 100.0;
+        println!(
+            "    - Hierarchical requires {} more total nodes ({:.1}% overhead)",
+            total_leaf_nodes - flat_total_nodes,
+            overhead_percentage
+        );
+        println!(
+            "    - Trade-off: More total nodes, but better communication complexity during DKG"
+        );
+    } else if total_leaf_nodes < flat_total_nodes {
+        let savings_percentage =
+            ((flat_total_nodes - total_leaf_nodes) as f64 / flat_total_nodes as f64) * 100.0;
+        println!(
+            "    - Hierarchical saves {} total nodes ({:.1}% reduction) - rare case",
+            flat_total_nodes - total_leaf_nodes,
+            savings_percentage
+        );
+    } else {
+        println!("    - Hierarchical and flat structures require the same number of total nodes - rare case");
+    }
+
+    // Communication complexity benefit
+    println!("  Communication complexity:");
+    println!(
+        "    - DKG improvement: {:.1}x better for hierarchical",
+        dkg_improvement
+    );
+
+    // Overall assessment
+    let node_overhead = total_leaf_nodes as f64 / flat_total_nodes as f64;
+    println!(
+        "    - Node overhead cost: {:.1}x more total nodes required",
+        node_overhead
+    );
+
+    if dkg_improvement > node_overhead {
+        println!(
+            "    - Net benefit: Communication savings ({:.1}x) outweigh node overhead ({:.1}x)",
+            dkg_improvement, node_overhead
+        );
+    } else {
+        println!(
+            "    - Net cost: Node overhead ({:.1}x) exceeds communication savings ({:.1}x)",
+            node_overhead, dkg_improvement
+        );
+    }
 
     Ok(())
 }
