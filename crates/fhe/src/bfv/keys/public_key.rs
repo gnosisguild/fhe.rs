@@ -82,7 +82,7 @@ impl PublicKey {
     pub fn new_extended<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         rng: &mut R,
-    ) -> Result<(Ciphertext, Poly, Poly)> {
+    ) -> Result<(Self, Ciphertext, Poly, Poly)> {
         let pk = Self::new(sk, rng);
         let ct = pk.c.clone();
         let ctx = pk.par.ctx_at_level(ct.level)?;
@@ -93,6 +93,7 @@ impl PublicKey {
 
         let mut c0 = sk.as_ref() * &ct.c[1];
         c0 += &e;
+        // A
         let mut c1 = pk.c.c[1].clone();
 
         // It is now safe to enable variable time computations.
@@ -108,7 +109,7 @@ impl PublicKey {
             level: ct.level,
         };
 
-        Ok((ciphertext, sk, e))
+        Ok((pk, ciphertext, sk, e))
     }
 }
 
