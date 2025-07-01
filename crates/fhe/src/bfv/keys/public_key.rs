@@ -83,13 +83,13 @@ impl PublicKey {
     pub fn new_extended<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         rng: &mut R,
-    ) -> Result<(Self, Ciphertext, Poly, Poly)> {
+    ) -> Result<(Ciphertext, Poly, Poly, Poly)> {
         let pk = Self::new(sk, rng);
         let ct = pk.c.clone();
         let ctx = pk.par.ctx_at_level(ct.level)?;
 
-        let boxed = sk.coeffs.clone();
-        let sk_vec = boxed.into_vec();
+        // SK
+        let sk_vec = sk.coeffs.clone().into_vec();
         let sk_poly = Poly::try_convert_from(
             &sk_vec,
             sk.par.ctx_at_level(ct.level)?,
@@ -97,12 +97,15 @@ impl PublicKey {
             Representation::Ntt,
         )?;
 
+        // eek
         let e = Poly::small(ctx, Representation::Ntt, pk.par.variance, rng)?;
-
-        let mut c0 = &sk_poly * &ct.c[1];
-        c0 += &e;
         // A
-        let mut c1 = pk.c.c[1].clone();
+        let a = ct.c[1].clone();
+        // sk * a + eek
+        let mut c0 = &sk_poly * &a;
+        c0 += &e;
+        // pk1 = ct1 = -A
+        let mut c1 = -a.clone();
 
         // It is now safe to enable variable time computations.
         unsafe {
@@ -117,7 +120,7 @@ impl PublicKey {
             level: ct.level,
         };
 
-        Ok((pk, ciphertext, sk_poly, e))
+        Ok((ciphertext, a, sk_poly, e))
     }
 }
 
