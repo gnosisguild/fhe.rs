@@ -4,6 +4,7 @@ use crate::bfv::traits::TryConvertFrom;
 use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext};
 use crate::proto::bfv::{Ciphertext as CiphertextProto, PublicKey as PublicKeyProto};
 use crate::{Error, Result};
+use fhe_math::rq::traits::TryConvertFrom as TCF;
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 use prost::Message;
@@ -87,11 +88,18 @@ impl PublicKey {
         let ct = pk.c.clone();
         let ctx = pk.par.ctx_at_level(ct.level)?;
 
-        // TODO: Ask sk.par, could be wrong
-        let sk = Poly::small(ctx, Representation::Ntt, sk.par.variance, rng)?;
+        let boxed = sk.coeffs.clone();
+        let sk_vec = boxed.into_vec();
+        let sk_poly = Poly::try_convert_from(
+            &sk_vec,
+            sk.par.ctx_at_level(ct.level)?,
+            false,
+            Representation::Ntt,
+        )?;
+
         let e = Poly::small(ctx, Representation::Ntt, pk.par.variance, rng)?;
 
-        let mut c0 = sk.as_ref() * &ct.c[1];
+        let mut c0 = &sk_poly * &ct.c[1];
         c0 += &e;
         // A
         let mut c1 = pk.c.c[1].clone();
@@ -109,7 +117,7 @@ impl PublicKey {
             level: ct.level,
         };
 
-        Ok((pk, ciphertext, sk, e))
+        Ok((pk, ciphertext, sk_poly, e))
     }
 }
 
