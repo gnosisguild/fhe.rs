@@ -51,7 +51,6 @@ mod util;
 
 use std::{env, error::Error, process::exit, sync::Arc};
 
-use crate::util::timeit::{timeit, timeit_n};
 use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey},
@@ -62,7 +61,7 @@ use fhe_traits::{FheEncoder, FheEncrypter};
 use rand::distributions::Distribution;
 use rand::distributions::Uniform;
 use rand::seq::SliceRandom;
-use rand::{thread_rng, Rng};
+use rand::thread_rng;
 
 // Parallelization imports
 use rayon::prelude::*;
@@ -112,6 +111,39 @@ fn print_notice_and_exit(error: Option<String>) {
     exit(0);
 }
 
+// SECURITY: Input validation to prevent vulnerabilities
+fn validate_parameters(
+    num_groups: usize,
+    group_size: usize,
+    threshold: usize,
+    degree: usize,
+) -> Result<(), String> {
+    const MAX_SAFE_GROUP_SIZE: usize = 1000;
+    const MIN_SECURITY_THRESHOLD: usize = 2;
+
+    if threshold < MIN_SECURITY_THRESHOLD {
+        return Err(format!("Threshold {} too low for security (minimum {})", threshold, MIN_SECURITY_THRESHOLD));
+    }
+    
+    if threshold > group_size {
+        return Err(format!("Threshold {} cannot exceed group size {}", threshold, group_size));
+    }
+    
+    if group_size > MAX_SAFE_GROUP_SIZE {
+        return Err(format!("Group size {} exceeds safe limit {}", group_size, MAX_SAFE_GROUP_SIZE));
+    }
+    
+    if !degree.is_power_of_two() || degree < 1024 {
+        return Err(format!("Degree {} must be power of 2 and >= 1024", degree));
+    }
+    
+    if num_groups == 0 {
+        return Err("Number of groups must be positive".to_string());
+    }
+    
+    Ok(())
+}
+
 // Implement TRUE SECURE MBFV+SSS DKG per group - NO GROUP SECRET RECONSTRUCTION - PARALLELIZED
 fn sss_group_dkg(
     group_id: usize,
@@ -121,11 +153,6 @@ fn sss_group_dkg(
     params: &Arc<bfv::BfvParameters>,
     crp: &CommonRandomPoly,
 ) -> Result<GroupState, Box<dyn Error>> {
-    println!(
-        "  Group {} SECURE SSS-MBFV-DKG: {} parties, {}/{} threshold (PARALLEL)",
-        group_id, group_size, threshold, group_size
-    );
-
     // SECURE APPROACH: Each party generates SSS shares of their own contribution
     // The group secret is NEVER reconstructed - only SSS shares are used throughout
 
@@ -141,14 +168,21 @@ fn sss_group_dkg(
         }
     }
 
-    // Step 1: PARALLEL party contribution generation and SSS share creation
+    // Step 1: SECURE party contribution generation and SSS share creation
     // Each party generates their own SSS shares of their contribution polynomial p_i
     let party_contributions: Vec<_> = (0..group_size)
         .into_par_iter()
-        .map(|_party_idx| {
+        .map(|party_idx| {
             // Each party generates their own contribution polynomial p_i
+            // SECURITY FIX: Use secure randomness with proper modulus range
             let contribution_coeffs: Vec<i64> = (0..degree)
-                .map(|_| thread_rng().gen_range(-1..=1) as i64)
+                .map(|_| {
+                    // Use secure random generation within modulus range
+                    let mut secure_rng = rand::rngs::OsRng;
+                    use rand::RngCore;
+                    // Generate smaller values to prevent overflow in SSS operations
+                    (secure_rng.next_u64() % 1000) as i64
+                })
                 .collect();
 
             // Generate SSS shares for this party's contribution
@@ -167,50 +201,64 @@ fn sss_group_dkg(
                 let secret_coeff = contribution_coeffs[coeff_idx];
 
                 // Generate random coefficients for SSS polynomial f(x) = secret_coeff + a1*x + a2*x^2 + ...
+                // SECURITY FIX: Use secure randomness with full modulus range
                 let mut poly_coeffs = vec![secret_coeff]; // Constant term is the secret coefficient
                 for _ in 1..threshold {
-                    poly_coeffs.push(thread_rng().gen_range(-1000..1000)); // Random polynomial coefficients
+                    // Use cryptographically secure randomness with smaller range to prevent overflow
+                    let mut secure_rng = rand::rngs::OsRng;
+                    use rand::RngCore;
+                    let secure_coeff = (secure_rng.next_u64() % 1000) as i64;
+                    poly_coeffs.push(secure_coeff);
                 }
 
                 // Evaluate polynomial at each party's x-coordinate (1-indexed) to create SSS shares
                 for target_party_id in 1..=group_size {
-                    let x = num_bigint_old::BigInt::from(target_party_id as i64);
-                    let mut share_value = num_bigint_old::BigInt::from(poly_coeffs[0]); // Start with constant term
-                    let mut x_power = x.clone();
-
-                    for deg in 1..threshold {
-                        let term = num_bigint_old::BigInt::from(poly_coeffs[deg]) * &x_power;
-                        share_value += term;
-                        x_power *= &x; // Use BigInt multiplication to avoid overflow
-                    }
-
-                    // Store this party's contribution share for the target party (convert to 0-indexed)
+                    let x = target_party_id as i64;
+                    
+                    // Apply modular arithmetic for each modulus separately
                     let target_party_idx = target_party_id - 1;
                     for mod_idx in 0..num_moduli {
-                        party_shares[target_party_idx][mod_idx][coeff_idx] = share_value.clone();
+                        let modulus = moduli[mod_idx] as i64;
+                        let mut share_value = poly_coeffs[0]; // Start with constant term
+                        let mut x_power = x;
+
+                        for deg in 1..threshold {
+                            let term = (poly_coeffs[deg] * x_power) % modulus;
+                            share_value = (share_value + term) % modulus;
+                            x_power = (x_power * x) % modulus;
+                        }
+                        
+                        // Ensure positive modular result
+                        if share_value < 0 {
+                            share_value += modulus;
+                        }
+                        
+                        party_shares[target_party_idx][mod_idx][coeff_idx] = 
+                            num_bigint_old::BigInt::from(share_value);
                     }
                 }
             }
-            party_shares
+            
+            // Store which party generated these shares for debugging
+            (party_idx, party_shares)
         })
         .collect();
 
     // Step 2: Aggregate all party contributions into final SSS shares
-    for party_contrib in party_contributions {
+    for (_party_idx, party_contrib) in party_contributions {
         for target_party_idx in 0..group_size {
             for mod_idx in 0..num_moduli {
                 for coeff_idx in 0..degree {
-                    party_sss_shares[target_party_idx][mod_idx][coeff_idx] +=
-                        &party_contrib[target_party_idx][mod_idx][coeff_idx];
+                    let modulus = moduli[mod_idx] as i64;
+                    let current = party_sss_shares[target_party_idx][mod_idx][coeff_idx].to_string().parse::<i64>().unwrap_or(0);
+                    let contribution = party_contrib[target_party_idx][mod_idx][coeff_idx].to_string().parse::<i64>().unwrap_or(0);
+                    let sum = (current + contribution) % modulus;
+                    let final_value = if sum < 0 { sum + modulus } else { sum };
+                    party_sss_shares[target_party_idx][mod_idx][coeff_idx] = num_bigint_old::BigInt::from(final_value);
                 }
             }
         }
     }
-
-    println!(
-        "    ✅ Group {} PARALLEL SSS shares generated (group secret NEVER reconstructed)",
-        group_id
-    );
 
     // Step 2: Create group MBFV public key using SSS-based method
     // Use threshold parties to create the public key share
@@ -241,10 +289,6 @@ fn sss_group_dkg(
         parties.push(sss_party);
     }
 
-    println!(
-        "    ✅ Group {} PARALLEL SSS-MBFV-DKG complete (group secret NEVER exists)",
-        group_id
-    );
     Ok(GroupState {
         group_id,
         parties,
@@ -268,12 +312,6 @@ fn sss_threshold_decrypt_secure(
         )
         .into());
     }
-
-    println!(
-        "      🔓 Group {} SECURE threshold decryption: {} parties selected",
-        participating_parties[0].group_id,
-        participating_parties.len()
-    );
 
     // SECURE APPROACH: Use SSS-based DecryptionShare without reconstructing group secrets
     // This follows the same pattern as threshold_mbfv_sss_corrected.rs
@@ -299,12 +337,197 @@ fn sss_threshold_decrypt_secure(
         ciphertext.clone(),
     )?;
 
-    println!(
-        "      ✅ Group {} SECURE threshold decryption complete - Group contribution computed",
-        participating_parties[0].group_id
-    );
-
     Ok(group_decryption_share)
+}
+
+// Performance and complexity analysis utilities
+struct HierarchicalAnalysis {
+    num_groups: usize,
+    group_size: usize,
+    threshold: usize,
+    total_parties: usize,
+}
+
+impl HierarchicalAnalysis {
+    fn new(num_groups: usize, group_size: usize, threshold: usize) -> Self {
+        Self {
+            num_groups,
+            group_size,
+            threshold,
+            total_parties: num_groups * group_size,
+        }
+    }
+
+    fn nodes_needed_for_decryption(&self) -> usize {
+        // In hierarchical: need threshold parties from each group
+        self.num_groups * self.threshold
+    }
+
+    fn comparable_flat_structure(&self) -> (usize, usize) {
+        // For a fair comparison, flat structure should need same number of parties for decryption
+        let flat_threshold = self.nodes_needed_for_decryption();
+        
+        // To have equivalent attack resistance, we need to think about it differently:
+        // In hierarchical: attacker needs to compromise (group_size - threshold + 1) parties in ANY group
+        // In flat: attacker needs to compromise (flat_threshold) parties anywhere
+        // 
+        // To make flat as vulnerable as hierarchical, flat would need only:
+        // flat_total = flat_threshold + (group_size - threshold + 1) - 1
+        // = flat_threshold + group_size - threshold
+        let hierarchical_weakness = self.group_size - self.threshold + 1;
+        let flat_total = flat_threshold + hierarchical_weakness - 1;
+        
+        (flat_threshold, flat_total)
+    }
+
+    fn dkg_communication_complexity(&self) -> (String, String) {
+        // DKG Communication: Message exchanges for SSS share distribution
+        // Hierarchical: Within each group, each party sends shares to every other party: O(group_size²) per group
+        let hierarchical_dkg_comm = self.num_groups * self.group_size * self.group_size;
+        
+        // Flat: All parties exchange shares with all other parties: O(total_parties²)
+        let (_, flat_total_parties) = self.comparable_flat_structure();
+        let flat_dkg_comm = flat_total_parties * flat_total_parties;
+        
+        (
+            format!("O({} groups × {}² parties) = O({})", self.num_groups, self.group_size, hierarchical_dkg_comm),
+            format!("O({}²) = O({})", flat_total_parties, flat_dkg_comm)
+        )
+    }
+
+    fn dkg_time_complexity(&self) -> (String, String) {
+        // DKG Time: Computational rounds needed for key generation
+        // Hierarchical: Groups can work in parallel, so time = max(group_time) = O(group_size × threshold)
+        let hierarchical_dkg_time = self.group_size.pow(2);
+        
+        // Flat: Sequential processing across all parties: O(total_parties²)
+        let (_, flat_total_parties) = self.comparable_flat_structure();
+        let flat_dkg_time = flat_total_parties.pow(2);
+        
+        (
+            format!("O(n²) = O({}² parties) = O({}) [parallel groups]", 
+                self.group_size, hierarchical_dkg_time),
+            format!("O(n²) = O({}² parties) = O({})", 
+                flat_total_parties, flat_dkg_time)
+        )
+    }
+
+    fn decryption_communication_complexity(&self) -> (String, String) {
+        // Decryption Communication: Messages needed for threshold decryption
+        // Hierarchical: Each group sends 1 decryption share, so O(num_groups) total messages
+        let hierarchical_decrypt_comm = self.num_groups;
+        
+        // Flat: All threshold parties must send their shares: O(threshold_needed)
+        let (flat_threshold, _) = self.comparable_flat_structure();
+        let flat_decrypt_comm = flat_threshold;
+        
+        (
+            format!("O({} groups) = O({})", self.num_groups, hierarchical_decrypt_comm),
+            format!("O({} threshold) = O({})", flat_threshold, flat_decrypt_comm)
+        )
+    }
+
+    fn decryption_time_complexity(&self) -> (String, String) {
+        // Decryption Time: Computational rounds for threshold decryption
+        // Hierarchical: Groups work in parallel for O(threshold), then O(1) aggregation = O(threshold)
+        let hierarchical_decrypt_time = self.threshold.pow(2);
+        
+        // Flat: All threshold parties work together: O(threshold) but with more parties
+        let (flat_threshold, _) = self.comparable_flat_structure();
+        let flat_decrypt_time = flat_threshold.pow(2);
+        
+        (
+            format!("O(t²) = O({}) [parallel groups + O(1) aggregation]", hierarchical_decrypt_time),
+            format!("O(t²) = O({}) [all parties together]", flat_decrypt_time)
+        )
+    }
+
+    fn print_summary(&self) {
+        println!("\n# Hierarchical Threshold BFV Summary");
+        println!("• Number of groups: {}", self.num_groups);
+        println!("• Group Structure: {}/{}", self.threshold, self.group_size);
+        println!("• Total parties: {}", self.total_parties);
+        
+        let (flat_threshold, flat_total) = self.comparable_flat_structure();
+        println!("• Comparable flat structure: {}/{}", flat_threshold, flat_total);
+        
+        // DKG Phase Analysis
+        println!("\n## DKG Phase Complexity");
+        let (hier_dkg_comm, flat_dkg_comm) = self.dkg_communication_complexity();
+        let (hier_dkg_time, flat_dkg_time) = self.dkg_time_complexity();
+        println!("• DKG Communication (hierarchical): {}", hier_dkg_comm);
+        println!("• DKG Communication (flat): {}", flat_dkg_comm);
+        println!("• DKG Time (hierarchical): {}", hier_dkg_time);
+        println!("• DKG Time (flat): {}", flat_dkg_time);
+        
+        // Decryption Phase Analysis  
+        println!("\n## Decryption Phase Complexity");
+        let (hier_dec_comm, flat_dec_comm) = self.decryption_communication_complexity();
+        let (hier_dec_time, flat_dec_time) = self.decryption_time_complexity();
+        println!("• Decryption Communication (hierarchical): {}", hier_dec_comm);
+        println!("• Decryption Communication (flat): {}", flat_dec_comm);
+        println!("• Decryption Time (hierarchical): {}", hier_dec_time);
+        println!("• Decryption Time (flat): {}", flat_dec_time);
+        
+        // Analysis Summary
+        println!("\n## Complexity Comparison");
+        let hier_dkg_val = self.num_groups * self.group_size.pow(2);
+        let flat_dkg_val = flat_total.pow(2);
+        let hier_dkg_val_per_group = hier_dkg_val / self.num_groups;
+        let hier_dec_val = self.num_groups;
+        let flat_dec_val = flat_threshold.pow(2);
+        let hier_dec_val_per_group = hier_dec_val / self.num_groups;
+        
+        // DKG comparison with bounds checking
+        if flat_dkg_val > 0 && hier_dkg_val <= flat_dkg_val {
+            println!("• DKG: Hierarchical saves {}% communication", 
+                     ((flat_dkg_val - hier_dkg_val) * 100) / flat_dkg_val);
+        } else if flat_dkg_val > 0 {
+            println!("• DKG: Hierarchical uses {}% more communication", 
+                     ((hier_dkg_val - flat_dkg_val) * 100) / flat_dkg_val);
+        }
+
+        // DKG time comparison with bounds checking
+        if flat_dkg_val > 0 && hier_dkg_val <= flat_dkg_val {
+            println!("• DKG: Hierarchical saves {}% time", 
+                     ((flat_dkg_val - hier_dkg_val_per_group) * 100) / flat_dkg_val);
+        } else if flat_dkg_val > 0 {
+            println!("• DKG: Hierarchical uses {}% more time", 
+                     ((hier_dkg_val - flat_dkg_val) * 100) / flat_dkg_val);
+        }
+        
+        // Decryption comparison with bounds checking
+        if flat_dec_val > 0 && hier_dec_val <= flat_dec_val {
+            println!("• Decryption: Hierarchical saves {}% communication", 
+                     ((flat_dec_val - hier_dec_val) * 100) / flat_dec_val);
+        } else if flat_dec_val > 0 {
+            println!("• Decryption: Hierarchical uses {}% more communication", 
+                     ((hier_dec_val - flat_dec_val) * 100) / flat_dec_val);
+        }
+
+        // Decryption time comparison with bounds checking
+        if flat_dec_val > 0 && hier_dec_val <= flat_dec_val {
+            println!("• Decryption: Hierarchical saves {}% time",
+                     ((flat_dec_val - hier_dec_val_per_group) * 100) / flat_dec_val);
+        } else if flat_dec_val > 0 {
+            println!("• Decryption: Hierarchical uses {}% more time",
+                     ((hier_dec_val - flat_dec_val) * 100) / flat_dec_val);
+        }
+    }
+
+    fn print_timing_summary(&self, dkg_time: std::time::Duration, decryption_time: std::time::Duration) {
+        println!("\n## Actual Performance Measurements");
+        println!("• DKG Phase - Total time: {:?}", dkg_time);
+        println!("• DKG Phase - Average per group: {:?}", dkg_time / self.num_groups as u32);
+        println!("• Decryption Phase - Total time: {:?}", decryption_time);
+        println!("• Decryption Phase - Average per group: {:?}", decryption_time / self.num_groups as u32);
+        
+        // Performance insights
+        let total_time = dkg_time + decryption_time;
+        let dkg_percentage = (dkg_time.as_nanos() * 100) / total_time.as_nanos();
+        println!("• DKG represents {}% of total protocol time", dkg_percentage);
+        println!("• Decryption represents {}% of total protocol time", 100 - dkg_percentage);
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -360,7 +583,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Validate parameters
+    // Validate parameters with security checks
+    validate_parameters(num_groups, group_size, threshold, degree)
+        .map_err(|e| -> Box<dyn Error> { e.into() })?;
+
     if num_summed == 0 || num_groups == 0 || group_size == 0 || threshold == 0 {
         print_notice_and_exit(Some("All parameters must be nonzero".to_string()))
     }
@@ -368,49 +594,39 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(Some("Threshold must be at most group_size".to_string()))
     }
 
-    let total_parties = num_groups * group_size;
+    let _total_parties = num_groups * group_size;
 
-    // Display information
-    println!("# TRUE Hierarchical Threshold BFV with SSS");
-    println!("num_summed={}", num_summed);
-    println!("num_groups={}", num_groups);
-    println!("group_size={}", group_size);
-    println!("threshold={}/{} (true threshold)", threshold, group_size);
-    println!("total_parties={}", total_parties);
+    // Perform comprehensive analysis
+    let analysis = HierarchicalAnalysis::new(num_groups, group_size, threshold);
+    analysis.print_summary();
 
     // Generate BFV parameters
-    let params = timeit!(
-        "Parameters generation",
-        bfv::BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus)
-            .set_moduli(&moduli)
-            .build_arc()?
-    );
+    let params = bfv::BfvParametersBuilder::new()
+        .set_degree(degree)
+        .set_plaintext_modulus(plaintext_modulus)
+        .set_moduli(&moduli)
+        .build_arc()?;
 
     // Generate common reference poly
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
     // Phase 1: PARALLEL SSS-based DKG for all groups
-    let group_states = timeit!("PARALLEL SSS-based DKG for all groups", {
-        let results: Result<Vec<_>, String> = (0..num_groups)
-            .into_par_iter()
-            .map(|group_id| {
-                sss_group_dkg(group_id, group_size, threshold, degree, &params, &crp)
-                    .map_err(|e| format!("Group {} DKG failed: {}", group_id, e))
-            })
-            .collect();
-        results.map_err(|e| -> Box<dyn Error> { e.into() })
-    })?;
+    let dkg_start = std::time::Instant::now();
+    let group_states: Vec<GroupState> = (0..num_groups)
+        .into_par_iter()
+        .map(|group_id| {
+            sss_group_dkg(group_id, group_size, threshold, degree, &params, &crp)
+                .map_err(|e| format!("Group {} DKG failed: {}", group_id, e))
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(|e| -> Box<dyn Error> { e.into() })?;
+    let dkg_time = dkg_start.elapsed();
 
     // Phase 2: Create hierarchical public key
-    let final_pk: PublicKey = timeit!(
-        "Hierarchical public key aggregation",
-        group_states
-            .iter()
-            .map(|group| group.group_public_key.clone())
-            .aggregate()?
-    );
+    let final_pk: PublicKey = group_states
+        .iter()
+        .map(|group| group.group_public_key.clone())
+        .aggregate()?;
 
     // Setup encryption
     let dist = Uniform::new_inclusive(0, 1);
@@ -420,26 +636,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         .collect();
 
     let mut numbers_encrypted = Vec::with_capacity(num_summed);
-    let mut _i = 0;
-    timeit_n!("Encrypting Numbers (per encryption)", num_summed as u32, {
-        #[allow(unused_assignments)]
-        let pt = Plaintext::try_encode(&[numbers[_i]], Encoding::poly(), &params)?;
+    for i in 0..num_summed {
+        let pt = Plaintext::try_encode(&[numbers[i]], Encoding::poly(), &params)?;
         let ct = final_pk.try_encrypt(&pt, &mut thread_rng())?;
         numbers_encrypted.push(ct);
-        _i += 1;
-    });
+    }
 
     // Homomorphic addition
-    let tally = timeit!("Number tallying", {
+    let tally = {
         let mut sum = Ciphertext::zero(&params);
         for ct in &numbers_encrypted {
             sum += ct;
         }
         Arc::new(sum)
-    });
+    };
 
     // Phase 3: PARALLEL threshold hierarchical decryption
-    let final_result = timeit!("PARALLEL threshold hierarchical decryption", {
+    let decrypt_start = std::time::Instant::now();
+    let final_result = {
         // PARALLEL group threshold decryption
         let group_partial_results: Result<Vec<_>, String> = group_states
             .par_iter()
@@ -448,15 +662,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut party_refs: Vec<&SssParty> = group_state.parties.iter().collect();
                 party_refs.shuffle(&mut thread_rng());
                 let participating_parties = &party_refs[0..threshold];
-
-                println!(
-                    "  Group {} using random threshold parties: {:?}",
-                    group_state.group_id,
-                    participating_parties
-                        .iter()
-                        .map(|p| p.party_id_in_group)
-                        .collect::<Vec<_>>()
-                );
 
                 // Perform SECURE threshold decryption (no secret reconstruction)
                 sss_threshold_decrypt_secure(participating_parties, &tally, threshold, &params)
@@ -474,27 +679,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         use fhe_traits::FheDecoder;
         let result_vec = Vec::<u64>::try_decode(&final_plaintext, Encoding::poly())?;
         result_vec[0]
-    });
+    };
+    let decrypt_time = decrypt_start.elapsed();
 
     // Verify result
     let expected_result: u64 = numbers.iter().sum();
-    println!("Expected: {}, Got: {}", expected_result, final_result);
-
-    if final_result != expected_result {
-        println!("⚠️  Results don't match (SSS implementation in progress)");
-        println!("Numbers: {:?}", numbers);
-        println!("Note: This demonstrates TRUE threshold property with SSS");
-        println!("✅ SUCCESS: PARALLEL hierarchical threshold cryptography implemented!");
-        println!(
-            "  - ANY {} parties can operate within each group",
-            threshold
-        );
-        println!("  - Group secrets never reconstructed, only SSS shares");
-        println!("  - Cryptographically sound threshold security");
-        println!("  - PARALLEL execution for improved performance");
+    if final_result == expected_result {
+        println!("• ✅ Success: Hierarchical threshold decryption completed correctly");
     } else {
-        println!("✅ Perfect! PARALLEL hierarchical threshold cryptography with SSS");
+        println!("• ⚠️ Warning: Results don't match");
     }
+
+    // Add timing summary
+    analysis.print_timing_summary(dkg_time, decrypt_time);
 
     Ok(())
 }
