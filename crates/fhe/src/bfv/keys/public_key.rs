@@ -89,18 +89,21 @@ impl PublicKey {
         let ctx = pk.par.ctx_at_level(ct.level)?;
 
         // SK
-        let sk_vec = sk.coeffs.clone().into_vec();
-        let sk_poly = Poly::try_convert_from(
+        let boxed = sk.coeffs.clone();
+        let sk_vec = boxed.into_vec();
+        let mut sk_poly = Poly::try_convert_from(
             &sk_vec,
             sk.par.ctx_at_level(ct.level)?,
             false,
-            Representation::Ntt,
+            Representation::PowerBasis,
         )?;
 
         // eek
         let e = Poly::small(ctx, Representation::Ntt, pk.par.variance, rng)?;
         // A
         let a = ct.c[1].clone();
+
+        sk_poly.change_representation(Representation::Ntt);
         // sk * a + eek
         let mut c0 = &sk_poly * &a;
         c0 += &e;
@@ -242,6 +245,17 @@ mod tests {
             sk.try_decrypt(&pk.c)?,
             Plaintext::zero(Encoding::poly(), &params)?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn keygen_extended() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let (ct, _a, _sk, _e) = PublicKey::new_extended(&sk, &mut rng)?;
+        assert_eq!(ct.par, params);
+
         Ok(())
     }
 
