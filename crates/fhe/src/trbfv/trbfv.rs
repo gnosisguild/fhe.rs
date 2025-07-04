@@ -501,28 +501,68 @@ impl TrBFVShare {
         Ok(poly)
     }
 
-    /// Optimized decryption using packed hybrid shares
+    /// Generate packed decryption shares from packed hybrid shares
+    pub fn decryption_share_packed(
+        &mut self,
+        ciphertext: Arc<Ciphertext>,
+        sk_packed_shares: &[PackedHybridShare],
+        es_packed_shares: &[PackedHybridShare],
+    ) -> Result<Vec<PackedHybridShare>> {
+        if sk_packed_shares.len() < self.threshold || es_packed_shares.len() < self.threshold {
+            return Err(Error::TooFewValues(
+                sk_packed_shares.len().min(es_packed_shares.len()), 
+                self.threshold
+            ));
+        }
+        
+        // First reconstruct the secret key and error polynomials from the threshold shares
+        let sk_poly = self.reconstruct_packed_hybrid(&sk_packed_shares[..self.threshold])?;
+        let es_poly = self.reconstruct_packed_hybrid(&es_packed_shares[..self.threshold])?;
+        
+        // Generate the decryption share using the reconstructed polynomials
+        let d_share_poly = self.decryption_share(ciphertext.clone(), sk_poly, es_poly)?;
+        
+        // Convert the decryption share back to packed format
+        let d_share_coeffs: Vec<i64> = d_share_poly.coefficients()
+            .iter()
+            .map(|&coeff| coeff as i64)
+            .collect();
+        
+        // Generate packed shares for the decryption result
+        let packed_d_shares = self.generate_packed_hybrid_shares(d_share_coeffs.into_boxed_slice())?;
+        
+        Ok(packed_d_shares)
+    }
+
+    /// Decrypt using packed hybrid shares
     pub fn decrypt_packed_hybrid(
         &mut self,
-        d_share_polys: Vec<PackedHybridShare>,
+        d_share_packed: Vec<PackedHybridShare>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext> {
-        // Reconstruct the decryption polynomial
-        let result_poly = self.reconstruct_packed_hybrid(&d_share_polys)?;
+        if d_share_packed.len() < self.threshold {
+            return Err(Error::TooFewValues(d_share_packed.len(), self.threshold));
+        }
 
-        // Scale and reduce (reuse existing scaling logic)
-        let plaintext_ctx = Context::new_arc(&self.moduli[..1], self.degree).unwrap();
+        // Take threshold number of shares
+        let threshold_shares = &d_share_packed[..self.threshold];
+        
+        // Reconstruct the decryption polynomial from packed shares
+        let result_poly = self.reconstruct_packed_hybrid(threshold_shares)?;
+
+        // Use the same scaling and reduction logic as the original decrypt method
+        let plaintext_ctx = Context::new_arc(&self.moduli[..1], self.degree)?;
         let mut scalers = Vec::with_capacity(self.moduli.len());
 
         for i in 0..self.moduli.len() {
-            let rns = RnsContext::new(&self.moduli[..self.moduli.len() - i]).unwrap();
-            let ctx_i = Context::new_arc(&self.moduli[..self.moduli.len() - i], self.degree).unwrap();
+            let rns = RnsContext::new(&self.moduli[..self.moduli.len() - i])?;
+            let ctx_i = Context::new_arc(&self.moduli[..self.moduli.len() - i], self.degree)?;
             scalers.push(
                 Scaler::new(
                     &ctx_i,
                     &plaintext_ctx,
                     ScalingFactor::new(&BigUint::from(self.plaintext_modulus), rns.modulus()),
-                ).unwrap()
+                )?
             );
         }
 

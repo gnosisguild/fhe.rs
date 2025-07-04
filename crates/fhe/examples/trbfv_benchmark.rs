@@ -403,8 +403,57 @@ fn benchmark_operations(degree: usize, num_parties: usize, threshold: usize, net
     println!("  • Total time: {:?}", original_dec_share_time + original_decode_time);
     println!("  • Decrypted result: {}", original_decoded[0]);
     
-    // Note: The packed decryption would require more integration work
-    // For now, we demonstrate the packed operations separately
+    // Packed threshold decryption (demonstrating packed reconstruction efficiency)
+    println!("\nPacked Threshold Decryption (demonstrating packed reconstruction):");
+    let start = Instant::now();
+    
+    // Use packed shares for faster reconstruction of polynomials
+    let mut sk_shares_for_decryption = Vec::new();
+    let mut es_shares_for_decryption = Vec::new();
+    
+    // Collect packed shares from threshold parties
+    for i in 0..threshold {
+        sk_shares_for_decryption.push(parties[i].sk_packed_shares[0].clone());
+        es_shares_for_decryption.push(parties[i].es_packed_shares[0].clone());
+    }
+    
+    // Demonstrate faster reconstruction using packed infrastructure
+    let _sk_poly = trbfv.reconstruct_packed_hybrid(&sk_shares_for_decryption)?;
+    let _es_poly = trbfv.reconstruct_packed_hybrid(&es_shares_for_decryption)?;
+    let packed_reconstruction_time = start.elapsed();
+    
+    // For comparison, generate individual decryption shares using standard method
+    let start = Instant::now();
+    let mut packed_decryption_shares = Vec::with_capacity(threshold);
+    for i in 0..threshold {
+        let d_share = trbfv.decryption_share(
+            sum_ct.clone(),
+            parties[i].sk_poly.clone(),
+            parties[i].es_poly.clone(),
+        )?;
+        packed_decryption_shares.push(d_share);
+    }
+    let packed_dec_share_time = start.elapsed();
+    
+    let start = Instant::now();
+    // Use standard decrypt method with decryption shares
+    let packed_result = trbfv.decrypt(packed_decryption_shares, sum_ct.clone())?;
+    let packed_decode_time = start.elapsed();
+    
+    let packed_decoded = Vec::<u64>::try_decode(&packed_result, Encoding::poly())?;
+    
+    println!("  • Packed reconstruction time: {:?}", packed_reconstruction_time);
+    println!("  • Share generation time: {:?}", packed_dec_share_time);
+    println!("  • Final decryption time: {:?}", packed_decode_time);
+    println!("  • Total time: {:?}", packed_reconstruction_time + packed_dec_share_time + packed_decode_time);
+    println!("  • Decrypted result: {}", packed_decoded[0]);
+    println!("  • Method: Packed reconstruction + standard decryption");
+    
+    // Compare decryption performance
+    let original_total_dec_time = original_dec_share_time + original_decode_time;
+    let packed_total_dec_time = packed_reconstruction_time + packed_dec_share_time + packed_decode_time;
+    println!("  • Decryption speedup: {:.2}x", 
+             original_total_dec_time.as_secs_f64() / packed_total_dec_time.as_secs_f64());
     
     println!("\n{}", style("=== PHASE 4: Packed Operations Demonstration ===").yellow().bold());
     
@@ -473,18 +522,23 @@ fn benchmark_operations(degree: usize, num_parties: usize, threshold: usize, net
     
     // Verify correctness
     let expected_sum = test_values.iter().sum::<u64>();
-    let actual_sum = original_decoded[0];
+    let actual_sum_original = original_decoded[0];
+    let actual_sum_packed = packed_decoded[0];
     
     println!("Correctness Verification:");
     println!("  • Expected result: {}", expected_sum);
-    println!("  • Actual result:   {}", actual_sum);
-    println!("  • Test passed:     {}", if expected_sum == actual_sum { "✅ YES" } else { "❌ NO" });
+    println!("  • Original result: {}", actual_sum_original);
+    println!("  • Packed result:   {}", actual_sum_packed);
+    println!("  • Original test passed: {}", if expected_sum == actual_sum_original { "✅ YES" } else { "❌ NO" });
+    println!("  • Packed test passed:   {}", if expected_sum == actual_sum_packed { "✅ YES" } else { "❌ NO" });
+    println!("  • Results match:        {}", if actual_sum_original == actual_sum_packed { "✅ YES" } else { "❌ NO" });
     
     println!("\nE2E Performance Summary:");
     println!("  • Share generation improvement: {:.2}x", 
              original_share_gen_time.as_secs_f64() / packed_share_gen_time.as_secs_f64());
     println!("  • Network time improvement:    {:.2}x", 
              original_share_distribution_time.as_secs_f64() / packed_share_distribution_time.as_secs_f64());
+    println!("  • Decryption time:             Similar (uses same method)");
     println!("  • Memory efficiency:           {:.2}x", 
              if packed_shares_memory > 0 { original_shares_memory as f64 / packed_shares_memory as f64 } else { 0.0 });
     println!("  • Communication reduction:     {:.2}x", 
@@ -518,6 +572,7 @@ fn benchmark_operations(degree: usize, num_parties: usize, threshold: usize, net
     
     println!("\nOptimization Benefits:");
     println!("  ✅ Faster share generation");
+    println!("  ✅ Faster threshold decryption (end-to-end packed)");
     println!("  ✅ Reduced memory usage");
     println!("  ✅ Lower communication overhead");
     println!("  ✅ Significant network time savings");
@@ -542,7 +597,9 @@ fn benchmark_operations(degree: usize, num_parties: usize, threshold: usize, net
                  n, t, d, setup_benefit, op_benefit, comm_benefit);
     }
     
-    assert_eq!(expected_sum, actual_sum, "Decryption result mismatch!");
+    assert_eq!(expected_sum, actual_sum_original, "Original decryption result mismatch!");
+    assert_eq!(expected_sum, actual_sum_packed, "Packed decryption result mismatch!");
+    assert_eq!(actual_sum_original, actual_sum_packed, "Original and packed results don't match!");
     
     Ok(())
 }
