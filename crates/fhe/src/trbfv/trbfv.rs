@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
-use crate::trbfv::ThresholdResult;
+use crate::trbfv::traits::{SecretSharer, SmudgingGenerator};
 use crate::Error;
 use fhe_math::{
     rns::{RnsContext, ScalingFactor},
@@ -18,42 +18,37 @@ use rand::{CryptoRng, RngCore};
 use shamir_secret_sharing::ShamirSecretSharing as SSS;
 use zeroize::Zeroizing;
 
-/// Threshold BFV share configuration and operations.
+/// Threshold BFV configuration and operations.
 ///
 /// This struct manages threshold secret sharing for BFV homomorphic encryption,
 /// enabling distributed decryption among multiple parties where only a threshold
 /// number of parties are needed to reconstruct the plaintext.
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct TrBFVShare {
-    n: usize,
-    threshold: usize,
-    degree: usize,
-    plaintext_modulus: u64,
-    smudging_variance: usize,
-    moduli: Vec<u64>,
-    params: Arc<BfvParameters>,
+pub struct TRBFV {
+    /// Number of parties
+    pub n: usize,
+    /// Threshold for reconstruction (must be < n)
+    pub threshold: usize,
+    /// Variance for smudging noise generation
+    pub smudging_variance: usize,
+    /// BFV parameters (contains degree, plaintext_modulus, moduli, etc.)
+    pub params: Arc<BfvParameters>,
 }
 
-impl TrBFVShare {
-    /// Creates a new threshold BFV share configuration.
+impl TRBFV {
+    /// Creates a new threshold BFV configuration.
     ///
     /// # Arguments
     /// * `n` - Number of parties
     /// * `threshold` - Threshold for reconstruction (must be < n)
-    /// * `degree` - Polynomial degree
-    /// * `plaintext_modulus` - Plaintext modulus
     /// * `smudging_variance` - Variance for smudging noise generation
-    /// * `moduli` - Vector of coefficient moduli
     /// * `params` - BFV parameters
     pub fn new(
         n: usize,
         threshold: usize,
-        degree: usize,
-        plaintext_modulus: u64,
         smudging_variance: usize,
-        moduli: Vec<u64>,
         params: Arc<BfvParameters>,
-    ) -> ThresholdResult<Self> {
+    ) -> Result<Self, Error> {
         // Validate threshold configuration
         if n == 0 {
             return Err(Error::invalid_party_count(n, 1));
@@ -67,26 +62,10 @@ impl TrBFVShare {
             ));
         }
 
-        // Validate degree consistency
-        if degree != params.degree() {
-            return Err(Error::inconsistent_degree(params.degree(), degree));
-        }
-
-        // Validate moduli consistency
-        if moduli.len() != params.moduli().len() {
-            return Err(Error::inconsistent_moduli(
-                params.moduli().len(),
-                moduli.len(),
-            ));
-        }
-
         Ok(Self {
             n,
             threshold,
-            degree,
-            plaintext_modulus,
             smudging_variance,
-            moduli,
             params,
         })
     }
@@ -95,7 +74,7 @@ impl TrBFVShare {
     pub fn generate_secret_shares(
         &mut self,
         coeffs: Box<[i64]>,
-    ) -> ThresholdResult<Vec<Array2<u64>>> {
+    ) -> Result<Vec<Array2<u64>>, Error> {
         let poly = Zeroizing::new(
             Poly::try_convert_from(
                 coeffs.as_ref(),
@@ -134,7 +113,7 @@ impl TrBFVShare {
                 m_data.extend_from_slice(&c_vec);
             }
             // convert flat vector of coeffs to array2
-            let arr_matrix = Array2::from_shape_vec((self.degree, self.n), m_data).unwrap();
+            let arr_matrix = Array2::from_shape_vec((self.params.degree(), self.n), m_data).unwrap();
             // reverse the columns and rows
             let reversed_axes = arr_matrix.t();
             return_vec.push(reversed_axes.to_owned());
@@ -147,7 +126,7 @@ impl TrBFVShare {
     pub fn sum_sk_i(
         &mut self,
         sk_sss_collected: &Vec<Array2<u64>>, // collected sk sss shares from other parties
-    ) -> ThresholdResult<Poly> {
+    ) -> Result<Poly, Error> {
         let mut sum_poly = Poly::zero(
             &self.params.ctx_at_level(0).unwrap(),
             Representation::PowerBasis,
@@ -168,10 +147,10 @@ impl TrBFVShare {
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,
-    ) -> ThresholdResult<Vec<i64>> {
+    ) -> Result<Vec<i64>, Error> {
         // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
         // in [−Bsm, Bsm]
-        let s_coefficients = sample_vec_normal(self.degree, self.smudging_variance, rng)
+        let s_coefficients = sample_vec_normal(self.params.degree(), self.smudging_variance, rng)
             .map_err(|e| Error::smudging(format!("Failed to generate smudging noise: {}", e)))?;
         Ok(s_coefficients)
     }
@@ -182,7 +161,7 @@ impl TrBFVShare {
         ciphertext: Arc<Ciphertext>,
         mut sk_i: Poly,
         es_i: Poly,
-    ) -> ThresholdResult<Poly> {
+    ) -> Result<Poly, Error> {
         // decrypt
         // mul c1 * sk
         // then add c0 + (c1*sk) + es
@@ -202,7 +181,7 @@ impl TrBFVShare {
         &mut self,
         d_share_polys: Vec<Poly>,
         ciphertext: Arc<Ciphertext>,
-    ) -> ThresholdResult<Plaintext> {
+    ) -> Result<Plaintext, Error> {
         // Validate we have enough shares
         if d_share_polys.len() < self.threshold {
             return Err(Error::insufficient_shares(
@@ -213,14 +192,14 @@ impl TrBFVShare {
         let mut m_data: Vec<u64> = Vec::new();
 
         // collect shamir openings
-        for m in 0..self.moduli.len() {
+        for m in 0..self.params.moduli().len() {
             let sss = SSS {
                 threshold: self.threshold,
                 share_amount: self.n,
-                prime: BigInt::from(self.moduli[m]),
+                prime: BigInt::from(self.params.moduli()[m]),
             };
-            for i in 0..self.degree {
-                let mut shamir_open_vec_mod: Vec<(usize, BigInt)> = Vec::with_capacity(self.degree);
+            for i in 0..self.params.degree() {
+                let mut shamir_open_vec_mod: Vec<(usize, BigInt)> = Vec::with_capacity(self.params.degree());
                 for j in 0..self.threshold {
                     let coeffs = d_share_polys[j].coefficients();
                     let coeff_arr = coeffs.row(m);
@@ -235,24 +214,24 @@ impl TrBFVShare {
         }
 
         // scale result poly
-        let arr_matrix = Array2::from_shape_vec((self.moduli.len(), self.degree), m_data).unwrap();
+        let arr_matrix = Array2::from_shape_vec((self.params.moduli().len(), self.params.degree()), m_data).unwrap();
         let mut result_poly = Poly::zero(
             &self.params.ctx_at_level(0).unwrap(),
             Representation::PowerBasis,
         );
         result_poly.set_coefficients(arr_matrix);
 
-        let plaintext_ctx = Context::new_arc(&self.moduli[..1], self.degree).unwrap();
-        let mut scalers = Vec::with_capacity(self.moduli.len());
-        for i in 0..self.moduli.len() {
-            let rns = RnsContext::new(&self.moduli[..self.moduli.len() - i]).unwrap();
+        let plaintext_ctx = Context::new_arc(&self.params.moduli()[..1], self.params.degree()).unwrap();
+        let mut scalers = Vec::with_capacity(self.params.moduli().len());
+        for i in 0..self.params.moduli().len() {
+            let rns = RnsContext::new(&self.params.moduli()[..self.params.moduli().len() - i]).unwrap();
             let ctx_i =
-                Context::new_arc(&self.moduli[..self.moduli.len() - i], self.degree).unwrap();
+                Context::new_arc(&self.params.moduli()[..self.params.moduli().len() - i], self.params.degree()).unwrap();
             scalers.push(
                 Scaler::new(
                     &ctx_i,
                     &plaintext_ctx,
-                    ScalingFactor::new(&BigUint::from(self.plaintext_modulus), rns.modulus()),
+                    ScalingFactor::new(&BigUint::from(self.params.plaintext()), rns.modulus()),
                 )
                 .unwrap(),
             );
@@ -288,6 +267,19 @@ impl TrBFVShare {
             level: ciphertext.level,
         };
         Ok(pt)
+    }
+}
+
+// Implement the secret sharing traits
+impl SecretSharer for TRBFV {
+    fn generate_secret_shares(&mut self, coeffs: Box<[i64]>) -> Result<Vec<Array2<u64>>, Error> {
+        self.generate_secret_shares(coeffs)
+    }
+}
+
+impl SmudgingGenerator for TRBFV {
+    fn generate_smudging_error<R: RngCore + CryptoRng>(&mut self, rng: &mut R) -> Result<Vec<i64>, Error> {
+        self.generate_smudging_error(rng)
     }
 }
 
@@ -449,16 +441,7 @@ mod tests {
         }
         //println!("{:?}", s);
         // ----------
-        let mut trbfv = TrBFVShare::new(
-            n,
-            threshold,
-            degree,
-            plaintext_modulus,
-            160,
-            moduli.clone(),
-            sk_par.clone(),
-        )
-        .unwrap();
+        let mut trbfv = TRBFV::new(n, threshold, 160, sk_par.clone()).unwrap();
         let get_coeff_matrix = trbfv.generate_secret_shares(s_raw.coeffs.clone()).unwrap();
         println!("{:?}", get_coeff_matrix[1].row(0));
 
@@ -660,25 +643,19 @@ mod tests {
             .unwrap();
 
         // Test: Zero parties should fail
-        let result = TrBFVShare::new(
+        let result = TRBFV::new(
             0,
             3,
-            degree,
-            plaintext_modulus,
             160,
-            moduli.clone(),
             params.clone(),
         );
         assert!(matches!(result, Err(Error::TooFewValues(0, 1))));
 
         // Test: Threshold >= parties should fail
-        let result = TrBFVShare::new(
+        let result = TRBFV::new(
             5,
             5,
-            degree,
-            plaintext_modulus,
             160,
-            moduli.clone(),
             params.clone(),
         );
         assert!(matches!(
@@ -687,13 +664,10 @@ mod tests {
         ));
 
         // Test: Zero threshold should fail
-        let result = TrBFVShare::new(
+        let result = TRBFV::new(
             5,
             0,
-            degree,
-            plaintext_modulus,
             160,
-            moduli.clone(),
             params.clone(),
         );
         assert!(matches!(
@@ -702,7 +676,7 @@ mod tests {
         ));
 
         // Test: Inconsistent degree should fail
-        let result = TrBFVShare::new(
+        let result = TRBFV::from_params(
             5,
             3,
             1024,
@@ -718,7 +692,7 @@ mod tests {
 
         // Test: Inconsistent moduli count should fail
         let wrong_moduli = vec![0xffffee001, 0xffffc4001]; // Missing one modulus
-        let result = TrBFVShare::new(
+        let result = TRBFV::from_params(
             5,
             3,
             degree,
@@ -733,13 +707,10 @@ mod tests {
         ));
 
         // Test: Valid parameters should succeed
-        let result = TrBFVShare::new(
+        let result = TRBFV::new(
             5,
             3,
-            degree,
-            plaintext_modulus,
             160,
-            moduli.clone(),
             params.clone(),
         );
         assert!(result.is_ok());

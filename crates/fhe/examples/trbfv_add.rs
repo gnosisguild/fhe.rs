@@ -8,7 +8,7 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
-    trbfv::TrBFVShare,
+    trbfv::TRBFV,
 };
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
@@ -132,13 +132,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
     // Setup trBFV module
-    let mut trbfv = TrBFVShare::new(
+    let mut trbfv = TRBFV::new(
         num_parties,
         threshold,
-        degree,
-        plaintext_modulus,
         160,
-        moduli.clone(),
         params.clone(),
     )
     .unwrap();
