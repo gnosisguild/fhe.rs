@@ -3,4 +3,4 @@
 
 mod trbfv;
 
-pub use trbfv::TrBFVShare;
+pub use trbfv::{TrBFVShare, PackedHybridShare, ShamirMetadata, PackingParameters};
