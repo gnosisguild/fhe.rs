@@ -1,6 +1,7 @@
 /// Share collection and management for threshold BFV.
 ///
-/// This module provides functionality for managing and processing shares in the threshold BFV scheme.
+/// This module provides the ShareManager struct that handles aggregation of secret shares
+/// and computation of decryption shares in the threshold BFV scheme.
 use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, PublicKey};
 use crate::trbfv::secret_sharing::{SecretSharer, ShamirSecretSharing};
 use crate::Error;
@@ -18,18 +19,34 @@ use num_traits::ToPrimitive;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-/// Share aggregation and management operations.
+/// Manager for threshold BFV share operations.
+///
+/// ShareManager coordinates the collection and processing of secret shares in the threshold BFV scheme.
+/// It handles both the aggregation of collected shares and the computation of decryption shares.
+///
+/// # Protocol Flow
+/// 1. Each party generates secret shares using secret sharing
+/// 2. Parties exchange shares through secure channels
+/// 3. ShareManager aggregates collected shares to reconstruct partial secrets
+/// 4. During decryption, ShareManager computes decryption shares from ciphertext
+/// 5. Finally, threshold number of decryption shares are combined to decrypt
+#[derive(Debug)]
 pub struct ShareManager {
-    /// Number of parties
+    /// Number of parties in the threshold scheme
     pub n: usize,
-    /// Threshold for reconstruction
+    /// Threshold for reconstruction (minimum shares needed)
     pub threshold: usize,
-    /// BFV parameters
+    /// BFV parameters (degree, moduli, etc.)
     pub params: Arc<BfvParameters>,
 }
 
 impl ShareManager {
     /// Create a new share manager.
+    ///
+    /// # Arguments
+    /// - `n`: Total number of parties
+    /// - `threshold`: Minimum number of shares required for reconstruction
+    /// - `params`: BFV parameters
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Self {
         Self {
             n,
@@ -39,6 +56,16 @@ impl ShareManager {
     }
 
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
+    ///
+    /// This function takes shares collected from other parties and aggregates them
+    /// to reconstruct the sum of secret key polynomials (SK_i) needed for decryption.
+    ///
+    /// # Arguments
+    /// - `sk_sss_collected`: Vector of secret shares collected from other parties
+    ///   Each Array2<u64> contains shares for all moduli and polynomial coefficients
+    ///
+    /// # Returns
+    /// A polynomial representing the aggregated secret key material
     pub fn aggregate_collected_shares(
         &mut self,
         sk_sss_collected: &Vec<Array2<u64>>, // collected sk sss shares from other parties
@@ -60,6 +87,17 @@ impl ShareManager {
     }
 
     /// Compute decryption share from ciphertext and secret/smudging polynomials.
+    ///
+    /// This function computes a party's contribution to the threshold decryption process.
+    /// Each party uses their secret key share and smudging noise to compute a decryption share.
+    ///
+    /// # Arguments
+    /// - `ciphertext`: The ciphertext to decrypt (contains c0, c1 polynomials)
+    /// - `sk_i`: This party's secret key polynomial
+    /// - `es_i`: This party's smudging error polynomial
+    ///
+    /// # Returns
+    /// A decryption share polynomial that contributes to the final decryption
     pub fn decryption_share(
         &mut self,
         ciphertext: Arc<Ciphertext>,
@@ -81,6 +119,16 @@ impl ShareManager {
     }
 
     /// Decrypt ciphertext from collected decryption shares (threshold number required).
+    ///
+    /// This function performs the final step of threshold decryption by combining
+    /// decryption shares from at least `threshold` parties to reconstruct the plaintext.
+    ///
+    /// # Arguments
+    /// - `d_share_polys`: Vector of decryption shares from different parties
+    /// - `ciphertext`: The original ciphertext being decrypted
+    ///
+    /// # Returns
+    /// The decrypted plaintext
     pub fn decrypt_from_shares(
         &mut self,
         d_share_polys: Vec<Poly>,

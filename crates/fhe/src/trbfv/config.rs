@@ -4,6 +4,10 @@
 use crate::Error;
 
 /// Validates threshold configuration parameters.
+///
+/// # Parameters
+/// - `n`: Number of parties in the threshold scheme
+/// - `threshold`: Minimum number of parties required for reconstruction
 pub fn validate_threshold_config(n: usize, threshold: usize) -> Result<(), Error> {
     if n == 0 {
         return Err(Error::invalid_party_count(n, 1));

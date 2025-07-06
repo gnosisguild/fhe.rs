@@ -1,7 +1,25 @@
 /// Main threshold BFV orchestrator.
 ///
 /// This module provides the main TRBFV struct that coordinates between secret sharing,
-/// smudging, and share management operations.
+/// smudging, and share management operations to implement the threshold BFV protocol.
+///
+/// # Threshold BFV Overview
+///
+/// Threshold BFV enables distributed decryption where:
+/// - Secret keys are shared among n parties using secret sharing
+/// - Only t parties (threshold) are needed to decrypt
+/// - Up to t-1 parties can be compromised without breaking security
+/// - Smudging noise protects intermediate values during decryption
+///
+/// # Protocol Flow
+///
+/// 1. **Setup**: Generate BFV parameters and TRBFV configuration
+/// 2. **Key Generation**: Each party generates secret key shares
+/// 3. **Share Distribution**: Parties exchange shares via secure channels
+/// 4. **Encryption**: Standard BFV encryption (no changes needed)
+/// 5. **Threshold Decryption**:
+///    - Each party computes decryption share with smudging
+///    - Combine threshold shares to recover plaintext
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::secret_sharing::{SecretSharer, ShamirSecretSharing};
@@ -14,15 +32,13 @@ use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
 
 /// Threshold BFV configuration and operations.
-///
-/// This struct manages threshold secret sharing for BFV homomorphic encryption,
-/// enabling distributed decryption among multiple parties where only a threshold
-/// number of parties are needed to reconstruct the plaintext.
+/// This struct serves as the main coordinator for threshold BFV operations, managing
+/// the interaction between secret sharing, smudging, and share management components.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct TRBFV {
-    /// Number of parties
+    /// Number of parties in the threshold scheme
     pub n: usize,
-    /// Threshold for reconstruction (must be < n)
+    /// Threshold for reconstruction (must be < n and > 0)
     pub threshold: usize,
     /// Variance for smudging noise generation
     pub smudging_variance: usize,
@@ -34,8 +50,8 @@ impl TRBFV {
     /// Creates a new threshold BFV configuration.
     ///
     /// # Arguments
-    /// * `n` - Number of parties
-    /// * `threshold` - Threshold for reconstruction (must be < n)
+    /// * `n` - Number of parties (must be > 0)
+    /// * `threshold` - Threshold for reconstruction (must be < n and > 0)
     /// * `smudging_variance` - Variance for smudging noise generation
     /// * `params` - BFV parameters
     pub fn new(
@@ -56,6 +72,15 @@ impl TRBFV {
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients.
+    ///
+    /// This method creates secret shares that can be distributed to different parties.
+    /// Each party will receive one share for each polynomial coefficient.
+    ///
+    /// # Arguments
+    /// * `coeffs` - Polynomial coefficients to be shared (typically secret key coefficients)
+    ///
+    /// # Returns
+    /// Vector of share matrices, one per BFV modulus. Each matrix has dimensions [n, degree].
     pub fn generate_secret_shares(
         &mut self,
         coeffs: Box<[i64]>,
@@ -65,6 +90,15 @@ impl TRBFV {
     }
 
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
+    ///
+    /// This method combines shares collected from other parties to reconstruct the
+    /// secret key material needed for decryption.
+    ///
+    /// # Arguments
+    /// * `sk_sss_collected` - Shares collected from other parties
+    ///
+    /// # Returns
+    /// Aggregated polynomial representing the combined secret key material
     pub fn aggregate_collected_shares(
         &mut self,
         sk_sss_collected: &Vec<Array2<u64>>, // collected sk sss shares from other parties
@@ -74,6 +108,15 @@ impl TRBFV {
     }
 
     /// Generate smudging error coefficients for noise.
+    ///
+    /// Creates noise that will be added to decryption shares to protect privacy.
+    /// The noise is sampled from a normal distribution with the configured variance.
+    ///
+    /// # Arguments
+    /// * `rng` - Cryptographically secure random number generator
+    ///
+    /// # Returns
+    /// Vector of smudging error coefficients
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,
@@ -84,6 +127,17 @@ impl TRBFV {
     }
 
     /// Compute decryption share from ciphertext and secret/smudging polynomials.
+    ///
+    /// Each party calls this method to compute their contribution to the threshold decryption.
+    /// The result should be sent to the party coordinating the decryption.
+    ///
+    /// # Arguments
+    /// * `ciphertext` - The ciphertext to decrypt
+    /// * `sk_i` - This party's secret key polynomial
+    /// * `es_i` - This party's smudging error polynomial
+    ///
+    /// # Returns
+    /// Decryption share polynomial
     pub fn decryption_share(
         &mut self,
         ciphertext: Arc<Ciphertext>,
@@ -95,6 +149,16 @@ impl TRBFV {
     }
 
     /// Decrypt ciphertext from collected decryption shares (threshold number required).
+    ///
+    /// This method performs the final step of threshold decryption by combining
+    /// decryption shares from at least `threshold` parties.
+    ///
+    /// # Arguments
+    /// * `d_share_polys` - Decryption shares from different parties
+    /// * `ciphertext` - The original ciphertext being decrypted
+    ///
+    /// # Returns
+    /// The decrypted plaintext
     pub fn decrypt(
         &mut self,
         d_share_polys: Vec<Poly>,
