@@ -8,4 +8,4 @@ pub mod shamir;
 pub mod traits;
 
 pub use shamir::ShamirSecretSharing;
-pub use traits::SecretSharer; 
+pub use traits::SecretSharer;

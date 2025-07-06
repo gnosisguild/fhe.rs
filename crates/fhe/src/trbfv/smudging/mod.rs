@@ -8,4 +8,4 @@ pub mod config;
 pub mod noise;
 
 pub use config::SmudgingConfig;
-pub use noise::{SmudgingGenerator, StandardSmudgingGenerator}; 
+pub use noise::{SmudgingGenerator, StandardSmudgingGenerator};
