@@ -2,7 +2,6 @@
 ///
 /// This module provides the traits and implementations for generating smudging noise
 /// in the threshold BFV scheme.
-
 use crate::Error;
 use fhe_util::sample_vec_normal;
 use rand::{CryptoRng, RngCore};
@@ -10,7 +9,10 @@ use rand::{CryptoRng, RngCore};
 /// Trait for generating smudging noise.
 pub trait SmudgingGenerator {
     /// Generate smudging error coefficients for noise.
-    fn generate_smudging_error<R: RngCore + CryptoRng>(&mut self, rng: &mut R) -> Result<Vec<i64>, Error>;
+    fn generate_smudging_error<R: RngCore + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<Vec<i64>, Error>;
 }
 
 /// Standard smudging noise generator.
@@ -41,4 +43,4 @@ impl SmudgingGenerator for StandardSmudgingGenerator {
             .map_err(|e| Error::smudging(format!("Failed to generate smudging noise: {}", e)))?;
         Ok(s_coefficients)
     }
-} 
+}

@@ -2,14 +2,13 @@
 ///
 /// This module provides the main TRBFV struct that coordinates between secret sharing,
 /// smudging, and share management operations.
-
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
-use crate::trbfv::config::validate_all_params;
+use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::secret_sharing::{SecretSharer, ShamirSecretSharing};
 use crate::trbfv::shares::ShareManager;
 use crate::trbfv::smudging::{SmudgingGenerator, StandardSmudgingGenerator};
 use crate::Error;
-use fhe_math::rq::{Context, Poly, Representation};
+use fhe_math::rq::Poly;
 use ndarray::Array2;
 use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
@@ -46,7 +45,7 @@ impl TRBFV {
         params: Arc<BfvParameters>,
     ) -> Result<Self, Error> {
         // Validate all parameters
-        validate_all_params(n, threshold, smudging_variance)?;
+        validate_threshold_config(n, threshold)?;
 
         Ok(Self {
             n,
@@ -54,12 +53,6 @@ impl TRBFV {
             smudging_variance,
             params,
         })
-    }
-
-    /// Create a new TRBFV instance from BFV parameters with default values.
-    /// This is primarily for testing and backward compatibility.
-    pub fn from_params(params: Arc<BfvParameters>) -> Result<Self, Error> {
-        Self::new(5, 3, 160, params)
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients.
@@ -85,7 +78,8 @@ impl TRBFV {
         &mut self,
         rng: &mut R,
     ) -> Result<Vec<i64>, Error> {
-        let mut smudging_gen = StandardSmudgingGenerator::new(self.params.degree(), self.smudging_variance);
+        let mut smudging_gen =
+            StandardSmudgingGenerator::new(self.params.degree(), self.smudging_variance);
         smudging_gen.generate_smudging_error(rng)
     }
 
@@ -108,19 +102,6 @@ impl TRBFV {
     ) -> Result<Plaintext, Error> {
         let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
         share_manager.decrypt_from_shares(d_share_polys, ciphertext)
-    }
-}
-
-// Implement the traits for backward compatibility
-impl SecretSharer for TRBFV {
-    fn generate_secret_shares(&mut self, coeffs: Box<[i64]>) -> Result<Vec<Array2<u64>>, Error> {
-        self.generate_secret_shares(coeffs)
-    }
-}
-
-impl SmudgingGenerator for TRBFV {
-    fn generate_smudging_error<R: RngCore + CryptoRng>(&mut self, rng: &mut R) -> Result<Vec<i64>, Error> {
-        self.generate_smudging_error(rng)
     }
 }
 
@@ -165,15 +146,12 @@ mod tests {
 
         // Test invalid n = 0
         assert!(TRBFV::new(0, 3, 160, params.clone()).is_err());
-        
+
         // Test invalid threshold >= n
         assert!(TRBFV::new(5, 5, 160, params.clone()).is_err());
-        
+
         // Test invalid threshold = 0
         assert!(TRBFV::new(5, 0, 160, params.clone()).is_err());
-        
-        // Test invalid smudging_variance = 0
-        assert!(TRBFV::new(5, 3, 0, params.clone()).is_err());
     }
 
     #[test]
@@ -218,10 +196,10 @@ mod tests {
             .build_arc()
             .unwrap();
 
-        let mut trbfv = TRBFV::new(5, 3, 160, params.clone()).unwrap();
+        let mut trbfv = TRBFV::new(n, threshold, 160, params.clone()).unwrap();
         let smudging_error = trbfv.generate_smudging_error(&mut rng);
         assert!(smudging_error.is_ok());
         let smudging_error = smudging_error.unwrap();
         assert_eq!(smudging_error.len(), degree);
     }
-} 
+}

@@ -2,12 +2,11 @@
 ///
 /// This module provides the concrete implementation of Shamir Secret Sharing
 /// for polynomial coefficients in the threshold BFV scheme.
-
 use crate::bfv::BfvParameters;
 use crate::trbfv::secret_sharing::traits::SecretSharer;
 use crate::Error;
-use fhe_math::rq::{traits::TryConvertFrom, Context, Poly, Representation};
-use itertools::{izip, Itertools};
+use fhe_math::rq::{traits::TryConvertFrom, Poly, Representation};
+use itertools::izip;
 use ndarray::Array2;
 use num_bigint_old::{BigInt, ToBigInt};
 use num_traits::ToPrimitive;
@@ -29,17 +28,17 @@ pub struct ShamirSecretSharing {
 impl ShamirSecretSharing {
     /// Create a new Shamir Secret Sharing instance.
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Self {
-        Self { n, threshold, params }
+        Self {
+            n,
+            threshold,
+            params,
+        }
     }
 }
 
 impl SecretSharer for ShamirSecretSharing {
     /// Generate Shamir Secret Shares for polynomial coefficients.
-    /// Generate Shamir Secret Shares for polynomial coefficients.
-    fn generate_secret_shares(
-        &mut self,
-        coeffs: Box<[i64]>,
-    ) -> Result<Vec<Array2<u64>>, Error> {
+    fn generate_secret_shares(&mut self, coeffs: Box<[i64]>) -> Result<Vec<Array2<u64>>, Error> {
         let poly = Zeroizing::new(
             Poly::try_convert_from(
                 coeffs.as_ref(),
@@ -78,12 +77,27 @@ impl SecretSharer for ShamirSecretSharing {
                 m_data.extend_from_slice(&c_vec);
             }
             // convert flat vector of coeffs to array2
-            let arr_matrix = Array2::from_shape_vec((self.params.degree(), self.n), m_data).unwrap();
+            let arr_matrix =
+                Array2::from_shape_vec((self.params.degree(), self.n), m_data).unwrap();
             // reverse the columns and rows
             let reversed_axes = arr_matrix.t();
             return_vec.push(reversed_axes.to_owned());
         }
         // return vec = rows are party members, columns are degree length of shamir values
         Ok(return_vec)
+    }
+
+    /// Reconstruct a secret coefficient from shares.
+    fn reconstruct_coefficient(
+        &self,
+        shares: &[(usize, BigInt)],
+        modulus: u64,
+    ) -> Result<BigInt, Error> {
+        let sss = SSS {
+            threshold: self.threshold,
+            share_amount: self.n,
+            prime: BigInt::from(modulus),
+        };
+        Ok(sss.recover(shares))
     }
 }

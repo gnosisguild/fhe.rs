@@ -132,13 +132,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
     // Setup trBFV module
-    let mut trbfv = TRBFV::new(
-        num_parties,
-        threshold,
-        160,
-        params.clone(),
-    )
-    .unwrap();
+    let mut trbfv = TRBFV::new(num_parties, threshold, 160, params.clone()).unwrap();
 
     // Set up shares for each party.
     timeit_n!("Party setup (per party)", num_parties as u32, {
