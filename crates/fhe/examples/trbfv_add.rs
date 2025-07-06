@@ -186,8 +186,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     i = 0;
     // For each party, convert shares to polys and sum the collected shares.
     timeit_n!("Sum collected shares (per party)", num_parties as u32, {
-        parties[i].sk_poly_sum = trbfv.sum_sk_i(&parties[i].sk_sss_collected).unwrap();
-        parties[i].es_poly_sum = trbfv.sum_sk_i(&parties[i].es_sss_collected).unwrap();
+        parties[i].sk_poly_sum = trbfv
+            .aggregate_collected_shares(&parties[i].sk_sss_collected)
+            .unwrap();
+        parties[i].es_poly_sum = trbfv
+            .aggregate_collected_shares(&parties[i].es_sss_collected)
+            .unwrap();
         i += 1;
     });
 

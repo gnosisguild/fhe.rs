@@ -38,8 +38,8 @@ impl ShareManager {
         }
     }
 
-    /// Aggregate collected secret sharing shares to compute summed SK_i polynomial.
-    pub fn sum_sk_i(
+    /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
+    pub fn aggregate_collected_shares(
         &mut self,
         sk_sss_collected: &Vec<Array2<u64>>, // collected sk sss shares from other parties
     ) -> Result<Poly, Error> {
@@ -190,7 +190,7 @@ mod tests {
     use rand::thread_rng;
 
     #[test]
-    fn test_sum_sk_i() {
+    fn test_aggregate_collected_shares() {
         let mut rng = thread_rng();
         let degree = 2048;
         let plaintext_modulus = 4096;
@@ -226,8 +226,10 @@ mod tests {
             sk_sss_collected.push(node_share_m);
         }
 
-        // Test sum_sk_i
-        let sum_poly = share_manager.sum_sk_i(&sk_sss_collected).unwrap();
+        // Test aggregate_collected_shares
+        let sum_poly = share_manager
+            .aggregate_collected_shares(&sk_sss_collected)
+            .unwrap();
         assert_eq!(sum_poly.coefficients().nrows(), moduli.len());
         assert_eq!(sum_poly.coefficients().ncols(), degree);
     }

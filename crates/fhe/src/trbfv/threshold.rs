@@ -64,13 +64,13 @@ impl TRBFV {
         shamir_ss.generate_secret_shares(coeffs)
     }
 
-    /// Aggregate collected secret sharing shares to compute summed SK_i polynomial.
-    pub fn sum_sk_i(
+    /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
+    pub fn aggregate_collected_shares(
         &mut self,
         sk_sss_collected: &Vec<Array2<u64>>, // collected sk sss shares from other parties
     ) -> Result<Poly, Error> {
         let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
-        share_manager.sum_sk_i(sk_sss_collected)
+        share_manager.aggregate_collected_shares(sk_sss_collected)
     }
 
     /// Generate smudging error coefficients for noise.
