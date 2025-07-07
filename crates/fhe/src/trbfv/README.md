@@ -25,6 +25,38 @@ The TRBFV module is built with a modular, extensible architecture:
 
 At the end, the **`TRBFV`** is the main struct coordinating all threshold operations.
 
+## Protobuf
+
+### Available Serialization Functions
+
+Located in `proto::trbfv`:
+
+- **`serialize_secret_share()`** / **`deserialize_secret_share()`**: For `Array2<u64>` secret share matrices
+- **`serialize_smudging_data()`** / **`deserialize_smudging_data()`**: For `Vec<i64>` smudging coefficients  
+- **`serialize_decryption_share()`** / **`deserialize_decryption_share()`**: For `Poly` decryption shares
+- **`TRBFV::to_bytes()`** / **`TRBFV::from_bytes()`**: For TRBFV configuration itself
+
+### How it works
+
+The following is a simple workflow using protobufs for TRBFV:
+
+```rust
+use fhe::proto::trbfv::{serialize_secret_share, deserialize_secret_share};
+use fhe::trbfv::TRBFV;
+use fhe_traits::Serialize;
+
+// 1. Setup phase: Share TRBFV configuration
+let config_bytes = trbfv.to_bytes(); // Send to all parties
+
+// 2. Key generation: Distribute secret shares
+let shares = trbfv.generate_secret_shares(secret_key.coeffs)?;
+let serialized_shares = serialize_secret_share(&shares[0]); // Send to party
+
+// 3. Decryption phase: Collect decryption shares
+let decryption_share = trbfv.decryption_share(ciphertext, sk_poly, es_poly)?;
+let serialized_share = serialize_decryption_share(&decryption_share); // Send to dealer
+```
+
 ## Example Usage
 
 ```rust
@@ -68,8 +100,9 @@ let decryption_share = trbfv.decryption_share(ciphertext.clone(), sk_poly_sum, e
 let plaintext = trbfv.decrypt(decryption_shares, ciphertext)?;
 ```
 
-## Complete Example
+## Complete Examples
 
+### Local Threshold Example
 See [`examples/trbfv_add.rs`](../../examples/trbfv_add.rs) for a complete threshold BFV addition example that demonstrates:
 - Multi-party setup with secret sharing
 - Share distribution simulation
@@ -80,6 +113,16 @@ Run it with:
 ```bash
 cargo run --example trbfv_add --num_parties=10 --threshold=7
 ```
+
+### Protobuf Serialization
+
+The protobuf serialization functions are available in the `proto::trbfv` module and can be used for:
+- Network communication between distributed parties
+- Persistent storage of TRBFV configurations and shares
+- Cross-platform compatibility in distributed systems
+
+All serialization functions are thoroughly tested and production-ready for distributed deployment scenarios.
+
 ## Security Notes
 
 ⚠️ **This implementation has not been independently audited.** 

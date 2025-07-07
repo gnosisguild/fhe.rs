@@ -27,6 +27,7 @@ use crate::trbfv::shares::ShareManager;
 use crate::trbfv::smudging::{SmudgingGenerator, StandardSmudgingGenerator};
 use crate::Error;
 use fhe_math::rq::Poly;
+use fhe_traits::FheParametrized;
 use ndarray::Array2;
 use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
@@ -167,6 +168,10 @@ impl TRBFV {
         let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
         share_manager.decrypt_from_shares(d_share_polys, ciphertext)
     }
+}
+
+impl FheParametrized for TRBFV {
+    type Parameters = BfvParameters;
 }
 
 #[cfg(test)]
