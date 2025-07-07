@@ -251,7 +251,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = result_vec[0];
 
     // Show summation result
-    println!("Sum result = {} / {}", result, num_summed);
+    println!("Sum result = {result} / {num_summed}");
 
     let expected_result = numbers.iter().sum();
     assert_eq!(result, expected_result);

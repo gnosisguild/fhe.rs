@@ -40,7 +40,7 @@ impl SmudgingGenerator for StandardSmudgingGenerator {
         // For each party, generate local smudging noise, coeffs of of degree N − 1 with coefficients
         // in [−Bsm, Bsm]
         let s_coefficients = sample_vec_normal(self.degree, self.variance, rng)
-            .map_err(|e| Error::smudging(format!("Failed to generate smudging noise: {}", e)))?;
+            .map_err(|e| Error::smudging(format!("Failed to generate smudging noise: {e}")))?;
         Ok(s_coefficients)
     }
 }

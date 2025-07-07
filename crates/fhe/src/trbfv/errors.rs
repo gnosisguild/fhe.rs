@@ -17,22 +17,21 @@ impl Error {
     /// Create a threshold too large error.
     pub fn threshold_too_large(threshold: usize, n: usize) -> Self {
         Error::UnspecifiedInput(format!(
-            "Threshold {} must be less than number of parties {}",
-            threshold, n
+            "Threshold {threshold} must be less than number of parties {n}"
         ))
     }
 
     /// Create an invalid party ID error.
     pub fn invalid_party_id(party_id: usize, max_party_id: usize) -> Self {
         Error::UnspecifiedInput(format!(
-            "Invalid party ID: {}, must be between 0 and {}",
-            party_id, max_party_id
+            "Invalid party ID: {party_id}, must be between 0 and {max_party_id}"
         ))
     }
 
     /// Create a secret sharing error.
     pub fn secret_sharing<S: Into<String>>(msg: S) -> Self {
-        Error::UnspecifiedInput(format!("Secret sharing error: {}", msg.into()))
+        let msg = msg.into();
+        Error::UnspecifiedInput(format!("Secret sharing error: {msg}"))
     }
 
     /// Create a smudging error.
@@ -42,43 +41,38 @@ impl Error {
 
     /// Create a share operation error.
     pub fn share_operation<S: Into<String>>(msg: S) -> Self {
-        Error::UnspecifiedInput(format!("Share operation error: {}", msg.into()))
+        let msg = msg.into();
+        Error::UnspecifiedInput(format!("Share operation error: {msg}"))
     }
 
     /// Create a decryption share error.
     pub fn decryption_share<S: Into<String>>(msg: S) -> Self {
-        Error::UnspecifiedInput(format!(
-            "Decryption share computation failed: {}",
-            msg.into()
-        ))
+        let msg = msg.into();
+        Error::UnspecifiedInput(format!("Decryption share computation failed: {msg}"))
     }
 
     /// Create a decryption reconstruction error.
     pub fn decryption_reconstruction<S: Into<String>>(msg: S) -> Self {
-        Error::UnspecifiedInput(format!("Decryption reconstruction failed: {}", msg.into()))
+        let msg = msg.into();
+        Error::UnspecifiedInput(format!("Decryption reconstruction failed: {msg}"))
     }
 
     /// Create a malformed shares error.
     pub fn malformed_shares(party_id: usize, reason: String) -> Self {
-        Error::UnspecifiedInput(format!(
-            "Malformed shares from party {}: {}",
-            party_id, reason
-        ))
+        Error::UnspecifiedInput(format!("Malformed shares from party {party_id}: {reason}"))
     }
 
     /// Create an inconsistent degree error.
     pub fn inconsistent_degree(expected: usize, got: usize) -> Self {
         Error::UnspecifiedInput(format!(
-            "Inconsistent polynomial degree: expected {}, found {}",
-            expected, got
+            "Inconsistent polynomial degree: expected {expected}, found {got}"
         ))
     }
 
     /// Create an inconsistent moduli error.
     pub fn inconsistent_moduli(expected: usize, got: usize) -> Self {
         Error::UnspecifiedInput(format!(
-            "Inconsistent moduli: expected {} moduli, found {}",
-            expected, got
+            "Inconsistent moduli: expected {expected} moduli, found {got}"
         ))
     }
 }

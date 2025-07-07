@@ -96,7 +96,7 @@ impl Plaintext {
                 m_scaled_by_delta.push(
                     reduced
                         .to_u64()
-                        .unwrap_or_else(|| panic!("Value {:?} too large for u64", reduced)),
+                        .unwrap_or_else(|| panic!("Value {reduced:?} too large for u64")),
                 );
             }
         }

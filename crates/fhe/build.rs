@@ -27,7 +27,7 @@ fn main() -> Result<()> {
 
             // Prepend #![allow(missing_docs)]
             let contents = fs::read_to_string(&target_path)?;
-            let new_contents = format!("#![allow(missing_docs)]\n{}", contents);
+            let new_contents = format!("#![allow(missing_docs)]\n{contents}");
             fs::write(&target_path, new_contents)?;
 
             break;
