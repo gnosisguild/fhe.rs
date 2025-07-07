@@ -174,14 +174,12 @@ impl ShareManager {
         );
         result_poly.set_coefficients(arr_matrix);
 
-        let plaintext_ctx =
-            Context::new_arc(&self.params.moduli()[..1], self.params.degree())
-                .map_err(Error::MathError)?;
+        let plaintext_ctx = Context::new_arc(&self.params.moduli()[..1], self.params.degree())
+            .map_err(Error::MathError)?;
         let mut scalers = Vec::with_capacity(self.params.moduli().len());
         for i in 0..self.params.moduli().len() {
-            let rns =
-                RnsContext::new(&self.params.moduli()[..self.params.moduli().len() - i])
-                    .map_err(Error::MathError)?;
+            let rns = RnsContext::new(&self.params.moduli()[..self.params.moduli().len() - i])
+                .map_err(Error::MathError)?;
             let ctx_i = Context::new_arc(
                 &self.params.moduli()[..self.params.moduli().len() - i],
                 self.params.degree(),

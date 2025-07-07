@@ -53,9 +53,7 @@ impl SecretSharer for ShamirSecretSharing {
         let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(self.params.moduli.len());
 
         // for each moduli, for each coeff generate an SSS of degree n and threshold n = 2t + 1
-        for (m, p) in
-            izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter())
-        {
+        for (m, p) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()) {
             // Create shamir object
             let shamir = SSS {
                 threshold: self.threshold,
