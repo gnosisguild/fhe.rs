@@ -1,92 +1,28 @@
 # https://github.com/actions-rs/meta/blob/master/recipes/quickstart.md
+name: Rust
 on:
+  workflow_dispatch:
   pull_request:
-    paths-ignore:
-      - 'README.md'
   push:
     branches:
-          - main
-    paths-ignore:
-      - 'README.md'        
-    
-name: Test and coverage
+      - main
 
 jobs:
-  check:
-    name: Check
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
+  ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
 
-  test:
-    name: Test Suite
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - name: Install Rust stable
+        uses: actions-rs/toolchain@v1
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
+          toolchain: 1.85.0
 
-  codecov:
-    name: Code coverage
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - name: Add llvm-tools
-        run: rustup component add llvm-tools-preview
-      - name: Run tests with coverage instrumentation
-        env:
-          LLVM_PROFILE_FILE: "target/coverage/coverage-%p-%m.profraw"
-          RUSTFLAGS: '-Cinstrument-coverage -Ccodegen-units=1 -Cllvm-args=--inline-threshold=0 -Clink-dead-code -Coverflow-checks=off'
-          RUSTDOCFLAGS: '-Cinstrument-coverage -Ccodegen-units=1 -Cllvm-args=--inline-threshold=0 -Clink-dead-code -Coverflow-checks=off'
-        run: |
-          mkdir -p target/coverage
-          cargo test --no-fail-fast
-      - name: List generated coverage files
-        run: find target/coverage -name "*.profraw" || true
-      - name: Install grcov
-        run: cargo install grcov
-      - name: Generate coverage report with grcov
-        run: |
-          grcov target/coverage \
-            --binary-path ./target/debug \
-            --source-dir . \
-            -t cobertura \
-            --branch \
-            --ignore-not-existing \
-            --ignore "crates/fhe/src/bfv/proto/*" \
-            --ignore "crates/fhe-math/src/proto/*" \
-            -o cobertura.xml
-      - name: Upload to codecov.io
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: cobertura.xml
-          fail_ci_if_error: true
+      - name: Check code format
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-features
