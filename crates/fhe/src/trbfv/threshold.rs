@@ -101,7 +101,7 @@ impl TRBFV {
     /// Aggregated polynomial representing the combined secret key material
     pub fn aggregate_collected_shares(
         &mut self,
-        sk_sss_collected: &Vec<Array2<u64>>, // collected sk sss shares from other parties
+        sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
     ) -> Result<Poly, Error> {
         let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
         share_manager.aggregate_collected_shares(sk_sss_collected)

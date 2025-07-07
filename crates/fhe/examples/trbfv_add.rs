@@ -144,9 +144,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
         let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
         let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-        let sk_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        let es_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        let d_share_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        let sk_poly_sum = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        let es_poly_sum = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+        let d_share_poly = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
         parties.push(Party {
             pk_share,
             sk_sss,
@@ -241,8 +241,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // gather d_share_polys
     let mut d_share_polys: Vec<Poly> = Vec::new();
-    for i in 0..threshold {
-        d_share_polys.push(parties[i].d_share_poly.clone());
+    for party in parties.iter().take(threshold) {
+        d_share_polys.push(party.d_share_poly.clone());
     }
 
     // decrypt result

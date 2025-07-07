@@ -42,7 +42,7 @@ impl SecretSharer for ShamirSecretSharing {
         let poly = Zeroizing::new(
             Poly::try_convert_from(
                 coeffs.as_ref(),
-                &self.params.ctx_at_level(0).unwrap(),
+                self.params.ctx_at_level(0).unwrap(),
                 false,
                 Representation::PowerBasis,
             )
@@ -53,8 +53,8 @@ impl SecretSharer for ShamirSecretSharing {
         let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(self.params.moduli.len());
 
         // for each moduli, for each coeff generate an SSS of degree n and threshold n = 2t + 1
-        for (_k, (m, p)) in
-            izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()).enumerate()
+        for (m, p) in
+            izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter())
         {
             // Create shamir object
             let shamir = SSS {
@@ -65,13 +65,13 @@ impl SecretSharer for ShamirSecretSharing {
             let mut m_data: Vec<u64> = Vec::new();
 
             // For each coeff in the polynomial p under the current modulus m
-            for (_i, c) in p.iter().enumerate() {
+            for c in p.iter() {
                 // Split the coeff into n shares
                 let secret = c.to_bigint().unwrap();
                 let c_shares = shamir.split(secret.clone());
                 // For each share convert to u64
                 let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
-                for (_j, (_, c_share)) in c_shares.iter().enumerate() {
+                for (_, c_share) in c_shares.iter() {
                     c_vec.push(c_share.to_u64().unwrap());
                 }
                 m_data.extend_from_slice(&c_vec);
