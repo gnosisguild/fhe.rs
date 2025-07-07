@@ -1,16 +1,14 @@
 # https://github.com/actions-rs/meta/blob/master/recipes/quickstart.md
 on:
   pull_request:
-    branches:
-      - main
     paths-ignore:
       - 'README.md'
   push:
     branches:
-      - main
+          - main
     paths-ignore:
-      - 'README.md'
-
+      - 'README.md'        
+    
 name: Test and coverage
 
 jobs:
