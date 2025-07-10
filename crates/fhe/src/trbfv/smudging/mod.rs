@@ -19,6 +19,9 @@
 pub mod config;
 /// Noise generation for smudging.
 pub mod noise;
+/// Variance calculation for optimal smudging noise.
+pub mod variance;
 
 pub use config::SmudgingConfig;
 pub use noise::{SmudgingGenerator, StandardSmudgingGenerator};
+pub use variance::{VarianceCalculator, VarianceCalculatorConfig};
