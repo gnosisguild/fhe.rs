@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 1;
+    let mut num_summed = 5;
     let mut num_parties = 10;
     let mut threshold = 7;
 
@@ -132,14 +132,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
     // Setup trBFV module
-    let mut trbfv = TRBFV::new(num_parties, threshold, 160, params.clone()).unwrap();
+    let mut trbfv = TRBFV::new(num_parties, threshold, params.clone()).unwrap();
 
     // Set up shares for each party.
     timeit_n!("Party setup (per party)", num_parties as u32, {
         let sk_share = SecretKey::random(&params, &mut OsRng);
         let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
         let sk_sss = trbfv.generate_secret_shares(sk_share.coeffs.clone())?;
-        let esi_coeffs = trbfv.generate_smudging_error(&mut OsRng)?;
+        let esi_coeffs = trbfv.generate_smudging_error(num_summed, &mut OsRng)?; // m=num_summed (number of ciphertexts)
         let esi_sss = trbfv.generate_secret_shares(esi_coeffs.into_boxed_slice())?;
         // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
         let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);

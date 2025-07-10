@@ -9,6 +9,6 @@ pub use generated::*;
 
 // Re-export serialization functions
 pub use serialization::{
-    deserialize_decryption_share, deserialize_secret_share, deserialize_smudging_data,
-    serialize_decryption_share, serialize_secret_share, serialize_smudging_data,
+    deserialize_decryption_share, deserialize_secret_share, serialize_decryption_share,
+    serialize_secret_share,
 };

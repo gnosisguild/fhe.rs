@@ -17,5 +17,5 @@ pub mod threshold;
 // Re-export main types for convenience
 pub use secret_sharing::{SecretSharer, ShamirSecretSharing};
 pub use shares::ShareManager;
-pub use smudging::{SmudgingConfig, SmudgingGenerator, StandardSmudgingGenerator};
+pub use smudging::{VarianceCalculator, VarianceCalculatorConfig};
 pub use threshold::TRBFV;

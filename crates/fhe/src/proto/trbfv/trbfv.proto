@@ -11,8 +11,7 @@ message Parameters {
 message TRBFVConfig {
     uint32 n = 1;                    
     uint32 threshold = 2;            
-    uint32 smudging_variance = 3;    
-    Parameters params = 4;           
+    Parameters params = 3;           
 }
 
 message SecretShare {
@@ -25,10 +24,6 @@ message SecretShareModulus {
 
 message DecryptionShare {
     bytes poly_data = 1;  
-}
-
-message SmudgingData {
-    repeated int64 error_coefficients = 1;  
 }
 
 message ThresholdDecryptionRequest {

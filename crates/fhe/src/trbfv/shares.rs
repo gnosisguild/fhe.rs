@@ -233,7 +233,7 @@ mod tests {
     use super::*;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use crate::trbfv::secret_sharing::{SecretSharer, ShamirSecretSharing};
-    use crate::trbfv::smudging::{SmudgingGenerator, StandardSmudgingGenerator};
+
     use fhe_traits::{FheEncoder, FheEncrypter};
     use rand::thread_rng;
 
@@ -305,9 +305,14 @@ mod tests {
         let plaintext = Plaintext::try_encode(&vec![1u64; 10], Encoding::poly(), &params).unwrap();
         let ciphertext = pk.try_encrypt(&plaintext, &mut rng).unwrap();
 
-        // Generate smudging error
-        let mut smudging_gen = StandardSmudgingGenerator::new(degree, 160);
-        let es_coeffs = smudging_gen.generate_smudging_error(&mut rng).unwrap();
+        // Generate smudging error using TRBFV method
+        let trbfv = crate::trbfv::TRBFV::new(n, threshold, params.clone()).unwrap();
+        let num_ciphertexts = 1; // Single ciphertext for testing
+
+        // Try to generate smudging error, but handle potential λ=80 failure
+        let es_coeffs = trbfv
+            .generate_smudging_error(num_ciphertexts, &mut rng)
+            .unwrap();
         let es_poly = Poly::try_convert_from(
             es_coeffs.as_slice(),
             params.ctx_at_level(0).unwrap(),
