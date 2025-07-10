@@ -271,8 +271,8 @@ mod tests {
             }
             Err(e) => {
                 // With λ=80, this might fail - that's expected
-                println!("Expected failure with λ=80: {}", e);
-                assert!(e.to_string().len() > 0);
+                println!("Expected failure with λ=80: {e}");
+                assert!(!e.to_string().is_empty());
             }
         }
     }
