@@ -24,7 +24,9 @@ use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::secret_sharing::{SecretSharer, ShamirSecretSharing};
 use crate::trbfv::shares::ShareManager;
-use crate::trbfv::smudging::{VarianceCalculator, VarianceCalculatorConfig};
+use crate::trbfv::smudging::{
+    SmudgingNoiseGenerator, VarianceCalculator, VarianceCalculatorConfig,
+};
 use crate::Error;
 use fhe_math::rq::Poly;
 use fhe_traits::FheParametrized;
@@ -106,6 +108,8 @@ impl TRBFV {
     ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed (e.g., votes to count, numbers to sum)
+    /// * `public_key_errors` - Public key error polynomials for variance calculation
+    /// * `secret_keys` - Secret key polynomials for variance calculation
     /// * `rng` - Cryptographically secure random number generator
     ///
     /// # Returns
@@ -113,11 +117,20 @@ impl TRBFV {
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         num_ciphertexts: usize,
+        public_key_errors: Vec<Poly>,
+        secret_keys: Vec<Poly>,
         rng: &mut R,
     ) -> Result<Vec<i64>, Error> {
-        let config = VarianceCalculatorConfig::new(self.params.clone(), self.n, num_ciphertexts);
+        let config = VarianceCalculatorConfig::new(
+            self.params.clone(),
+            self.n,
+            num_ciphertexts,
+            public_key_errors,
+            secret_keys,
+        );
         let calculator = VarianceCalculator::new(config);
-        calculator.generate_smudging_error(rng)
+        let generator = SmudgingNoiseGenerator::from_calculator(calculator)?;
+        generator.generate_smudging_error(rng)
     }
 
     /// Compute decryption share from ciphertext and secret/smudging polynomials.
@@ -260,7 +273,27 @@ mod tests {
 
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
-        let result = trbfv.generate_smudging_error(num_ciphertexts, &mut rng);
+        // Generate real polynomials for testing
+        let ctx = params.ctx_at_level(0).unwrap();
+
+        // Generate realistic public key error polynomials (small coefficients)
+        let public_key_errors = vec![
+            Poly::small(&ctx, fhe_math::rq::Representation::PowerBasis, 3, &mut rng).unwrap(),
+            Poly::small(&ctx, fhe_math::rq::Representation::PowerBasis, 2, &mut rng).unwrap(),
+        ];
+
+        // Generate realistic secret key polynomials (small coefficients)
+        let secret_keys = vec![
+            Poly::small(&ctx, fhe_math::rq::Representation::PowerBasis, 3, &mut rng).unwrap(),
+            Poly::small(&ctx, fhe_math::rq::Representation::PowerBasis, 2, &mut rng).unwrap(),
+        ];
+
+        let result = trbfv.generate_smudging_error(
+            num_ciphertexts,
+            public_key_errors,
+            secret_keys,
+            &mut rng,
+        );
         match result {
             Ok(smudging_coeffs) => {
                 assert_eq!(smudging_coeffs.len(), degree);

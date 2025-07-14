@@ -40,8 +40,8 @@ fn print_notice_and_exit(error: Option<String>) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Parameters
-    let degree = 2048;
-    let plaintext_modulus: u64 = 4096;
+    let degree = 4096;
+    let plaintext_modulus: u64 = 65537;
     let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
 
     // This executable is a command line tool which enables to specify
@@ -139,7 +139,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         let sk_share = SecretKey::random(&params, &mut OsRng);
         let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
         let sk_sss = trbfv.generate_secret_shares(sk_share.coeffs.clone())?;
-        let esi_coeffs = trbfv.generate_smudging_error(num_summed, &mut OsRng)?; // m=num_summed (number of ciphertexts)
+
+        // Generate polynomial data for smudging variance calculation
+        let ctx = params.ctx_at_level(0).unwrap();
+
+        // Option 1: Zero polynomials (works with λ=80, but doesn't test real variance calculation)
+        // let public_key_errors = vec![
+        //     Poly::zero(&ctx, Representation::PowerBasis),
+        // ];
+        // let secret_keys = vec![
+        //     Poly::zero(&ctx, Representation::PowerBasis),
+        // ];
+
+        // Option 2: Small coefficients (tests real variance calculation, but may fail with λ=80)
+        // Uncomment the lines below to test with real coefficients:
+        let public_key_errors = vec![
+            Poly::small(&ctx, Representation::PowerBasis, 2, &mut OsRng).unwrap(), // variance=2
+        ];
+        let secret_keys = vec![
+            Poly::small(&ctx, Representation::PowerBasis, 3, &mut OsRng).unwrap(), // variance=3
+        ];
+
+        let esi_coeffs = trbfv.generate_smudging_error(
+            num_summed,
+            public_key_errors,
+            secret_keys,
+            &mut OsRng,
+        )?;
         let esi_sss = trbfv.generate_secret_shares(esi_coeffs.into_boxed_slice())?;
         // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
         let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
@@ -166,8 +192,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         num_parties as u32,
         {
             for j in 0..num_parties {
-                let mut node_share_m = Array::zeros((0, 2048));
-                let mut es_node_share_m = Array::zeros((0, 2048));
+                let mut node_share_m = Array::zeros((0, degree));
+                let mut es_node_share_m = Array::zeros((0, degree));
                 for m in 0..moduli.len() {
                     node_share_m
                         .push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).clone()))

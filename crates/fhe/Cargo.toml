@@ -27,6 +27,7 @@ num-traits.workspace = true
 prost.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
+rand_distr.workspace = true
 zeroize.workspace = true
 zeroize_derive.workspace = true
 ndarray.workspace = true

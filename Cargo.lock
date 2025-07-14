@@ -339,6 +339,7 @@ dependencies = [
  "prost-build",
  "rand 0.8.5",
  "rand_chacha",
+ "rand_distr",
  "serde",
  "shamir_secret_sharing",
  "thiserror",
