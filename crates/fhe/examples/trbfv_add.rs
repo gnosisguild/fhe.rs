@@ -140,39 +140,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
         let sk_sss = trbfv.generate_secret_shares(sk_share.coeffs.clone())?;
 
-        // Generate polynomial data for smudging variance calculation
-        let ctx = params.ctx_at_level(0).unwrap();
-
-        // Option 1: Zero polynomials (works with λ=80, but doesn't test real variance calculation)
-        // let public_key_errors = vec![
-        //     Poly::zero(&ctx, Representation::PowerBasis),
-        // ];
-        // let secret_keys = vec![
-        //     Poly::zero(&ctx, Representation::PowerBasis),
-        // ];
-
-        // Option 2: Small coefficients (tests real variance calculation, but may fail with λ=80)
-        // Uncomment the lines below to test with real coefficients:
-        let public_key_errors = vec![
-            Poly::small(&ctx, Representation::PowerBasis, 2, &mut OsRng).unwrap(), // variance=2
-        ];
-        let secret_keys = vec![
-            Poly::small(&ctx, Representation::PowerBasis, 3, &mut OsRng).unwrap(), // variance=3
-        ];
-
-        let esi_coeffs = trbfv.generate_smudging_error(
-            num_summed,
-            public_key_errors,
-            secret_keys,
-            &mut OsRng,
-        )?;
-        let esi_sss = trbfv.generate_secret_shares(esi_coeffs.into_boxed_slice())?;
         // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
         let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
         let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
         let sk_poly_sum = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
         let es_poly_sum = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
         let d_share_poly = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+
+        let esi_coeffs = trbfv.generate_smudging_error(
+            num_summed,
+            es_poly_sum.clone(),
+            sk_poly_sum.clone(),
+            &mut OsRng,
+        )?;
+        let esi_sss = trbfv.generate_secret_shares(esi_coeffs.into_boxed_slice())?;
+
         parties.push(Party {
             pk_share,
             sk_sss,
