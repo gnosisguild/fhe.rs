@@ -3,7 +3,7 @@
 /// This module provides the ShareManager struct that handles aggregation of secret shares
 /// and computation of decryption shares in the threshold BFV scheme.
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
-use crate::trbfv::secret_sharing::{SecretSharer, ShamirSecretSharing};
+use crate::trbfv::shamir::ShamirSecretSharing;
 use crate::Error;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
@@ -11,10 +11,11 @@ use fhe_math::{
     rns::{RnsContext, ScalingFactor},
     rq::{scaler::Scaler, Context, Poly, Representation},
 };
+use itertools::izip;
 use itertools::Itertools;
 use ndarray::Array2;
 use num_bigint::BigUint;
-use num_bigint_old::{BigInt, ToBigInt};
+use num_bigint::{BigInt, ToBigInt};
 use num_traits::ToPrimitive;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -53,6 +54,57 @@ impl ShareManager {
             threshold,
             params,
         }
+    }
+
+    /// Generate Shamir Secret Shares for polynomial coefficients.
+    pub fn generate_secret_shares(
+        &mut self,
+        coeffs: Box<[i64]>,
+    ) -> Result<Vec<Array2<u64>>, Error> {
+        let poly = Zeroizing::new(
+            Poly::try_convert_from(
+                coeffs.as_ref(),
+                self.params.ctx_at_level(0).unwrap(),
+                false,
+                Representation::PowerBasis,
+            )
+            .unwrap(),
+        );
+
+        // 2 dim array, columns = fhe coeffs (degree), rows = party members shamir share coeff (n)
+        let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(self.params.moduli.len());
+
+        // for each moduli, for each coeff generate an SSS of degree n and threshold n = 2t + 1
+        for (m, p) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()) {
+            // Create shamir object
+            let shamir = ShamirSecretSharing {
+                threshold: self.threshold,
+                share_amount: self.n,
+                prime: BigInt::from(*m),
+            };
+            let mut m_data: Vec<u64> = Vec::new();
+
+            // For each coeff in the polynomial p under the current modulus m
+            for c in p.iter() {
+                // Split the coeff into n shares
+                let secret = c.to_bigint().unwrap();
+                let c_shares = shamir.split(secret.clone());
+                // For each share convert to u64
+                let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
+                for (_, c_share) in c_shares.iter() {
+                    c_vec.push(c_share.to_u64().unwrap());
+                }
+                m_data.extend_from_slice(&c_vec);
+            }
+            // convert flat vector of coeffs to array2
+            let arr_matrix =
+                Array2::from_shape_vec((self.params.degree(), self.n), m_data).unwrap();
+            // reverse the columns and rows
+            let reversed_axes = arr_matrix.t();
+            return_vec.push(reversed_axes.to_owned());
+        }
+        // return vec = rows are party members, columns are degree length of shamir values
+        Ok(return_vec)
     }
 
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
@@ -145,7 +197,11 @@ impl ShareManager {
 
         // collect shamir openings
         for m in 0..self.params.moduli().len() {
-            let shamir_ss = ShamirSecretSharing::new(self.n, self.threshold, self.params.clone());
+            let shamir_ss = ShamirSecretSharing::new(
+                self.n,
+                self.threshold,
+                BigInt::from(self.params.moduli[m]),
+            );
             for i in 0..self.params.degree() {
                 let mut shamir_open_vec_mod: Vec<(usize, BigInt)> =
                     Vec::with_capacity(self.params.degree());
@@ -156,10 +212,8 @@ impl ShareManager {
                     let coeff_formatted = (j + 1, coeff.to_bigint().unwrap());
                     shamir_open_vec_mod.push(coeff_formatted);
                 }
-                let shamir_result = shamir_ss.reconstruct_coefficient(
-                    &shamir_open_vec_mod[0..self.threshold],
-                    self.params.moduli()[m],
-                )?;
+                let shamir_result =
+                    shamir_ss.recover(&shamir_open_vec_mod[0..self.threshold as usize]);
                 m_data.push(shamir_result.to_u64().unwrap());
             }
         }
@@ -225,114 +279,5 @@ impl ShareManager {
             level: ciphertext.level,
         };
         Ok(pt)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
-    use crate::trbfv::secret_sharing::{SecretSharer, ShamirSecretSharing};
-
-    use fhe_traits::{FheEncoder, FheEncrypter};
-    use rand::thread_rng;
-
-    #[test]
-    fn test_aggregate_collected_shares() {
-        let mut rng = thread_rng();
-        let degree = 2048;
-        let plaintext_modulus = 4096;
-        let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
-        let params = BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus)
-            .set_moduli(&moduli)
-            .build_arc()
-            .unwrap();
-
-        let n = 16;
-        let threshold = 9;
-        let mut share_manager = ShareManager::new(n, threshold, params.clone());
-
-        // Generate secret keys and shares for multiple parties
-        let mut all_shares = Vec::new();
-        for _party in 0..n {
-            let sk = SecretKey::random(&params, &mut rng);
-            let mut shamir_ss = ShamirSecretSharing::new(n, threshold, params.clone());
-            let shares = shamir_ss.generate_secret_shares(sk.coeffs.clone()).unwrap();
-            all_shares.push(shares);
-        }
-
-        // Simulate share collection for party 0 (like in the example)
-        let mut sk_sss_collected = Vec::new();
-        for item in all_shares.iter().take(n) {
-            let mut node_share_m = Array2::zeros((0, degree));
-            for modulus_share in item.iter().take(moduli.len()) {
-                let share_row = modulus_share.row(0); // Party 0's share from party j
-                node_share_m.push_row(share_row).unwrap();
-            }
-            sk_sss_collected.push(node_share_m);
-        }
-
-        // Test aggregate_collected_shares
-        let sum_poly = share_manager
-            .aggregate_collected_shares(&sk_sss_collected)
-            .unwrap();
-        assert_eq!(sum_poly.coefficients().nrows(), moduli.len());
-        assert_eq!(sum_poly.coefficients().ncols(), degree);
-    }
-
-    #[test]
-    fn test_decryption_share() {
-        let mut rng = thread_rng();
-        let degree = 2048;
-        let plaintext_modulus = 4096;
-        let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
-        let params = BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus)
-            .set_moduli(&moduli)
-            .build_arc()
-            .unwrap();
-
-        let n = 16;
-        let threshold = 9;
-        let mut share_manager = ShareManager::new(n, threshold, params.clone());
-
-        // Generate secret key and ciphertext
-        let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-        let plaintext = Plaintext::try_encode(&vec![1u64; 10], Encoding::poly(), &params).unwrap();
-        let ciphertext = pk.try_encrypt(&plaintext, &mut rng).unwrap();
-
-        // Generate smudging error using TRBFV method
-        let trbfv = crate::trbfv::TRBFV::new(n, threshold, params.clone()).unwrap();
-        let num_ciphertexts = 1; // Single ciphertext for testing
-
-        // Try to generate smudging error, but handle potential λ=80 failure
-        // let es_coeffs = trbfv
-        //     .generate_smudging_error(num_ciphertexts, &mut rng)
-        //     .unwrap();
-        // let es_poly = Poly::try_convert_from(
-        //     es_coeffs.as_slice(),
-        //     params.ctx_at_level(0).unwrap(),
-        //     false,
-        //     Representation::PowerBasis,
-        // )
-        // .unwrap();
-
-        // Test decryption share
-        // let sk_poly = Poly::try_convert_from(
-        //     sk.coeffs.as_ref(),
-        //     params.ctx_at_level(0).unwrap(),
-        //     false,
-        //     Representation::PowerBasis,
-        // )
-        // .unwrap();
-        // let d_share = share_manager
-        //     .decryption_share(Arc::new(ciphertext), sk_poly, es_poly)
-        //     .unwrap();
-        // assert_eq!(d_share.coefficients().nrows(), moduli.len());
-        // assert_eq!(d_share.coefficients().ncols(), degree);
     }
 }

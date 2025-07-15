@@ -14,7 +14,7 @@ use crate::Error;
 
 use fhe_math::rq::Poly;
 use num_bigint::{BigInt, BigUint};
-use num_traits::{ToPrimitive, Zero};
+use num_traits::ToPrimitive;
 use rand::{CryptoRng, Rng, RngCore};
 use std::ops::Neg;
 use std::sync::Arc;
@@ -193,8 +193,8 @@ impl SmudgingNoiseGenerator {
         rng: &mut R,
     ) -> BigInt {
         loop {
-            /// TODO bound is too large for i64, we need to work with bigint but
-            /// the 0.2.6 version of num-bigint doesn't have a gen_range method
+            // TODO bound is too large for i64, we need to work with bigint but
+            // the 0.2.6 version of num-bigint doesn't have a gen_range method
             println!("bound: {:?}", bound);
             let bound_i64 = bound.to_i64().unwrap();
             let candidate = rng.gen_range(bound_i64.clone().neg()..=bound_i64.clone());

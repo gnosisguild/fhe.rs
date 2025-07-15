@@ -5,8 +5,8 @@
 pub mod config;
 /// Error types for threshold operations
 pub mod errors;
-/// Secret sharing abstractions and implementations
-pub mod secret_sharing;
+/// Shamir Secret Sharing implementation
+pub mod shamir;
 /// Share collection and management
 pub mod shares;
 /// Smudging abstractions and implementations
@@ -15,7 +15,7 @@ pub mod smudging;
 pub mod threshold;
 
 // Re-export main types for convenience
-pub use secret_sharing::{SecretSharer, ShamirSecretSharing};
+pub use shamir::ShamirSecretSharing;
 pub use shares::ShareManager;
 pub use smudging::{VarianceCalculator, VarianceCalculatorConfig};
 pub use threshold::TRBFV;

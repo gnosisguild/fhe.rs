@@ -22,7 +22,6 @@
 ///    - Combine threshold shares to recover plaintext
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
-use crate::trbfv::secret_sharing::{SecretSharer, ShamirSecretSharing};
 use crate::trbfv::shares::ShareManager;
 use crate::trbfv::smudging::{
     SmudgingNoiseGenerator, VarianceCalculator, VarianceCalculatorConfig,
@@ -31,7 +30,6 @@ use crate::Error;
 use fhe_math::rq::Poly;
 use fhe_traits::FheParametrized;
 use ndarray::Array2;
-use num_bigint::BigInt;
 use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
 
@@ -80,8 +78,8 @@ impl TRBFV {
         &mut self,
         coeffs: Box<[i64]>,
     ) -> Result<Vec<Array2<u64>>, Error> {
-        let mut shamir_ss = ShamirSecretSharing::new(self.n, self.threshold, self.params.clone());
-        shamir_ss.generate_secret_shares(coeffs)
+        let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        share_manager.generate_secret_shares(coeffs)
     }
 
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
