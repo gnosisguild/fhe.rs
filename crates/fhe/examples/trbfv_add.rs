@@ -153,17 +153,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // Option 2: Small coefficients (tests real variance calculation, but may fail with λ=80)
         // Uncomment the lines below to test with real coefficients:
-        let public_key_errors = vec![
-            Poly::small(&ctx, Representation::PowerBasis, 2, &mut OsRng).unwrap(), // variance=2
-        ];
-        let secret_keys = vec![
-            Poly::small(&ctx, Representation::PowerBasis, 3, &mut OsRng).unwrap(), // variance=3
-        ];
+        // let public_key_errors = vec![
+        //     Poly::small(&ctx, Representation::PowerBasis, 2, &mut OsRng).unwrap(), // variance=2
+        // ];
+        // let secret_keys = vec![
+        //     Poly::small(&ctx, Representation::PowerBasis, 3, &mut OsRng).unwrap(), // variance=3
+        // ];
 
         let esi_coeffs = trbfv.generate_smudging_error(
             num_summed,
-            public_key_errors,
-            secret_keys,
+            //public_key_errors,
+            //secret_keys,
             &mut OsRng,
         )?;
         let esi_sss = trbfv.generate_secret_shares(esi_coeffs.into_boxed_slice())?;

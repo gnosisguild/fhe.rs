@@ -34,9 +34,9 @@ pub struct VarianceCalculatorConfig {
     /// Fresh error bound (standard: 19)  
     pub b_e: u64,
     /// Public key error polynomials for infinity norm calculation
-    pub public_key_errors: Vec<Poly>,
+    pub public_key_errors: u64,
     /// Secret key polynomials for infinity norm calculation
-    pub secret_keys: Vec<Poly>,
+    pub secret_key_bound: u64,
     /// Security parameter (fixed: 80)
     pub lambda: usize,
 }
@@ -54,8 +54,6 @@ impl VarianceCalculatorConfig {
         params: Arc<BfvParameters>,
         n: usize,
         m: usize,
-        public_key_errors: Vec<Poly>,
-        secret_keys: Vec<Poly>,
     ) -> Self {
         Self {
             params,
@@ -63,8 +61,8 @@ impl VarianceCalculatorConfig {
             m,
             b_enc: 19,
             b_e: 19,
-            public_key_errors,
-            secret_keys,
+            public_key_errors:19,
+            secret_key_bound:10,
             lambda: 80,
         }
     }
@@ -87,16 +85,16 @@ impl VarianceCalculator {
     /// Calculate the infinity norm of polynomial vectors using arbitrary precision.
     ///
     /// Returns the maximum absolute coefficient value across all polynomials.
-    fn calculate_infinity_norm(polys: &[Poly]) -> BigUint {
-        let mut max_coeff = BigUint::from(0u64);
-        for poly in polys {
-            let coeffs: Vec<BigUint> = poly.into();
-            for coeff in coeffs {
-                max_coeff = max_coeff.max(coeff);
-            }
-        }
-        max_coeff
-    }
+    // fn calculate_infinity_norm(polys: &[Poly]) -> BigUint {
+    //     let mut max_coeff = BigUint::from(0u64);
+    //     for poly in polys {
+    //         let coeffs: Vec<BigUint> = poly.into();
+    //         for coeff in coeffs {
+    //             max_coeff = max_coeff.max(coeff);
+    //         }
+    //     }
+    //     max_coeff
+    // }
 
     /// Calculate the optimal smudging variance using arbitrary precision arithmetic.
     ///
@@ -109,15 +107,27 @@ impl VarianceCalculator {
     /// # Errors  
     /// Returns error if circuit is too deep (B_c exceeds Q/2t limit)
     pub fn calculate_variance(&self) -> Result<BigUint, Error> {
-        // Calculate infinity norms from actual polynomial errors
-        let e_norm = Self::calculate_infinity_norm(&self.config.public_key_errors);
-        let sk_norm = Self::calculate_infinity_norm(&self.config.secret_keys);
+  
+        // Calculate B_fresh = d·||e||_∞ + B_enc + d·B_e·||sk||_∞
+        // let d = BigUint::from(self.config.params.degree());
+        // println!("d: {}", d);
+        // let b_fresh = &d * e_norm
+        //     + BigUint::from(self.config.b_enc)
+        //     + &d * BigUint::from(self.config.b_e) * sk_norm;
+
+        // Assuming these are u32 or can be converted to u32
+        let d: u64 = self.config.params.degree().try_into().unwrap();
+       // println!("d: {}", d);
+
+        let b_enc: u64 = self.config.b_enc;
+        let b_e: u64 = self.config.b_e;
+        let e_norm =self.config.public_key_errors;
+        let sk_norm = self.config.secret_key_bound;
 
         // Calculate B_fresh = d·||e||_∞ + B_enc + d·B_e·||sk||_∞
-        let d = BigUint::from(self.config.params.degree());
-        let b_fresh = &d * e_norm
-            + BigUint::from(self.config.b_enc)
-            + &d * BigUint::from(self.config.b_e) * sk_norm;
+        let b_fresh: u64 = d * e_norm + b_enc + d * b_e * sk_norm;
+
+           // println!("b_fresh: {}", b_fresh);
 
         // Calculate full modulus Q = ∏q_i
         let mut q_full = BigUint::from(1u64);
@@ -127,7 +137,9 @@ impl VarianceCalculator {
 
         // Calculate circuit depth bound B_c = m·B_fresh + (Q mod t)
         let t = BigUint::from(self.config.params.plaintext());
-        let b_c = BigUint::from(self.config.m) * b_fresh + &q_full % &t;
+        let b_fresh_big = BigUint::from(b_fresh);
+        let b_c = BigUint::from(self.config.m) * b_fresh_big + &q_full % &t;
+        //println!("b_c: {}", b_c);
 
         // Security constraint: verify B_c < Q/(2t) for correctness
         let q_over_2t = &q_full / (BigUint::from(2u64) * &t);

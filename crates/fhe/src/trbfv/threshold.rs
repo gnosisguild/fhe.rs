@@ -108,8 +108,6 @@ impl TRBFV {
     ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed (e.g., votes to count, numbers to sum)
-    /// * `public_key_errors` - Public key error polynomials for variance calculation
-    /// * `secret_keys` - Secret key polynomials for variance calculation
     /// * `rng` - Cryptographically secure random number generator
     ///
     /// # Returns
@@ -117,16 +115,12 @@ impl TRBFV {
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         num_ciphertexts: usize,
-        public_key_errors: Vec<Poly>,
-        secret_keys: Vec<Poly>,
         rng: &mut R,
     ) -> Result<Vec<i64>, Error> {
         let config = VarianceCalculatorConfig::new(
             self.params.clone(),
             self.n,
-            num_ciphertexts,
-            public_key_errors,
-            secret_keys,
+          num_ciphertexts,
         );
         let calculator = VarianceCalculator::new(config);
         let generator = SmudgingNoiseGenerator::from_calculator(calculator)?;
@@ -290,8 +284,6 @@ mod tests {
 
         let result = trbfv.generate_smudging_error(
             num_ciphertexts,
-            public_key_errors,
-            secret_keys,
             &mut rng,
         );
         match result {
