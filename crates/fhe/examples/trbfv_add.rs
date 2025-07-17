@@ -8,7 +8,7 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
-    trbfv::TRBFV,
+    trbfv::{ShareManager, TRBFV},
 };
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
