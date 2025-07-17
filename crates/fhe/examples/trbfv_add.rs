@@ -153,7 +153,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             sk_poly_sum.clone(),
             &mut OsRng,
         )?;
-        let esi_sss = trbfv.generate_secret_shares(esi_coeffs.into_boxed_slice())?;
+        let share_manager = ShareManager::new(num_parties, threshold, params.clone());
+        let esi_poly: Poly = share_manager.bigints_to_poly(&esi_coeffs)?;
+        let esi_sss = trbfv.generate_secret_shares(
+            esi_poly
+                .coefficients()
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|&x| x as i64)
+                .collect::<Vec<i64>>()
+                .into_boxed_slice(),
+        )?;
 
         parties.push(Party {
             pk_share,

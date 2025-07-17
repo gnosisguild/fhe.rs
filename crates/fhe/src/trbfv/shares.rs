@@ -16,7 +16,7 @@ use itertools::Itertools;
 use ndarray::Array2;
 use num_bigint::BigUint;
 use num_bigint::{BigInt, ToBigInt};
-use num_traits::{ToPrimitive, Signed};
+use num_traits::{Signed, ToPrimitive};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -58,7 +58,7 @@ impl ShareManager {
 
     /// Convert a vector of BigInt coefficients into a Poly in full RNS representation
     /// at level 0 using the BFV context.
-    pub fn bigints_to_poly(&self, bigints: &[BigInt]) -> Result<Poly,Error> {
+    pub fn bigints_to_poly(&self, bigints: &[BigInt]) -> Result<Poly, Error> {
         // Get level 0 context (all moduli)
         let ctx = self.params.ctx_at_level(0)?; // full modulus level
 
@@ -76,7 +76,7 @@ impl ShareManager {
 
         // Create a matrix: rows = moduli, cols = coefficients
         // Shape: (num_moduli, degree)
-        let mut coeffs_rns = vec![0u64; moduli.len() * n];
+        let mut coeffs_rns = vec![0u64; moduli.len() * d];
 
         for (col, coeff) in bigints.iter().enumerate() {
             for (row, &modulus) in moduli.iter().enumerate() {
@@ -88,27 +88,28 @@ impl ShareManager {
                 let u64_value = reduced
                     .to_u64()
                     .ok_or_else(|| Error::DefaultError("Residue doesn't fit in u64".to_string()))?;
-                
+
                 coeffs_rns[row * d + col] = u64_value;
             }
         }
 
         // Convert flat vector into Array2<u64> with shape (num_moduli, n)
-        let coeff_matrix = ndarray::Array2::from_shape_vec((moduli.len(), n), coeffs_rns)
+        let coeff_matrix = ndarray::Array2::from_shape_vec((moduli.len(), d), coeffs_rns)
             .map_err(|_| Error::DefaultError("Failed to create coefficient matrix".to_string()))?;
 
         // Build Poly with RNS representation
-        let poly= Zeroizing::new(
+        let poly = Zeroizing::new(
             Poly::try_convert_from(
-                coeff_matrix, &ctx.clone(),
-                 false, 
-                 Representation::PowerBasis,
-                ).unwrap()
-            );
+                coeff_matrix,
+                &ctx.clone(),
+                false,
+                Representation::PowerBasis,
+            )
+            .unwrap(),
+        );
 
-        Ok(poly)
+        Ok((*poly).clone())
     }
-    
 
     /// Generate Shamir Secret Shares for polynomial coefficients.
     pub fn generate_secret_shares(
