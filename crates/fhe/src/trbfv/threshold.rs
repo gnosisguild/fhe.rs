@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 /// Main threshold BFV orchestrator.
 ///
 /// This module provides the main TRBFV struct that coordinates between secret sharing,
@@ -30,8 +32,8 @@ use crate::Error;
 use fhe_math::rq::Poly;
 use fhe_traits::FheParametrized;
 use ndarray::Array2;
+use num_bigint::BigInt;
 use rand::{CryptoRng, RngCore};
-use std::sync::Arc;
 
 /// Threshold BFV configuration and operations.
 /// This struct serves as the main coordinator for threshold BFV operations, managing
@@ -119,7 +121,7 @@ impl TRBFV {
         public_key_error: Poly,
         secret_key: Poly,
         rng: &mut R,
-    ) -> Result<Vec<i64>, Error> {
+    ) -> Result<Vec<BigInt>, Error> {
         let config = VarianceCalculatorConfig::new(
             self.params.clone(),
             self.n,
@@ -130,9 +132,8 @@ impl TRBFV {
         let calculator = VarianceCalculator::new(config);
         let generator = SmudgingNoiseGenerator::from_calculator(calculator)?;
 
-        generator.generate_smudging_error(rng)
+        generator.generate_smudging_error()
     }
-
     /// Compute decryption share from ciphertext and secret/smudging polynomials.
     ///
     /// Each party calls this method to compute their contribution to the threshold decryption.

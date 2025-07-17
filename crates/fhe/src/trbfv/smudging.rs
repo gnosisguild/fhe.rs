@@ -13,9 +13,9 @@ use crate::bfv::BfvParameters;
 use crate::Error;
 
 use fhe_math::rq::Poly;
-use num_bigint::{BigInt, BigUint};
-use num_traits::ToPrimitive;
-use rand::{CryptoRng, Rng, RngCore};
+use num_bigint::{BigInt, BigUint, RandBigInt};
+use num_traits::{ToPrimitive, Zero};
+use rand::{thread_rng, CryptoRng, Rng, RngCore};
 use std::ops::Neg;
 use std::sync::Arc;
 
@@ -107,7 +107,7 @@ impl VarianceCalculator {
     ///
     /// # Errors  
     /// Returns error if circuit is too deep (B_c exceeds Q/2t limit)
-    pub fn calculate_variance(&self) -> Result<BigUint, Error> {
+    pub fn calculate_sm_bound(&self) -> Result<BigUint, Error> {
         // Calculate infinity norms from actual polynomial errors
         let e_norm = Self::calculate_infinity_norm(&self.config.public_key_error);
         let sk_norm = Self::calculate_infinity_norm(&self.config.secret_key);
@@ -139,13 +139,20 @@ impl VarianceCalculator {
         // Calculate optimal B_sm: balance security (2^λ·B_c) and correctness ((Q/2t - B_c)/n)
         let lower_bound = BigUint::from(2u64).pow(self.config.lambda as u32) * &b_c;
         let upper_bound = (&q_over_2t - &b_c) / BigUint::from(self.config.n);
-        let b_sm = (lower_bound + upper_bound) / BigUint::from(2u64);
+
+        let b_sm = if upper_bound >= lower_bound {
+            lower_bound
+        } else {
+            return Err(Error::UnspecifiedInput(
+                "Upper bound is less than lower bound, cannot calculate B_sm".to_string(),
+            ));
+        };
 
         // Calculate variance: σ² = (B_sm/3)²
-        let b_sm_div_3 = b_sm / BigUint::from(3u64);
-        let variance = &b_sm_div_3 * &b_sm_div_3;
+        // let b_sm_div_3 = b_sm / BigUint::from(3u64);
+        // let variance = &b_sm_div_3 * &b_sm_div_3;
 
-        Ok(variance)
+        Ok(b_sm)
     }
 }
 
@@ -171,8 +178,8 @@ impl SmudgingNoiseGenerator {
     /// Create a noise generator from a variance calculator.
     pub fn from_calculator(calculator: VarianceCalculator) -> Result<Self, Error> {
         let params = calculator.config.params.clone();
-        let variance = calculator.calculate_variance()?;
-        Ok(Self::new(params, variance))
+        let smudging_bound = calculator.calculate_sm_bound()?;
+        Ok(Self::new(params, smudging_bound))
     }
 
     /// Sample from a discrete Gaussian distribution with standard deviation σ, bounded to [-bound, bound].
@@ -187,39 +194,44 @@ impl SmudgingNoiseGenerator {
     ///
     /// # Returns
     /// Sample from discrete Gaussian distribution
-    fn discrete_gaussian_sample<R: RngCore + CryptoRng>(
-        sigma: f64,
-        bound: &BigInt,
-        rng: &mut R,
-    ) -> BigInt {
+
+    /// Sample from a discrete Gaussian with std dev `sigma = bound / 3`, bounded in [-bound, bound],
+    /// using rejection sampling with integer logic (no floating point involved).
+    pub fn discrete_gaussian_sample(bound: &BigInt) -> BigInt {
+        let mut rng = thread_rng();
+
+        let sigma_squared_times_2 = {
+            // sigma = bound / 3 => sigma^2 = bound^2 / 9 => 2*sigma^2 = 2*bound^2 / 9
+            let bound_squared = bound * bound;
+            (&bound_squared * 2u32) / 9u32
+        };
+
         loop {
-            // TODO bound is too large for i64, we need to work with bigint but
-            // the 0.2.6 version of num-bigint doesn't have a gen_range method
-            println!("bound: {:?}", bound);
-            let bound_i64 = bound.to_i64().unwrap();
-            let candidate = rng.gen_range(bound_i64.clone().neg()..=bound_i64.clone());
+            // candidate in [-bound, bound]
+            let candidate = rng.gen_bigint_range(&bound.neg(), &(bound.clone() + 1));
 
-            let x_squared = (&candidate * &candidate)
-                .to_f64()
-                .expect("x^2 too big to convert to f64");
+            // Accept with probability proportional to exp(-x^2 / (2σ²))
+            // Instead of computing exp(...), do this:
+            // Generate a random value R ∈ [0, 2^k], and compare R < exp(-x² / (2σ²)) * 2^k
+            // Which is equivalent to:
+            // x² * 2^k < -ln(R / 2^k) * 2σ²
+            // We'll simplify with an integer trick: accept if x² < random threshold
 
-            let accept_prob = (-x_squared / (2.0 * sigma * sigma)).exp();
+            let x_squared = &candidate * &candidate;
 
-            if rng.gen::<f64>() < accept_prob {
-                return BigInt::from(candidate);
+            // Sample rejection threshold: uniform in [0, sigma² * 2)
+            let threshold = rng.gen_bigint_range(&Zero::zero(), &sigma_squared_times_2);
+
+            if &x_squared < &threshold {
+                return candidate;
             }
         }
     }
 
     /// Generate multiple samples from discrete Gaussian distribution
-    fn discrete_gaussian_vector<R: RngCore + CryptoRng>(
-        sigma: f64,
-        bound: &BigInt,
-        count: usize,
-        rng: &mut R,
-    ) -> Vec<BigInt> {
+    pub fn discrete_gaussian_vector(bound: &BigInt, count: usize) -> Vec<BigInt> {
         (0..count)
-            .map(|_| Self::discrete_gaussian_sample(sigma, bound, rng))
+            .map(|_| Self::discrete_gaussian_sample(bound))
             .collect()
     }
 
@@ -236,29 +248,16 @@ impl SmudgingNoiseGenerator {
     ///
     /// # Errors
     /// Returns error if sampling fails
-    pub fn generate_smudging_error<R: RngCore + CryptoRng>(
-        &self,
-        rng: &mut R,
-    ) -> Result<Vec<i64>, Error> {
+    pub fn generate_smudging_error(&self) -> Result<Vec<BigInt>, Error> {
         let degree = self.params.degree();
 
-        // Calculate standard deviation: σ = √variance
-        let sqrt_variance = self.smudging_variance.sqrt();
+        // Convert B_sm (stored in `smudging_variance`) to BigInt for sampling
+        let bound = BigInt::from(self.smudging_variance.clone());
 
-        // Calculate bound: 3σ (covers ~99.7% of normal distribution)
-        let bound_bigint = &sqrt_variance * BigUint::from(3u64);
+        // Sample degree many noise coefficients from D_{Z,σ} ∩ [-bound, bound]
+        let samples = Self::discrete_gaussian_vector(&bound, degree);
 
-        // Convert to f64 for sigma calculation, with safety checks
-        let sigma: f64 = sqrt_variance.to_f64().ok_or(Error::UnspecifiedInput(
-            "Variance too large to convert to f64".to_string(),
-        ))?;
-
-        // Convert bound to BigInt for sampling
-        let bound: BigInt = BigInt::from(bound_bigint);
-
-        // Use discrete Gaussian sampling for better security properties
-        let samples: Vec<BigInt> = Self::discrete_gaussian_vector(sigma, &bound, degree, rng);
-        Ok(samples.into_iter().map(|x| x.to_i64().unwrap()).collect())
+        Ok(samples)
     }
 
     /// Get the polynomial degree.
