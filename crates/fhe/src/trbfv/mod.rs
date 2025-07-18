@@ -13,6 +13,7 @@ pub mod shares;
 pub mod smudging;
 /// Main threshold BFV orchestrator
 pub mod threshold;
+pub mod normal;
 
 // Re-export main types for convenience
 pub use shamir::ShamirSecretSharing;

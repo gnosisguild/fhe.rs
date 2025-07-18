@@ -18,6 +18,8 @@ use num_traits::{ToPrimitive, Zero};
 use rand::{thread_rng, CryptoRng, Rng, RngCore};
 use std::ops::Neg;
 use std::sync::Arc;
+use crate::trbfv::normal::{BigIntNormalSampler, sample_bigint_normal_vec};
+
 
 /// Configuration for calculating optimal smudging variance in threshold BFV.
 ///
@@ -83,18 +85,6 @@ impl SmudgingBoundCalculator {
         Self { config }
     }
 
-    /// Calculate the infinity norm of a polynomial using arbitrary precision.
-    ///
-    /// Returns the maximum absolute coefficient value.
-    // fn calculate_infinity_norm(poly: &Poly) -> BigUint {
-    //     let mut max_coeff = BigUint::from(0u64);
-    //     let coeffs: Vec<BigUint> = poly.into();
-    //     for coeff in coeffs {
-    //         max_coeff = max_coeff.max(coeff);
-    //     }
-    //     max_coeff
-    // }
-
     /// Calculate the optimal smudging variance using arbitrary precision arithmetic.
     ///
     /// Implements the trBFV variance formula: σ² = (B_sm/3)² where B_sm balances
@@ -153,10 +143,6 @@ impl SmudgingBoundCalculator {
             ));
         };
 
-        // Calculate variance: σ² = (B_sm/3)²
-        // let b_sm_div_3 = b_sm / BigUint::from(3u64);
-        // let variance = &b_sm_div_3 * &b_sm_div_3;
-
         Ok(b_sm)
     }
 }
@@ -185,72 +171,12 @@ impl SmudgingNoiseGenerator {
         let smudging_bound = calculator.calculate_sm_bound()?;
         Ok(Self::new(params, smudging_bound))
     }
-    /// Sample from a discrete Gaussian distribution with standard deviation σ, bounded to [-bound, bound].
-    ///
-    /// Uses rejection sampling to generate samples from D_{Z,σ} ∩ [-bound, bound].
-    /// This provides better security properties than uniform sampling for cryptographic noise.
-    ///
-    /// # Arguments
-    /// * `sigma` - Standard deviation of the Gaussian distribution
-    /// * `bound` - Maximum absolute value bound
-    /// * `rng` - Cryptographically secure random number generator
+
+
+    /// Generate smudging error coefficients using the calculated bound.
     ///
     /// # Returns
-    /// Sample from discrete Gaussian distribution
-
-    /// Sample from a discrete Gaussian with std dev `sigma = bound / 3`, bounded in [-bound, bound],
-    /// using rejection sampling with integer logic (no floating point involved).
-    pub fn discrete_gaussian_sample(bound: &BigInt) -> BigInt {
-        let mut rng = thread_rng();
-
-        let sigma_squared_times_2 = {
-            // sigma = bound / 3 => sigma^2 = bound^2 / 9 => 2*sigma^2 = 2*bound^2 / 9
-            let bound_squared = bound * bound;
-            (&bound_squared * 2u32) / 9u32
-        };
-
-        loop {
-            // candidate in [-bound, bound]
-            let candidate = rng.gen_bigint_range(&bound.neg(), &(bound.clone() + 1));
-
-            // Accept with probability proportional to exp(-x^2 / (2σ²))
-            // Instead of computing exp(...), do this:
-            // Generate a random value R ∈ [0, 2^k], and compare R < exp(-x² / (2σ²)) * 2^k
-            // Which is equivalent to:
-            // x² * 2^k < -ln(R / 2^k) * 2σ²
-            // We'll simplify with an integer trick: accept if x² < random threshold
-
-            let x_squared = &candidate * &candidate;
-
-            // Sample rejection threshold: uniform in [0, sigma² * 2)
-            let threshold = rng.gen_bigint_range(&Zero::zero(), &sigma_squared_times_2);
-
-            if &x_squared < &threshold {
-                return candidate;
-            }
-        }
-    }
-
-    /// Generate multiple samples from discrete Gaussian distribution
-    pub fn discrete_gaussian_vector(bound: &BigInt, count: usize) -> Vec<BigInt> {
-        (0..count)
-            .map(|_| Self::discrete_gaussian_sample(bound))
-            .collect()
-    }
-
-    /// Generate smudging noise coefficients using discrete Gaussian sampling.
-    ///
-    /// Uses `sample_vec_discrete_gaussian` function which provides better security
-    /// properties than uniform sampling for cryptographic noise generation.
-    ///
-    /// # Arguments
-    /// * `rng` - Cryptographically secure random number generator
-    ///
-    /// # Returns
-    /// Vector of i64 noise coefficients sampled from discrete Gaussian distribution
-    ///
-    /// # Errors
-    /// Returns error if sampling fails
+    /// A vector of BigInt coefficients sampled from the normal distribution
     pub fn generate_smudging_error(&self) -> Result<Vec<BigInt>, Error> {
         let degree = self.params.degree();
 
@@ -258,7 +184,7 @@ impl SmudgingNoiseGenerator {
         let bound = BigInt::from(self.smudging_bound.clone());
 
         // Sample degree many noise coefficients from D_{Z,σ} ∩ [-bound, bound]
-        let samples = Self::discrete_gaussian_vector(&bound, degree);
+        let samples = sample_bigint_normal_vec(&bound, degree);
         println!("samples length: {}", samples.len());
         Ok(samples)
     }
