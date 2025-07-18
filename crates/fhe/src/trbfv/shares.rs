@@ -253,8 +253,8 @@ impl ShareManager {
         // collect shamir openings
         for m in 0..self.params.moduli().len() {
             let shamir_ss = ShamirSecretSharing::new(
-                self.n,
                 self.threshold,
+                self.n,
                 BigInt::from(self.params.moduli[m]),
             );
             for i in 0..self.params.degree() {

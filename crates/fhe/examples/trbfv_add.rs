@@ -8,11 +8,12 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
-    trbfv::{ShareManager, TRBFV},
+    trbfv::TRBFV,
 };
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
+use num_traits::cast::ToPrimitive;
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use util::timeit::{timeit, timeit_n};
 
@@ -39,8 +40,6 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-
-
     // Parameters
     let degree = 2048;
     let plaintext_modulus: u64 = 4096;
@@ -149,22 +148,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         let es_poly_sum = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
         let d_share_poly = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
 
-        let esi_coeffs = trbfv.generate_smudging_error(
-            num_summed,
-            &mut OsRng,
-        )?;
-        let share_manager = ShareManager::new(num_parties, threshold, params.clone());
-        let esi_poly: Poly = share_manager.bigints_to_poly(&esi_coeffs)?;
-        let esi_sss = trbfv.generate_secret_shares(
-            esi_poly
-                .coefficients()
-                .as_slice()
-                .unwrap()
-                .iter()
-                .map(|&x| x as i64)
-                .collect::<Vec<i64>>()
-                .into_boxed_slice(),
-        )?;
+        let esi_coeffs = trbfv.generate_smudging_error(num_summed, &mut OsRng)?;
+
+        // Convert BigInt coefficients to i64 directly
+        let esi_coeffs_i64: Box<[i64]> = esi_coeffs
+            .iter()
+            .map(|big_int| {
+                // Convert BigInt to i64 - you may need to adjust this conversion
+                // depending on the actual type returned by generate_smudging_error
+                big_int.to_i64().unwrap_or(0)
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
+        let esi_sss = trbfv.generate_secret_shares(esi_coeffs_i64)?;
 
         parties.push(Party {
             pk_share,
@@ -260,8 +257,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // gather d_share_polys
     let mut d_share_polys: Vec<Poly> = Vec::new();
-    for party in parties.iter().take(threshold) {
-        d_share_polys.push(party.d_share_poly.clone());
+    for i in 0..threshold {
+        d_share_polys.push(parties[i].d_share_poly.clone());
     }
 
     // decrypt result
