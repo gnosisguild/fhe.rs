@@ -16,7 +16,10 @@ use ndarray::{Array, Array2, ArrayView};
 use num_traits::cast::ToPrimitive;
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use util::timeit::{timeit, timeit_n};
-
+use fhe::trbfv::ShareManager;
+use num_bigint::BigInt;
+use num_bigint::BigUint;
+use fhe_math::rq::traits::TryConvertFrom;
 fn print_notice_and_exit(error: Option<String>) {
     println!(
         "{} Addition with threshold BFV",
@@ -138,7 +141,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Set up shares for each party.
     timeit_n!("Party setup (per party)", num_parties as u32, {
         let sk_share = SecretKey::random(&params, &mut OsRng);
-        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
+        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;        
+        // Convert secret key coefficients to polynomial
+        let sk_poly = Poly::try_convert_from(
+            sk_share.coeffs.as_ref(),
+            params.ctx_at_level(0).unwrap(),
+            false,
+            Representation::PowerBasis,
+        )?;
         let sk_sss = trbfv.generate_secret_shares(sk_share.coeffs.clone())?;
 
         // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
@@ -149,20 +159,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         let d_share_poly = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
 
         let esi_coeffs = trbfv.generate_smudging_error(num_summed, &mut OsRng)?;
-
-        // Convert BigInt coefficients to i64 directly
-        let esi_coeffs_i64: Box<[i64]> = esi_coeffs
-            .iter()
-            .map(|big_int| {
-                // Convert BigInt to i64 - you may need to adjust this conversion
-                // depending on the actual type returned by generate_smudging_error
-                big_int.to_i64().unwrap_or(0)
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-
-        let esi_sss = trbfv.generate_secret_shares(esi_coeffs_i64)?;
-
+        let mut share_manager = ShareManager::new(num_parties, threshold, params.clone());
+        let esi_poly = share_manager.bigints_to_poly(&esi_coeffs)?;
+        
+        // Use the polynomial directly - no conversion needed!
+        let esi_sss = share_manager.generate_secret_shares_from_poly(esi_poly)?;
+            
         parties.push(Party {
             pk_share,
             sk_sss,
