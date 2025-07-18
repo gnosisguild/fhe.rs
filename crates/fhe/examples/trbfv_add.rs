@@ -39,9 +39,11 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+
+
     // Parameters
-    let degree = 4096;
-    let plaintext_modulus: u64 = 65537;
+    let degree = 2048;
+    let plaintext_modulus: u64 = 4096;
     let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
 
     // This executable is a command line tool which enables to specify
@@ -149,8 +151,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let esi_coeffs = trbfv.generate_smudging_error(
             num_summed,
-            es_poly_sum.clone(),
-            sk_poly_sum.clone(),
             &mut OsRng,
         )?;
         let share_manager = ShareManager::new(num_parties, threshold, params.clone());

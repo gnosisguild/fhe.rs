@@ -26,7 +26,7 @@ use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::shares::ShareManager;
 use crate::trbfv::smudging::{
-    SmudgingNoiseGenerator, VarianceCalculator, VarianceCalculatorConfig,
+    SmudgingNoiseGenerator, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
 };
 use crate::Error;
 use fhe_math::rq::Poly;
@@ -118,19 +118,15 @@ impl TRBFV {
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         num_ciphertexts: usize,
-        public_key_error: Poly,
-        secret_key: Poly,
         rng: &mut R,
     ) -> Result<Vec<BigInt>, Error> {
-        let config = VarianceCalculatorConfig::new(
+        let config = SmudgingBoundCalculatorConfig::new(
             self.params.clone(),
             self.n,
             num_ciphertexts,
-            public_key_error,
-            secret_key,
         );
-        let calculator = VarianceCalculator::new(config);
-        let generator = SmudgingNoiseGenerator::from_calculator(calculator)?;
+        let calculator = SmudgingBoundCalculator::new(config);
+        let generator = SmudgingNoiseGenerator::from_bound_calculator(calculator)?;
 
         generator.generate_smudging_error()
     }

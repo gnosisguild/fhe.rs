@@ -23,7 +23,7 @@ use std::sync::Arc;
 ///
 /// All parameters use arbitrary precision arithmetic to handle cryptographically large values.
 #[derive(Debug, Clone)]
-pub struct VarianceCalculatorConfig {
+pub struct SmudgingBoundCalculatorConfig {
     /// BFV parameters (degree, moduli, plaintext modulus)
     pub params: Arc<BfvParameters>,
     /// Number of parties in the threshold scheme
@@ -35,14 +35,14 @@ pub struct VarianceCalculatorConfig {
     /// Fresh error bound (standard: 19)  
     pub b_e: u64,
     /// Public key error poly for infinity norm calculation
-    pub public_key_error: Poly,
+    pub public_key_error: u64,
     /// Secret key poly for infinity norm calculation
-    pub secret_key: Poly,
+    pub secret_key_bound: u64,
     /// Security parameter (fixed: 80)
     pub lambda: usize,
 }
 
-impl VarianceCalculatorConfig {
+impl SmudgingBoundCalculatorConfig {
     /// Create a new variance calculator configuration with standard parameters.
     ///
     /// # Arguments
@@ -55,8 +55,6 @@ impl VarianceCalculatorConfig {
         params: Arc<BfvParameters>,
         n: usize,
         m: usize,
-        public_key_error: Poly,
-        secret_key: Poly,
     ) -> Self {
         Self {
             params,
@@ -64,9 +62,9 @@ impl VarianceCalculatorConfig {
             m,
             b_enc: 19,
             b_e: 19,
-            public_key_error,
-            secret_key,
-            lambda: 80,
+            public_key_error:19,
+            secret_key_bound:10,
+            lambda: 71,
         }
     }
 }
@@ -75,27 +73,27 @@ impl VarianceCalculatorConfig {
 ///
 /// Implements the trBFV security formulas without any approximations or precision limitations.
 #[derive(Debug)]
-pub struct VarianceCalculator {
-    config: VarianceCalculatorConfig,
+pub struct SmudgingBoundCalculator {
+    config: SmudgingBoundCalculatorConfig,
 }
 
-impl VarianceCalculator {
+impl SmudgingBoundCalculator {
     /// Create a new variance calculator.
-    pub fn new(config: VarianceCalculatorConfig) -> Self {
+    pub fn new(config: SmudgingBoundCalculatorConfig) -> Self {
         Self { config }
     }
 
     /// Calculate the infinity norm of a polynomial using arbitrary precision.
     ///
     /// Returns the maximum absolute coefficient value.
-    fn calculate_infinity_norm(poly: &Poly) -> BigUint {
-        let mut max_coeff = BigUint::from(0u64);
-        let coeffs: Vec<BigUint> = poly.into();
-        for coeff in coeffs {
-            max_coeff = max_coeff.max(coeff);
-        }
-        max_coeff
-    }
+    // fn calculate_infinity_norm(poly: &Poly) -> BigUint {
+    //     let mut max_coeff = BigUint::from(0u64);
+    //     let coeffs: Vec<BigUint> = poly.into();
+    //     for coeff in coeffs {
+    //         max_coeff = max_coeff.max(coeff);
+    //     }
+    //     max_coeff
+    // }
 
     /// Calculate the optimal smudging variance using arbitrary precision arithmetic.
     ///
@@ -108,15 +106,19 @@ impl VarianceCalculator {
     /// # Errors  
     /// Returns error if circuit is too deep (B_c exceeds Q/2t limit)
     pub fn calculate_sm_bound(&self) -> Result<BigUint, Error> {
-        // Calculate infinity norms from actual polynomial errors
-        let e_norm = Self::calculate_infinity_norm(&self.config.public_key_error);
-        let sk_norm = Self::calculate_infinity_norm(&self.config.secret_key);
+
+        // Assuming these are u32 or can be converted to u32
+        let d: u64 = self.config.params.degree().try_into().unwrap();
+        // println!("d: {}", d);
+
+        let b_enc: u64 = self.config.b_enc;
+        let b_e: u64 = self.config.b_e;
+        let e_norm =self.config.public_key_error;
+        let sk_norm = self.config.secret_key_bound;
 
         // Calculate B_fresh = d·||e||_∞ + B_enc + d·B_e·||sk||_∞
-        let d = BigUint::from(self.config.params.degree());
-        let b_fresh = &d * e_norm
-            + BigUint::from(self.config.b_enc)
-            + &d * BigUint::from(self.config.b_e) * sk_norm;
+        let b_fresh: u64 = d * e_norm + b_enc + d * b_e * sk_norm;
+        println!("b_fresh: {}", b_fresh);
 
         // Calculate full modulus Q = ∏q_i
         let mut q_full = BigUint::from(1u64);
@@ -126,7 +128,9 @@ impl VarianceCalculator {
 
         // Calculate circuit depth bound B_c = m·B_fresh + (Q mod t)
         let t = BigUint::from(self.config.params.plaintext());
-        let b_c = BigUint::from(self.config.m) * b_fresh + &q_full % &t;
+        let b_fresh_big = BigUint::from(b_fresh);
+        let b_c = BigUint::from(self.config.m) * b_fresh_big + &q_full % &t;
+        println!("b_c: {}", b_c);
 
         // Security constraint: verify B_c < Q/(2t) for correctness
         let q_over_2t = &q_full / (BigUint::from(2u64) * &t);
@@ -138,8 +142,9 @@ impl VarianceCalculator {
 
         // Calculate optimal B_sm: balance security (2^λ·B_c) and correctness ((Q/2t - B_c)/n)
         let lower_bound = BigUint::from(2u64).pow(self.config.lambda as u32) * &b_c;
-        let upper_bound = (&q_over_2t - &b_c) / BigUint::from(self.config.n);
-
+        println!("lower_bound: {}", lower_bound);
+        let upper_bound = (&q_over_2t - &b_c)/ BigUint::from(self.config.n);
+        println!("upper_bound: {}", upper_bound);
         let b_sm = if upper_bound >= lower_bound {
             lower_bound
         } else {
@@ -163,25 +168,23 @@ impl VarianceCalculator {
 #[derive(Debug)]
 pub struct SmudgingNoiseGenerator {
     params: Arc<BfvParameters>,
-    smudging_variance: BigUint,
+    smudging_bound: BigUint,
 }
 
 impl SmudgingNoiseGenerator {
     /// Create a new noise generator with calculated variance.
-    pub fn new(params: Arc<BfvParameters>, smudging_variance: BigUint) -> Self {
+    pub fn new(params: Arc<BfvParameters>, smudging_bound: BigUint) -> Self {
         Self {
             params,
-            smudging_variance,
+            smudging_bound,
         }
     }
-
-    /// Create a noise generator from a variance calculator.
-    pub fn from_calculator(calculator: VarianceCalculator) -> Result<Self, Error> {
+    /// Create a noise generator from a smudging bound calculator.
+    pub fn from_bound_calculator(calculator: SmudgingBoundCalculator) -> Result<Self, Error> {
         let params = calculator.config.params.clone();
         let smudging_bound = calculator.calculate_sm_bound()?;
         Ok(Self::new(params, smudging_bound))
     }
-
     /// Sample from a discrete Gaussian distribution with standard deviation σ, bounded to [-bound, bound].
     ///
     /// Uses rejection sampling to generate samples from D_{Z,σ} ∩ [-bound, bound].
@@ -252,11 +255,11 @@ impl SmudgingNoiseGenerator {
         let degree = self.params.degree();
 
         // Convert B_sm (stored in `smudging_variance`) to BigInt for sampling
-        let bound = BigInt::from(self.smudging_variance.clone());
+        let bound = BigInt::from(self.smudging_bound.clone());
 
         // Sample degree many noise coefficients from D_{Z,σ} ∩ [-bound, bound]
         let samples = Self::discrete_gaussian_vector(&bound, degree);
-
+        println!("samples length: {}", samples.len());
         Ok(samples)
     }
 
@@ -266,8 +269,8 @@ impl SmudgingNoiseGenerator {
     }
 
     /// Get the smudging variance.
-    pub fn smudging_variance(&self) -> &BigUint {
-        &self.smudging_variance
+    pub fn smudging_bound(&self) -> &BigUint {
+        &self.smudging_bound
     }
 }
 
