@@ -12,14 +12,12 @@
 use crate::bfv::BfvParameters;
 use crate::Error;
 
-use fhe_math::rq::Poly;
+use crate::trbfv::normal::sample_bigint_normal_vec;
 use num_bigint::{BigInt, BigUint, RandBigInt};
 use num_traits::{ToPrimitive, Zero};
 use rand::{thread_rng, CryptoRng, Rng, RngCore};
 use std::ops::Neg;
 use std::sync::Arc;
-use crate::trbfv::normal::{BigIntNormalSampler, sample_bigint_normal_vec};
-
 
 /// Configuration for calculating optimal smudging variance in threshold BFV.
 ///
@@ -53,19 +51,15 @@ impl SmudgingBoundCalculatorConfig {
     /// * `m` - Number of ciphertexts to process
     /// * `public_key_error` - Public key error poly
     /// * `secret_key` - Secret key poly
-    pub fn new(
-        params: Arc<BfvParameters>,
-        n: usize,
-        m: usize,
-    ) -> Self {
+    pub fn new(params: Arc<BfvParameters>, n: usize, m: usize) -> Self {
         Self {
             params,
             n,
             m,
             b_enc: 19,
             b_e: 19,
-            public_key_error:19,
-            secret_key_bound:10,
+            public_key_error: 19,
+            secret_key_bound: n as u64,
             lambda: 71,
         }
     }
@@ -96,19 +90,16 @@ impl SmudgingBoundCalculator {
     /// # Errors  
     /// Returns error if circuit is too deep (B_c exceeds Q/2t limit)
     pub fn calculate_sm_bound(&self) -> Result<BigUint, Error> {
-
         // Assuming these are u32 or can be converted to u32
         let d: u64 = self.config.params.degree().try_into().unwrap();
-        // println!("d: {}", d);
 
         let b_enc: u64 = self.config.b_enc;
         let b_e: u64 = self.config.b_e;
-        let e_norm =self.config.public_key_error;
+        let e_norm = self.config.public_key_error;
         let sk_norm = self.config.secret_key_bound;
 
         // Calculate B_fresh = d·||e||_∞ + B_enc + d·B_e·||sk||_∞
         let b_fresh: u64 = d * e_norm + b_enc + d * b_e * sk_norm;
-        println!("b_fresh: {}", b_fresh);
 
         // Calculate full modulus Q = ∏q_i
         let mut q_full = BigUint::from(1u64);
@@ -116,11 +107,10 @@ impl SmudgingBoundCalculator {
             q_full *= BigUint::from(modulus);
         }
 
-        // Calculate circuit depth bound B_c = m·B_fresh + (Q mod t)
+        // Calculate circuit depth bound B_c = m·(B_fresh + (Q mod t))
         let t = BigUint::from(self.config.params.plaintext());
         let b_fresh_big = BigUint::from(b_fresh);
-        let b_c = BigUint::from(self.config.m) * b_fresh_big + &q_full % &t;
-        println!("b_c: {}", b_c);
+        let b_c = BigUint::from(self.config.m) * (b_fresh_big + &q_full % &t);
 
         // Security constraint: verify B_c < Q/(2t) for correctness
         let q_over_2t = &q_full / (BigUint::from(2u64) * &t);
@@ -132,9 +122,7 @@ impl SmudgingBoundCalculator {
 
         // Calculate optimal B_sm: balance security (2^λ·B_c) and correctness ((Q/2t - B_c)/n)
         let lower_bound = BigUint::from(2u64).pow(self.config.lambda as u32) * &b_c;
-        println!("lower_bound: {}", lower_bound);
-        let upper_bound = (&q_over_2t - &b_c)/ BigUint::from(self.config.n);
-        println!("upper_bound: {}", upper_bound);
+        let upper_bound = (&q_over_2t - &b_c) / BigUint::from(self.config.n);
         let b_sm = if upper_bound >= lower_bound {
             lower_bound
         } else {
@@ -172,7 +160,6 @@ impl SmudgingNoiseGenerator {
         Ok(Self::new(params, smudging_bound))
     }
 
-
     /// Generate smudging error coefficients using the calculated bound.
     ///
     /// # Returns
@@ -185,7 +172,7 @@ impl SmudgingNoiseGenerator {
 
         // Sample degree many noise coefficients from D_{Z,σ} ∩ [-bound, bound]
         let samples = sample_bigint_normal_vec(&bound, degree);
-        println!("samples length: {}", samples.len());
+
         Ok(samples)
     }
 

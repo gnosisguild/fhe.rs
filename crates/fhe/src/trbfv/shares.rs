@@ -162,6 +162,46 @@ impl ShareManager {
         Ok(return_vec)
     }
 
+    /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
+    pub fn generate_secret_shares_from_poly(
+        &mut self,
+        poly: Poly,
+    ) -> Result<Vec<Array2<u64>>, Error> {
+        // 2 dim array, columns = fhe coeffs (degree), rows = party members shamir share coeff (n)
+        let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(self.params.moduli.len());
+
+        // for each moduli, for each coeff generate an SSS of degree n and threshold n = 2t + 1
+        for (m, p) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()) {
+            // Create shamir object
+            let shamir = ShamirSecretSharing {
+                threshold: self.threshold,
+                share_amount: self.n,
+                prime: BigInt::from(*m),
+            };
+            let mut m_data: Vec<u64> = Vec::new();
+
+            // For each coeff in the polynomial p under the current modulus m
+            for c in p.iter() {
+                // Split the coeff into n shares
+                let secret = c.to_bigint().unwrap();
+                let c_shares = shamir.split(secret.clone());
+                // For each share convert to u64
+                let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
+                for (_, c_share) in c_shares.iter() {
+                    c_vec.push(c_share.to_u64().unwrap());
+                }
+                m_data.extend_from_slice(&c_vec);
+            }
+            // convert flat vector of coeffs to array2
+            let arr_matrix =
+                Array2::from_shape_vec((self.params.degree(), self.n), m_data).unwrap();
+            // reverse the columns and rows
+            let reversed_axes = arr_matrix.t();
+            return_vec.push(reversed_axes.to_owned());
+        }
+        // return vec = rows are party members, columns are degree length of shamir values
+        Ok(return_vec)
+    }
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
     ///
     /// This function takes shares collected from other parties and aggregates them
@@ -222,6 +262,7 @@ impl ShareManager {
         let mut c1sk = &c1 * &sk_i;
         c1sk.change_representation(Representation::PowerBasis);
         let d_share_poly = &c0 + &c1sk + es_i;
+        //let d_share_poly = &c0 + &c1sk;
         Ok(d_share_poly)
     }
 
@@ -253,8 +294,8 @@ impl ShareManager {
         // collect shamir openings
         for m in 0..self.params.moduli().len() {
             let shamir_ss = ShamirSecretSharing::new(
-                self.n,
                 self.threshold,
+                self.n,
                 BigInt::from(self.params.moduli[m]),
             );
             for i in 0..self.params.degree() {

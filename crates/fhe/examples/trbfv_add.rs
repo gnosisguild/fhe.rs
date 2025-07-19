@@ -39,8 +39,6 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-
-
     // Parameters
     let degree = 2048;
     let plaintext_modulus: u64 = 4096;
@@ -149,22 +147,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         let es_poly_sum = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
         let d_share_poly = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
 
-        let esi_coeffs = trbfv.generate_smudging_error(
-            num_summed,
-            &mut OsRng,
-        )?;
-        let share_manager = ShareManager::new(num_parties, threshold, params.clone());
+        let esi_coeffs = trbfv.generate_smudging_error(num_summed, &mut OsRng)?;
+        let mut share_manager = ShareManager::new(num_parties, threshold, params.clone());
         let esi_poly: Poly = share_manager.bigints_to_poly(&esi_coeffs)?;
-        let esi_sss = trbfv.generate_secret_shares(
-            esi_poly
-                .coefficients()
-                .as_slice()
-                .unwrap()
-                .iter()
-                .map(|&x| x as i64)
-                .collect::<Vec<i64>>()
-                .into_boxed_slice(),
-        )?;
+        let esi_sss = share_manager.generate_secret_shares_from_poly(esi_poly)?;
 
         parties.push(Party {
             pk_share,
@@ -271,8 +257,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Show summation result
     println!("Sum result = {result} / {num_summed}");
-
     let expected_result = numbers.iter().sum();
+    println!("expected result = {expected_result}");
     assert_eq!(result, expected_result);
 
     Ok(())

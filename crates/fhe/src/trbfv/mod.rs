@@ -5,6 +5,7 @@
 pub mod config;
 /// Error types for threshold operations
 pub mod errors;
+pub mod normal;
 /// Shamir Secret Sharing implementation
 pub mod shamir;
 /// Share collection and management
@@ -13,7 +14,6 @@ pub mod shares;
 pub mod smudging;
 /// Main threshold BFV orchestrator
 pub mod threshold;
-pub mod normal;
 
 // Re-export main types for convenience
 pub use shamir::ShamirSecretSharing;

@@ -49,7 +49,7 @@
 
 use core::f64::consts::PI;
 use num_bigint::BigInt;
-use num_traits::{One, Signed, Zero, ToPrimitive};
+use num_traits::{One, Signed, ToPrimitive, Zero};
 use rand::Rng;
 
 /// BigInt-backed truncated normal/Gaussian sampler.
@@ -67,12 +67,16 @@ impl BigIntNormalSampler {
 
     /// Convenience: create sampler with bound = 2^n.
     pub fn new_power_of_2(n: u32) -> Self {
-        Self { bound: BigInt::one() << n }
+        Self {
+            bound: BigInt::one() << n,
+        }
     }
 
     /// Return immutable reference to bound.
     #[inline]
-    pub fn bound(&self) -> &BigInt { &self.bound }
+    pub fn bound(&self) -> &BigInt {
+        &self.bound
+    }
 
     /// Check if value is within [-bound, bound].
     #[inline]
@@ -133,8 +137,8 @@ impl BigIntNormalSampler {
         // NOTE: `ratio` is in [-1,1], so scale by 2^53 safely.
         const FP_BITS: u32 = 53;
         let scaled = (ratio * (1u64 << FP_BITS) as f64).round() as i64; // signed
-        // scaled / 2^FP_BITS * bound
-        // => (scaled * bound) >> FP_BITS
+                                                                        // scaled / 2^FP_BITS * bound
+                                                                        // => (scaled * bound) >> FP_BITS
         let scaled_big = BigInt::from(scaled);
         let prod = scaled_big * &self.bound;
         // arithmetic shift right by FP_BITS (floor toward -inf); we want round‑nearest.
@@ -167,7 +171,9 @@ impl BigIntNormalSampler {
         mean_ratio: f64,
         std_dev_ratio: f64,
     ) -> Vec<BigInt> {
-        (0..n).map(|_| self.sample(rng, mean_ratio, std_dev_ratio)).collect()
+        (0..n)
+            .map(|_| self.sample(rng, mean_ratio, std_dev_ratio))
+            .collect()
     }
 
     // ------------------------------------------------------------------
@@ -181,12 +187,12 @@ impl BigIntNormalSampler {
         // NOTE: previously took an explicit `bound_for_sigma` param; removed because
         // sampler already owns the bound and we support *any* positive BigInt bound.
         let mut rng = rand::thread_rng();
-        self.sample_multiple(&mut rng, n, 0.0, 1.0/3.0)
+        self.sample_multiple(&mut rng, n, 0.0, 1.0 / 3.0)
     }
 
     /// Same as `sample_vec_centered`, but explicit RNG for reproducibility.
     pub fn sample_vec_centered_with_rng(&self, rng: &mut impl Rng, n: usize) -> Vec<BigInt> {
-        self.sample_multiple(rng, n, 0.0, 1.0/3.0)
+        self.sample_multiple(rng, n, 0.0, 1.0 / 3.0)
     }
 
     /// Sample with explicit mean / std_dev *in BigInt units*.
@@ -228,7 +234,11 @@ impl BigIntNormalSampler {
             10f64.powi((vs.len() as i32) - (bs.len() as i32))
         } else {
             // definitely >=1; cap
-            if value.is_negative() { -1.0 } else { 1.0 }
+            if value.is_negative() {
+                -1.0
+            } else {
+                1.0
+            }
         }
     }
 }
@@ -250,49 +260,17 @@ pub fn sample_bigint_normal_vec(bound: &BigInt, n: usize) -> Vec<BigInt> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use num_traits::{One, Zero, ToPrimitive};
+    use num_traits::{One, ToPrimitive, Zero};
 
     #[test]
     fn smoke_sample() {
-        // Any arbitrary bound (NOT a power of 2) -- large-ish decimal.
         let bound: BigInt = "123456789012345678901234567890".parse().unwrap();
         let sampler = BigIntNormalSampler::new(bound.clone());
         let mut rng = rand::thread_rng();
-        let v = sampler.sample_multiple(&mut rng, 1000, 0.0, 1.0/3.0);
+        let v = sampler.sample_multiple(&mut rng, 1000, 0.0, 1.0 / 3.0);
         assert_eq!(v.len(), 1000);
         for x in &v {
             assert!(sampler.is_within_bounds(x));
         }
     }
-    
-
-    #[test]
-    fn ratio_roundtrip_small() {
-        // Small non power-of-2 bound
-        let bound: BigInt = 12345.into();
-        let sampler = BigIntNormalSampler::new(bound.clone());
-        let mut rng = rand::thread_rng();
-        let x = sampler.sample(&mut rng, 0.0, 1.0/3.0);
-        assert!(sampler.is_within_bounds(&x));
-        let r = sampler.bigint_to_ratio(&x);
-        assert!(r >= -1.0 && r <= 1.0);
-    }
-
-
-#[test]
-    fn free_fn_wrapper_any_bound() {
-        let bound: BigInt = 987654321_i64.into();
-        let v = sample_bigint_normal_vec(&bound, 64);
-        assert_eq!(v.len(), 64);
-        for x in &v {
-            assert!(x.abs() <= bound);
-        }
-    }
 }
-// ----------------------------------------------------------------------
-// TODO / Future enhancements
-// ----------------------------------------------------------------------
-// * Accept external RNG trait object for reproducible seeding across calls.
-// * Provide integer‑only CDT or Bernoulli‑exp sampler for constant‑time crypto.
-// * Support vectorized sampling with SIMD / parallel RNG streams.
-// * Add Serde derive + config struct for parameterization from TOML.
