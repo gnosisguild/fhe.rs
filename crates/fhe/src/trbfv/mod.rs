@@ -5,7 +5,6 @@
 pub mod config;
 /// Error types for threshold operations
 pub mod errors;
-pub mod normal;
 /// Shamir Secret Sharing implementation
 pub mod shamir;
 /// Share collection and management
