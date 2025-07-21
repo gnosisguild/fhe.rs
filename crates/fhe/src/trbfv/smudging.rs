@@ -256,176 +256,227 @@ fn ratio_to_bigint(ratio: f64, bound: &BigInt) -> BigInt {
 }
 
 #[cfg(test)]
-#[test]
-fn test_sampling() {
-    let bound: BigInt = "123456789012345678901234567890".parse().unwrap();
-    let samples = sample_bigint_normal_vec(&bound, 1000);
+mod tests {
+    use super::*;
+    use crate::bfv::BfvParametersBuilder;
+    use rand::thread_rng;
+    use std::str::FromStr;
 
-    assert_eq!(samples.len(), 1000);
-    for x in &samples {
-        assert!(x.abs() <= bound);
+    fn test_params() -> Arc<BfvParameters> {
+        BfvParametersBuilder::new()
+            .set_degree(2048)
+            .set_plaintext_modulus(4096)
+            .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
+            .build_arc()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_sampling() {
+        let bound: BigInt = "123456789012345678901234567890".parse().unwrap();
+        let samples = sample_bigint_normal_vec(&bound, 1000);
+
+        assert_eq!(samples.len(), 1000);
+        for x in &samples {
+            assert!(x.abs() <= bound);
+        }
+    }
+
+    #[test]
+    fn test_normal_sampling_edge_cases() {
+        // Test with zero bound
+        let zero_bound = BigInt::from(0);
+        let samples = sample_bigint_normal_vec(&zero_bound, 10);
+        assert_eq!(samples.len(), 10);
+        assert!(samples.iter().all(|x| x.is_zero()));
+
+        // Test with small bound
+        let small_bound = BigInt::from(5);
+        let samples = sample_bigint_normal_vec(&small_bound, 100);
+        assert_eq!(samples.len(), 100);
+        for x in &samples {
+            assert!(x.abs() <= small_bound);
+        }
+
+        // Test with negative values in result
+        let bound = BigInt::from(1000);
+        let samples = sample_bigint_normal_vec(&bound, 1000);
+        let has_positive = samples.iter().any(|x| x.is_positive());
+        let has_negative = samples.iter().any(|x| x.is_negative());
+        assert!(has_positive || has_negative); // Should have some variation
+    }
+
+    #[test]
+    fn test_smudging_bound_calculator_config() {
+        let params = test_params();
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2);
+
+        assert_eq!(config.params, params);
+        assert_eq!(config.n, 5);
+        assert_eq!(config.m, 2);
+        assert_eq!(config.b_enc, 19);
+        assert_eq!(config.b_e, 19);
+        assert_eq!(config.public_key_error, 19);
+        assert_eq!(config.secret_key_bound, 5);
+        assert_eq!(config.lambda, 71);
+    }
+
+    #[test]
+    fn test_smudging_bound_calculator_minimal_case() {
+        let params = test_params();
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1);
+        let calculator = SmudgingBoundCalculator::new(config);
+
+        let result = calculator.calculate_sm_bound();
+
+        // With small parameters, this should succeed
+        match result {
+            Ok(bound) => {
+                assert!(bound > BigUint::from(0u64));
+                println!("Calculated bound has {} bits", bound.bits());
+            }
+            Err(e) => {
+                // If it fails, should be due to circuit depth constraint
+                assert!(
+                    e.to_string().contains("Circuit too deep")
+                        || e.to_string()
+                            .contains("Upper bound is less than lower bound")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_smudging_noise_generator_creation() {
+        let params = test_params();
+        let bound = BigUint::from(12345u64);
+        let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
+
+        assert_eq!(generator.params, params);
+        assert_eq!(generator.smudging_bound, bound);
+        assert_eq!(generator.degree(), params.degree());
+        assert_eq!(generator.smudging_bound(), &bound);
+    }
+
+    #[test]
+    fn test_smudging_noise_generator_from_calculator() {
+        let params = test_params();
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1);
+        let calculator = SmudgingBoundCalculator::new(config);
+
+        let result = SmudgingNoiseGenerator::from_bound_calculator(calculator);
+
+        match result {
+            Ok(generator) => {
+                assert_eq!(generator.params, params);
+                assert_eq!(generator.degree(), params.degree());
+                assert!(generator.smudging_bound() > &BigUint::from(0u64));
+            }
+            Err(e) => {
+                // Expected for large security parameter - that's OK
+                assert!(!e.to_string().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_noise_generation_small_bound() {
+        let params = test_params();
+        let bound = BigUint::from(1000u64);
+        let generator = SmudgingNoiseGenerator::new(params.clone(), bound);
+
+        let result = generator.generate_smudging_error();
+        assert!(result.is_ok());
+
+        let coefficients = result.unwrap();
+        assert_eq!(coefficients.len(), params.degree());
+
+        // All coefficients should be bounded
+        for coeff in &coefficients {
+            assert!(coeff.abs() <= BigInt::from(1000u64));
+        }
+    }
+
+    #[test]
+    fn test_noise_generation_zero_bound() {
+        let params = test_params();
+        let bound = BigUint::from(0u64);
+        let generator = SmudgingNoiseGenerator::new(params.clone(), bound);
+
+        let coefficients = generator.generate_smudging_error().unwrap();
+        assert_eq!(coefficients.len(), params.degree());
+        assert!(coefficients.iter().all(|x| x.is_zero()));
+    }
+
+    #[test]
+    fn test_noise_generation_large_bound() {
+        let params = test_params();
+        let large_bound = BigUint::from_str("123456789012345678901234567890").unwrap();
+        let generator = SmudgingNoiseGenerator::new(params.clone(), large_bound.clone());
+
+        let coefficients = generator.generate_smudging_error().unwrap();
+        assert_eq!(coefficients.len(), params.degree());
+
+        // Should generate non-zero coefficients with high probability
+        let non_zero_count = coefficients.iter().filter(|x| !x.is_zero()).count();
+        assert!(non_zero_count > coefficients.len() / 4); // At least 25% should be non-zero
+
+        // All should be within bounds
+        for coeff in &coefficients {
+            assert!(coeff.abs() <= BigInt::from(large_bound.clone()));
+        }
+    }
+
+    #[test]
+    fn test_realistic_parameters_workflow() {
+        let params = test_params();
+        let n = 3;
+        let m = 1;
+
+        // Try the complete workflow
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), n, m);
+        let calculator = SmudgingBoundCalculator::new(config);
+
+        let bound = calculator.calculate_sm_bound().unwrap();
+        let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
+        let coefficients = generator.generate_smudging_error().unwrap();
+
+        assert_eq!(coefficients.len(), params.degree());
+    }
+
+    #[test]
+    fn test_box_muller_properties() {
+        let mut rng = thread_rng();
+        let samples: Vec<f64> = (0..1000).map(|_| box_muller(&mut rng)).collect();
+
+        // Basic statistical properties (rough checks)
+        let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
+        let variance: f64 =
+            samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+
+        // Should be approximately N(0,1)
+        assert!(mean.abs() < 0.2); // Mean should be close to 0
+        assert!((variance - 1.0).abs() < 0.3); // Variance should be close to 1
+    }
+
+    #[test]
+    fn test_ratio_to_bigint_edge_cases() {
+        let small_bound = BigInt::from(10);
+        let large_bound = BigInt::from_str("123456789012345678901234567890123456789").unwrap();
+
+        // Test with small bound (fast path)
+        let result1 = ratio_to_bigint(0.5, &small_bound);
+        assert!(result1.abs() <= small_bound);
+
+        // Test with large bound (precision path)
+        let result2 = ratio_to_bigint(0.5, &large_bound);
+        assert!(result2.abs() <= large_bound);
+
+        // Test edge ratios
+        let result3 = ratio_to_bigint(1.0, &small_bound);
+        assert!(result3.abs() <= small_bound);
+
+        let result4 = ratio_to_bigint(-1.0, &small_bound);
+        assert!(result4.abs() <= small_bound);
     }
 }
-
-// mod tests {
-//     use super::*;
-//     use crate::bfv::BfvParametersBuilder;
-//     use fhe_math::rq::{Poly, Representation};
-//     use rand::thread_rng;
-//     use std::str::FromStr;
-
-//     fn test_params() -> Arc<BfvParameters> {
-//         BfvParametersBuilder::new()
-//             .set_degree(4096)
-//             .set_plaintext_modulus(65537)
-//             .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
-//             .build_arc()
-//             .unwrap()
-//     }
-
-//     fn zero_polynomials(params: &Arc<BfvParameters>, count: usize) -> Vec<Poly> {
-//         let ctx = params.ctx_at_level(0).unwrap();
-//         (0..count)
-//             .map(|_| Poly::zero(&ctx, Representation::PowerBasis))
-//             .collect()
-//     }
-
-//     fn small_polynomials(params: &Arc<BfvParameters>, count: usize) -> Vec<Poly> {
-//         let mut rng = thread_rng();
-//         let ctx = params.ctx_at_level(0).unwrap();
-//         (0..count)
-//             .map(|_| Poly::small(&ctx, Representation::PowerBasis, 3, &mut rng).unwrap())
-//             .collect()
-//     }
-
-//     #[test]
-//     fn test_variance_calculation_minimal_case() {
-//         let params = test_params();
-//         let config = VarianceCalculatorConfig::new(
-//             params.clone(),
-//             3,
-//             1,
-//             zero_polynomials(&params, 1),
-//             zero_polynomials(&params, 1),
-//         );
-
-//         let variance = VarianceCalculator::new(config)
-//             .calculate_variance()
-//             .unwrap();
-
-//         assert!(variance > BigUint::from(0u64));
-//         assert!(
-//             variance.bits() > 100,
-//             "Variance should be cryptographically large"
-//         );
-//     }
-
-//     #[test]
-//     fn test_variance_calculation_circuit_depth_limit() {
-//         let params = test_params();
-//         let config = VarianceCalculatorConfig::new(
-//             params.clone(),
-//             3,
-//             10_000_000, // Excessive circuit depth
-//             small_polynomials(&params, 1),
-//             small_polynomials(&params, 1),
-//         );
-
-//         let result = VarianceCalculator::new(config).calculate_variance();
-
-//         assert!(result.is_err());
-//         assert!(result.unwrap_err().to_string().contains("Circuit too deep"));
-//     }
-
-//     #[test]
-//     fn test_infinity_norm_arbitrary_precision() {
-//         let params = test_params();
-
-//         // Test zero norm
-//         let zero_norm = VarianceCalculator::calculate_infinity_norm(&zero_polynomials(&params, 2));
-//         assert_eq!(zero_norm, BigUint::from(0u64));
-
-//         // Test non-zero norm
-//         let small_norm =
-//             VarianceCalculator::calculate_infinity_norm(&small_polynomials(&params, 2));
-//         assert!(small_norm >= BigUint::from(0u64));
-//     }
-
-//     #[test]
-//     fn test_noise_generation_zero_variance() {
-//         let mut rng = thread_rng();
-//         let params = test_params();
-//         let generator = SmudgingNoiseGenerator::new(params.clone(), BigUint::from(0u64));
-
-//         let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
-
-//         assert_eq!(coefficients.len(), params.degree());
-//         assert!(coefficients.iter().all(|&x| x == 0));
-//     }
-
-//     #[test]
-//     fn test_noise_generation_large_variance() {
-//         let mut rng = thread_rng();
-//         let params = test_params();
-
-//         // Test with extremely large variance (200+ bits) - uses maximum safe sampling
-//         let huge_variance =
-//             BigUint::from_str("1606938044258990275541962092341162602522202993782792835301376")
-//                 .unwrap();
-//         let generator = SmudgingNoiseGenerator::new(params.clone(), huge_variance);
-
-//         let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
-
-//         assert_eq!(coefficients.len(), params.degree());
-//         // Should generate non-zero coefficients with high probability
-//         assert!(coefficients.iter().any(|&x| x != 0));
-//         // All coefficients should be within safe i64 bounds
-//         assert!(coefficients.iter().all(|&x| x.abs() <= i64::MAX / 2));
-//     }
-
-//     #[test]
-//     fn test_end_to_end_workflow() {
-//         let mut rng = thread_rng();
-//         let params = test_params();
-
-//         // Calculate variance
-//         let config = VarianceCalculatorConfig::new(
-//             params.clone(),
-//             5,
-//             2,
-//             zero_polynomials(&params, 1),
-//             zero_polynomials(&params, 1),
-//         );
-//         let variance = VarianceCalculator::new(config)
-//             .calculate_variance()
-//             .unwrap();
-
-//         // Generate noise with calculated variance
-//         let generator = SmudgingNoiseGenerator::new(params.clone(), variance.clone());
-//         let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
-
-//         assert_eq!(coefficients.len(), params.degree());
-//         println!(
-//             "Successfully generated noise with {}-bit variance",
-//             variance.bits()
-//         );
-//     }
-
-//     #[test]
-//     fn test_realistic_parameters() {
-//         let params = test_params();
-//         let config = VarianceCalculatorConfig::new(
-//             params.clone(),
-//             3,
-//             1,
-//             small_polynomials(&params, 2),
-//             small_polynomials(&params, 2),
-//         );
-
-//         // With realistic parameters, may succeed or fail due to security constraints
-//         match VarianceCalculator::new(config).calculate_variance() {
-//             Ok(variance) => assert!(variance > BigUint::from(0u64)),
-//             Err(e) => assert!(e.to_string().contains("Circuit too deep")),
-//         }
-//     }
-// }

@@ -342,3 +342,146 @@ impl ShareManager {
         Ok(pt)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
+    use fhe_traits::{FheEncoder, FheEncrypter};
+    use rand::{rngs::OsRng, thread_rng};
+
+    fn test_params() -> Arc<BfvParameters> {
+        BfvParametersBuilder::new()
+            .set_degree(2048)
+            .set_plaintext_modulus(4096)
+            .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
+            .build_arc()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_share_manager_creation() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 3, params.clone());
+        assert_eq!(manager.n, 5);
+        assert_eq!(manager.threshold, 3);
+        assert_eq!(manager.params, params);
+    }
+
+    #[test]
+    fn test_coeffs_to_poly_utility() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 3, params.clone());
+
+        // Test with i64 coefficients
+        let coeffs = vec![1i64, 2, 3, 4].into_boxed_slice();
+        let ctx = params.ctx_at_level(0).unwrap();
+        let poly = manager.coeffs_to_poly(coeffs.as_ref(), &ctx).unwrap();
+        assert_eq!(poly.ctx(), ctx);
+
+        // Test convenience method
+        let coeffs2 = vec![5i64, 6, 7, 8].into_boxed_slice();
+        let poly2 = manager.coeffs_to_poly_level0(coeffs2.as_ref()).unwrap();
+        assert_eq!(poly2.ctx(), ctx);
+    }
+
+    #[test]
+    fn test_bigints_to_poly() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 3, params.clone());
+
+        // Create BigInt coefficients (full degree)
+        let degree = params.degree();
+        let bigints: Vec<BigInt> = (0..degree).map(|i| BigInt::from(i as i64)).collect();
+
+        let poly = manager.bigints_to_poly(&bigints).unwrap();
+        assert_eq!(poly.coefficients().ncols(), degree);
+        assert_eq!(poly.coefficients().nrows(), params.moduli().len());
+    }
+
+    #[test]
+    fn test_bigints_to_poly_wrong_size() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 3, params.clone());
+
+        // Wrong number of coefficients
+        let bigints = vec![BigInt::from(1), BigInt::from(2)]; // Too few
+        let result = manager.bigints_to_poly(&bigints);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decryption_share_computation() {
+        let mut rng = thread_rng();
+        let params = test_params();
+        let n = 3;
+        let threshold = 2;
+        let mut manager = ShareManager::new(n, threshold, params.clone());
+
+        // Setup: Generate keys and encrypt a plaintext
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+
+        let plaintext_data = vec![42u64, 100, 200];
+        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
+        let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
+
+        // Generate polynomials for decryption share
+        let sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        let ctx = params.ctx_at_level(0).unwrap();
+        let es_poly = Poly::zero(&ctx, Representation::PowerBasis);
+
+        // Compute decryption share
+        let decryption_share = manager
+            .decryption_share(Arc::new(ct), (*sk_poly).clone(), es_poly)
+            .unwrap();
+
+        assert_eq!(decryption_share.coefficients().ncols(), params.degree());
+    }
+
+    #[test]
+    fn test_threshold_decryption_workflow() {
+        let mut rng = OsRng;
+        let params = test_params();
+        let n = 3;
+        let threshold = 2;
+
+        // Setup multiple share managers (simulating different parties)
+        let mut managers: Vec<ShareManager> = (0..n)
+            .map(|_| ShareManager::new(n, threshold, params.clone()))
+            .collect();
+
+        // Generate keys for each party
+        let secret_keys: Vec<SecretKey> = (0..n)
+            .map(|_| SecretKey::random(&params, &mut rng))
+            .collect();
+
+        // Create a test ciphertext
+        let pk = PublicKey::new(&secret_keys[0], &mut rng);
+        let plaintext_data = vec![123u64];
+        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
+        let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
+
+        // Each party generates their decryption share
+        let mut decryption_shares = Vec::new();
+        for i in 0..threshold {
+            let sk_poly = managers[i]
+                .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
+                .unwrap();
+            let ctx = params.ctx_at_level(0).unwrap();
+            let es_poly = Poly::zero(&ctx, Representation::PowerBasis);
+
+            let share = managers[i]
+                .decryption_share(ct.clone(), (*sk_poly).clone(), es_poly)
+                .unwrap();
+            decryption_shares.push(share);
+        }
+
+        // Verify we have enough shares
+        assert_eq!(decryption_shares.len(), threshold);
+
+        // Test decrypt_from_shares
+        let result = managers[0].decrypt_from_shares(decryption_shares, ct);
+        assert!(result.is_ok());
+    }
+}
