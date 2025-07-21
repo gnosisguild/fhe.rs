@@ -119,7 +119,7 @@ impl TRBFV {
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         num_ciphertexts: usize,
-        rng: &mut R,
+        _rng: &mut R,
     ) -> Result<Vec<BigInt>, Error> {
         let config =
             SmudgingBoundCalculatorConfig::new(self.params.clone(), self.n, num_ciphertexts);
@@ -193,6 +193,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_mut)]
     fn test_trbfv_new() {
         let n: usize = 16;
         let threshold = 9;
@@ -220,6 +221,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_mut)]
     fn test_secret_sharing_integration() {
         let mut rng = thread_rng();
         let n: usize = 5;
@@ -289,7 +291,7 @@ mod tests {
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();
         let ctx = params.ctx_at_level(0).unwrap();
-        let es_poly = Poly::zero(&ctx, Representation::PowerBasis);
+        let es_poly = Poly::zero(ctx, Representation::PowerBasis);
 
         let decryption_share = trbfv
             .decryption_share(ct, (*sk_poly).clone(), es_poly)
@@ -329,7 +331,7 @@ mod tests {
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
                 .unwrap();
             let ctx = params.ctx_at_level(0).unwrap();
-            let es_poly = Poly::zero(&ctx, Representation::PowerBasis);
+            let es_poly = Poly::zero(ctx, Representation::PowerBasis);
 
             let share = trbfv_instances[i]
                 .decryption_share(ct.clone(), (*sk_poly).clone(), es_poly)
@@ -362,7 +364,7 @@ mod tests {
         assert_eq!(trbfv1.threshold, trbfv2.threshold);
 
         // Test Debug (should not panic)
-        let debug_str = format!("{:?}", trbfv1);
+        let debug_str = format!("{trbfv1:?}");
         assert!(debug_str.contains("TRBFV"));
 
         // Test PartialEq

@@ -78,7 +78,7 @@ impl ShareManager {
         Poly: TryConvertFrom<T>,
     {
         let ctx = self.params.ctx_at_level(0)?;
-        self.coeffs_to_poly(coeffs, &ctx)
+        self.coeffs_to_poly(coeffs, ctx)
     }
 
     /// Convert a vector of BigInt coefficients into a Poly in full RNS representation
@@ -123,7 +123,7 @@ impl ShareManager {
             .map_err(|_| Error::DefaultError("Failed to create coefficient matrix".to_string()))?;
 
         // Use the utility function instead of duplicate code
-        self.coeffs_to_poly(coeff_matrix, &ctx)
+        self.coeffs_to_poly(coeff_matrix, ctx)
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
@@ -273,8 +273,7 @@ impl ShareManager {
                     let coeff_formatted = (j + 1, coeff.to_bigint().unwrap());
                     shamir_open_vec_mod.push(coeff_formatted);
                 }
-                let shamir_result =
-                    shamir_ss.recover(&shamir_open_vec_mod[0..self.threshold as usize]);
+                let shamir_result = shamir_ss.recover(&shamir_open_vec_mod[0..self.threshold]);
                 m_data.push(shamir_result.to_u64().unwrap());
             }
         }
@@ -376,7 +375,7 @@ mod tests {
         // Test with i64 coefficients
         let coeffs = vec![1i64, 2, 3, 4].into_boxed_slice();
         let ctx = params.ctx_at_level(0).unwrap();
-        let poly = manager.coeffs_to_poly(coeffs.as_ref(), &ctx).unwrap();
+        let poly = manager.coeffs_to_poly(coeffs.as_ref(), ctx).unwrap();
         assert_eq!(poly.ctx(), ctx);
 
         // Test convenience method
@@ -429,7 +428,7 @@ mod tests {
         // Generate polynomials for decryption share
         let sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
         let ctx = params.ctx_at_level(0).unwrap();
-        let es_poly = Poly::zero(&ctx, Representation::PowerBasis);
+        let es_poly = Poly::zero(ctx, Representation::PowerBasis);
 
         // Compute decryption share
         let decryption_share = manager
@@ -469,7 +468,7 @@ mod tests {
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
                 .unwrap();
             let ctx = params.ctx_at_level(0).unwrap();
-            let es_poly = Poly::zero(&ctx, Representation::PowerBasis);
+            let es_poly = Poly::zero(ctx, Representation::PowerBasis);
 
             let share = managers[i]
                 .decryption_share(ct.clone(), (*sk_poly).clone(), es_poly)

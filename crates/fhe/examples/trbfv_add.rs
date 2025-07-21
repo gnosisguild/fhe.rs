@@ -10,13 +10,12 @@ use fhe::{
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
     trbfv::{ShareManager, TRBFV},
 };
-use fhe_math::rq::traits::TryConvertFrom;
+
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use util::timeit::{timeit, timeit_n};
-use zeroize::Zeroizing;
 
 fn print_notice_and_exit(error: Option<String>) {
     println!(

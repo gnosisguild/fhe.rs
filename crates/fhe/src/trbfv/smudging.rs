@@ -14,7 +14,7 @@ use crate::Error;
 
 use core::f64::consts::PI;
 use num_bigint::{BigInt, BigUint};
-use num_traits::{Signed, ToPrimitive, Zero};
+use num_traits::{ToPrimitive, Zero};
 use rand::Rng;
 use std::sync::Arc;
 
@@ -221,7 +221,7 @@ fn sample_truncated_ratio(rng: &mut impl Rng) -> f64 {
         // formula: r = mean_ratio + std_dev_ratio * z
         // where mean_ratio = 0, std_dev_ratio = 1/3, so r = z / 3.0
         let r = z / 3.0;
-        if r >= -1.0 && r <= 1.0 {
+        if (-1.0..=1.0).contains(&r) {
             return r;
         }
     }
@@ -259,6 +259,7 @@ fn ratio_to_bigint(ratio: f64, bound: &BigInt) -> BigInt {
 mod tests {
     use super::*;
     use crate::bfv::BfvParametersBuilder;
+    use num_traits::Signed;
     use rand::thread_rng;
     use std::str::FromStr;
 
