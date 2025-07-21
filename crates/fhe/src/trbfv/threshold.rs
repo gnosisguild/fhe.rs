@@ -34,6 +34,7 @@ use fhe_traits::FheParametrized;
 use ndarray::Array2;
 use num_bigint::BigInt;
 use rand::{CryptoRng, RngCore};
+use zeroize::Zeroizing;
 
 /// Threshold BFV configuration and operations.
 /// This struct serves as the main coordinator for threshold BFV operations, managing
@@ -72,16 +73,16 @@ impl TRBFV {
     /// Each party will receive one share for each polynomial coefficient.
     ///
     /// # Arguments
-    /// * `coeffs` - Polynomial coefficients to be shared (typically secret key coefficients)
+    /// * `poly` - Polynomial to be shared (typically secret key polynomial)
     ///
     /// # Returns
     /// Vector of share matrices, one per BFV modulus. Each matrix has dimensions [n, degree].
-    pub fn generate_secret_shares(
+    pub fn generate_secret_shares_from_poly(
         &mut self,
-        coeffs: Box<[i64]>,
+        poly: Zeroizing<Poly>,
     ) -> Result<Vec<Array2<u64>>, Error> {
         let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
-        share_manager.generate_secret_shares(coeffs)
+        share_manager.generate_secret_shares_from_poly(poly)
     }
 
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
@@ -239,7 +240,11 @@ mod tests {
 
         // Generate a secret key for testing
         let sk = SecretKey::random(&params, &mut rng);
-        let shares = trbfv.generate_secret_shares(sk.coeffs.clone()).unwrap();
+        let share_manager = ShareManager::new(n, threshold, params.clone());
+        let sk_poly = share_manager
+            .coeffs_to_poly_level0(sk.coeffs.clone().as_ref())
+            .unwrap();
+        let shares = trbfv.generate_secret_shares_from_poly(sk_poly).unwrap();
 
         // Check that we got the right number of shares
         assert_eq!(shares.len(), moduli.len());

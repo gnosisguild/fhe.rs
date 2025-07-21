@@ -10,11 +10,13 @@ use fhe::{
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
     trbfv::{ShareManager, TRBFV},
 };
+use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use util::timeit::{timeit, timeit_n};
+use zeroize::Zeroizing;
 
 fn print_notice_and_exit(error: Option<String>) {
     println!(
@@ -138,7 +140,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     timeit_n!("Party setup (per party)", num_parties as u32, {
         let sk_share = SecretKey::random(&params, &mut OsRng);
         let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
-        let sk_sss = trbfv.generate_secret_shares(sk_share.coeffs.clone())?;
+
+        let mut share_manager = ShareManager::new(num_parties, threshold, params.clone());
+        let sk_poly = share_manager.coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())?;
+        let sk_sss = trbfv.generate_secret_shares_from_poly(sk_poly)?;
 
         // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
         let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
@@ -148,8 +153,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let d_share_poly = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
 
         let esi_coeffs = trbfv.generate_smudging_error(num_summed, &mut OsRng)?;
-        let mut share_manager = ShareManager::new(num_parties, threshold, params.clone());
-        let esi_poly: Poly = share_manager.bigints_to_poly(&esi_coeffs)?;
+        let esi_poly = share_manager.bigints_to_poly(&esi_coeffs)?;
         let esi_sss = share_manager.generate_secret_shares_from_poly(esi_poly)?;
 
         parties.push(Party {
@@ -258,7 +262,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Show summation result
     println!("Sum result = {result} / {num_summed}");
     let expected_result = numbers.iter().sum();
-    println!("expected result = {expected_result}");
+    println!("Expected result = {expected_result} / {num_summed}");
     assert_eq!(result, expected_result);
 
     Ok(())
