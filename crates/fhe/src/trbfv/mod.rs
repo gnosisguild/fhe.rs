@@ -5,6 +5,8 @@
 pub mod config;
 /// Error types for threshold operations
 pub mod errors;
+/// Normal distribution sampling for smudging noise
+pub mod normal;
 /// Shamir Secret Sharing implementation
 pub mod shamir;
 /// Share collection and management
