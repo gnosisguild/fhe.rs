@@ -215,7 +215,7 @@ mod tests {
         let test_coeffs = vec![1i64, 2, 3, 4];
         let poly = Poly::try_convert_from(
             test_coeffs.as_slice(),
-            &ctx,
+            ctx,
             false,
             Representation::PowerBasis,
         )
@@ -223,7 +223,7 @@ mod tests {
 
         // Test serialization and deserialization
         let bytes = serialize_smudging_data(&poly);
-        let deserialized = deserialize_smudging_data(&bytes, &ctx).unwrap();
+        let deserialized = deserialize_smudging_data(&bytes, ctx).unwrap();
 
         // Compare coefficients since Poly doesn't implement PartialEq
         assert_eq!(poly.coefficients(), deserialized.coefficients());
@@ -244,9 +244,9 @@ mod tests {
         let ctx = params.ctx_at_level(0).unwrap();
 
         // Test zero polynomial
-        let poly = Poly::zero(&ctx, Representation::PowerBasis);
+        let poly = Poly::zero(ctx, Representation::PowerBasis);
         let bytes = serialize_smudging_data(&poly);
-        let deserialized = deserialize_smudging_data(&bytes, &ctx).unwrap();
+        let deserialized = deserialize_smudging_data(&bytes, ctx).unwrap();
 
         assert_eq!(poly.coefficients(), deserialized.coefficients());
     }
