@@ -26,6 +26,10 @@ message DecryptionShare {
     bytes poly_data = 1;  
 }
 
+message SmudgingData {
+    bytes poly_data = 1;
+}
+
 message ThresholdDecryptionRequest {
     bytes ciphertext = 1;          
     uint32 party_id = 2;           
