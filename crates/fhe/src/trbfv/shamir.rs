@@ -268,6 +268,6 @@ mod tests {
         };
         let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
         let shares = sss.split(secret.clone());
-        assert_eq!(secret, sss.recover(&shares[0..sss.threshold as usize]));
+        assert_eq!(secret, sss.recover(&shares[0..sss.threshold]));
     }
 }

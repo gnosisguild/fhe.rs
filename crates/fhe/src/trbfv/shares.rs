@@ -56,9 +56,34 @@ impl ShareManager {
         }
     }
 
+    /// Utility to create a Zeroizing<Poly> from coefficients.
+    ///
+    /// # Arguments
+    /// - `coeffs`: Coefficients that can be converted to Poly (Box<[i64]>, Array2<u64>, etc.)
+    /// - `ctx`: BFV context to use for the polynomial
+    ///
+    /// # Returns
+    /// A Zeroizing<Poly> in PowerBasis representation
+    pub fn coeffs_to_poly<T>(&self, coeffs: T, ctx: &Arc<Context>) -> Result<Zeroizing<Poly>, Error>
+    where
+        Poly: TryConvertFrom<T>,
+    {
+        let poly = Poly::try_convert_from(coeffs, ctx, false, Representation::PowerBasis)?;
+        Ok(Zeroizing::new(poly))
+    }
+
+    /// Convenience method using level 0 context from parameters.
+    pub fn coeffs_to_poly_level0<T>(&self, coeffs: T) -> Result<Zeroizing<Poly>, Error>
+    where
+        Poly: TryConvertFrom<T>,
+    {
+        let ctx = self.params.ctx_at_level(0)?;
+        self.coeffs_to_poly(coeffs, ctx)
+    }
+
     /// Convert a vector of BigInt coefficients into a Poly in full RNS representation
     /// at level 0 using the BFV context.
-    pub fn bigints_to_poly(&self, bigints: &[BigInt]) -> Result<Poly, Error> {
+    pub fn bigints_to_poly(&self, bigints: &[BigInt]) -> Result<Zeroizing<Poly>, Error> {
         // Get level 0 context (all moduli)
         let ctx = self.params.ctx_at_level(0)?; // full modulus level
 
@@ -97,75 +122,14 @@ impl ShareManager {
         let coeff_matrix = ndarray::Array2::from_shape_vec((moduli.len(), d), coeffs_rns)
             .map_err(|_| Error::DefaultError("Failed to create coefficient matrix".to_string()))?;
 
-        // Build Poly with RNS representation
-        let poly = Zeroizing::new(
-            Poly::try_convert_from(
-                coeff_matrix,
-                &ctx.clone(),
-                false,
-                Representation::PowerBasis,
-            )
-            .unwrap(),
-        );
-
-        Ok((*poly).clone())
-    }
-
-    /// Generate Shamir Secret Shares for polynomial coefficients.
-    pub fn generate_secret_shares(
-        &mut self,
-        coeffs: Box<[i64]>,
-    ) -> Result<Vec<Array2<u64>>, Error> {
-        let poly = Zeroizing::new(
-            Poly::try_convert_from(
-                coeffs.as_ref(),
-                self.params.ctx_at_level(0).unwrap(),
-                false,
-                Representation::PowerBasis,
-            )
-            .unwrap(),
-        );
-
-        // 2 dim array, columns = fhe coeffs (degree), rows = party members shamir share coeff (n)
-        let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(self.params.moduli.len());
-
-        // for each moduli, for each coeff generate an SSS of degree n and threshold n = 2t + 1
-        for (m, p) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()) {
-            // Create shamir object
-            let shamir = ShamirSecretSharing {
-                threshold: self.threshold,
-                share_amount: self.n,
-                prime: BigInt::from(*m),
-            };
-            let mut m_data: Vec<u64> = Vec::new();
-
-            // For each coeff in the polynomial p under the current modulus m
-            for c in p.iter() {
-                // Split the coeff into n shares
-                let secret = c.to_bigint().unwrap();
-                let c_shares = shamir.split(secret.clone());
-                // For each share convert to u64
-                let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
-                for (_, c_share) in c_shares.iter() {
-                    c_vec.push(c_share.to_u64().unwrap());
-                }
-                m_data.extend_from_slice(&c_vec);
-            }
-            // convert flat vector of coeffs to array2
-            let arr_matrix =
-                Array2::from_shape_vec((self.params.degree(), self.n), m_data).unwrap();
-            // reverse the columns and rows
-            let reversed_axes = arr_matrix.t();
-            return_vec.push(reversed_axes.to_owned());
-        }
-        // return vec = rows are party members, columns are degree length of shamir values
-        Ok(return_vec)
+        // Use the utility function instead of duplicate code
+        self.coeffs_to_poly(coeff_matrix, ctx)
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
     pub fn generate_secret_shares_from_poly(
         &mut self,
-        poly: Poly,
+        poly: Zeroizing<Poly>,
     ) -> Result<Vec<Array2<u64>>, Error> {
         // 2 dim array, columns = fhe coeffs (degree), rows = party members shamir share coeff (n)
         let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(self.params.moduli.len());
@@ -202,6 +166,7 @@ impl ShareManager {
         // return vec = rows are party members, columns are degree length of shamir values
         Ok(return_vec)
     }
+
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
     ///
     /// This function takes shares collected from other parties and aggregates them
@@ -308,8 +273,7 @@ impl ShareManager {
                     let coeff_formatted = (j + 1, coeff.to_bigint().unwrap());
                     shamir_open_vec_mod.push(coeff_formatted);
                 }
-                let shamir_result =
-                    shamir_ss.recover(&shamir_open_vec_mod[0..self.threshold as usize]);
+                let shamir_result = shamir_ss.recover(&shamir_open_vec_mod[0..self.threshold]);
                 m_data.push(shamir_result.to_u64().unwrap());
             }
         }
@@ -375,5 +339,148 @@ impl ShareManager {
             level: ciphertext.level,
         };
         Ok(pt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
+    use fhe_traits::{FheEncoder, FheEncrypter};
+    use rand::{rngs::OsRng, thread_rng};
+
+    fn test_params() -> Arc<BfvParameters> {
+        BfvParametersBuilder::new()
+            .set_degree(2048)
+            .set_plaintext_modulus(4096)
+            .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
+            .build_arc()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_share_manager_creation() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 3, params.clone());
+        assert_eq!(manager.n, 5);
+        assert_eq!(manager.threshold, 3);
+        assert_eq!(manager.params, params);
+    }
+
+    #[test]
+    fn test_coeffs_to_poly_utility() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 3, params.clone());
+
+        // Test with i64 coefficients
+        let coeffs = vec![1i64, 2, 3, 4].into_boxed_slice();
+        let ctx = params.ctx_at_level(0).unwrap();
+        let poly = manager.coeffs_to_poly(coeffs.as_ref(), ctx).unwrap();
+        assert_eq!(poly.ctx(), ctx);
+
+        // Test convenience method
+        let coeffs2 = vec![5i64, 6, 7, 8].into_boxed_slice();
+        let poly2 = manager.coeffs_to_poly_level0(coeffs2.as_ref()).unwrap();
+        assert_eq!(poly2.ctx(), ctx);
+    }
+
+    #[test]
+    fn test_bigints_to_poly() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 3, params.clone());
+
+        // Create BigInt coefficients (full degree)
+        let degree = params.degree();
+        let bigints: Vec<BigInt> = (0..degree).map(|i| BigInt::from(i as i64)).collect();
+
+        let poly = manager.bigints_to_poly(&bigints).unwrap();
+        assert_eq!(poly.coefficients().ncols(), degree);
+        assert_eq!(poly.coefficients().nrows(), params.moduli().len());
+    }
+
+    #[test]
+    fn test_bigints_to_poly_wrong_size() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 3, params.clone());
+
+        // Wrong number of coefficients
+        let bigints = vec![BigInt::from(1), BigInt::from(2)]; // Too few
+        let result = manager.bigints_to_poly(&bigints);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decryption_share_computation() {
+        let mut rng = thread_rng();
+        let params = test_params();
+        let n = 3;
+        let threshold = 2;
+        let mut manager = ShareManager::new(n, threshold, params.clone());
+
+        // Setup: Generate keys and encrypt a plaintext
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+
+        let plaintext_data = vec![42u64, 100, 200];
+        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
+        let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
+
+        // Generate polynomials for decryption share
+        let sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        let ctx = params.ctx_at_level(0).unwrap();
+        let es_poly = Poly::zero(ctx, Representation::PowerBasis);
+
+        // Compute decryption share
+        let decryption_share = manager
+            .decryption_share(Arc::new(ct), (*sk_poly).clone(), es_poly)
+            .unwrap();
+
+        assert_eq!(decryption_share.coefficients().ncols(), params.degree());
+    }
+
+    #[test]
+    fn test_threshold_decryption_workflow() {
+        let mut rng = OsRng;
+        let params = test_params();
+        let n = 3;
+        let threshold = 2;
+
+        // Setup multiple share managers (simulating different parties)
+        let mut managers: Vec<ShareManager> = (0..n)
+            .map(|_| ShareManager::new(n, threshold, params.clone()))
+            .collect();
+
+        // Generate keys for each party
+        let secret_keys: Vec<SecretKey> = (0..n)
+            .map(|_| SecretKey::random(&params, &mut rng))
+            .collect();
+
+        // Create a test ciphertext
+        let pk = PublicKey::new(&secret_keys[0], &mut rng);
+        let plaintext_data = vec![123u64];
+        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
+        let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
+
+        // Each party generates their decryption share
+        let mut decryption_shares = Vec::new();
+        for i in 0..threshold {
+            let sk_poly = managers[i]
+                .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
+                .unwrap();
+            let ctx = params.ctx_at_level(0).unwrap();
+            let es_poly = Poly::zero(ctx, Representation::PowerBasis);
+
+            let share = managers[i]
+                .decryption_share(ct.clone(), (*sk_poly).clone(), es_poly)
+                .unwrap();
+            decryption_shares.push(share);
+        }
+
+        // Verify we have enough shares
+        assert_eq!(decryption_shares.len(), threshold);
+
+        // Test decrypt_from_shares
+        let result = managers[0].decrypt_from_shares(decryption_shares, ct);
+        assert!(result.is_ok());
     }
 }
