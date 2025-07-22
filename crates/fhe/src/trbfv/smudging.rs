@@ -13,7 +13,8 @@ use crate::bfv::BfvParameters;
 use crate::trbfv::normal::sample_bigint_normal_vec;
 use crate::Error;
 
-use num_bigint::{BigInt, BigUint};
+use num_bigint::{BigInt, BigUint, RandBigInt};
+use rand::{thread_rng, Rng};
 use std::sync::Arc;
 
 /// Configuration for calculating optimal smudging variance in threshold BFV.
@@ -165,12 +166,42 @@ impl SmudgingNoiseGenerator {
         let degree = self.params.degree();
 
         // Convert B_sm (stored in `smudging_variance`) to BigInt for sampling
-        let bound = BigInt::from(self.smudging_bound.clone());
+        //let bound = BigInt::from(self.smudging_bound.clone());
 
         // Sample degree many noise coefficients from D_{Z,σ} ∩ [-bound, bound]
-        let samples = sample_bigint_normal_vec(&bound, degree);
+        // let samples = sample_bigint_normal_vec(&bound, degree);
+
+        // Sample degree many noise coefficients uniformly from [-bound, bound]
+        let samples = self.sample_uniform_coefficients(degree);
 
         Ok(samples)
+    }
+
+    /// Sample uniform coefficients from [-bound, bound]
+    fn sample_uniform_coefficients(&self, count: usize) -> Vec<BigInt> {
+        let mut rng = thread_rng();
+        let mut samples = Vec::with_capacity(count);
+
+        // Pre-calculate bound + 1 for efficiency
+        let upper_bound = &self.smudging_bound + 1u32;
+        let zero = BigUint::from(0u32);
+
+        for _ in 0..count {
+            // Sample magnitude from [0, bound]
+            let magnitude = rng.gen_biguint_range(&zero, &upper_bound);
+            let abs_value = BigInt::from(magnitude);
+
+            // Randomly choose sign (50/50 chance)
+            let sample = if rng.gen_bool(0.5) {
+                abs_value
+            } else {
+                -abs_value
+            };
+
+            samples.push(sample);
+        }
+
+        samples
     }
 
     /// Get the polynomial degree.
