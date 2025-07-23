@@ -11,12 +11,12 @@ use fhe_math::{
     rns::{RnsContext, ScalingFactor},
     rq::{scaler::Scaler, Context, Poly, Representation},
 };
-use itertools::izip;
 use itertools::Itertools;
 use ndarray::Array2;
 use num_bigint::BigUint;
 use num_bigint::{BigInt, ToBigInt};
 use num_traits::{Signed, ToPrimitive};
+use rayon::prelude::*;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -131,40 +131,48 @@ impl ShareManager {
         &mut self,
         poly: Zeroizing<Poly>,
     ) -> Result<Vec<Array2<u64>>, Error> {
-        // 2 dim array, columns = fhe coeffs (degree), rows = party members shamir share coeff (n)
-        let mut return_vec: Vec<Array2<u64>> = Vec::with_capacity(self.params.moduli.len());
+        let moduli: Vec<u64> = poly.ctx().moduli().to_vec();
+        let coefficients = poly.coefficients();
+        let coeff_rows: Vec<_> = coefficients.outer_iter().collect();
 
-        // for each moduli, for each coeff generate an SSS of degree n and threshold n = 2t + 1
-        for (m, p) in izip!(poly.ctx().moduli().iter(), poly.coefficients().outer_iter()) {
-            // Create shamir object
-            let shamir = ShamirSecretSharing {
-                threshold: self.threshold,
-                share_amount: self.n,
-                prime: BigInt::from(*m),
-            };
-            let mut m_data: Vec<u64> = Vec::new();
+        let return_vec: Result<Vec<Array2<u64>>, Error> = moduli
+            .par_iter()
+            .zip(coeff_rows.par_iter())
+            .map(|(m, p)| -> Result<Array2<u64>, Error> {
+                // Create shamir object
+                let shamir = ShamirSecretSharing {
+                    threshold: self.threshold,
+                    share_amount: self.n,
+                    prime: BigInt::from(*m),
+                };
 
-            // For each coeff in the polynomial p under the current modulus m
-            for c in p.iter() {
-                // Split the coeff into n shares
-                let secret = c.to_bigint().unwrap();
-                let c_shares = shamir.split(secret.clone());
-                // For each share convert to u64
-                let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
-                for (_, c_share) in c_shares.iter() {
-                    c_vec.push(c_share.to_u64().unwrap());
+                let mut m_data: Vec<u64> = Vec::new();
+
+                // For each coeff in the polynomial p under the current modulus m
+                for c in p.iter() {
+                    // Split the coeff into n shares
+                    let secret = c.to_bigint().unwrap();
+                    let c_shares = shamir.split(secret.clone());
+                    // For each share convert to u64
+                    let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
+                    for (_, c_share) in c_shares.iter() {
+                        c_vec.push(c_share.to_u64().unwrap());
+                    }
+                    m_data.extend_from_slice(&c_vec);
                 }
-                m_data.extend_from_slice(&c_vec);
-            }
-            // convert flat vector of coeffs to array2
-            let arr_matrix =
-                Array2::from_shape_vec((self.params.degree(), self.n), m_data).unwrap();
-            // reverse the columns and rows
-            let reversed_axes = arr_matrix.t();
-            return_vec.push(reversed_axes.to_owned());
-        }
-        // return vec = rows are party members, columns are degree length of shamir values
-        Ok(return_vec)
+
+                // convert flat vector of coeffs to array2
+                let arr_matrix = Array2::from_shape_vec((self.params.degree(), self.n), m_data)
+                    .map_err(|_| {
+                        Error::DefaultError("Failed to create coefficient matrix".to_string())
+                    })?;
+                // reverse the columns and rows
+                let reversed_axes = arr_matrix.t();
+                Ok(reversed_axes.to_owned())
+            })
+            .collect();
+
+        return_vec
     }
 
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
@@ -182,19 +190,21 @@ impl ShareManager {
         &mut self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
     ) -> Result<Poly, Error> {
-        let mut sum_poly = Poly::zero(
-            self.params.ctx_at_level(0).unwrap(),
-            Representation::PowerBasis,
-        );
-        for item in sk_sss_collected.iter().take(self.n) {
-            // Initialize empty poly with correct context (moduli and level)
-            let mut poly_j = Poly::zero(
-                self.params.ctx_at_level(0).unwrap(),
-                Representation::PowerBasis,
+        let ctx = self.params.ctx_at_level(0).unwrap();
+
+        let sum_poly = sk_sss_collected
+            .par_iter()
+            .take(self.n)
+            .map(|item| {
+                let mut poly_j = Poly::zero(ctx, Representation::PowerBasis);
+                poly_j.set_coefficients(item.clone());
+                poly_j
+            })
+            .reduce(
+                || Poly::zero(ctx, Representation::PowerBasis),
+                |acc, poly| &acc + &poly,
             );
-            poly_j.set_coefficients(item.clone());
-            sum_poly = &sum_poly + &poly_j;
-        }
+
         Ok(sum_poly)
     }
 
@@ -254,29 +264,37 @@ impl ShareManager {
                 self.threshold,
             ));
         }
-        let mut m_data: Vec<u64> = Vec::new();
+        let m_data: Vec<u64> = (0..self.params.moduli().len())
+            .into_par_iter()
+            .flat_map(|m| {
+                let shamir_ss = ShamirSecretSharing::new(
+                    self.threshold,
+                    self.n,
+                    BigInt::from(self.params.moduli[m]),
+                );
 
-        // collect shamir openings
-        for m in 0..self.params.moduli().len() {
-            let shamir_ss = ShamirSecretSharing::new(
-                self.threshold,
-                self.n,
-                BigInt::from(self.params.moduli[m]),
-            );
-            for i in 0..self.params.degree() {
-                let mut shamir_open_vec_mod: Vec<(usize, BigInt)> =
-                    Vec::with_capacity(self.params.degree());
-                for (j, d_share_poly) in d_share_polys.iter().enumerate().take(self.threshold) {
-                    let coeffs = d_share_poly.coefficients();
-                    let coeff_arr = coeffs.row(m);
-                    let coeff = coeff_arr[i];
-                    let coeff_formatted = (j + 1, coeff.to_bigint().unwrap());
-                    shamir_open_vec_mod.push(coeff_formatted);
-                }
-                let shamir_result = shamir_ss.recover(&shamir_open_vec_mod[0..self.threshold]);
-                m_data.push(shamir_result.to_u64().unwrap());
-            }
-        }
+                // Parallelize coefficient recovery within each modulus
+                (0..self.params.degree())
+                    .into_par_iter()
+                    .map(|i| {
+                        let mut shamir_open_vec_mod: Vec<(usize, BigInt)> =
+                            Vec::with_capacity(self.params.degree());
+                        for (j, d_share_poly) in
+                            d_share_polys.iter().enumerate().take(self.threshold)
+                        {
+                            let coeffs = d_share_poly.coefficients();
+                            let coeff_arr = coeffs.row(m);
+                            let coeff = coeff_arr[i];
+                            let coeff_formatted = (j + 1, coeff.to_bigint().unwrap());
+                            shamir_open_vec_mod.push(coeff_formatted);
+                        }
+                        let shamir_result =
+                            shamir_ss.recover(&shamir_open_vec_mod[0..self.threshold]);
+                        shamir_result.to_u64().unwrap()
+                    })
+                    .collect::<Vec<u64>>()
+            })
+            .collect();
 
         // scale result poly
         let arr_matrix =
@@ -290,24 +308,26 @@ impl ShareManager {
 
         let plaintext_ctx = Context::new_arc(&self.params.moduli()[..1], self.params.degree())
             .map_err(Error::MathError)?;
-        let mut scalers = Vec::with_capacity(self.params.moduli().len());
-        for i in 0..self.params.moduli().len() {
-            let rns = RnsContext::new(&self.params.moduli()[..self.params.moduli().len() - i])
+
+        let scalers: Result<Vec<_>, Error> = (0..self.params.moduli().len())
+            .into_par_iter()
+            .map(|i| {
+                let rns = RnsContext::new(&self.params.moduli()[..self.params.moduli().len() - i])
+                    .map_err(Error::MathError)?;
+                let ctx_i = Context::new_arc(
+                    &self.params.moduli()[..self.params.moduli().len() - i],
+                    self.params.degree(),
+                )
                 .map_err(Error::MathError)?;
-            let ctx_i = Context::new_arc(
-                &self.params.moduli()[..self.params.moduli().len() - i],
-                self.params.degree(),
-            )
-            .map_err(Error::MathError)?;
-            scalers.push(
-                Scaler::new(
+                Ok(Scaler::new(
                     &ctx_i,
                     &plaintext_ctx,
                     ScalingFactor::new(&BigUint::from(self.params.plaintext()), rns.modulus()),
                 )
-                .unwrap(),
-            );
-        }
+                .unwrap())
+            })
+            .collect();
+        let scalers = scalers?;
 
         let par = ciphertext.par.clone();
         let d = Zeroizing::new(

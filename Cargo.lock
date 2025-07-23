@@ -330,6 +330,7 @@ dependencies = [
  "rand",
  "rand_chacha",
  "rand_distr",
+ "rayon",
  "serde",
  "thiserror",
  "zeroize",
