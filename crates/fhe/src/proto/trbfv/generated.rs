@@ -16,9 +16,7 @@ pub struct TrbfvConfig {
     pub n: u32,
     #[prost(uint32, tag = "2")]
     pub threshold: u32,
-    #[prost(uint32, tag = "3")]
-    pub smudging_variance: u32,
-    #[prost(message, optional, tag = "4")]
+    #[prost(message, optional, tag = "3")]
     pub params: ::core::option::Option<Parameters>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -42,8 +40,8 @@ pub struct DecryptionShare {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SmudgingData {
-    #[prost(int64, repeated, tag = "1")]
-    pub error_coefficients: ::prost::alloc::vec::Vec<i64>,
+    #[prost(bytes = "vec", tag = "1")]
+    pub poly_data: ::prost::alloc::vec::Vec<u8>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
