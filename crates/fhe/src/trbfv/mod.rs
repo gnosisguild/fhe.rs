@@ -5,6 +5,8 @@
 pub mod config;
 /// Error types for threshold operations
 pub mod errors;
+/// Normal distribution sampling for smudging noise
+pub mod normal;
 /// Shamir Secret Sharing implementation
 pub mod shamir;
 /// Share collection and management
@@ -17,5 +19,5 @@ pub mod threshold;
 // Re-export main types for convenience
 pub use shamir::ShamirSecretSharing;
 pub use shares::ShareManager;
-pub use smudging::{VarianceCalculator, VarianceCalculatorConfig};
+pub use smudging::{SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
 pub use threshold::TRBFV;

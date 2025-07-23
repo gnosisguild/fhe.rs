@@ -3,7 +3,7 @@
 use super::generated::{
     DecryptionShare as DecryptionShareProto, Parameters as ParametersProto,
     SecretShare as SecretShareProto, SecretShareModulus as SecretShareModulusProto,
-    TrbfvConfig as TrbfvConfigProto,
+    SmudgingData as SmudgingDataProto, TrbfvConfig as TrbfvConfigProto,
 };
 use crate::bfv::{BfvParameters, BfvParametersBuilder};
 use crate::trbfv::TRBFV;
@@ -59,6 +59,15 @@ impl From<&Poly> for DecryptionShareProto {
     }
 }
 
+/// Convert Poly to protobuf representation for smudging data
+impl From<&Poly> for SmudgingDataProto {
+    fn from(poly: &Poly) -> Self {
+        SmudgingDataProto {
+            poly_data: poly.to_bytes(),
+        }
+    }
+}
+
 /// Serialize TRBFV to bytes
 impl Serialize for TRBFV {
     fn to_bytes(&self) -> Vec<u8> {
@@ -74,6 +83,11 @@ pub fn serialize_secret_share(share_matrix: &Array2<u64>) -> Vec<u8> {
 /// Helper function to serialize Poly to bytes (for decryption shares)
 pub fn serialize_decryption_share(poly: &Poly) -> Vec<u8> {
     DecryptionShareProto::from(poly).encode_to_vec()
+}
+
+/// Helper function to serialize Poly to bytes (for smudging polynomials)
+pub fn serialize_smudging_data(poly: &Poly) -> Vec<u8> {
+    SmudgingDataProto::from(poly).encode_to_vec()
 }
 
 /// Deserialize TRBFV from bytes
@@ -135,6 +149,15 @@ pub fn deserialize_decryption_share(
     Poly::from_bytes(&proto.poly_data, ctx).map_err(Error::MathError)
 }
 
+/// Helper function to deserialize Poly from bytes (for smudging polynomials)
+pub fn deserialize_smudging_data(
+    bytes: &[u8],
+    ctx: &Arc<fhe_math::rq::Context>,
+) -> Result<Poly, Error> {
+    let proto: SmudgingDataProto = Message::decode(bytes).map_err(|_| Error::SerializationError)?;
+    Poly::from_bytes(&proto.poly_data, ctx).map_err(Error::MathError)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +194,60 @@ mod tests {
         let deserialized = deserialize_secret_share(&bytes).unwrap();
 
         assert_eq!(share_matrix, deserialized);
+    }
+
+    #[test]
+    fn test_smudging_data_serialization() {
+        use crate::bfv::BfvParametersBuilder;
+        use fhe_math::rq::traits::TryConvertFrom;
+        use fhe_math::rq::{Poly, Representation};
+
+        let params = BfvParametersBuilder::new()
+            .set_degree(2048)
+            .set_plaintext_modulus(4096)
+            .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
+            .build_arc()
+            .unwrap();
+
+        let ctx = params.ctx_at_level(0).unwrap();
+
+        // Create test polynomial with some coefficients using TryConvertFrom
+        let test_coeffs = vec![1i64, 2, 3, 4];
+        let poly = Poly::try_convert_from(
+            test_coeffs.as_slice(),
+            ctx,
+            false,
+            Representation::PowerBasis,
+        )
+        .unwrap();
+
+        // Test serialization and deserialization
+        let bytes = serialize_smudging_data(&poly);
+        let deserialized = deserialize_smudging_data(&bytes, ctx).unwrap();
+
+        // Compare coefficients since Poly doesn't implement PartialEq
+        assert_eq!(poly.coefficients(), deserialized.coefficients());
+    }
+
+    #[test]
+    fn test_smudging_data_zero_poly() {
+        use crate::bfv::BfvParametersBuilder;
+        use fhe_math::rq::{Poly, Representation};
+
+        let params = BfvParametersBuilder::new()
+            .set_degree(2048)
+            .set_plaintext_modulus(4096)
+            .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
+            .build_arc()
+            .unwrap();
+
+        let ctx = params.ctx_at_level(0).unwrap();
+
+        // Test zero polynomial
+        let poly = Poly::zero(ctx, Representation::PowerBasis);
+        let bytes = serialize_smudging_data(&poly);
+        let deserialized = deserialize_smudging_data(&bytes, ctx).unwrap();
+
+        assert_eq!(poly.coefficients(), deserialized.coefficients());
     }
 }

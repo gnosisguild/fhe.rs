@@ -8,8 +8,9 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
-    trbfv::TRBFV,
+    trbfv::{ShareManager, TRBFV},
 };
+
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
@@ -40,9 +41,13 @@ fn print_notice_and_exit(error: Option<String>) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Parameters
-    let degree = 4096;
-    let plaintext_modulus: u64 = 65537;
-    let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
+    let degree = 8192;
+    let plaintext_modulus: u64 = 16384;
+    let moduli = vec![
+        0x1FFFFFFEA0001, // 562949951979521
+        0x1FFFFFFE88001, // 562949951881217
+        0x1FFFFFFE48001, // 562949951619073
+    ];
 
     // This executable is a command line tool which enables to specify
     // trBFV summations with party and threshold sizes.
@@ -53,7 +58,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 5;
+    let mut num_summed = 1000;
     let mut num_parties = 10;
     let mut threshold = 7;
 
@@ -138,7 +143,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     timeit_n!("Party setup (per party)", num_parties as u32, {
         let sk_share = SecretKey::random(&params, &mut OsRng);
         let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
-        let sk_sss = trbfv.generate_secret_shares(sk_share.coeffs.clone())?;
+
+        let mut share_manager = ShareManager::new(num_parties, threshold, params.clone());
+        let sk_poly = share_manager.coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())?;
+        let sk_sss = trbfv.generate_secret_shares_from_poly(sk_poly)?;
 
         // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
         let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
@@ -147,13 +155,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let es_poly_sum = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
         let d_share_poly = Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
 
-        let esi_coeffs = trbfv.generate_smudging_error(
-            num_summed,
-            es_poly_sum.clone(),
-            sk_poly_sum.clone(),
-            &mut OsRng,
-        )?;
-        let esi_sss = trbfv.generate_secret_shares(esi_coeffs.into_boxed_slice())?;
+        let esi_coeffs = trbfv.generate_smudging_error(num_summed, &mut OsRng)?;
+        let esi_poly = share_manager.bigints_to_poly(&esi_coeffs)?;
+        let esi_sss = share_manager.generate_secret_shares_from_poly(esi_poly)?;
 
         parties.push(Party {
             pk_share,
@@ -260,8 +264,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Show summation result
     println!("Sum result = {result} / {num_summed}");
-
     let expected_result = numbers.iter().sum();
+    println!("Expected result = {expected_result} / {num_summed}");
     assert_eq!(result, expected_result);
 
     Ok(())
