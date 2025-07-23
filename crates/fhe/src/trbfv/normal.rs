@@ -6,11 +6,17 @@ use core::f64::consts::PI;
 use num_bigint::BigInt;
 use num_traits::{ToPrimitive, Zero};
 use rand::Rng;
+use rayon::prelude::*;
 
 /// Draw `n` samples from centered truncated Gaussian with sigma = bound/3.
 pub fn sample_bigint_normal_vec(bound: &BigInt, n: usize) -> Vec<BigInt> {
-    let mut rng = rand::thread_rng();
-    (0..n).map(|_| sample_single(bound, &mut rng)).collect()
+    (0..n)
+        .into_par_iter()
+        .map(|_| {
+            let mut rng = rand::thread_rng();
+            sample_single(bound, &mut rng)
+        })
+        .collect()
 }
 
 /// Sample a single value from N(0, (bound/3)²) truncated to [-bound, bound].

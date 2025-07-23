@@ -4,6 +4,7 @@
 /// with the BFV parameter system.
 use num_bigint::{BigInt, RandBigInt};
 use num_traits::{One, Zero};
+use rayon::prelude::*;
 
 /// A rust porting of Shamir Secret Sharing over Finite Field
 /// from https://docs.rs/shamir_secret_sharing adapted to work with
@@ -91,11 +92,15 @@ impl ShamirSecretSharing {
 
     fn sample_polynomial(&self, secret: BigInt) -> Vec<BigInt> {
         let mut coefficients: Vec<BigInt> = vec![secret];
-        let mut rng = rand::thread_rng();
         let low = BigInt::from(0);
         let high = &self.prime - BigInt::from(1);
+
         let random_coefficients: Vec<BigInt> = (0..(self.threshold - 1))
-            .map(|_| rng.gen_bigint_range(&low, &high))
+            .into_par_iter()
+            .map(|_| {
+                let mut rng = rand::thread_rng();
+                rng.gen_bigint_range(&low, &high)
+            })
             .collect();
         coefficients.extend(random_coefficients);
         coefficients
@@ -103,6 +108,7 @@ impl ShamirSecretSharing {
 
     fn evaluate_polynomial(&self, polynomial: Vec<BigInt>) -> Vec<(usize, BigInt)> {
         (1..=self.share_amount)
+            .into_par_iter()
             .map(|x| (x, self.mod_evaluate_at(&polynomial, x)))
             .collect()
     }
@@ -140,30 +146,29 @@ impl ShamirSecretSharing {
 
     fn lagrange_interpolation(&self, x: BigInt, xs: Vec<usize>, ys: Vec<BigInt>) -> BigInt {
         let len = xs.len();
-        // println!("x: {}, xs: {:?}, ys: {:?}", x, xs, ys);
         let xs_bigint: Vec<BigInt> = xs.iter().map(|x| BigInt::from(*x as i64)).collect();
-        // println!("sx_bigint: {:?}", xs_bigint);
-        (0..len).fold(Zero::zero(), |sum, item| {
-            let numerator = (0..len).fold(One::one(), |product: BigInt, i| {
-                if i == item {
-                    product
-                } else {
-                    product * (&x - &xs_bigint[i]) % &self.prime
-                }
-            });
-            let denominator = (0..len).fold(One::one(), |product: BigInt, i| {
-                if i == item {
-                    product
-                } else {
-                    product * (&xs_bigint[item] - &xs_bigint[i]) % &self.prime
-                }
-            });
-            // println!(
-            // "numerator: {}, donominator: {}, y: {}",
-            // numerator, denominator, &ys[item]
-            // );
-            (sum + numerator * self.mod_reverse(denominator) * &ys[item]) % &self.prime
-        })
+
+        (0..len)
+            .into_par_iter()
+            .map(|item| {
+                let numerator = (0..len).fold(One::one(), |product: BigInt, i| {
+                    if i == item {
+                        product
+                    } else {
+                        product * (&x - &xs_bigint[i]) % &self.prime
+                    }
+                });
+                let denominator = (0..len).fold(One::one(), |product: BigInt, i| {
+                    if i == item {
+                        product
+                    } else {
+                        product * (&xs_bigint[item] - &xs_bigint[i]) % &self.prime
+                    }
+                });
+                // Calculate this Lagrange term
+                (numerator * self.mod_reverse(denominator) * &ys[item]) % &self.prime
+            })
+            .reduce(Zero::zero, |sum, term| (sum + term) % &self.prime)
     }
 
     fn mod_reverse(&self, num: BigInt) -> BigInt {
