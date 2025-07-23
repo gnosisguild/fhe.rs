@@ -41,9 +41,13 @@ fn print_notice_and_exit(error: Option<String>) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Parameters
-    let degree = 2048;
-    let plaintext_modulus: u64 = 4096;
-    let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
+    let degree = 8192;
+    let plaintext_modulus: u64 = 16384;
+    let moduli = vec![
+        0x1FFFFFFEA0001, // 562949951979521
+        0x1FFFFFFE88001, // 562949951881217
+        0x1FFFFFFE48001, // 562949951619073
+    ];
 
     // This executable is a command line tool which enables to specify
     // trBFV summations with party and threshold sizes.
@@ -54,7 +58,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 5;
+    let mut num_summed = 1000;
     let mut num_parties = 10;
     let mut threshold = 7;
 
