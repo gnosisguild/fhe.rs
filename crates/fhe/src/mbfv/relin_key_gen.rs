@@ -362,7 +362,7 @@ impl Aggregate<RelinKeyShare<R2>> for RelinearizationKey {
             ctx_ksk: ctx.clone(),
             log_base: 0,
         };
-        Ok(RelinearizationKey { ksk })
+        Ok(RelinearizationKey::new_from_ksk(ksk))
     }
 }
 
@@ -421,9 +421,8 @@ mod tests {
                         .aggregate()
                         .unwrap(),
                 );
-
                 // Aggregate rlk r2 shares into relin key
-                let rlk = party_rlks
+                let rlk: RelinearizationKey = party_rlks
                     .iter()
                     .map(|g| g.round_2(&rlk_r1, &mut rng))
                     .aggregate()

@@ -1,4 +1,4 @@
-//! Key-switching keys for the BFV encryption scheme. Adapts the
+//! Key-switching keys for the BFV encryption scheme. Implements the
 //! Brakerski-Vaikuntanathan key switching through decomposition technique
 //! adapted to RNS as described in the HPS optimization paper (https://eprint.iacr.org/2018/117)
 
@@ -22,36 +22,59 @@ use zeroize::Zeroizing;
 /// Key switching key for the BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct KeySwitchingKey {
-    /// The parameters of the underlying BFV encryption scheme.
-    pub(crate) par: Arc<BfvParameters>,
+    /// BFV encryption scheme parameters.
+    pub par: Arc<BfvParameters>,
 
-    /// The (optional) seed that generated the polynomials c1.
-    pub(crate) seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
+    /// Seed used to generate c1 polynomials.
+    pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
 
-    /// The key switching elements c0.
-    pub(crate) c0: Box<[Poly]>,
+    /// Key switching elements c0.
+    pub c0: Box<[Poly]>,
 
-    /// The key switching elements c1.
-    pub(crate) c1: Box<[Poly]>,
+    /// Key switching elements c1.
+    pub c1: Box<[Poly]>,
 
-    /// The level and context of the polynomials that will be key switched.
-    pub(crate) ciphertext_level: usize,
-    pub(crate) ctx_ciphertext: Arc<Context>,
+    /// Max level and context of polynomials that can be key switched. This
+    /// defines the decomposition basis of the key switching key.
+    pub ciphertext_level: usize,
 
-    /// The level and context of the key switching key.
-    pub(crate) ksk_level: usize,
-    pub(crate) ctx_ksk: Arc<Context>,
+    /// Context of the ciphertext being key switched.
+    pub ctx_ciphertext: Arc<Context>,
 
-    // For level with only one modulus, we will use basis
-    pub(crate) log_base: usize,
+    /// Level and context of the key switching key polynomials. These can be
+    /// mod switched down to be multiplied during keyswitching with a ciphertext
+    /// that is of a different level.
+    pub ksk_level: usize,
+
+    /// Context of the key switching key polynomials.
+    pub ctx_ksk: Arc<Context>,
+
+    /// For level with only one modulus, we will use basis.
+    pub log_base: usize,
 }
 
 impl KeySwitchingKey {
     /// Generate a [`KeySwitchingKey`] to this [`SecretKey`] from a polynomial
-    /// `from`.
+    /// `from` using a random seed for generating c1 values.
     pub fn new<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         from: &Poly,
+        ciphertext_level: usize,
+        ksk_level: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut seed);
+
+        Self::new_with_seed(sk, from, seed, ciphertext_level, ksk_level, rng)
+    }
+
+    /// Generate a [`KeySwitchingKey`] with a provided seed for generating c1
+    /// values
+    pub fn new_with_seed<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        from: &Poly,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
         ciphertext_level: usize,
         ksk_level: usize,
         rng: &mut R,
@@ -64,9 +87,6 @@ impl KeySwitchingKey {
                 "Incorrect context for polynomial from".to_string(),
             ));
         }
-
-        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        rng.fill(&mut seed);
 
         if ctx_ksk.moduli().len() == 1 {
             let modulus = ctx_ksk.moduli().first().unwrap();
@@ -105,7 +125,12 @@ impl KeySwitchingKey {
         }
     }
 
-    /// Generate the c1's from the seed
+    /// Generate the c1's from the seed. The context is used to define the
+    /// number of RNS moduli that the polynomials are represented by. When key
+    /// switching, there is a multiplication between the decomposed polynomial
+    /// for each RNS modulus up to 'size' and the c1's which occurs between
+    /// polynomials. These polynomials should be of the same context even
+    /// though the decomposition 'size' may be different.
     fn generate_c1(
         ctx: &Arc<Context>,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
@@ -141,15 +166,22 @@ impl KeySwitchingKey {
     /// - g_i is the RNS basis conversion factor (q̃_i · q*_i) for the current
     ///   modulus q_i
     ///
+    /// The size of the KS_0 vector is the same as the number of RNS moduli in
+    /// the ciphertext context, meaning polynomials, when they are key switched,
+    /// are decomposed by each modulus in the ciphertext context. This key
+    /// already has the basis of the decomposition that the deocmposed
+    /// polynomials then dot-product with to perform the key switching.
+    ///
     /// Each element of KS_0 therefore corresponds to operations performed in
     /// RNS, with its own error polynomial e_i and random polynomial a_i,
     /// resulting in a collection of RNS polynomials that form the complete
-    /// KS_0 component.
+    /// KS_0 component. Each element of KS_0 is a polynomial with context equal
+    /// to the key switching key context.
     ///
     /// # Arguments
     ///
     /// * `sk` - The secret key
-    /// * `from` - The polynomial to be switched (in RNS representation)
+    /// * `from` - The original key to switch from (in RNS representation).
     /// * `c1` - The KS_1 polynomials (containing a_i for i in 0..k-1)
     /// * `rng` - Random number generator
     ///
@@ -178,8 +210,6 @@ impl KeySwitchingKey {
             ));
         }
 
-        let size = c1.len();
-
         let mut s = Zeroizing::new(Poly::try_convert_from(
             sk.coeffs.as_ref(),
             c1[0].ctx(),
@@ -188,7 +218,9 @@ impl KeySwitchingKey {
         )?);
         s.change_representation(Representation::Ntt);
 
-        let rns = RnsContext::new(&sk.par.moduli[..size])?;
+        // Up to size because that is the decomposition basis set by c1. We only need
+        // the garner coefficients for the moduli we are using (g₁, ..., g_size).
+        let rns = RnsContext::new(&sk.par.moduli[..c1.len()])?;
 
         // For each of the RNS moduli qi, we compute the following:
         // a_s = a*s
@@ -233,7 +265,8 @@ impl KeySwitchingKey {
         Ok(c0)
     }
 
-    /// Generate the c0's from the c1's and the secret key
+    /// Generate the c0's from the c1's, the secret key, and the 'from' secret
+    /// key polynomial.
     fn generate_c0_decomposition<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         from: &Poly,
@@ -327,7 +360,7 @@ impl KeySwitchingKey {
 
         if p.ctx().as_ref() != self.ctx_ciphertext.as_ref() {
             return Err(Error::DefaultError(
-                "The input polynomial does not have the correct context.".to_string(),
+                "The input polynomial does not have the correct context. Its RNS representation needs to match that of the key switching key decomposition context, or in other words, the key switching key ciphertext context.".to_string(),
             ));
         }
         if p.representation() != &Representation::PowerBasis {
@@ -350,7 +383,8 @@ impl KeySwitchingKey {
                 )
             };
             c0 += &(&c2_i * c0_i);
-            c2_i *= c1_i;
+
+            c2_i *= c1_i; // Re-uses memory, is faster
             c1 += &c2_i;
         }
         Ok((c0, c1))
@@ -635,6 +669,32 @@ mod tests {
             let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
             let ksk_proto = KeySwitchingKeyProto::from(&ksk);
             assert_eq!(ksk, KeySwitchingKey::try_convert_from(&ksk_proto, &params)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compare_constructors() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        for params in [BfvParameters::default_arc(6, 8)] {
+            let sk = SecretKey::random(&params, &mut rng);
+            let ctx = params.ctx_at_level(0)?;
+            let p = Poly::small(ctx, Representation::PowerBasis, 10, &mut rng)?;
+
+            // Create first key with new()
+            let ksk1 = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
+
+            // Get the seed from the first key
+            let seed = ksk1.seed.expect("Key should have a seed");
+
+            // Create second key with new_with_seed() using the same seed
+            let ksk2 = KeySwitchingKey::new_with_seed(&sk, &p, seed, 0, 0, &mut rng)?;
+
+            // Compare c1 values
+            assert_eq!(ksk1.c1.len(), ksk2.c1.len());
+            for (c1_1, c1_2) in ksk1.c1.iter().zip(ksk2.c1.iter()) {
+                assert_eq!(c1_1, c1_2);
+            }
         }
         Ok(())
     }

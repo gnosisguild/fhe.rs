@@ -7,11 +7,12 @@
 #[cfg(test)]
 extern crate proptest;
 
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng, RngCore};
 
 use num_bigint_dig::{prime::probably_prime, BigUint, ModInverse};
 use num_traits::{cast::ToPrimitive, PrimInt};
 use prime_factorization::Factorization;
+use rand_distr::{Distribution, Normal};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use std::{error::Error, fmt, panic::UnwindSafe};
 
@@ -50,7 +51,7 @@ impl fmt::Display for FactorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FactorError::EmptyInput => write!(f, "No input provided"),
-            FactorError::NoFactorsFound(m) => write!(f, "No factors found for {}", m),
+            FactorError::NoFactorsFound(m) => write!(f, "No factors found for {m}"),
             FactorError::NoResult => write!(f, "Unable to determine smallest factor"),
         }
     }
@@ -153,6 +154,24 @@ pub fn sample_vec_cbd<R: RngCore + CryptoRng>(
         );
         current_pool >>= number_bits;
         current_pool_nbits -= number_bits;
+    }
+
+    Ok(out)
+}
+
+/// Sample a vector of normal distributions of a given variance.
+pub fn sample_vec_normal<R: Rng + CryptoRng>(
+    vector_size: usize,
+    variance: usize,
+    rng: &mut R,
+) -> Result<Vec<i64>, &'static str> {
+    // convert variance to standard deviation
+    let standard_deviation = (variance as f64).sqrt();
+    let mut out = Vec::with_capacity(vector_size);
+    let normal = Normal::new(0.0, standard_deviation).unwrap();
+    for _ in 0..vector_size {
+        let sample = normal.sample(rng);
+        out.push(sample as i64); // Store the sampled value in the output vector
     }
 
     Ok(out)

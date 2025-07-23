@@ -21,8 +21,8 @@
 
 use std::sync::Arc;
 
-use super::key_switching_key::KeySwitchingKey;
-use crate::bfv::{traits::TryConvertFrom, BfvParameters, Ciphertext, SecretKey};
+use crate::bfv::traits::TryConvertFrom;
+use crate::bfv::{BfvParameters, Ciphertext, KeySwitchingKey, SecretKey};
 use crate::proto::bfv::{
     KeySwitchingKey as KeySwitchingKeyProto, RelinearizationKey as RelinearizationKeyProto,
 };
@@ -47,13 +47,20 @@ use zeroize::Zeroizing;
 /// homomorphic multiplication operations.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct RelinearizationKey {
-    pub(crate) ksk: KeySwitchingKey,
+    /// The key switching key that transforms a ciphertext encrypted under s² to
+    /// a ciphertext encrypted under s.
+    ksk: KeySwitchingKey,
 }
 
 impl RelinearizationKey {
     /// Generate a [`RelinearizationKey`] from a [`SecretKey`].
     pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
         Self::new_leveled_internal(sk, 0, 0, rng)
+    }
+
+    /// Generate a [`RelinearizationKey`] from a [`KeySwitchingKey`].
+    pub fn new_from_ksk(ksk: KeySwitchingKey) -> Self {
+        Self { ksk }
     }
 
     /// Generate a [`RelinearizationKey`] from a [`SecretKey`].
@@ -183,6 +190,21 @@ impl RelinearizationKey {
         }
     }
 
+    /// Get the parameters of the relinearization key
+    pub fn parameters(&self) -> Arc<BfvParameters> {
+        self.ksk.par.clone()
+    }
+
+    /// Get the ciphertext level of the relinearization key
+    pub fn ciphertext_level(&self) -> usize {
+        self.ksk.ciphertext_level
+    }
+
+    /// Get the key level of the relinearization key
+    pub fn key_level(&self) -> usize {
+        self.ksk.ksk_level
+    }
+
     /// Same operation as [`relinearizes`] but for relinearizing a polynomial
     /// rather than a full ciphertext. Takes a polynomial representing c₂
     /// and returns the relinearized components (d₀, d₁) = c₂·s², encrypted
@@ -194,7 +216,7 @@ impl RelinearizationKey {
     /// # Returns
     /// * `Ok((d₀, d₁))` - The relinearized components encrypted under s
     /// * `Err` if the key switching operation fails
-    pub(crate) fn relinearizes_poly(&self, c2: &Poly) -> Result<(Poly, Poly)> {
+    pub fn relinearizes_poly(&self, c2: &Poly) -> Result<(Poly, Poly)> {
         self.ksk.key_switch(c2)
     }
 }
