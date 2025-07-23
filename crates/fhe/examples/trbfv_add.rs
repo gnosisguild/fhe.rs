@@ -8,12 +8,14 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
-    trbfv::TrBFVShare,
+    trbfv::{ShareManager, TRBFV},
 };
+
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
+use rayon::prelude::*;
 use util::timeit::{timeit, timeit_n};
 
 fn print_notice_and_exit(error: Option<String>) {
@@ -40,9 +42,13 @@ fn print_notice_and_exit(error: Option<String>) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Parameters
-    let degree = 2048;
-    let plaintext_modulus: u64 = 4096;
-    let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
+    let degree = 8192;
+    let plaintext_modulus: u64 = 16384;
+    let moduli = vec![
+        0x1FFFFFFEA0001, // 562949951979521
+        0x1FFFFFFE88001, // 562949951881217
+        0x1FFFFFFE48001, // 562949951619073
+    ];
 
     // This executable is a command line tool which enables to specify
     // trBFV summations with party and threshold sizes.
@@ -53,7 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 1;
+    let mut num_summed = 1000;
     let mut num_parties = 10;
     let mut threshold = 7;
 
@@ -126,46 +132,68 @@ fn main() -> Result<(), Box<dyn Error>> {
         es_poly_sum: Poly,
         d_share_poly: Poly,
     }
-    let mut parties = Vec::with_capacity(num_parties);
 
     // Generate a common reference poly for public key generation.
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
     // Setup trBFV module
-    let mut trbfv = TrBFVShare::new(
-        num_parties,
-        threshold,
-        degree,
-        plaintext_modulus,
-        160,
-        moduli.clone(),
-        params.clone(),
-    )
-    .unwrap();
+    let mut trbfv = TRBFV::new(num_parties, threshold, params.clone()).unwrap();
 
-    // Set up shares for each party.
-    timeit_n!("Party setup (per party)", num_parties as u32, {
-        let sk_share = SecretKey::random(&params, &mut OsRng);
-        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng())?;
-        let sk_sss = trbfv.generate_secret_shares(sk_share.coeffs.clone())?;
-        let esi_coeffs = trbfv.generate_smudging_error(&mut OsRng)?;
-        let esi_sss = trbfv.generate_secret_shares(esi_coeffs.into_boxed_slice())?;
-        // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
-        let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-        let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-        let sk_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        let es_poly_sum = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        let d_share_poly = Poly::zero(&params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-        parties.push(Party {
-            pk_share,
-            sk_sss,
-            esi_sss,
-            sk_sss_collected,
-            es_sss_collected,
-            sk_poly_sum,
-            es_poly_sum,
-            d_share_poly,
-        });
+    // Set up shares for each party in parallel
+    println!("💻 Available CPU cores: {}", rayon::current_num_threads());
+    let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
+        (0..num_parties)
+            .into_par_iter()
+            .map(|_| {
+                // Each thread gets its own RNG to avoid contention
+                let mut rng = OsRng;
+                let mut thread_rng = thread_rng();
+
+                let sk_share = SecretKey::random(&params, &mut rng);
+                let pk_share =
+                    PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng).unwrap();
+
+                let mut share_manager = ShareManager::new(num_parties, threshold, params.clone());
+                let sk_poly = share_manager
+                    .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
+                    .unwrap();
+
+                // Clone trbfv for thread safety (it's cheap since it's just config)
+                let mut temp_trbfv = trbfv.clone();
+                let sk_sss = temp_trbfv
+                    .generate_secret_shares_from_poly(sk_poly)
+                    .unwrap();
+
+                // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
+                let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
+                let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
+                let sk_poly_sum =
+                    Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+                let es_poly_sum =
+                    Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+                let d_share_poly =
+                    Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+
+                let esi_coeffs = temp_trbfv
+                    .generate_smudging_error(num_summed, &mut rng)
+                    .unwrap();
+                let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
+                let esi_sss = share_manager
+                    .generate_secret_shares_from_poly(esi_poly)
+                    .unwrap();
+
+                Party {
+                    pk_share,
+                    sk_sss,
+                    esi_sss,
+                    sk_sss_collected,
+                    es_sss_collected,
+                    sk_poly_sum,
+                    es_poly_sum,
+                    d_share_poly,
+                }
+            })
+            .collect()
     });
 
     // Swap shares mocking network comms, party 1 sends share 2 to party 2 etc.
@@ -175,9 +203,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         num_parties as u32,
         {
             for j in 0..num_parties {
-                let mut node_share_m = Array::zeros((0, 2048));
-                let mut es_node_share_m = Array::zeros((0, 2048));
-                for m in 0..moduli.len() {
+                let mut node_share_m = Array::zeros((0, degree));
+                let mut es_node_share_m = Array::zeros((0, degree));
+                for m in 0..params.moduli().len() {
                     node_share_m
                         .push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).clone()))
                         .unwrap();
@@ -192,12 +220,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     );
 
-    i = 0;
-    // For each party, convert shares to polys and sum the collected shares.
-    timeit_n!("Sum collected shares (per party)", num_parties as u32, {
-        parties[i].sk_poly_sum = trbfv.sum_sk_i(&parties[i].sk_sss_collected).unwrap();
-        parties[i].es_poly_sum = trbfv.sum_sk_i(&parties[i].es_sss_collected).unwrap();
-        i += 1;
+    timeit!("Sum collected shares (parallel)", {
+        parties.par_iter_mut().for_each(|party| {
+            let mut temp_trbfv = trbfv.clone();
+            party.sk_poly_sum = temp_trbfv
+                .aggregate_collected_shares(&party.sk_sss_collected)
+                .unwrap();
+            party.es_poly_sum = temp_trbfv
+                .aggregate_collected_shares(&party.es_sss_collected)
+                .unwrap();
+        });
     });
 
     // Aggregation: same as previous mbfv aggregations
@@ -212,14 +244,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         .sample_iter(&mut thread_rng())
         .take(num_summed)
         .collect();
-    let mut numbers_encrypted = Vec::with_capacity(num_summed);
-    let mut _i = 0;
-    timeit_n!("Encrypting Numbers (per encryption)", num_summed as u32, {
-        #[allow(unused_assignments)]
-        let pt = Plaintext::try_encode(&[numbers[_i]], Encoding::poly(), &params)?;
-        let ct = pk.try_encrypt(&pt, &mut thread_rng())?;
-        numbers_encrypted.push(ct);
-        _i += 1;
+
+    let numbers_encrypted: Vec<Ciphertext> = timeit!("Encrypting Numbers (parallel)", {
+        numbers
+            .par_iter()
+            .map(|&number| {
+                let mut rng = thread_rng();
+                let pt = Plaintext::try_encode(&[number], Encoding::poly(), &params).unwrap();
+                pk.try_encrypt(&pt, &mut rng).unwrap()
+            })
+            .collect()
     });
 
     // calculation
@@ -231,34 +265,37 @@ fn main() -> Result<(), Box<dyn Error>> {
         Arc::new(sum)
     });
 
-    // decrypt
-    i = 0;
-    timeit_n!("Generate Decrypt Share (per party)", num_parties as u32, {
-        parties[i].d_share_poly = trbfv
-            .decryption_share(
-                tally.clone(),
-                parties[i].sk_poly_sum.clone(),
-                parties[i].es_poly_sum.clone(),
-            )
-            .unwrap();
-        i += 1;
+    timeit!("Generate Decrypt Share (parallel)", {
+        parties.par_iter_mut().for_each(|party| {
+            party.d_share_poly = trbfv
+                .clone()
+                .decryption_share(
+                    tally.clone(),
+                    party.sk_poly_sum.clone(),
+                    party.es_poly_sum.clone(),
+                )
+                .unwrap();
+        });
     });
 
     // gather d_share_polys
     let mut d_share_polys: Vec<Poly> = Vec::new();
-    for i in 0..threshold {
-        d_share_polys.push(parties[i].d_share_poly.clone());
+    for party in parties.iter().take(threshold) {
+        d_share_polys.push(party.d_share_poly.clone());
     }
 
     // decrypt result
-    let open_results = trbfv.decrypt(d_share_polys, tally.clone()).unwrap();
-    let result_vec = Vec::<u64>::try_decode(&open_results, Encoding::poly())?;
-    let result = result_vec[0];
+    let (_open_results, result) = timeit!("Threshold decrypt (combine shares)", {
+        let open_results = trbfv.decrypt(d_share_polys, tally.clone()).unwrap();
+        let result_vec = Vec::<u64>::try_decode(&open_results, Encoding::poly())?;
+        let result = result_vec[0];
+        (open_results, result)
+    });
 
     // Show summation result
-    println!("Sum result = {} / {}", result, num_summed);
-
+    println!("Sum result = {result} / {num_summed}");
     let expected_result = numbers.iter().sum();
+    println!("Expected result = {expected_result} / {num_summed}");
     assert_eq!(result, expected_result);
 
     Ok(())

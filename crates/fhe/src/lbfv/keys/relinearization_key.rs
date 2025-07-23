@@ -172,7 +172,7 @@ impl LBFVRelinearizationKey {
     /// # Returns
     /// * `Ok(usize)` - The number of ciphertexts in the public key
     /// * `Err` if the number of moduli in the ciphertext context is not equal
-    /// to the number of polynomials in `b_vec`, which should be equal to "l".
+    ///   to the number of polynomials in `b_vec`, which should be equal to "l".
     pub fn l(&self) -> Result<usize> {
         if self.ksk_r_to_s.par.max_level() + 1 - self.ciphertext_level() != self.b_vec.len() {
             return Err(Error::DefaultError("'l' is not consistent.".to_string()));
@@ -264,7 +264,7 @@ impl LBFVRelinearizationKey {
     ///
     /// # Returns
     /// * `usize` - The ciphertext level of the relinearization key which is the same
-    /// as the ciphertext level of the key switching key.
+    ///   as the ciphertext level of the key switching key.
     pub fn ciphertext_level(&self) -> usize {
         self.ksk_r_to_s.ciphertext_level
     }
@@ -273,7 +273,7 @@ impl LBFVRelinearizationKey {
     ///
     /// # Returns
     /// * `Arc<Context>` - The ciphertext context of the relinearization key which is the same
-    /// as the ciphertext context of the key switching key.
+    ///   as the ciphertext context of the key switching key.
     pub fn ciphertext_ctx(&self) -> Arc<Context> {
         self.ksk_r_to_s.ctx_ciphertext.clone()
     }
@@ -282,7 +282,7 @@ impl LBFVRelinearizationKey {
     ///
     /// # Returns
     /// * `usize` - The key level of the relinearization key which is the same
-    /// as the key level of the key switching key.
+    ///   as the key level of the key switching key.
     pub fn key_level(&self) -> usize {
         self.ksk_r_to_s.ksk_level
     }
@@ -291,7 +291,7 @@ impl LBFVRelinearizationKey {
     ///
     /// # Returns
     /// * `Arc<Context>` - The key context of the relinearization key which is the same
-    /// as the key context of the key switching key.
+    ///   as the key context of the key switching key.
     pub fn key_ctx(&self) -> Arc<Context> {
         self.ksk_r_to_s.ctx_ksk.clone()
     }
@@ -300,7 +300,7 @@ impl LBFVRelinearizationKey {
     ///
     /// # Returns
     /// * `Arc<BfvParameters>` - The BFV parameters of the relinearization key which is the same
-    /// as the BFV parameters of the key switching key.
+    ///   as the BFV parameters of the key switching key.
     pub fn parameters(&self) -> Arc<BfvParameters> {
         self.ksk_r_to_s.par.clone()
     }

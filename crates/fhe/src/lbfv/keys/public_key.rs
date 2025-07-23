@@ -179,10 +179,7 @@ impl LBFVPublicKey {
         for i in 0..new_l {
             let mut poly = self.c[i].c[0].clone();
             if poly.ctx() != key_ctx {
-                println!(
-                    "Switching from level {} to level {}",
-                    ciphertext_level, key_level
-                );
+                println!("Switching from level {ciphertext_level} to level {key_level}");
                 poly.change_representation(Representation::PowerBasis);
                 poly = poly.mod_switch_to(&switcher)?;
             }

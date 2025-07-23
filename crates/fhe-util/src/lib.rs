@@ -51,7 +51,7 @@ impl fmt::Display for FactorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FactorError::EmptyInput => write!(f, "No input provided"),
-            FactorError::NoFactorsFound(m) => write!(f, "No factors found for {}", m),
+            FactorError::NoFactorsFound(m) => write!(f, "No factors found for {m}"),
             FactorError::NoResult => write!(f, "Unable to determine smallest factor"),
         }
     }
