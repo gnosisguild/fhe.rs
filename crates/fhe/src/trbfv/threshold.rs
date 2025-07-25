@@ -9,8 +9,8 @@ use std::sync::Arc;
 ///
 /// Threshold BFV enables distributed decryption where:
 /// - Secret keys are shared among n parties using secret sharing
-/// - Only t parties (threshold) are needed to decrypt
-/// - Up to t-1 parties can be compromised without breaking security
+/// - Only t+1 parties (threshold) are needed to decrypt
+/// - Up to t parties can be compromised without breaking security
 /// - Smudging noise protects intermediate values during decryption
 ///
 /// # Protocol Flow
@@ -43,7 +43,7 @@ use zeroize::Zeroizing;
 pub struct TRBFV {
     /// Number of parties in the threshold scheme
     pub n: usize,
-    /// Threshold for reconstruction (must be < n and > 0)
+    /// Threshold for reconstruction (must be <= (n-1)/2)
     pub threshold: usize,
     /// BFV parameters (contains degree, plaintext_modulus, moduli, etc.)
     pub params: Arc<BfvParameters>,
@@ -54,7 +54,7 @@ impl TRBFV {
     ///
     /// # Arguments
     /// * `n` - Number of parties (must be > 0)
-    /// * `threshold` - Threshold for reconstruction (must be < n and > 0)
+    /// * `threshold` - Threshold for reconstruction (must be <= (n-1)/2)
     /// * `params` - BFV parameters
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
         // Validate all parameters
@@ -196,7 +196,7 @@ mod tests {
     #[allow(unused_mut)]
     fn test_trbfv_new() {
         let n: usize = 16;
-        let threshold = 9;
+        let threshold = 7;
         let params = test_params();
 
         let mut trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
@@ -212,12 +212,10 @@ mod tests {
         // Test invalid n = 0
         assert!(TRBFV::new(0, 3, params.clone()).is_err());
 
-        // Test invalid threshold >= n
+        // Test invalid threshold > (n-1)/2
+        assert!(TRBFV::new(3, 2, params.clone()).is_err());
         assert!(TRBFV::new(3, 3, params.clone()).is_err());
         assert!(TRBFV::new(3, 4, params.clone()).is_err());
-
-        // Test threshold = 0
-        assert!(TRBFV::new(5, 0, params.clone()).is_err());
     }
 
     #[test]
@@ -225,7 +223,7 @@ mod tests {
     fn test_secret_sharing_integration() {
         let mut rng = thread_rng();
         let n: usize = 5;
-        let threshold = 3;
+        let threshold = 2;
         let params = test_params();
 
         let mut trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
@@ -250,7 +248,7 @@ mod tests {
     fn test_smudging_error_generation() {
         let params = test_params();
         let n = 3;
-        let threshold = 2;
+        let threshold = 1;
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         let result = trbfv.generate_smudging_error(1, &mut OsRng);
@@ -261,7 +259,7 @@ mod tests {
     fn test_smudging_error_multiple_ciphertexts() {
         let params = test_params();
         let n = 3;
-        let threshold = 2;
+        let threshold = 1;
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         // Test with multiple ciphertexts (this should increase the bound requirements)
@@ -274,7 +272,7 @@ mod tests {
         let mut rng = thread_rng();
         let params = test_params();
         let n = 3;
-        let threshold = 2;
+        let threshold = 1;
         let mut trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         // Create a test ciphertext
@@ -305,7 +303,7 @@ mod tests {
         let mut rng = OsRng;
         let params = test_params();
         let n = 3;
-        let threshold = 2;
+        let threshold = 1;
 
         // Create multiple TRBFV instances (simulating parties)
         let mut trbfv_instances: Vec<TRBFV> = (0..n)
@@ -325,7 +323,7 @@ mod tests {
 
         // Each party generates decryption shares
         let mut decryption_shares = Vec::new();
-        for i in 0..threshold {
+        for i in 0..(threshold+1) {
             let share_manager = ShareManager::new(n, threshold, params.clone());
             let sk_poly = share_manager
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
@@ -347,7 +345,7 @@ mod tests {
     #[test]
     fn test_fhe_parametrized_trait() {
         let params = test_params();
-        let trbfv = TRBFV::new(3, 2, params.clone()).unwrap();
+        let trbfv = TRBFV::new(3, 1, params.clone()).unwrap();
 
         // Test basic struct properties instead
         assert_eq!(trbfv.params, params);
@@ -356,7 +354,7 @@ mod tests {
     #[test]
     fn test_clone_and_debug() {
         let params = test_params();
-        let trbfv1 = TRBFV::new(5, 3, params.clone()).unwrap();
+        let trbfv1 = TRBFV::new(5, 2, params.clone()).unwrap();
 
         // Test Clone
         let trbfv2 = trbfv1.clone();
@@ -375,15 +373,15 @@ mod tests {
     fn test_edge_case_minimal_threshold() {
         let params = test_params();
 
-        // Minimal valid configuration: 2 parties, threshold 1
-        let mut trbfv = TRBFV::new(2, 1, params.clone()).unwrap();
-        assert_eq!(trbfv.n, 2);
+        // Minimal valid configuration: 3 parties, threshold 1
+        let mut trbfv = TRBFV::new(3, 1, params.clone()).unwrap();
+        assert_eq!(trbfv.n, 3);
         assert_eq!(trbfv.threshold, 1);
 
         // Test that basic operations work
         let mut rng = thread_rng();
         let sk = SecretKey::random(&params, &mut rng);
-        let share_manager = ShareManager::new(2, 1, params.clone());
+        let share_manager = ShareManager::new(3, 1, params.clone());
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();

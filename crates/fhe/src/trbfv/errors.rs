@@ -17,7 +17,7 @@ impl Error {
     /// Create a threshold too large error.
     pub fn threshold_too_large(threshold: usize, n: usize) -> Self {
         Error::UnspecifiedInput(format!(
-            "Threshold {threshold} must be less than number of parties {n}"
+            "Threshold {threshold} must be strictly less than half the number of parties {n}"
         ))
     }
 
@@ -92,7 +92,7 @@ mod tests {
         let error = Error::threshold_too_large(5, 3);
         assert_eq!(
             error.to_string(),
-            "Threshold 5 must be less than number of parties 3"
+            "Threshold 5 must be strictly less than half the number of parties 3"
         );
 
         let error = Error::inconsistent_degree(2048, 1024);

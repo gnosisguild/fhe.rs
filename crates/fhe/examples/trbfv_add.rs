@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut num_summed = 1000;
     let mut num_parties = 10;
-    let mut threshold = 7;
+    let mut threshold = 4;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.
@@ -92,14 +92,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if num_summed == 0 || num_parties == 0 || threshold == 0 {
+    if num_summed == 0 || num_parties == 0 {
         print_notice_and_exit(Some(
             "Users, threshold, and party sizes must be nonzero".to_string(),
         ))
     }
-    if threshold >= num_parties {
+    if threshold > (num_parties - 1)/2 {
         print_notice_and_exit(Some(
-            "Threshold must be less than number of parties".to_string(),
+            "Threshold must be strictly less than half the number of parties".to_string(),
         ))
     }
 

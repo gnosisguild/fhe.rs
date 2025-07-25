@@ -26,7 +26,7 @@ use rayon::prelude::*;
 /// use num_bigint::Sign::*;
 /// fn main() {
 /// let sss = SSS {
-///     threshold: 3,
+///     threshold: 2,
 ///     share_amount: 5,
 ///     prime: BigInt::parse_bytes(b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",16).unwrap()
 ///     };
@@ -36,12 +36,12 @@ use rayon::prelude::*;
 /// let shares = sss.split(secret.clone());
 ///
 /// println!("shares: {:?}", shares);
-/// assert_eq!(secret, sss.recover(&shares[0..sss.threshold as usize]));
+/// assert_eq!(secret, sss.recover(&shares[0..sss.threshold +1]));
 /// }
 ///
 #[derive(Debug)]
 pub struct ShamirSecretSharing {
-    /// Threshold for reconstruction (minimum number of shares needed)
+    /// Threshold for reconstruction (minimum number of shares needed is threshold + 1)
     pub threshold: usize,
     /// Number of parties in the threshold scheme
     pub share_amount: usize,
@@ -84,7 +84,7 @@ impl ShamirSecretSharing {
     ///
     /// Panics if `threshold` is greater than or equal to `share_amount`.
     pub fn split(&self, secret: BigInt) -> Vec<(usize, BigInt)> {
-        assert!(self.threshold < self.share_amount);
+        assert!(self.threshold <= (self.share_amount - 1)/2);
         let polynomial = self.sample_polynomial(secret);
         // println!("polynomial: {:?}", polynomial);
         self.evaluate_polynomial(polynomial)
@@ -95,7 +95,7 @@ impl ShamirSecretSharing {
         let low = BigInt::from(0);
         let high = &self.prime - BigInt::from(1);
 
-        let random_coefficients: Vec<BigInt> = (0..(self.threshold - 1))
+        let random_coefficients: Vec<BigInt> = (0..(self.threshold))
             .into_par_iter()
             .map(|_| {
                 let mut rng = rand::thread_rng();
@@ -132,9 +132,9 @@ impl ShamirSecretSharing {
     ///
     /// # Panics
     ///
-    /// Panics if the number of shares provided is not equal to the threshold.
+    /// Panics if the number of shares provided is not equal to the threshold + one.
     pub fn recover(&self, shares: &[(usize, BigInt)]) -> BigInt {
-        assert!(shares.len() == self.threshold, "wrong shares number");
+        assert!(shares.len() == (self.threshold + 1), "wrong shares number");
         let (xs, ys): (Vec<usize>, Vec<BigInt>) = shares.iter().cloned().unzip();
         let result = self.lagrange_interpolation(Zero::zero(), xs, ys);
         if result < Zero::zero() {
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn test_wikipedia_example() {
         let sss = ShamirSecretSharing {
-            threshold: 3,
+            threshold: 2,
             share_amount: 6,
             prime: BigInt::from(1613),
         };
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn test_large_prime() {
         let sss = ShamirSecretSharing {
-            threshold: 3,
+            threshold: 2,
             share_amount: 5,
             // prime: BigInt::from(6999213259363483493573619703 as i128),
             prime: BigInt::parse_bytes(
@@ -273,6 +273,6 @@ mod tests {
         };
         let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
         let shares = sss.split(secret.clone());
-        assert_eq!(secret, sss.recover(&shares[0..sss.threshold]));
+        assert_eq!(secret, sss.recover(&shares[0..sss.threshold + 1]));
     }
 }

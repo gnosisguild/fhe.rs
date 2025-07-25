@@ -258,10 +258,10 @@ impl ShareManager {
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
         // Validate we have enough shares
-        if d_share_polys.len() < self.threshold {
+        if d_share_polys.len() < (self.threshold + 1){
             return Err(Error::insufficient_shares(
                 d_share_polys.len(),
-                self.threshold,
+                self.threshold + 1,
             ));
         }
         let m_data: Vec<u64> = (0..self.params.moduli().len())
@@ -280,7 +280,7 @@ impl ShareManager {
                         let mut shamir_open_vec_mod: Vec<(usize, BigInt)> =
                             Vec::with_capacity(self.params.degree());
                         for (j, d_share_poly) in
-                            d_share_polys.iter().enumerate().take(self.threshold)
+                            d_share_polys.iter().enumerate().take(self.threshold + 1)
                         {
                             let coeffs = d_share_poly.coefficients();
                             let coeff_arr = coeffs.row(m);
@@ -289,7 +289,7 @@ impl ShareManager {
                             shamir_open_vec_mod.push(coeff_formatted);
                         }
                         let shamir_result =
-                            shamir_ss.recover(&shamir_open_vec_mod[0..self.threshold]);
+                            shamir_ss.recover(&shamir_open_vec_mod[0..self.threshold + 1]);
                         shamir_result.to_u64().unwrap()
                     })
                     .collect::<Vec<u64>>()
@@ -381,16 +381,16 @@ mod tests {
     #[test]
     fn test_share_manager_creation() {
         let params = test_params();
-        let manager = ShareManager::new(5, 3, params.clone());
+        let manager = ShareManager::new(5, 2, params.clone());
         assert_eq!(manager.n, 5);
-        assert_eq!(manager.threshold, 3);
+        assert_eq!(manager.threshold, 2);
         assert_eq!(manager.params, params);
     }
 
     #[test]
     fn test_coeffs_to_poly_utility() {
         let params = test_params();
-        let manager = ShareManager::new(5, 3, params.clone());
+        let manager = ShareManager::new(5, 2, params.clone());
 
         // Test with i64 coefficients
         let coeffs = vec![1i64, 2, 3, 4].into_boxed_slice();
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn test_bigints_to_poly_wrong_size() {
         let params = test_params();
-        let manager = ShareManager::new(5, 3, params.clone());
+        let manager = ShareManager::new(5, 2, params.clone());
 
         // Wrong number of coefficients
         let bigints = vec![BigInt::from(1), BigInt::from(2)]; // Too few
@@ -434,7 +434,7 @@ mod tests {
         let mut rng = thread_rng();
         let params = test_params();
         let n = 3;
-        let threshold = 2;
+        let threshold = 1;
         let mut manager = ShareManager::new(n, threshold, params.clone());
 
         // Setup: Generate keys and encrypt a plaintext
@@ -463,7 +463,7 @@ mod tests {
         let mut rng = OsRng;
         let params = test_params();
         let n = 3;
-        let threshold = 2;
+        let threshold = 1;
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
@@ -483,7 +483,7 @@ mod tests {
 
         // Each party generates their decryption share
         let mut decryption_shares = Vec::new();
-        for i in 0..threshold {
+        for i in 0..(threshold+1) {
             let sk_poly = managers[i]
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
                 .unwrap();
@@ -497,7 +497,7 @@ mod tests {
         }
 
         // Verify we have enough shares
-        assert_eq!(decryption_shares.len(), threshold);
+        assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares
         let result = managers[0].decrypt_from_shares(decryption_shares, ct);
