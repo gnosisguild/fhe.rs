@@ -105,13 +105,11 @@ impl TRBFV {
 
     /// Generate smudging error coefficients for noise.
     ///
-    /// Creates noise that will be added to decryption shares to protect privacy.
+    /// Creates noise that will be added to decryption shares.
     /// Uses optimal variance calculation based on security parameters and number of ciphertexts.
     ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed (e.g., votes to count, numbers to sum)
-    /// * `public_key_errors` - Public key error polynomials for variance calculation
-    /// * `secret_keys` - Secret key polynomials for variance calculation
     /// * `rng` - Cryptographically secure random number generator
     ///
     /// # Returns
@@ -185,9 +183,9 @@ mod tests {
 
     fn test_params() -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
-            .set_degree(2048)
-            .set_plaintext_modulus(4096)
-            .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
+            .set_degree(8192)
+            .set_plaintext_modulus(16384)
+            .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
             .build_arc()
             .unwrap()
     }

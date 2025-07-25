@@ -7,7 +7,7 @@
 /// Key features:
 /// - Arbitrary precision variance calculation using BigUint
 /// - Efficient noise generation using standard uniform sampling
-/// - Security parameter λ = 80 with configurable circuit depth
+/// - Statistical Security parameter λ = 80 with configurable circuit depth
 /// - No precision loss in calculations while maintaining performance
 use crate::bfv::BfvParameters;
 //use crate::trbfv::normal::sample_bigint_normal_vec;
@@ -36,7 +36,7 @@ pub struct SmudgingBoundCalculatorConfig {
     pub public_key_error: u64,
     /// Secret key poly for infinity norm calculation
     pub secret_key_bound: u64,
-    /// Security parameter (fixed: 80)
+    /// Statistical Security parameter (fixed: 80)
     pub lambda: usize,
 }
 
@@ -57,8 +57,8 @@ impl SmudgingBoundCalculatorConfig {
             b_enc: 19,
             b_e: 19,
             public_key_error: 19,
-            secret_key_bound: n as u64,
-            lambda: 71,
+            secret_key_bound: (n * 19) as u64,
+            lambda: 80,
         }
     }
 }
@@ -227,9 +227,9 @@ mod tests {
 
     fn test_params() -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
-            .set_degree(2048)
-            .set_plaintext_modulus(4096)
-            .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
+            .set_degree(8192)
+            .set_plaintext_modulus(16384)
+            .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
             .build_arc()
             .unwrap()
     }
@@ -245,8 +245,8 @@ mod tests {
         assert_eq!(config.b_enc, 19);
         assert_eq!(config.b_e, 19);
         assert_eq!(config.public_key_error, 19);
-        assert_eq!(config.secret_key_bound, 5);
-        assert_eq!(config.lambda, 71);
+        assert_eq!(config.secret_key_bound, 5*19);
+        assert_eq!(config.lambda, 80);
     }
 
     #[test]
