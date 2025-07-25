@@ -12,7 +12,8 @@ use rayon::prelude::*;
 ///
 /// ---
 ///
-/// A rust implementation of  Shamir Secret Sharing over Finite Field.
+/// A rust implementation of Shamir Secret Sharing over Finite Field that we use to secret share
+/// each RNS representative of a value in the ring Z_Q where Q is the product of prime moduli.
 ///
 /// The lib support large field charactirics `prime` by taking advantage of `num_bigint`.
 /// It's not optimized for production purpose, which can be improved in several aspects:
