@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(config.b_enc, 19);
         assert_eq!(config.b_e, 19);
         assert_eq!(config.public_key_error, 19);
-        assert_eq!(config.secret_key_bound, 5*19);
+        assert_eq!(config.secret_key_bound, 5 * 19);
         assert_eq!(config.lambda, 80);
     }
 

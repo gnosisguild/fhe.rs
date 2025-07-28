@@ -252,14 +252,19 @@ mod tests {
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         let result = trbfv.generate_smudging_error(1, &mut OsRng);
-        //Checking if all the cofficients of the smudging noise are different than 0,
+        //Checking if all the coefficients of the smudging noise are different than 0,
         //having one equal to zero is hardly likely to happen if the smudging noise was generated.
-        //TODO: add a test that calculates the empirical variance from the coefficients, so as to 
-        //compare with the variance used when generating the coefficients. 
+        //TODO: add a test that calculates the empirical variance from the coefficients, so as to
+        //compare with the variance used when generating the coefficients.
         for (poly_idx, poly) in result.iter().enumerate() {
-        for (coeff_idx, coeff) in poly.iter().enumerate() {
-            assert!(!coeff.is_zero(), "Zero coefficient at poly[{}][{}] used as smudging noise", poly_idx, coeff_idx);
-        }
+            for (coeff_idx, coeff) in poly.iter().enumerate() {
+                assert!(
+                    !coeff.is_zero(),
+                    "Zero coefficient at poly[{}][{}] used as smudging noise",
+                    poly_idx,
+                    coeff_idx
+                );
+            }
         }
     }
 
@@ -274,9 +279,14 @@ mod tests {
         let result = trbfv.generate_smudging_error(10, &mut OsRng);
 
         for (poly_idx, poly) in result.iter().enumerate() {
-        for (coeff_idx, coeff) in poly.iter().enumerate() {
-            assert!(!coeff.is_zero(), "Zero coefficient at poly[{}][{}], this is hardly likely to happen", poly_idx, coeff_idx);
-        }
+            for (coeff_idx, coeff) in poly.iter().enumerate() {
+                assert!(
+                    !coeff.is_zero(),
+                    "Zero coefficient at poly[{}][{}], this is hardly likely to happen",
+                    poly_idx,
+                    coeff_idx
+                );
+            }
         }
         assert_eq!(result.unwrap().len(), params.degree());
     }
@@ -312,10 +322,10 @@ mod tests {
         assert_eq!(decryption_share.coefficients().ncols(), params.degree());
     }
 
-    //TODO Replace this with a more accurate test test_threshold_decrypt_workflow, 
-    //something similar to test_threshold_decryption_workflow from trbfv/shares.rs 
+    //TODO Replace this with a more accurate test test_threshold_decrypt_workflow,
+    //something similar to test_threshold_decryption_workflow from trbfv/shares.rs
     //but with smudging noise generated and not only equal to zero. At the end we should be checking if we get correct
-    //plaintext. 
+    //plaintext.
     #[test]
     fn test_full_threshold_decrypt_workflow() {
         let mut rng = OsRng;
@@ -341,7 +351,7 @@ mod tests {
 
         // Each party generates decryption shares
         let mut decryption_shares = Vec::new();
-        for i in 0..(threshold+1) {
+        for i in 0..(threshold + 1) {
             let share_manager = ShareManager::new(n, threshold, params.clone());
             let sk_poly = share_manager
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())

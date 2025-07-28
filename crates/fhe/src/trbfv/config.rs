@@ -12,7 +12,7 @@ pub fn validate_threshold_config(n: usize, threshold: usize) -> Result<(), Error
     if n == 0 {
         return Err(Error::invalid_party_count(n, 1));
     }
-    if threshold > (n-1)/2 {
+    if threshold > (n - 1) / 2 {
         return Err(Error::threshold_too_large(threshold, n));
     }
     Ok(())
@@ -41,6 +41,5 @@ mod tests {
         assert!(validate_threshold_config(5, 3).is_err());
 
         assert!(validate_threshold_config(4, 2).is_err());
-
     }
 }

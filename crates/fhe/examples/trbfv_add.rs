@@ -97,7 +97,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "Users, threshold, and party sizes must be nonzero".to_string(),
         ))
     }
-    if threshold > (num_parties - 1)/2 {
+    if threshold > (num_parties - 1) / 2 {
         print_notice_and_exit(Some(
             "Threshold must be strictly less than half the number of parties".to_string(),
         ))

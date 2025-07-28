@@ -85,7 +85,7 @@ impl ShamirSecretSharing {
     ///
     /// Panics if `threshold` is greater than or equal to `share_amount`.
     pub fn split(&self, secret: BigInt) -> Vec<(usize, BigInt)> {
-        assert!(self.threshold <= (self.share_amount - 1)/2);
+        assert!(self.threshold <= (self.share_amount - 1) / 2);
         let polynomial = self.sample_polynomial(secret);
         // println!("polynomial: {:?}", polynomial);
         self.evaluate_polynomial(polynomial)
