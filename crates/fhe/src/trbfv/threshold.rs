@@ -36,6 +36,8 @@ use num_bigint::BigInt;
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
+use num_traits::Zero;
+
 /// Threshold BFV configuration and operations.
 /// This struct serves as the main coordinator for threshold BFV operations, managing
 /// the interaction between secret sharing, smudging, and share management components.
@@ -250,7 +252,15 @@ mod tests {
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         let result = trbfv.generate_smudging_error(1, &mut OsRng);
-        assert_eq!(result.unwrap().len(), params.degree());
+        //Checking if all the cofficients of the smudging noise are different than 0,
+        //having one equal to zero is hardly likely to happen if the smudging noise was generated.
+        //TODO: add a test that calculates the empirical variance from the coefficients, so as to 
+        //compare with the variance used when generating the coefficients. 
+        for (poly_idx, poly) in result.iter().enumerate() {
+        for (coeff_idx, coeff) in poly.iter().enumerate() {
+            assert!(!coeff.is_zero(), "Zero coefficient at poly[{}][{}] used as smudging noise", poly_idx, coeff_idx);
+        }
+        }
     }
 
     #[test]
@@ -262,6 +272,12 @@ mod tests {
 
         // Test with multiple ciphertexts (this should increase the bound requirements)
         let result = trbfv.generate_smudging_error(10, &mut OsRng);
+
+        for (poly_idx, poly) in result.iter().enumerate() {
+        for (coeff_idx, coeff) in poly.iter().enumerate() {
+            assert!(!coeff.is_zero(), "Zero coefficient at poly[{}][{}], this is hardly likely to happen", poly_idx, coeff_idx);
+        }
+        }
         assert_eq!(result.unwrap().len(), params.degree());
     }
 
@@ -296,6 +312,10 @@ mod tests {
         assert_eq!(decryption_share.coefficients().ncols(), params.degree());
     }
 
+    //TODO Replace this with a more accurate test test_threshold_decrypt_workflow, 
+    //something similar to test_threshold_decryption_workflow from trbfv/shares.rs 
+    //but with smudging noise generated and not only equal to zero. At the end we should be checking if we get correct
+    //plaintext. 
     #[test]
     fn test_full_threshold_decrypt_workflow() {
         let mut rng = OsRng;
@@ -367,6 +387,7 @@ mod tests {
         assert_eq!(trbfv1, trbfv2);
     }
 
+    //TODO To replace with a more accurate test
     #[test]
     fn test_edge_case_minimal_threshold() {
         let params = test_params();

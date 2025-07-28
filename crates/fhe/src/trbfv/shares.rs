@@ -2,7 +2,7 @@
 ///
 /// This module provides the ShareManager struct that handles aggregation of secret shares
 /// and computation of decryption shares in the threshold BFV scheme.
-use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
+use crate::bfv::{BfvParameters, Ciphertext, Plaintext, SecretKey};
 use crate::trbfv::shamir::ShamirSecretSharing;
 use crate::Error;
 use fhe_math::rq::traits::TryConvertFrom;
@@ -12,13 +12,15 @@ use fhe_math::{
     rq::{scaler::Scaler, Context, Poly, Representation},
 };
 use itertools::Itertools;
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView};
 use num_bigint::BigUint;
 use num_bigint::{BigInt, ToBigInt};
 use num_traits::{Signed, ToPrimitive};
 use rayon::prelude::*;
 use std::sync::Arc;
 use zeroize::Zeroizing;
+
+use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 
 /// Manager for threshold BFV share operations.
 ///
@@ -49,6 +51,12 @@ impl ShareManager {
     /// - `threshold`: Minimum number of shares required for reconstruction
     /// - `params`: BFV parameters
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Self {
+
+        let min_modulus = params.moduli().iter().min().unwrap();
+        assert!(n < *min_modulus as usize,
+        "n must be smaller than the smallest moduli"
+        );
+
         Self {
             n,
             threshold,
@@ -132,6 +140,16 @@ impl ShareManager {
         poly: Zeroizing<Poly>,
     ) -> Result<Vec<Array2<u64>>, Error> {
         let moduli: Vec<u64> = poly.ctx().moduli().to_vec();
+
+        let min_modulus = moduli.iter().min().expect("moduli vector is empty");
+
+        assert!(
+            self.n < (*min_modulus).try_into().unwrap(),
+            "n {} is not smaller than the smallest modulus {}, the MPC protocol implemented assumes that n is smaller than the smallest moduli defining the ciphertext space",
+            self.n,
+            min_modulus
+        );
+
         let coefficients = poly.coefficients();
         let coeff_rows: Vec<_> = coefficients.outer_iter().collect();
 
@@ -429,33 +447,48 @@ mod tests {
         assert!(result.is_err());
     }
 
+
+
     #[test]
     fn test_decryption_share_computation() {
         let mut rng = thread_rng();
         let params = test_params();
         let n = 3;
-        let threshold = 1;
-        let mut manager = ShareManager::new(n, threshold, params.clone());
+        //Fix threshold to be 0 for the purpose of this test so that any single party can decrypt.
+        //I.e., the secret key is given to all parties and not secret shared
+        let threshold = 0;
+        let mut manager = ShareManager::new(n.try_into().unwrap(), threshold, params.clone());
 
         // Setup: Generate keys and encrypt a plaintext
         let sk = SecretKey::random(&params, &mut rng);
         let pk = PublicKey::new(&sk, &mut rng);
 
-        let plaintext_data = vec![42u64, 100, 200];
+        let mut plaintext_data = vec![42u64, 100, 400];
+        plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
-        let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
+        let ct: Arc<Ciphertext> = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
+        //let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
 
         // Generate polynomials for decryption share
         let sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
         let ctx = params.ctx_at_level(0).unwrap();
+        //Setting smuding noise to be zero in this test
         let es_poly = Poly::zero(ctx, Representation::PowerBasis);
 
         // Compute decryption share
         let decryption_share = manager
-            .decryption_share(Arc::new(ct), (*sk_poly).clone(), es_poly)
+            .decryption_share(ct.clone(), (*sk_poly).clone(), es_poly)
             .unwrap();
 
-        assert_eq!(decryption_share.coefficients().ncols(), params.degree());
+       let shares = vec![decryption_share.clone()];
+
+       let result = manager.decrypt_from_shares(shares, ct);
+       let plaintext_found = result.expect("Failed to decrypt from shares");
+
+       let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
+        .expect("Decoding plaintext failed");
+    
+       assert_eq!(decoded, plaintext_data);
     }
 
     #[test]
@@ -465,33 +498,75 @@ mod tests {
         let n = 3;
         let threshold = 1;
 
+        let ctx = params.ctx_at_level(0).unwrap();
+
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()))
             .collect();
 
-        // Generate keys for each party
-        let secret_keys: Vec<SecretKey> = (0..n)
-            .map(|_| SecretKey::random(&params, &mut rng))
+        // One party generates the secret key and secret shares it among the other parties
+        let secret_key = SecretKey::random(&params, &mut rng);
+
+        let sk_poly = managers[0]
+                      .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
+                      .unwrap();
+
+
+        let sk_sss = managers[0] 
+                      .generate_secret_shares_from_poly(sk_poly)
+                      .unwrap();
+
+        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = vec![
+            vec![], 
+            vec![],
+            vec![],
+        ];
+
+
+
+
+        let mut sk_poly_sums: Vec<Poly> = (0..n)
+            .map(|_| Poly::zero(ctx, Representation::PowerBasis))
             .collect();
 
+        for i in 0..n {
+                  let mut node_share_m = Array2::zeros((0, params.degree()));
+                  for m in 0..params.moduli().len() {
+                     node_share_m
+                          .push_row(ArrayView::from(sk_sss[m].row(i).clone()))
+                          .unwrap();
+                  }
+                  sk_sss_collected[i].push(node_share_m);
+
+
+
+                  let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
+                  sk_poly_sums[i] = managers[i] 
+                  .aggregate_collected_shares(share_slice)
+                  .unwrap();
+
+              }
+
         // Create a test ciphertext
-        let pk = PublicKey::new(&secret_keys[0], &mut rng);
-        let plaintext_data = vec![123u64];
+        let pk = PublicKey::new(&secret_key, &mut rng);
+        let mut plaintext_data = vec![123u64];
+        plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
         // Each party generates their decryption share
         let mut decryption_shares = Vec::new();
+
+        //Testing for deryption between parties 0 and 1
+        //TODO Add tests for decyption between different parties than the first ones
         for i in 0..(threshold+1) {
-            let sk_poly = managers[i]
-                .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
-                .unwrap();
             let ctx = params.ctx_at_level(0).unwrap();
+            //Setting smuding noise to be zero in this test
             let es_poly = Poly::zero(ctx, Representation::PowerBasis);
 
             let share = managers[i]
-                .decryption_share(ct.clone(), (*sk_poly).clone(), es_poly)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone(), es_poly)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -500,7 +575,16 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares
-        let result = managers[0].decrypt_from_shares(decryption_shares, ct);
+        let result = managers[0].decrypt_from_shares(decryption_shares.clone(), ct.clone());
         assert!(result.is_ok());
+
+        // Test if we had correct decyption
+        let plaintext_found = result.expect("Failed to decrypt from shares");
+        let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
+        .expect("Decoding plaintext failed");
+    
+        assert_eq!(decoded, plaintext_data);
+
+      
     }
 }

@@ -280,7 +280,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // gather d_share_polys
     let mut d_share_polys: Vec<Poly> = Vec::new();
-    for party in parties.iter().take(threshold) {
+    for party in parties.iter().take(threshold + 1) {
         d_share_polys.push(party.d_share_poly.clone());
     }
 
