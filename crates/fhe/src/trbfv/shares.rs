@@ -52,6 +52,11 @@ impl ShareManager {
     /// - `params`: BFV parameters
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Self {
 
+        //Note that in case we consider in the future using qi's that are not prime numbers (so
+        //they would be only satisfying the condition of being coprime to each other which is
+        //sufficient for Greco etc), we can use the utility get_smallest_prime_factor implemented
+        //in crates/fhe-util/src/lib.rs
+
         let min_modulus = params.moduli().iter().min().unwrap();
         assert!(n < *min_modulus as usize,
         "n must be smaller than the smallest moduli"
