@@ -9,8 +9,8 @@ use std::sync::Arc;
 ///
 /// Threshold BFV enables distributed decryption where:
 /// - Secret keys are shared among n parties using secret sharing
-/// - Only t parties (threshold) are needed to decrypt
-/// - Up to t-1 parties can be compromised without breaking security
+/// - Only t+1 parties (threshold) are needed to decrypt
+/// - Up to t parties can be compromised without breaking security
 /// - Smudging noise protects intermediate values during decryption
 ///
 /// # Protocol Flow
@@ -43,7 +43,7 @@ use zeroize::Zeroizing;
 pub struct TRBFV {
     /// Number of parties in the threshold scheme
     pub n: usize,
-    /// Threshold for reconstruction (must be < n and > 0)
+    /// Threshold for reconstruction (must be <= (n-1)/2)
     pub threshold: usize,
     /// BFV parameters (contains degree, plaintext_modulus, moduli, etc.)
     pub params: Arc<BfvParameters>,
@@ -54,7 +54,7 @@ impl TRBFV {
     ///
     /// # Arguments
     /// * `n` - Number of parties (must be > 0)
-    /// * `threshold` - Threshold for reconstruction (must be < n and > 0)
+    /// * `threshold` - Threshold for reconstruction (must be <= (n-1)/2)
     /// * `params` - BFV parameters
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
         // Validate all parameters
@@ -105,13 +105,11 @@ impl TRBFV {
 
     /// Generate smudging error coefficients for noise.
     ///
-    /// Creates noise that will be added to decryption shares to protect privacy.
+    /// Creates noise that will be added to decryption shares.
     /// Uses optimal variance calculation based on security parameters and number of ciphertexts.
     ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed (e.g., votes to count, numbers to sum)
-    /// * `public_key_errors` - Public key error polynomials for variance calculation
-    /// * `secret_keys` - Secret key polynomials for variance calculation
     /// * `rng` - Cryptographically secure random number generator
     ///
     /// # Returns
@@ -181,13 +179,14 @@ mod tests {
     use crate::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
     use fhe_math::rq::{Poly, Representation};
     use fhe_traits::{FheEncoder, FheEncrypter};
+    use num_traits::Zero;
     use rand::{rngs::OsRng, thread_rng};
 
     fn test_params() -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
-            .set_degree(2048)
-            .set_plaintext_modulus(4096)
-            .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
+            .set_degree(8192)
+            .set_plaintext_modulus(16384)
+            .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
             .build_arc()
             .unwrap()
     }
@@ -196,7 +195,7 @@ mod tests {
     #[allow(unused_mut)]
     fn test_trbfv_new() {
         let n: usize = 16;
-        let threshold = 9;
+        let threshold = 7;
         let params = test_params();
 
         let mut trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
@@ -212,12 +211,10 @@ mod tests {
         // Test invalid n = 0
         assert!(TRBFV::new(0, 3, params.clone()).is_err());
 
-        // Test invalid threshold >= n
+        // Test invalid threshold > (n-1)/2
+        assert!(TRBFV::new(3, 2, params.clone()).is_err());
         assert!(TRBFV::new(3, 3, params.clone()).is_err());
         assert!(TRBFV::new(3, 4, params.clone()).is_err());
-
-        // Test threshold = 0
-        assert!(TRBFV::new(5, 0, params.clone()).is_err());
     }
 
     #[test]
@@ -225,7 +222,7 @@ mod tests {
     fn test_secret_sharing_integration() {
         let mut rng = thread_rng();
         let n: usize = 5;
-        let threshold = 3;
+        let threshold = 2;
         let params = test_params();
 
         let mut trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
@@ -250,22 +247,42 @@ mod tests {
     fn test_smudging_error_generation() {
         let params = test_params();
         let n = 3;
-        let threshold = 2;
+        let threshold = 1;
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         let result = trbfv.generate_smudging_error(1, &mut OsRng);
-        assert_eq!(result.unwrap().len(), params.degree());
+        //Checking if all the coefficients of the smudging noise are different than 0,
+        //having one equal to zero is hardly likely to happen if the smudging noise was generated.
+        //TODO: add a test that calculates the empirical variance from the coefficients, so as to
+        //compare with the variance used when generating the coefficients.
+        for (poly_idx, poly) in result.iter().enumerate() {
+            for (coeff_idx, coeff) in poly.iter().enumerate() {
+                assert!(
+                    !coeff.is_zero(),
+                    "Zero coefficient at poly[{poly_idx}][{coeff_idx}] used as smudging noise"
+                );
+            }
+        }
     }
 
     #[test]
     fn test_smudging_error_multiple_ciphertexts() {
         let params = test_params();
         let n = 3;
-        let threshold = 2;
+        let threshold = 1;
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         // Test with multiple ciphertexts (this should increase the bound requirements)
         let result = trbfv.generate_smudging_error(10, &mut OsRng);
+
+        for (poly_idx, poly) in result.iter().enumerate() {
+            for (coeff_idx, coeff) in poly.iter().enumerate() {
+                assert!(
+                    !coeff.is_zero(),
+                    "Zero coefficient at poly[{poly_idx}][{coeff_idx}], this is hardly likely to happen"
+                );
+            }
+        }
         assert_eq!(result.unwrap().len(), params.degree());
     }
 
@@ -274,7 +291,7 @@ mod tests {
         let mut rng = thread_rng();
         let params = test_params();
         let n = 3;
-        let threshold = 2;
+        let threshold = 1;
         let mut trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         // Create a test ciphertext
@@ -300,12 +317,16 @@ mod tests {
         assert_eq!(decryption_share.coefficients().ncols(), params.degree());
     }
 
+    //TODO Replace this with a more accurate test test_threshold_decrypt_workflow,
+    //something similar to test_threshold_decryption_workflow from trbfv/shares.rs
+    //but with smudging noise generated and not only equal to zero. At the end we should be checking if we get correct
+    //plaintext.
     #[test]
     fn test_full_threshold_decrypt_workflow() {
         let mut rng = OsRng;
         let params = test_params();
         let n = 3;
-        let threshold = 2;
+        let threshold = 1;
 
         // Create multiple TRBFV instances (simulating parties)
         let mut trbfv_instances: Vec<TRBFV> = (0..n)
@@ -325,7 +346,7 @@ mod tests {
 
         // Each party generates decryption shares
         let mut decryption_shares = Vec::new();
-        for i in 0..threshold {
+        for i in 0..(threshold + 1) {
             let share_manager = ShareManager::new(n, threshold, params.clone());
             let sk_poly = share_manager
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
@@ -347,7 +368,7 @@ mod tests {
     #[test]
     fn test_fhe_parametrized_trait() {
         let params = test_params();
-        let trbfv = TRBFV::new(3, 2, params.clone()).unwrap();
+        let trbfv = TRBFV::new(3, 1, params.clone()).unwrap();
 
         // Test basic struct properties instead
         assert_eq!(trbfv.params, params);
@@ -356,7 +377,7 @@ mod tests {
     #[test]
     fn test_clone_and_debug() {
         let params = test_params();
-        let trbfv1 = TRBFV::new(5, 3, params.clone()).unwrap();
+        let trbfv1 = TRBFV::new(5, 2, params.clone()).unwrap();
 
         // Test Clone
         let trbfv2 = trbfv1.clone();
@@ -371,19 +392,20 @@ mod tests {
         assert_eq!(trbfv1, trbfv2);
     }
 
+    //TODO To replace with a more accurate test
     #[test]
     fn test_edge_case_minimal_threshold() {
         let params = test_params();
 
-        // Minimal valid configuration: 2 parties, threshold 1
-        let mut trbfv = TRBFV::new(2, 1, params.clone()).unwrap();
-        assert_eq!(trbfv.n, 2);
+        // Minimal valid configuration: 3 parties, threshold 1
+        let mut trbfv = TRBFV::new(3, 1, params.clone()).unwrap();
+        assert_eq!(trbfv.n, 3);
         assert_eq!(trbfv.threshold, 1);
 
         // Test that basic operations work
         let mut rng = thread_rng();
         let sk = SecretKey::random(&params, &mut rng);
-        let share_manager = ShareManager::new(2, 1, params.clone());
+        let share_manager = ShareManager::new(3, 1, params.clone());
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();

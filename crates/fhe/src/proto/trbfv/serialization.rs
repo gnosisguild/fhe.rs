@@ -174,7 +174,7 @@ mod tests {
             .build_arc()
             .unwrap();
 
-        let trbfv = TRBFV::new(5, 3, params.clone()).unwrap();
+        let trbfv = TRBFV::new(5, 2, params.clone()).unwrap();
 
         // Test serialization and deserialization
         let bytes = trbfv.to_bytes();
