@@ -584,6 +584,57 @@ impl Poly {
         });
         Ok(())
     }
+
+    /// Creates a polynomial from a slice of coefficients in PowerBasis representation.
+    /// 
+    /// The coefficients represent the polynomial: coeffs[0] + coeffs[1]*x + coeffs[2]*x^2 + ... + coeffs[n-1]*x^(n-1)
+    /// 
+    /// # Arguments
+    /// * `coeffs` - Coefficient slice where coeffs[i] is the coefficient of x^i
+    /// * `ctx` - The context defining the polynomial ring parameters
+    /// 
+    /// # Returns
+    /// A polynomial in PowerBasis representation with the given coefficients
+    /// 
+    /// # Errors
+    /// Returns an error if:
+    /// - The coefficient slice length doesn't match the context degree
+    /// - The coefficient conversion fails
+    /// 
+    /// # Example
+    /// ```rust
+    /// // Create polynomial 1 + 2x + 3x^2
+    /// let coeffs = vec![1i64, 2i64, 3i64, 0i64]; // pad to context degree if needed
+    /// let poly = Poly::from_coefficients(&coeffs, &ctx)?;
+    /// ```
+    pub fn from_coefficients(coeffs: &[i64], ctx: &Arc<Context>) -> Result<Self> {
+        if coeffs.len() != ctx.degree {
+            return Err(Error::Default(format!(
+                "Coefficient slice length {} doesn't match context degree {}",
+                coeffs.len(),
+                ctx.degree
+            )));
+        }
+        
+        Self::try_convert_from(
+            coeffs,
+            ctx,
+            false,                      // disallow variable time operations by default
+            Representation::PowerBasis  // natural representation for coefficient input
+        )
+    }
+    
+    /// Creates a polynomial from a vector of coefficients (owned version).
+    /// 
+    /// This is a convenience method that takes ownership of the coefficient vector.
+    /// See `from_coefficients` for more details.
+    /// 
+    /// # Arguments
+    /// * `coeffs` - Owned coefficient vector
+    /// * `ctx` - The context defining the polynomial ring parameters
+    pub fn from_coefficients_vec(coeffs: Vec<i64>, ctx: &Arc<Context>) -> Result<Self> {
+        Self::from_coefficients(&coeffs, ctx)
+    }
 }
 
 impl Zeroize for Poly {
