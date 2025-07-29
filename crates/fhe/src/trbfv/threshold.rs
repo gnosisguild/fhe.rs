@@ -36,8 +36,6 @@ use num_bigint::BigInt;
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
-use num_traits::Zero;
-
 /// Threshold BFV configuration and operations.
 /// This struct serves as the main coordinator for threshold BFV operations, managing
 /// the interaction between secret sharing, smudging, and share management components.
@@ -181,6 +179,7 @@ mod tests {
     use crate::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
     use fhe_math::rq::{Poly, Representation};
     use fhe_traits::{FheEncoder, FheEncrypter};
+    use num_traits::Zero;
     use rand::{rngs::OsRng, thread_rng};
 
     fn test_params() -> Arc<BfvParameters> {
@@ -260,9 +259,7 @@ mod tests {
             for (coeff_idx, coeff) in poly.iter().enumerate() {
                 assert!(
                     !coeff.is_zero(),
-                    "Zero coefficient at poly[{}][{}] used as smudging noise",
-                    poly_idx,
-                    coeff_idx
+                    "Zero coefficient at poly[{poly_idx}][{coeff_idx}] used as smudging noise"
                 );
             }
         }
@@ -282,9 +279,7 @@ mod tests {
             for (coeff_idx, coeff) in poly.iter().enumerate() {
                 assert!(
                     !coeff.is_zero(),
-                    "Zero coefficient at poly[{}][{}], this is hardly likely to happen",
-                    poly_idx,
-                    coeff_idx
+                    "Zero coefficient at poly[{poly_idx}][{coeff_idx}], this is hardly likely to happen"
                 );
             }
         }

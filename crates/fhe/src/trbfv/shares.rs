@@ -2,7 +2,7 @@
 ///
 /// This module provides the ShareManager struct that handles aggregation of secret shares
 /// and computation of decryption shares in the threshold BFV scheme.
-use crate::bfv::{BfvParameters, Ciphertext, Plaintext, SecretKey};
+use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::shamir::ShamirSecretSharing;
 use crate::Error;
 use fhe_math::rq::traits::TryConvertFrom;
@@ -12,15 +12,13 @@ use fhe_math::{
     rq::{scaler::Scaler, Context, Poly, Representation},
 };
 use itertools::Itertools;
-use ndarray::{Array2, ArrayView};
+use ndarray::Array2;
 use num_bigint::BigUint;
 use num_bigint::{BigInt, ToBigInt};
 use num_traits::{Signed, ToPrimitive};
 use rayon::prelude::*;
 use std::sync::Arc;
 use zeroize::Zeroizing;
-
-use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 
 /// Manager for threshold BFV share operations.
 ///
@@ -389,7 +387,7 @@ impl ShareManager {
 mod tests {
     use super::*;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
-    use fhe_traits::{FheEncoder, FheEncrypter};
+    use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::{rngs::OsRng, thread_rng};
 
     fn test_params() -> Arc<BfvParameters> {
@@ -527,9 +525,9 @@ mod tests {
 
         for i in 0..n {
             let mut node_share_m = Array2::zeros((0, params.degree()));
-            for m in 0..params.moduli().len() {
+            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
                 node_share_m
-                    .push_row(ArrayView::from(sk_sss[m].row(i).clone()))
+                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
                     .unwrap();
             }
             sk_sss_collected[i].push(node_share_m);
