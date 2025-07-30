@@ -1,3 +1,20 @@
+//! This module provides functionality for working with polynomials in the ring
+//! R_q[x] = (ZZ_q1 x ... x ZZ_qn)[x], where the qi's are prime moduli in ZZ_q.
+//!
+//! The module includes various utilities for polynomial arithmetic, representation
+//! transformations, and operations in the context of Residue Number System (RNS)
+//! and Number Theoretic Transform (NTT). It supports multiple representations of
+//! polynomials, including PowerBasis, NTT, and NTTShoup, and provides methods for
+//! switching between these representations.
+//!
+//! Key features include:
+//! - Creation of polynomials with specific representations.
+//! - Random polynomial generation, both deterministic and non-deterministic.
+//! - Arithmetic operations on polynomials, including modular switching and scaling.
+//! - Substitution and transformation of polynomial coefficients.
+//!
+//! This module is designed to work with cryptographic applications, ensuring
+//! security and efficiency in polynomial computations.
 #![warn(missing_docs, unused_imports)]
 
 //! Polynomials in R_q\[x\] = (ZZ_q1 x ... x ZZ_qn)\[x\] where the qi's are
@@ -5,9 +22,9 @@
 
 mod context;
 mod convert;
+mod normal;
 mod ops;
 mod serialize;
-pub mod normal;
 
 pub mod scaler;
 pub mod switcher;
@@ -587,21 +604,21 @@ impl Poly {
     }
 
     /// Creates a polynomial from a slice of coefficients in PowerBasis representation.
-    /// 
+    ///
     /// The coefficients represent the polynomial: coeffs[0] + coeffs[1]*x + coeffs[2]*x^2 + ... + coeffs[n-1]*x^(n-1)
-    /// 
+    ///
     /// # Arguments
     /// * `coeffs` - Coefficient slice where coeffs[i] is the coefficient of x^i
     /// * `ctx` - The context defining the polynomial ring parameters
-    /// 
+    ///
     /// # Returns
     /// A polynomial in PowerBasis representation with the given coefficients
-    /// 
+    ///
     /// # Errors
     /// Returns an error if:
     /// - The coefficient slice length doesn't match the context degree
     /// - The coefficient conversion fails
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// // Create polynomial 1 + 2x + 3x^2
@@ -616,20 +633,20 @@ impl Poly {
                 ctx.degree
             )));
         }
-        
+
         Self::try_convert_from(
             coeffs,
             ctx,
             false,                      // disallow variable time operations by default
-            Representation::PowerBasis  // natural representation for coefficient input
+            Representation::PowerBasis, // natural representation for coefficient input
         )
     }
-    
+
     /// Creates a polynomial from a vector of coefficients (owned version).
-    /// 
+    ///
     /// This is a convenience method that takes ownership of the coefficient vector.
     /// See `from_coefficients` for more details.
-    /// 
+    ///
     /// # Arguments
     /// * `coeffs` - Owned coefficient vector
     /// * `ctx` - The context defining the polynomial ring parameters
