@@ -7,6 +7,7 @@ mod context;
 mod convert;
 mod ops;
 mod serialize;
+pub mod normal;
 
 pub mod scaler;
 pub mod switcher;
