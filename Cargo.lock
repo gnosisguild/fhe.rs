@@ -355,6 +355,7 @@ dependencies = [
  "prost-build",
  "rand",
  "rand_chacha",
+ "rayon",
  "sha2",
  "thiserror",
  "zeroize",

@@ -134,7 +134,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Generate a common reference poly for public key generation.
-    let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
+    let crp: CommonRandomPoly = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
     // Setup trBFV module
     let mut trbfv = TRBFV::new(num_parties, threshold, params.clone()).unwrap();
