@@ -470,7 +470,7 @@ mod tests {
         //Fix threshold to be 0 for the purpose of this test so that any single party can decrypt.
         //I.e., the secret key is given to all parties and not secret shared
         let threshold = 0;
-        let mut manager = ShareManager::new(n.try_into().unwrap(), threshold, params.clone());
+        let manager = ShareManager::new(n.try_into().unwrap(), threshold, params.clone());
 
         // Setup: Generate keys and encrypt a plaintext
         let sk = SecretKey::random(&params, &mut rng);
