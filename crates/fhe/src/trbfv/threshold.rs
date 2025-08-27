@@ -292,7 +292,7 @@ mod tests {
         let params = test_params();
         let n = 3;
         let threshold = 1;
-        let mut trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
+        let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         // Create a test ciphertext
         let sk = SecretKey::random(&params, &mut rng);
@@ -329,7 +329,7 @@ mod tests {
         let threshold = 1;
 
         // Create multiple TRBFV instances (simulating parties)
-        let mut trbfv_instances: Vec<TRBFV> = (0..n)
+        let trbfv_instances: Vec<TRBFV> = (0..n)
             .map(|_| TRBFV::new(n, threshold, params.clone()).unwrap())
             .collect();
 
@@ -398,7 +398,7 @@ mod tests {
         let params = test_params();
 
         // Minimal valid configuration: 3 parties, threshold 1
-        let mut trbfv = TRBFV::new(3, 1, params.clone()).unwrap();
+        let trbfv = TRBFV::new(3, 1, params.clone()).unwrap();
         assert_eq!(trbfv.n, 3);
         assert_eq!(trbfv.threshold, 1);
 
