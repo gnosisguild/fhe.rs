@@ -55,7 +55,7 @@ impl ShamirSecretSharing {
     ///
     /// # Arguments
     ///
-    /// * `threshold` - The minimum number of shares needed to reconstruct the secret
+    /// * `threshold + 1` - The minimum number of shares needed to reconstruct the secret
     /// * `share_amount` - The total number of shares to generate
     /// * `prime` - The prime modulus for the finite field operations
     ///
