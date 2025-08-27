@@ -78,7 +78,7 @@ impl TRBFV {
     /// # Returns
     /// Vector of share matrices, one per BFV modulus. Each matrix has dimensions [n, degree].
     pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
-        &mut self,
+        &self,
         poly: Zeroizing<Poly>,
         rng: R,
     ) -> Result<Vec<Array2<u64>>, Error> {
@@ -97,7 +97,7 @@ impl TRBFV {
     /// # Returns
     /// Aggregated polynomial representing the combined secret key material
     pub fn aggregate_collected_shares(
-        &mut self,
+        &self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
     ) -> Result<Poly, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
@@ -140,7 +140,7 @@ impl TRBFV {
     /// # Returns
     /// Decryption share polynomial
     pub fn decryption_share(
-        &mut self,
+        &self,
         ciphertext: Arc<Ciphertext>,
         sk_i: Poly,
         es_i: Poly,
@@ -161,7 +161,7 @@ impl TRBFV {
     /// # Returns
     /// The decrypted plaintext
     pub fn decrypt(
-        &mut self,
+        &self,
         d_share_polys: Vec<Poly>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
@@ -295,7 +295,7 @@ mod tests {
         let params = test_params();
         let n = 3;
         let threshold = 1;
-        let mut trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
+        let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         // Create a test ciphertext
         let sk = SecretKey::random(&params, &mut rng);
@@ -332,7 +332,7 @@ mod tests {
         let threshold = 1;
 
         // Create multiple TRBFV instances (simulating parties)
-        let mut trbfv_instances: Vec<TRBFV> = (0..n)
+        let trbfv_instances: Vec<TRBFV> = (0..n)
             .map(|_| TRBFV::new(n, threshold, params.clone()).unwrap())
             .collect();
 
@@ -401,7 +401,7 @@ mod tests {
         let params = test_params();
 
         // Minimal valid configuration: 3 parties, threshold 1
-        let mut trbfv = TRBFV::new(3, 1, params.clone()).unwrap();
+        let trbfv = TRBFV::new(3, 1, params.clone()).unwrap();
         assert_eq!(trbfv.n, 3);
         assert_eq!(trbfv.threshold, 1);
 
