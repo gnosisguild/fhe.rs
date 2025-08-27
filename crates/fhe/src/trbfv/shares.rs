@@ -220,7 +220,7 @@ impl ShareManager {
     /// # Returns
     /// A polynomial representing the aggregated secret key material
     pub fn aggregate_collected_shares(
-        &mut self,
+        &self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
     ) -> Result<Poly, Error> {
         let ctx = self.params.ctx_at_level(0).unwrap();
@@ -254,7 +254,7 @@ impl ShareManager {
     /// # Returns
     /// A decryption share polynomial that contributes to the final decryption
     pub fn decryption_share(
-        &mut self,
+        &self,
         ciphertext: Arc<Ciphertext>,
         mut sk_i: Poly,
         es_i: Poly,
@@ -286,7 +286,7 @@ impl ShareManager {
     /// # Returns
     /// The decrypted plaintext
     pub fn decrypt_from_shares(
-        &mut self,
+        &self,
         d_share_polys: Vec<Poly>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {

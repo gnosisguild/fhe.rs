@@ -100,7 +100,7 @@ impl TRBFV {
         &mut self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
     ) -> Result<Poly, Error> {
-        let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
         share_manager.aggregate_collected_shares(sk_sss_collected)
     }
 
@@ -145,7 +145,7 @@ impl TRBFV {
         sk_i: Poly,
         es_i: Poly,
     ) -> Result<Poly, Error> {
-        let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
         share_manager.decryption_share(ciphertext, sk_i, es_i)
     }
 
@@ -165,7 +165,7 @@ impl TRBFV {
         d_share_polys: Vec<Poly>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
-        let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
         share_manager.decrypt_from_shares(d_share_polys, ciphertext)
     }
 }
