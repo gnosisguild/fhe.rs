@@ -168,7 +168,7 @@ impl ShareManager {
             .enumerate()
             .map(|(i, (m, p))| -> Result<Array2<u64>, Error> {
                 // Get rng from seed
-                let rng = ChaCha20Rng::seed_from_u64(seeds[i]);
+                let mut rng = ChaCha20Rng::seed_from_u64(seeds[i]);
 
                 // Create shamir object
                 let shamir = ShamirSecretSharing {
@@ -184,7 +184,8 @@ impl ShareManager {
                     // Split the coeff into n shares
                     let secret = c.to_bigint().unwrap();
 
-                    let c_shares = shamir.split(secret.clone(), rng.clone());
+                    let c_shares = shamir.split(secret.clone(), &mut rng);
+
                     // For each share convert to u64
                     let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
                     for (_, c_share) in c_shares.iter() {

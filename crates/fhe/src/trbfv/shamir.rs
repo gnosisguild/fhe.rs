@@ -87,13 +87,21 @@ impl ShamirSecretSharing {
     /// # Panics
     ///
     /// Panics if `threshold` is greater than or equal to `share_amount`.
-    pub fn split<R: RngCore + CryptoRng>(&self, secret: BigInt, rng: R) -> Vec<(usize, BigInt)> {
+    pub fn split<R: RngCore + CryptoRng>(
+        &self,
+        secret: BigInt,
+        rng: &mut R,
+    ) -> Vec<(usize, BigInt)> {
         assert!(self.threshold <= (self.share_amount - 1) / 2);
         let polynomial = self.sample_polynomial(secret, rng);
         self.evaluate_polynomial(polynomial)
     }
 
-    fn sample_polynomial<R: RngCore + CryptoRng>(&self, secret: BigInt, mut rng: R) -> Vec<BigInt> {
+    fn sample_polynomial<R: RngCore + CryptoRng>(
+        &self,
+        secret: BigInt,
+        rng: &mut R,
+    ) -> Vec<BigInt> {
         let mut coefficients: Vec<BigInt> = vec![secret];
         let low = BigInt::from(0);
         let high = &self.prime - BigInt::from(1);
@@ -280,7 +288,7 @@ mod tests {
             .unwrap(),
         };
         let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
-        let shares = sss.split(secret.clone(), rand::thread_rng());
+        let shares = sss.split(secret.clone(), &mut rand::thread_rng());
         assert_eq!(secret, sss.recover(&shares[0..sss.threshold + 1]));
     }
 }
