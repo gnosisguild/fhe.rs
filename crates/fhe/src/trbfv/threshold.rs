@@ -118,14 +118,14 @@ impl TRBFV {
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         num_ciphertexts: usize,
-        _rng: &mut R,
+        rng: &mut R,
     ) -> Result<Vec<BigInt>, Error> {
         let config =
             SmudgingBoundCalculatorConfig::new(self.params.clone(), self.n, num_ciphertexts);
         let calculator = SmudgingBoundCalculator::new(config);
         let generator = SmudgingNoiseGenerator::from_bound_calculator(calculator)?;
 
-        generator.generate_smudging_error()
+        generator.generate_smudging_error(rng)
     }
     /// Compute decryption share from ciphertext and secret/smudging polynomials.
     ///
