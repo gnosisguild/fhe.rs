@@ -4,6 +4,8 @@
 /// with the BFV parameter system.
 use num_bigint::{BigInt, RandBigInt};
 use num_traits::{One, Zero};
+use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 
 /// A rust porting of Shamir Secret Sharing over Finite Field
@@ -75,6 +77,7 @@ impl ShamirSecretSharing {
     /// # Arguments
     ///
     /// * `secret` - The secret value to be shared
+    /// * `rng` - An rng from which to draw randomness
     ///
     /// # Returns
     ///
@@ -84,22 +87,26 @@ impl ShamirSecretSharing {
     /// # Panics
     ///
     /// Panics if `threshold` is greater than or equal to `share_amount`.
-    pub fn split(&self, secret: BigInt) -> Vec<(usize, BigInt)> {
+    pub fn split<R: RngCore + CryptoRng>(&self, secret: BigInt, rng: R) -> Vec<(usize, BigInt)> {
         assert!(self.threshold <= (self.share_amount - 1) / 2);
-        let polynomial = self.sample_polynomial(secret);
-        // println!("polynomial: {:?}", polynomial);
+        let polynomial = self.sample_polynomial(secret, rng);
         self.evaluate_polynomial(polynomial)
     }
 
-    fn sample_polynomial(&self, secret: BigInt) -> Vec<BigInt> {
+    fn sample_polynomial<R: RngCore + CryptoRng>(&self, secret: BigInt, mut rng: R) -> Vec<BigInt> {
         let mut coefficients: Vec<BigInt> = vec![secret];
         let low = BigInt::from(0);
         let high = &self.prime - BigInt::from(1);
 
-        let random_coefficients: Vec<BigInt> = (0..(self.threshold))
+        // Generate seeds deterministically from the input RNG
+        // This is done so clients can test using deterministic rngs
+        let seeds: Vec<u64> = (0..self.threshold).map(|_| rng.gen()).collect();
+
+        // Use the seeds
+        let random_coefficients: Vec<BigInt> = seeds
             .into_par_iter()
-            .map(|_| {
-                let mut rng = rand::thread_rng();
+            .map(|seed| {
+                let mut rng = ChaCha20Rng::seed_from_u64(seed);
                 rng.gen_bigint_range(&low, &high)
             })
             .collect();
@@ -273,7 +280,7 @@ mod tests {
             .unwrap(),
         };
         let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
-        let shares = sss.split(secret.clone());
+        let shares = sss.split(secret.clone(), rand::thread_rng());
         assert_eq!(secret, sss.recover(&shares[0..sss.threshold + 1]));
     }
 }
