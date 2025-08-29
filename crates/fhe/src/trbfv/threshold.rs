@@ -77,12 +77,13 @@ impl TRBFV {
     ///
     /// # Returns
     /// Vector of share matrices, one per BFV modulus. Each matrix has dimensions [n, degree].
-    pub fn generate_secret_shares_from_poly(
+    pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
         &mut self,
         poly: Zeroizing<Poly>,
+        rng: R,
     ) -> Result<Vec<Array2<u64>>, Error> {
         let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
-        share_manager.generate_secret_shares_from_poly(poly)
+        share_manager.generate_secret_shares_from_poly(poly, rng)
     }
 
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
@@ -117,14 +118,14 @@ impl TRBFV {
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         num_ciphertexts: usize,
-        _rng: &mut R,
+        rng: &mut R,
     ) -> Result<Vec<BigInt>, Error> {
         let config =
             SmudgingBoundCalculatorConfig::new(self.params.clone(), self.n, num_ciphertexts);
         let calculator = SmudgingBoundCalculator::new(config);
         let generator = SmudgingNoiseGenerator::from_bound_calculator(calculator)?;
 
-        generator.generate_smudging_error()
+        generator.generate_smudging_error(rng)
     }
     /// Compute decryption share from ciphertext and secret/smudging polynomials.
     ///
@@ -233,7 +234,9 @@ mod tests {
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.clone().as_ref())
             .unwrap();
-        let shares = trbfv.generate_secret_shares_from_poly(sk_poly).unwrap();
+        let shares = trbfv
+            .generate_secret_shares_from_poly(sk_poly, rand::thread_rng())
+            .unwrap();
 
         // Check that we got the right number of shares
         assert_eq!(shares.len(), params.moduli().len());
@@ -410,7 +413,7 @@ mod tests {
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();
 
-        let shares = trbfv.generate_secret_shares_from_poly(sk_poly);
+        let shares = trbfv.generate_secret_shares_from_poly(sk_poly, rand::thread_rng());
         assert!(shares.is_ok());
     }
 }

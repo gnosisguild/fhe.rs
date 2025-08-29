@@ -16,6 +16,8 @@ use ndarray::Array2;
 use num_bigint::BigUint;
 use num_bigint::{BigInt, ToBigInt};
 use num_traits::{Signed, ToPrimitive};
+use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -138,9 +140,10 @@ impl ShareManager {
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
-    pub fn generate_secret_shares_from_poly(
+    pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
         &mut self,
         poly: Zeroizing<Poly>,
+        mut rng: R,
     ) -> Result<Vec<Array2<u64>>, Error> {
         let moduli: Vec<u64> = poly.ctx().moduli().to_vec();
 
@@ -156,10 +159,17 @@ impl ShareManager {
         let coefficients = poly.coefficients();
         let coeff_rows: Vec<_> = coefficients.outer_iter().collect();
 
+        // Generate seeds deterministically from the input RNG
+        let seeds: Vec<u64> = (0..moduli.len()).map(|_| rng.gen()).collect();
+
         let return_vec: Result<Vec<Array2<u64>>, Error> = moduli
             .par_iter()
             .zip(coeff_rows.par_iter())
-            .map(|(m, p)| -> Result<Array2<u64>, Error> {
+            .enumerate()
+            .map(|(i, (m, p))| -> Result<Array2<u64>, Error> {
+                // Get rng from seed
+                let mut rng = ChaCha20Rng::seed_from_u64(seeds[i]);
+
                 // Create shamir object
                 let shamir = ShamirSecretSharing {
                     threshold: self.threshold,
@@ -173,7 +183,9 @@ impl ShareManager {
                 for c in p.iter() {
                     // Split the coeff into n shares
                     let secret = c.to_bigint().unwrap();
-                    let c_shares = shamir.split(secret.clone());
+
+                    let c_shares = shamir.split(secret.clone(), &mut rng);
+
                     // For each share convert to u64
                     let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
                     for (_, c_share) in c_shares.iter() {
@@ -514,7 +526,7 @@ mod tests {
             .unwrap();
 
         let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly)
+            .generate_secret_shares_from_poly(sk_poly, rng)
             .unwrap();
 
         let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = vec![vec![], vec![], vec![]];
