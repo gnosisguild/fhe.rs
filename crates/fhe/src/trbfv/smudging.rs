@@ -229,6 +229,7 @@ mod tests {
     use crate::bfv::BfvParametersBuilder;
     use num_traits::Signed;
     use num_traits::Zero;
+    use rand::thread_rng;
     use std::str::FromStr;
 
     fn test_params() -> Arc<BfvParameters> {
