@@ -208,7 +208,7 @@ impl ShareManager {
     /// # Returns
     /// A polynomial representing the aggregated secret key material
     pub fn aggregate_collected_shares(
-        &mut self,
+        &self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
     ) -> Result<Poly, Error> {
         let ctx = self.params.ctx_at_level(0).unwrap();
@@ -242,7 +242,7 @@ impl ShareManager {
     /// # Returns
     /// A decryption share polynomial that contributes to the final decryption
     pub fn decryption_share(
-        &mut self,
+        &self,
         ciphertext: Arc<Ciphertext>,
         mut sk_i: Poly,
         es_i: Poly,
@@ -274,7 +274,7 @@ impl ShareManager {
     /// # Returns
     /// The decrypted plaintext
     pub fn decrypt_from_shares(
-        &mut self,
+        &self,
         d_share_polys: Vec<Poly>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
@@ -458,7 +458,7 @@ mod tests {
         //Fix threshold to be 0 for the purpose of this test so that any single party can decrypt.
         //I.e., the secret key is given to all parties and not secret shared
         let threshold = 0;
-        let mut manager = ShareManager::new(n.try_into().unwrap(), threshold, params.clone());
+        let manager = ShareManager::new(n.try_into().unwrap(), threshold, params.clone());
 
         // Setup: Generate keys and encrypt a plaintext
         let sk = SecretKey::random(&params, &mut rng);
