@@ -77,6 +77,114 @@ impl PublicKey {
 
         Ok((ciphertext, u, e1, e2))
     }
+
+    /// Encrypt a plaintext with threshold BFV using the configured error2_variance
+    pub fn try_encrypt_trbfv<R: RngCore + CryptoRng>(
+        &self,
+        pt: &Plaintext,
+        rng: &mut R,
+    ) -> Result<Ciphertext> {
+        let mut ct = self.c.clone();
+        while ct.level != pt.level {
+            ct.mod_switch_to_next_level()?;
+        }
+
+        let ctx = self.par.ctx_at_level(ct.level)?;
+
+        // Standard variance for u and e1
+        let u = Zeroizing::new(Poly::small(
+            ctx,
+            Representation::Ntt,
+            self.par.variance,
+            rng,
+        )?);
+
+        // Standard variance for e1
+        let e1 = Zeroizing::new(Poly::small(
+            ctx,
+            Representation::Ntt,
+            self.par.variance,
+            rng,
+        )?);
+
+        // error2_variance for e2 in threshold BFV
+        let e2 = Zeroizing::new(Poly::small(
+            ctx,
+            Representation::Ntt,
+            self.par.get_error2_variance(),
+            rng,
+        )?);
+
+        let m = Zeroizing::new(pt.to_poly());
+        let mut c0 = u.as_ref() * &ct.c[0];
+        c0 += &e1;
+        c0 += &m;
+        let mut c1 = u.as_ref() * &ct.c[1];
+        c1 += &e2;
+
+        // It is now safe to enable variable time computations.
+        unsafe {
+            c0.allow_variable_time_computations();
+            c1.allow_variable_time_computations()
+        }
+
+        Ok(Ciphertext {
+            par: self.par.clone(),
+            seed: None,
+            c: vec![c0, c1],
+            level: ct.level,
+        })
+    }
+
+    /// Extended threshold BFV encryption that returns noise polynomials
+    pub fn try_encrypt_trbfv_extended<R: RngCore + CryptoRng>(
+        &self,
+        pt: &Plaintext,
+        rng: &mut R,
+    ) -> Result<(Ciphertext, Poly, Poly, Poly)> {
+        let mut ct = self.c.clone();
+        while ct.level != pt.level {
+            ct.mod_switch_to_next_level()?;
+        }
+
+        let ctx = self.par.ctx_at_level(ct.level)?;
+
+        // Standard variance for u
+        let u = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
+
+        // Standard variance for e1
+        let e1 = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
+
+        // error2_variance for e2 in threshold BFV
+        let e2 = Poly::small(
+            ctx,
+            Representation::Ntt,
+            self.par.get_error2_variance(),
+            rng,
+        )?;
+
+        let m = Zeroizing::new(pt.to_poly());
+        let mut c0 = &u * &ct.c[0];
+        c0 += &e1;
+        c0 += &m;
+        let mut c1 = &u * &ct.c[1];
+        c1 += &e2;
+
+        // It is now safe to enable variable time computations.
+        unsafe {
+            c0.allow_variable_time_computations();
+            c1.allow_variable_time_computations()
+        }
+
+        let ciphertext = Ciphertext {
+            par: self.par.clone(),
+            seed: None,
+            c: vec![c0, c1],
+            level: ct.level,
+        };
+
+        Ok((ciphertext, u, e1, e2))
+    }
 }
 
 impl FheParametrized for PublicKey {
@@ -181,7 +289,9 @@ impl DeserializeParametrized for PublicKey {
 #[cfg(test)]
 mod tests {
     use super::PublicKey;
-    use crate::bfv::{parameters::BfvParameters, Encoding, Plaintext, SecretKey};
+    use crate::bfv::{
+        parameters::BfvParameters, parameters::BfvParametersBuilder, Encoding, Plaintext, SecretKey,
+    };
     use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
     use rand::thread_rng;
     use std::error::Error;
@@ -241,6 +351,114 @@ mod tests {
             let bytes = pk.to_bytes();
             assert_eq!(pk, PublicKey::from_bytes(&bytes, &params)?);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn trbfv_encrypt_decrypt() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+
+        let pt = Plaintext::try_encode(
+            &params.plaintext.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+
+        // Test with default error2_variance (should be same as variance)
+        let ct = pk.try_encrypt_trbfv(&pt, &mut rng)?;
+        let pt2 = sk.try_decrypt(&ct)?;
+
+        println!("TRBFV Noise (default): {}", unsafe {
+            sk.measure_noise(&ct)?
+        });
+        assert_eq!(pt2, pt);
+
+        Ok(())
+    }
+
+    #[test]
+    fn trbfv_encrypt_custom_variance() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+
+        let pt = Plaintext::try_encode(
+            &params.plaintext.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+
+        // Test with default error2_variance (should be same as variance)
+        let ct = pk.try_encrypt_trbfv(&pt, &mut rng)?;
+        let pt2 = sk.try_decrypt(&ct)?;
+
+        println!("TRBFV Noise (custom): {}", unsafe {
+            sk.measure_noise(&ct)?
+        });
+        assert_eq!(pt2, pt);
+
+        Ok(())
+    }
+
+    #[test]
+    fn trbfv_extended_encrypt() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+
+        let pt = Plaintext::try_encode(
+            &params.plaintext.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+
+        let (ct, _u, _e1, _e2) = pk.try_encrypt_trbfv_extended(&pt, &mut rng)?;
+        let pt2 = sk.try_decrypt(&ct)?;
+
+        println!("TRBFV Extended - Noise polynomials returned");
+        assert_eq!(pt2, pt);
+
+        Ok(())
+    }
+
+    #[test]
+    fn trbfv_with_configured_error2_variance() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+
+        // Test with custom error2_variance using builder pattern (follows original pattern)
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&vec![62usize; 1])
+            .set_variance(10)
+            .set_error2_variance(15)
+            .build_arc()?;
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+
+        let pt = Plaintext::try_encode(
+            &params.plaintext.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+
+        // This should use the configured error2_variance (15)
+        let ct = pk.try_encrypt_trbfv(&pt, &mut rng)?;
+        let pt2 = sk.try_decrypt(&ct)?;
+
+        println!("TRBFV with configured error2_variance: {}", unsafe {
+            sk.measure_noise(&ct)?
+        });
+        assert_eq!(pt2, pt);
+        assert_eq!(params.get_error2_variance(), 15);
+        assert_eq!(params.variance(), 10); // Original variance unchanged
+
         Ok(())
     }
 }

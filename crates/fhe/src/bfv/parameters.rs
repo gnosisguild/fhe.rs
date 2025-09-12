@@ -39,6 +39,9 @@ pub struct BfvParameters {
     /// Error variance
     pub(crate) variance: usize,
 
+    /// Error variance for e1 in threshold BFV (defaults to variance if not set)
+    pub(crate) error2_variance: Option<usize>,
+
     /// Context for the underlying polynomials
     pub ctx: Vec<Arc<Context>>,
 
@@ -71,6 +74,7 @@ impl Debug for BfvParameters {
             .field("moduli", &self.moduli)
             // .field("moduli_sizes", &self.moduli_sizes)
             // .field("variance", &self.variance)
+            // .field("error2_variance", &self.error2_variance)
             // .field("ctx", &self.ctx)
             // .field("op", &self.op)
             // .field("delta", &self.delta)
@@ -111,6 +115,11 @@ impl BfvParameters {
     /// Returns the variance
     pub const fn variance(&self) -> usize {
         self.variance
+    }
+
+    /// Get the error2_variance, falling back to variance if not set
+    pub fn get_error2_variance(&self) -> usize {
+        self.error2_variance.unwrap_or(self.variance)
     }
 
     /// Returns the ctx
@@ -231,6 +240,12 @@ impl BfvParameters {
             .build_arc()
             .unwrap()
     }
+
+    /// Create a new BfvParameters with custom error2_variance for threshold BFV
+    pub fn with_error2_variance(mut self, error2_variance: usize) -> Self {
+        self.error2_variance = Some(error2_variance);
+        self
+    }
 }
 
 /// Builder for parameters for the Bfv encryption scheme.
@@ -239,6 +254,7 @@ pub struct BfvParametersBuilder {
     degree: usize,
     plaintext: u64,
     variance: usize,
+    error2_variance: Option<usize>,
     ciphertext_moduli: Vec<u64>,
     ciphertext_moduli_sizes: Vec<usize>,
 }
@@ -251,6 +267,7 @@ impl BfvParametersBuilder {
             degree: Default::default(),
             plaintext: Default::default(),
             variance: 10,
+            error2_variance: None,
             ciphertext_moduli: Default::default(),
             ciphertext_moduli_sizes: Default::default(),
         }
@@ -290,6 +307,12 @@ impl BfvParametersBuilder {
     /// one and sixteen.
     pub fn set_variance(&mut self, variance: usize) -> &mut Self {
         self.variance = variance;
+        self
+    }
+
+    /// Sets the error2 variance for threshold BFV. If not set, defaults to variance.
+    pub fn set_error2_variance(&mut self, error2_variance: usize) -> &mut Self {
+        self.error2_variance = Some(error2_variance);
         self
     }
 
@@ -459,6 +482,7 @@ impl BfvParametersBuilder {
             moduli: moduli.into_boxed_slice(),
             moduli_sizes: moduli_sizes.into_boxed_slice(),
             variance: self.variance,
+            error2_variance: self.error2_variance,
             ctx,
             op: op.map(Arc::new),
             delta: delta.into_boxed_slice(),
@@ -673,6 +697,42 @@ mod tests {
             .build()?;
         let bytes = params.to_bytes();
         assert_eq!(BfvParameters::try_deserialize(&bytes)?, params);
+        Ok(())
+    }
+
+    #[test]
+    fn error2_variance_functionality() -> Result<(), Box<dyn Error>> {
+        // Test default behavior (error2_variance defaults to variance)
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(10)
+            .build()?;
+        assert_eq!(params.get_error2_variance(), 10);
+
+        // Test custom error2_variance
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(10)
+            .set_error2_variance(20)
+            .build()?;
+        assert_eq!(params.get_error2_variance(), 20);
+        assert_eq!(params.variance(), 10);
+
+        // Test with_error2_variance method using builder pattern
+        let params_with_error2 = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(10)
+            .set_error2_variance(15)
+            .build()?;
+        assert_eq!(params_with_error2.get_error2_variance(), 15);
+        assert_eq!(params_with_error2.variance(), 10); // Original variance unchanged
+
         Ok(())
     }
 }
