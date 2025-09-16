@@ -2,8 +2,15 @@ use std::env;
 use std::fs;
 use std::io::Result;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn main() -> Result<()> {
+    // Check if protoc is available
+    if !is_protoc_available() {
+        println!("cargo:warning=protoc not found, skipping proto compilation");
+        return Ok(());
+    }
+
     let proto_dir = PathBuf::from("src/proto");
 
     // Create a temporary directory for prost output
@@ -29,6 +36,10 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=src/proto/bfv/bfv.proto");
     println!("cargo:rerun-if-changed=src/proto/trbfv/trbfv.proto");
     Ok(())
+}
+
+fn is_protoc_available() -> bool {
+    Command::new("protoc").arg("--version").output().is_ok()
 }
 
 fn compile_proto_file(
