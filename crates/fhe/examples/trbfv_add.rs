@@ -161,7 +161,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // Clone trbfv for thread safety (it's cheap since it's just config)
                 let mut temp_trbfv = trbfv.clone();
                 let sk_sss = temp_trbfv
-                    .generate_secret_shares_from_poly(sk_poly)
+                    .generate_secret_shares_from_poly(sk_poly, rng)
                     .unwrap();
 
                 // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
@@ -179,7 +179,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager
-                    .generate_secret_shares_from_poly(esi_poly)
+                    .generate_secret_shares_from_poly(esi_poly, rng)
                     .unwrap();
 
                 Party {
