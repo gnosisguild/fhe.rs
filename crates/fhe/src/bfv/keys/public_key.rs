@@ -108,10 +108,10 @@ impl PublicKey {
         )?);
 
         // error2_variance for e2 in threshold BFV
-        let e2 = Zeroizing::new(Poly::small(
+        let e2 = Zeroizing::new(Poly::error_2(
             ctx,
             Representation::Ntt,
-            self.par.get_error2_variance(),
+            &self.par.error2_variance,
             rng,
         )?);
 
@@ -156,12 +156,7 @@ impl PublicKey {
         let e1 = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
 
         // error2_variance for e2 in threshold BFV
-        let e2 = Poly::small(
-            ctx,
-            Representation::Ntt,
-            self.par.get_error2_variance(),
-            rng,
-        )?;
+        let e2 = Poly::error_2(ctx, Representation::Ntt, &self.par.error2_variance, rng)?;
 
         let m = Zeroizing::new(pt.to_poly());
         let mut c0 = &u * &ct.c[0];
@@ -217,10 +212,10 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
             self.par.variance,
             rng,
         )?);
-        let e2 = Zeroizing::new(Poly::small(
+        let e2 = Zeroizing::new(Poly::error_2(
             ctx,
             Representation::Ntt,
-            self.par.variance,
+            &self.par.error2_variance,
             rng,
         )?);
 
@@ -293,6 +288,7 @@ mod tests {
         parameters::BfvParameters, parameters::BfvParametersBuilder, Encoding, Plaintext, SecretKey,
     };
     use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
+    use num_bigint::BigUint;
     use rand::thread_rng;
     use std::error::Error;
 

@@ -7,7 +7,7 @@ use fhe_math::{
     zq::Modulus,
 };
 use fhe_traits::{FheDecrypter, FheEncrypter, FheParametrized};
-use fhe_util::sample_vec_cbd;
+use fhe_util::sample_vec_cbd_f32;
 use itertools::Itertools;
 use num_bigint::BigUint;
 use rand::{thread_rng, CryptoRng, Rng, RngCore, SeedableRng};
@@ -35,7 +35,8 @@ impl ZeroizeOnDrop for SecretKey {}
 impl SecretKey {
     /// Generate a random [`SecretKey`].
     pub fn random<R: RngCore + CryptoRng>(par: &Arc<BfvParameters>, rng: &mut R) -> Self {
-        let s_coefficients = sample_vec_cbd(par.degree(), par.variance, rng).unwrap();
+        let sk_variance = (par.variance as f32) / 20.0;
+        let s_coefficients = sample_vec_cbd_f32(par.degree(), sk_variance, rng).unwrap();
         Self::new(s_coefficients, par)
     }
 
@@ -261,7 +262,8 @@ mod tests {
 
         sk.coeffs.iter().for_each(|ci| {
             // Check that this is a small polynomial
-            assert!((*ci).abs() <= 2 * sk.par.variance as i64)
+            let sk_variance = params.variance / 20.0;
+            assert!((*ci).abs() <= 2.0 * sk_variance)
         })
     }
 

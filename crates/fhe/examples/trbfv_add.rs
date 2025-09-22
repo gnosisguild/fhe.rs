@@ -41,14 +41,25 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Parameters
+    // BFV parameters
     let degree = 8192;
-    let plaintext_modulus: u64 = 16384;
-    let moduli = vec![
-        0x1FFFFFFEA0001, // 562949951979521
-        0x1FFFFFFE88001, // 562949951881217
-        0x1FFFFFFE48001, // 562949951619073
-    ];
+    let params = timeit!(
+        "Parameters generation",
+        bfv::BfvParametersBuilder::new()
+            .set_degree(degree)
+            .set_plaintext_modulus(1000) // Note: changed from 16384 to match your spec
+            .set_moduli(&[
+                0x00800000022a0001, // Your new 56-bit moduli
+                0x00800000021a0001,
+                0x0080000002120001,
+                0x0080000001f60001,
+            ])
+            .set_variance(10)
+            .set_error2_variance_str(
+                "52309181128222339698631578526730685514457152477762943514050560000"
+            )?
+            .build_arc()?
+    );
 
     // This executable is a command line tool which enables to specify
     // trBFV summations with party and threshold sizes.
@@ -109,16 +120,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("\tnum_summed = {num_summed}");
     println!("\tnum_parties = {num_parties}");
     println!("\tthreshold = {threshold}");
-
-    // Let's generate the BFV parameters structure. This will be shared between parties
-    let params = timeit!(
-        "Parameters generation",
-        bfv::BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus)
-            .set_moduli(&moduli)
-            .build_arc()?
-    );
 
     // Party setup: each party generates a secret key and shares of a collective
     // public key.

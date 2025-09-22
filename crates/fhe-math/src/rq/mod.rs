@@ -20,6 +20,8 @@ use crate::{Error, Result};
 use fhe_util::sample_vec_cbd;
 use itertools::{izip, Itertools};
 use ndarray::{s, Array2, ArrayView2, Axis};
+use num_bigint::{BigInt, BigUint, RandBigInt, ToBigInt};
+use num_traits::{Signed, ToPrimitive};
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
@@ -266,11 +268,8 @@ impl Poly {
         }
         p
     }
-
     /// Generate a small polynomial and convert into the specified
     /// representation.
-    ///
-    /// Returns an error if the variance does not belong to [1, ..., 16].
     pub fn small<T: RngCore + CryptoRng>(
         ctx: &Arc<Context>,
         representation: Representation,
@@ -279,7 +278,7 @@ impl Poly {
     ) -> Result<Self> {
         if !(1..=16).contains(&variance) {
             Err(Error::Default(
-                "The variance should be an integer between 1 and 16".to_string(),
+                "The variance should be between 1 and 16".to_string(),
             ))
         } else {
             let coeffs = Zeroizing::new(
@@ -297,6 +296,147 @@ impl Poly {
             }
             Ok(p)
         }
+    }
+
+    /// Generate a polynomial with coefficients sampled uniformly from [-bound, bound]
+    /// using BigInt for large bounds (e.g., 155-bit values).
+    ///
+    /// The polynomial is created in PowerBasis representation and can be converted
+    /// to other representations as needed.
+    pub fn uniform_bigint<R: RngCore + CryptoRng>(
+        ctx: &Arc<Context>,
+        representation: Representation,
+        bound: &BigInt,
+        rng: &mut R,
+    ) -> Result<Self> {
+        // Sample uniform coefficients in [-bound, bound]
+        let coefficients = sample_uniform_coefficients_bigint(bound, ctx.degree, rng);
+
+        // Convert BigInt coefficients to polynomial using the robust method
+        let zeroized_poly = Self::from_bigints(&coefficients, ctx)?;
+
+        // Extract the Poly from Zeroizing wrapper
+        // We need to clone because Zeroizing doesn't have into_inner()
+        let mut poly = (*zeroized_poly).clone();
+
+        // Convert to requested representation
+        if representation != Representation::PowerBasis {
+            poly.change_representation(representation);
+        }
+
+        Ok(poly)
+    }
+
+    /// Generate a polynomial with coefficients sampled uniformly from [-bound, bound]
+    /// using BigUint bound. This is a convenience wrapper around uniform_bigint.
+    pub fn uniform_biguint<R: RngCore + CryptoRng>(
+        ctx: &Arc<Context>,
+        representation: Representation,
+        bound: &BigUint,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let bigint_bound = BigInt::from(bound.clone());
+        Self::uniform_bigint(ctx, representation, &bigint_bound, rng)
+    }
+
+    /// Conditional error sampling: uses CBD for small variance, uniform for large variance
+    /// This bridges the gap between traditional small error sampling and large uniform sampling
+    pub fn conditional_error<R: RngCore + CryptoRng>(
+        ctx: &Arc<Context>,
+        representation: Representation,
+        variance: &BigUint,
+        rng: &mut R,
+    ) -> Result<Self> {
+        // Convert BigUint to u64 for comparison
+        let variance_u64 = variance.to_u64().unwrap_or(u64::MAX);
+
+        if variance_u64 < 16 {
+            // Use existing CBD distribution for small variances
+            let variance_usize = variance.to_usize().unwrap_or(0);
+            Self::small(ctx, representation, variance_usize, rng)
+        } else {
+            // Convert variance to bound for uniform distribution
+            // For uniform distribution on [-B, B], variance = B²/3, so B = sqrt(3 * variance)
+            let bound = variance_to_uniform_bound(variance)?;
+            Self::uniform_bigint(ctx, representation, &bound, rng)
+        }
+    }
+
+    /// Generate a polynomial with coefficients sampled uniformly from [-bound, bound]
+    /// where the bound is derived from the given variance.
+    /// For uniform distribution on [-B, B], variance = B²/3, so B = sqrt(3 * variance)
+    pub fn uniform_from_variance<R: RngCore + CryptoRng>(
+        ctx: &Arc<Context>,
+        representation: Representation,
+        variance: &BigUint,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let bound = variance_to_uniform_bound(variance)?;
+        Self::uniform_bigint(ctx, representation, &bound, rng)
+    }
+
+    /// Convert a vector of BigInt coefficients into a Poly in full RNS representation
+    /// at level 0 using the provided context.
+    pub fn from_bigints(bigints: &[BigInt], ctx: &Arc<Context>) -> Result<Zeroizing<Self>> {
+        let degree = ctx.degree;
+        if bigints.len() != degree {
+            return Err(Error::Default(format!(
+                "Expected {} coefficients, got {}",
+                degree,
+                bigints.len()
+            )));
+        }
+
+        // Moduli from context
+        let moduli = ctx.moduli();
+
+        // Create a matrix: rows = moduli, cols = coefficients
+        // Shape: (num_moduli, degree)
+        let mut coeffs_rns = vec![0u64; moduli.len() * degree];
+
+        for (col, coeff) in bigints.iter().enumerate() {
+            for (row, &modulus) in moduli.iter().enumerate() {
+                // Reduce coefficient mod q_i
+                let mut reduced = coeff % BigInt::from(modulus);
+                if reduced.is_negative() {
+                    reduced += BigInt::from(modulus);
+                }
+                let u64_value = reduced
+                    .to_u64()
+                    .ok_or_else(|| Error::Default("Residue doesn't fit in u64".to_string()))?;
+
+                coeffs_rns[row * degree + col] = u64_value;
+            }
+        }
+
+        // Convert flat vector into Array2<u64> with shape (num_moduli, degree)
+        let coeff_matrix = Array2::from_shape_vec((moduli.len(), degree), coeffs_rns)
+            .map_err(|_| Error::Default("Failed to create coefficient matrix".to_string()))?;
+
+        // Create polynomial from coefficients matrix
+        Self::from_coeffs_matrix(coeff_matrix, ctx)
+    }
+
+    /// Create a polynomial from a coefficient matrix in RNS representation
+    /// This is a utility function that can be used by various polynomial constructors
+    pub fn from_coeffs_matrix(
+        coeff_matrix: Array2<u64>,
+        ctx: &Arc<Context>,
+    ) -> Result<Zeroizing<Self>> {
+        let mut poly = Self::zero(ctx, Representation::PowerBasis);
+        poly.set_coefficients(coeff_matrix);
+        Ok(Zeroizing::new(poly))
+    }
+
+    /// Generate error polynomial for e2 in threshold BFV
+    /// Uses CBD for variance < 16, uniform distribution for variance >= 16
+    pub fn error_2<R: RngCore + CryptoRng>(
+        ctx: &Arc<Context>,
+        representation: Representation,
+        variance: &BigUint,
+        rng: &mut R,
+    ) -> Result<Self> {
+        Self::conditional_error(ctx, representation, variance, rng)
     }
 
     /// Access the polynomial coefficients in RNS representation.
@@ -584,6 +724,44 @@ impl Poly {
         });
         Ok(())
     }
+}
+
+/// Sample uniform coefficients from [-bound, bound] using BigInt
+///
+/// This function generates `count` random coefficients, each uniformly distributed
+/// in the range [-bound, bound] inclusive.
+pub fn sample_uniform_coefficients_bigint<R: RngCore + CryptoRng>(
+    bound: &BigInt,
+    count: usize,
+    rng: &mut R,
+) -> Vec<BigInt> {
+    let mut samples = Vec::with_capacity(count);
+
+    // Create range [-bound, bound + 1) since gen_bigint_range is exclusive of upper bound
+    let lower_bound = -bound;
+    let upper_bound = bound + 1;
+
+    for _ in 0..count {
+        let sample = rng.gen_bigint_range(&lower_bound, &upper_bound);
+        samples.push(sample);
+    }
+
+    samples
+}
+
+/// Convert variance to bound for uniform distribution
+/// For uniform distribution on [-B, B], variance = B²/3, so B = sqrt(3 * variance)
+fn variance_to_uniform_bound(variance: &BigUint) -> Result<BigInt> {
+    // Calculate 3 * variance
+    let three_variance = variance * 3u32;
+
+    // Calculate sqrt(3 * variance) using integer square root
+    let bound_uint = three_variance.sqrt();
+
+    // Convert to BigInt for signed arithmetic
+    bound_uint
+        .to_bigint()
+        .ok_or_else(|| Error::Default("Failed to convert bound to BigInt".to_string()))
 }
 
 impl Zeroize for Poly {
