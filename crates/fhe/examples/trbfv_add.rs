@@ -16,6 +16,7 @@ use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use rayon::prelude::*;
+use std::time::Instant;
 use util::timeit::{timeit, timeit_n};
 
 fn print_notice_and_exit(error: Option<String>) {
@@ -47,9 +48,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Parameters generation",
         bfv::BfvParametersBuilder::new()
             .set_degree(degree)
-            .set_plaintext_modulus(1000) // Note: changed from 16384 to match your spec
+            .set_plaintext_modulus(1000)
             .set_moduli(&[
-                0x00800000022a0001, // Your new 56-bit moduli
+                0x00800000022a0001,
                 0x00800000021a0001,
                 0x0080000002120001,
                 0x0080000001f60001,
@@ -71,8 +72,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut num_summed = 1000;
-    let mut num_parties = 10;
-    let mut threshold = 4;
+    let mut num_parties = 50;
+    let mut threshold = 10;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.
@@ -266,38 +267,51 @@ fn main() -> Result<(), Box<dyn Error>> {
         Arc::new(sum)
     });
 
-    timeit!("Generate Decrypt Share (parallel)", {
-        parties.par_iter_mut().for_each(|party| {
-            party.d_share_poly = trbfv
-                .clone()
-                .decryption_share(
-                    tally.clone(),
-                    party.sk_poly_sum.clone(),
-                    party.es_poly_sum.clone(),
-                )
-                .unwrap();
-        });
+    // Measure decryption share generation (average per party)
+    let share_generation_start = Instant::now();
+
+    parties.par_iter_mut().for_each(|party| {
+        party.d_share_poly = trbfv
+            .clone()
+            .decryption_share(
+                tally.clone(),
+                party.sk_poly_sum.clone(),
+                party.es_poly_sum.clone(),
+            )
+            .unwrap();
     });
 
-    // gather d_share_polys
-    let mut d_share_polys: Vec<Poly> = Vec::new();
-    for party in parties.iter().take(threshold + 1) {
-        d_share_polys.push(party.d_share_poly.clone());
-    }
+    let total_share_generation_time = share_generation_start.elapsed();
+    let avg_time_per_party = total_share_generation_time.as_millis() as f64 / num_parties as f64;
 
-    // decrypt result
-    let (_open_results, result) = timeit!("Threshold decrypt (combine shares)", {
-        let open_results = trbfv.decrypt(d_share_polys, tally.clone()).unwrap();
+    println!("Decryption share generation:");
+    println!(
+        "  Total time (parallel): {:.2?}",
+        total_share_generation_time
+    );
+    println!("  Average time per party: {:.2} ms", avg_time_per_party);
+
+    // Gather decryption shares from threshold+1 parties
+    let d_share_polys: Vec<Poly> = parties
+        .iter()
+        .take(threshold + 1)
+        .map(|party| party.d_share_poly.clone())
+        .collect();
+
+    // Measure share combination time separately
+    let result = timeit!("Share combination and final decryption", {
+        let open_results = trbfv.decrypt(d_share_polys, tally.clone())?;
         let result_vec = Vec::<u64>::try_decode(&open_results, Encoding::poly())?;
-        let result = result_vec[0];
-        (open_results, result)
-    });
+        Ok::<u64, Box<dyn Error>>(result_vec[0])
+    })?;
 
-    // Show summation result
-    println!("Sum result = {result} / {num_summed}");
-    let expected_result = numbers.iter().sum();
-    println!("Expected result = {expected_result} / {num_summed}");
-    assert_eq!(result, expected_result);
+    // Verify correctness
+    let expected_result: u64 = numbers.iter().sum();
+    println!("Computed result: {result}");
+    println!("Expected result: {expected_result}");
+
+    assert_eq!(result, expected_result, "Threshold computation failed!");
+    println!("Threshold BFV computation successful!");
 
     Ok(())
 }
