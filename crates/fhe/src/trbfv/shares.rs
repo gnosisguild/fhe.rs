@@ -588,8 +588,8 @@ mod tests {
 
         // Test decrypt_from_shares with parties 1 and 2 reconstructing
         let reconstructing = vec![1, 2];
-        let result = managers[0]
-            .decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
+        let result =
+            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
         assert!(result.is_ok());
 
         // Test if we had correct decyption
@@ -625,7 +625,8 @@ mod tests {
             .generate_secret_shares_from_poly(sk_poly)
             .unwrap();
 
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = vec![vec![], vec![], vec![], vec![], vec![]];
+        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> =
+            vec![vec![], vec![], vec![], vec![], vec![]];
 
         let mut sk_poly_sums: Vec<Poly> = (0..n)
             .map(|_| Poly::zero(ctx, Representation::PowerBasis))
@@ -671,8 +672,8 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares with selected parties
-        let result = managers[0]
-            .decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
+        let result =
+            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
         assert!(result.is_ok());
 
         // Validate plaintext
@@ -735,7 +736,9 @@ mod tests {
 
         // Choose arbitrary reconstructing parties (1-based indices): {2,5,7,11,13,17,19,20}
         // Corresponding 0-based indices: {1,4,6,10,12,16,18,19}
-        let chosen_indices = vec![1usize, 4usize, 6usize, 10usize, 12usize, 16usize, 18usize, 19usize];
+        let chosen_indices = vec![
+            1usize, 4usize, 6usize, 10usize, 12usize, 16usize, 18usize, 19usize,
+        ];
         let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
 
         // Each chosen party generates their decryption share
@@ -753,8 +756,8 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares with selected parties
-        let result = managers[0]
-            .decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
+        let result =
+            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
         assert!(result.is_ok());
 
         // Validate plaintext
@@ -834,10 +837,14 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Decrypt with correct indices -> should succeed and match plaintext
-        let result_ok = managers[0]
-            .decrypt_from_shares(decryption_shares.clone(), reconstructing_correct.clone(), ct.clone());
+        let result_ok = managers[0].decrypt_from_shares(
+            decryption_shares.clone(),
+            reconstructing_correct.clone(),
+            ct.clone(),
+        );
         assert!(result_ok.is_ok());
-        let plaintext_found_ok = result_ok.expect("Failed to decrypt from shares with correct indices");
+        let plaintext_found_ok =
+            result_ok.expect("Failed to decrypt from shares with correct indices");
         let decoded_ok: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found_ok, Encoding::poly())
             .expect("Decoding plaintext failed");
         assert_eq!(decoded_ok, plaintext_data);
@@ -850,13 +857,20 @@ mod tests {
         reconstructing_wrong[0] = non_selected + 1; // introduce an incorrect party id (1-based)
 
         // Decrypt with wrong indices -> should not match plaintext (but may still return Ok)
-        let result_bad = managers[0]
-            .decrypt_from_shares(decryption_shares.clone(), reconstructing_wrong, ct.clone());
+        let result_bad = managers[0].decrypt_from_shares(
+            decryption_shares.clone(),
+            reconstructing_wrong,
+            ct.clone(),
+        );
         assert!(result_bad.is_ok());
-        let plaintext_found_bad = result_bad.expect("Decryption unexpectedly failed with wrong indices");
+        let plaintext_found_bad =
+            result_bad.expect("Decryption unexpectedly failed with wrong indices");
         let decoded_bad: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found_bad, Encoding::poly())
             .expect("Decoding plaintext failed");
-        assert_ne!(decoded_bad, plaintext_data, "Decryption should not match with wrong indices");
+        assert_ne!(
+            decoded_bad, plaintext_data,
+            "Decryption should not match with wrong indices"
+        );
     }
 
     #[test]
@@ -912,7 +926,9 @@ mod tests {
 
         // Choose non-increasing reconstructing parties (0-based) of size threshold+1
         // Example: {9,10,14,7,5,3,2,1} => (1-based) {10,11,15,8,6,4,3,2}
-        let chosen_indices = vec![9usize, 10usize, 14usize, 7usize, 5usize, 3usize, 2usize, 1usize];
+        let chosen_indices = vec![
+            9usize, 10usize, 14usize, 7usize, 5usize, 3usize, 2usize, 1usize,
+        ];
         let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
 
         // Each chosen party generates their decryption share in the same (non-increasing) order
@@ -930,8 +946,8 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares with non-increasing party order
-        let result = managers[0]
-            .decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
+        let result =
+            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
         assert!(result.is_ok());
 
         // Validate plaintext
