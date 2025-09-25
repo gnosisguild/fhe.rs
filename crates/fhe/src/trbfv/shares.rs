@@ -846,4 +846,86 @@ mod tests {
             .expect("Decoding plaintext failed");
         assert_ne!(decoded_bad, plaintext_data, "Decryption should not match with wrong indices");
     }
+
+    #[test]
+    fn test_threshold_decryption_random_party_order() {
+        let mut rng = OsRng;
+        let params = test_params();
+        let n = 15;
+        let threshold = 7; // need 8 parties
+
+        let ctx = params.ctx_at_level(0).unwrap();
+
+        // Setup multiple share managers (simulating different parties)
+        let mut managers: Vec<ShareManager> = (0..n)
+            .map(|_| ShareManager::new(n, threshold, params.clone()))
+            .collect();
+
+        // One party generates the secret key and secret shares it among the other parties
+        let secret_key = SecretKey::random(&params, &mut rng);
+
+        let sk_poly = managers[0]
+            .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
+            .unwrap();
+
+        let sk_sss = managers[0]
+            .generate_secret_shares_from_poly(sk_poly)
+            .unwrap();
+
+        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
+
+        let mut sk_poly_sums: Vec<Poly> = (0..n)
+            .map(|_| Poly::zero(ctx, Representation::PowerBasis))
+            .collect();
+
+        for i in 0..n {
+            let mut node_share_m = Array2::zeros((0, params.degree()));
+            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
+                node_share_m
+                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
+                    .unwrap();
+            }
+            sk_sss_collected[i].push(node_share_m);
+
+            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
+            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
+        }
+
+        // Create a test ciphertext
+        let pk = PublicKey::new(&secret_key, &mut rng);
+        let mut plaintext_data = vec![222u64];
+        plaintext_data.resize(params.degree(), 0);
+        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
+        let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
+
+        // Choose non-increasing reconstructing parties (0-based) of size threshold+1
+        // Example: {9,10,14,7,5,3,2,1} => (1-based) {10,11,15,8,6,4,3,2}
+        let chosen_indices = vec![9usize, 10usize, 14usize, 7usize, 5usize, 3usize, 2usize, 1usize];
+        let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
+
+        // Each chosen party generates their decryption share in the same (non-increasing) order
+        let mut decryption_shares = Vec::new();
+        for &i in &chosen_indices {
+            let ctx = params.ctx_at_level(0).unwrap();
+            let es_poly = Poly::zero(ctx, Representation::PowerBasis);
+            let share = managers[i]
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone(), es_poly)
+                .unwrap();
+            decryption_shares.push(share);
+        }
+
+        // Verify we have enough shares
+        assert_eq!(decryption_shares.len(), threshold + 1);
+
+        // Test decrypt_from_shares with non-increasing party order
+        let result = managers[0]
+            .decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
+        assert!(result.is_ok());
+
+        // Validate plaintext
+        let plaintext_found = result.expect("Failed to decrypt from shares");
+        let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
+            .expect("Decoding plaintext failed");
+        assert_eq!(decoded, plaintext_data);
+    }
 }
