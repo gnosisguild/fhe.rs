@@ -137,7 +137,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
     // Setup trBFV module
-    let mut trbfv = TRBFV::new(num_parties, threshold, params.clone()).unwrap();
+    let trbfv = TRBFV::new(num_parties, threshold, params.clone()).unwrap();
 
     // Set up shares for each party in parallel
     println!("💻 Available CPU cores: {}", rayon::current_num_threads());
@@ -159,7 +159,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
 
                 // Clone trbfv for thread safety (it's cheap since it's just config)
-                let mut temp_trbfv = trbfv.clone();
+                let temp_trbfv = trbfv.clone();
                 let sk_sss = temp_trbfv
                     .generate_secret_shares_from_poly(sk_poly, rng)
                     .unwrap();
@@ -222,7 +222,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
-            let mut temp_trbfv = trbfv.clone();
+            let temp_trbfv = trbfv.clone();
             party.sk_poly_sum = temp_trbfv
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
