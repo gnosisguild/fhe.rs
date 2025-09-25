@@ -622,7 +622,7 @@ mod tests {
             .unwrap();
 
         let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly)
+            .generate_secret_shares_from_poly(sk_poly, rng)
             .unwrap();
 
         let mut sk_sss_collected: Vec<Vec<Array2<u64>>> =
@@ -705,7 +705,7 @@ mod tests {
             .unwrap();
 
         let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly)
+            .generate_secret_shares_from_poly(sk_poly, rng)
             .unwrap();
 
         let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
@@ -789,7 +789,7 @@ mod tests {
             .unwrap();
 
         let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly)
+            .generate_secret_shares_from_poly(sk_poly, rng)
             .unwrap();
 
         let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
@@ -895,7 +895,7 @@ mod tests {
             .unwrap();
 
         let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly)
+            .generate_secret_shares_from_poly(sk_poly, rng)
             .unwrap();
 
         let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
