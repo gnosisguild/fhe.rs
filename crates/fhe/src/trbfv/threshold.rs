@@ -163,10 +163,11 @@ impl TRBFV {
     pub fn decrypt(
         &self,
         d_share_polys: Vec<Poly>,
+        reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
-        share_manager.decrypt_from_shares(d_share_polys, ciphertext)
+        share_manager.decrypt_from_shares(d_share_polys, reconstructing_parties, ciphertext)
     }
 }
 
@@ -363,8 +364,9 @@ mod tests {
             decryption_shares.push(share);
         }
 
-        // Test the decrypt method
-        let result = trbfv_instances[0].decrypt(decryption_shares, ct);
+        // Test the decrypt method with parties 1 and 2 reconstructing
+        let reconstructing = vec![1, 2];
+        let result = trbfv_instances[0].decrypt(decryption_shares, reconstructing, ct);
         assert!(result.is_ok());
     }
 

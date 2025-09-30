@@ -286,7 +286,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // decrypt result
     let (_open_results, result) = timeit!("Threshold decrypt (combine shares)", {
-        let open_results = trbfv.decrypt(d_share_polys, tally.clone()).unwrap();
+        // Parties are 1-based for Shamir x-coordinates; we used the first (threshold+1) parties
+        let reconstructing_parties: Vec<usize> = (1..=threshold + 1).collect();
+        let open_results = trbfv
+            .decrypt(d_share_polys, reconstructing_parties, tally.clone())
+            .unwrap();
         let result_vec = Vec::<u64>::try_decode(&open_results, Encoding::poly())?;
         let result = result_vec[0];
         (open_results, result)
