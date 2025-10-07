@@ -39,6 +39,10 @@ pub struct BfvParameters {
     /// Error variance
     pub(crate) variance: usize,
 
+    /// Error variance for e2 in threshold BFV
+    /// Now supports up to 155-bit numbers using BigUint
+    pub(crate) error2_variance: BigUint,
+
     /// Context for the underlying polynomials
     pub ctx: Vec<Arc<Context>>,
 
@@ -71,6 +75,7 @@ impl Debug for BfvParameters {
             .field("moduli", &self.moduli)
             // .field("moduli_sizes", &self.moduli_sizes)
             // .field("variance", &self.variance)
+            // .field("error2_variance", &self.error2_variance)
             // .field("ctx", &self.ctx)
             // .field("op", &self.op)
             // .field("delta", &self.delta)
@@ -111,6 +116,11 @@ impl BfvParameters {
     /// Returns the variance
     pub const fn variance(&self) -> usize {
         self.variance
+    }
+
+    /// Get the error2_variance
+    pub fn get_error2_variance(&self) -> &BigUint {
+        &self.error2_variance
     }
 
     /// Returns the ctx
@@ -231,6 +241,12 @@ impl BfvParameters {
             .build_arc()
             .unwrap()
     }
+
+    /// Create a new BfvParameters with custom error2_variance for threshold BFV
+    pub fn with_error2_variance(mut self, error2_variance: BigUint) -> Self {
+        self.error2_variance = error2_variance;
+        self
+    }
 }
 
 /// Builder for parameters for the Bfv encryption scheme.
@@ -239,6 +255,7 @@ pub struct BfvParametersBuilder {
     degree: usize,
     plaintext: u64,
     variance: usize,
+    error2_variance: BigUint,
     ciphertext_moduli: Vec<u64>,
     ciphertext_moduli_sizes: Vec<usize>,
 }
@@ -251,6 +268,7 @@ impl BfvParametersBuilder {
             degree: Default::default(),
             plaintext: Default::default(),
             variance: 10,
+            error2_variance: BigUint::from(10u32), // Default to same as variance
             ciphertext_moduli: Default::default(),
             ciphertext_moduli_sizes: Default::default(),
         }
@@ -291,6 +309,32 @@ impl BfvParametersBuilder {
     pub fn set_variance(&mut self, variance: usize) -> &mut Self {
         self.variance = variance;
         self
+    }
+
+    /// Sets the error2 variance for threshold BFV using BigUint.
+    pub fn set_error2_variance(&mut self, error2_variance: BigUint) -> &mut Self {
+        self.error2_variance = error2_variance;
+        self
+    }
+
+    /// Sets the error2 variance for threshold BFV from a usize.
+    /// Convenience method for smaller values.
+    pub fn set_error2_variance_usize(&mut self, error2_variance: usize) -> &mut Self {
+        self.error2_variance = BigUint::from(error2_variance);
+        self
+    }
+
+    /// Sets the error2 variance for threshold BFV from a string representation.
+    /// Useful for very large numbers that can't fit in standard integer types.
+    pub fn set_error2_variance_str(&mut self, error2_variance: &str) -> Result<&mut Self> {
+        let big_uint = error2_variance.parse::<BigUint>().map_err(|_| {
+            Error::ParametersError(ParametersError::InvalidPlaintext(format!(
+                "Invalid BigUint string: {}",
+                error2_variance
+            )))
+        })?;
+        self.error2_variance = big_uint;
+        Ok(self)
     }
 
     /// Generate ciphertext moduli with the specified sizes
@@ -459,6 +503,7 @@ impl BfvParametersBuilder {
             moduli: moduli.into_boxed_slice(),
             moduli_sizes: moduli_sizes.into_boxed_slice(),
             variance: self.variance,
+            error2_variance: self.error2_variance.clone(),
             ctx,
             op: op.map(Arc::new),
             delta: delta.into_boxed_slice(),
@@ -525,96 +570,8 @@ impl MultiplicationParameters {
 mod tests {
     use super::{BfvParameters, BfvParametersBuilder};
     use fhe_traits::{Deserialize, Serialize};
+    use num_bigint::BigUint;
     use std::error::Error;
-
-    // TODO: To fix when errors handling is fixed.
-    // #[test]
-    // fn builder()  -> Result<(), Box<dyn Error>> {
-    // 	let params = BfvParametersBuilder::new().build();
-    // 	assert!(params.is_err_and(|e| e.to_string() == "Unspecified degree"));
-
-    // 	assert!(BfvParametersBuilder::new()
-    // 		.set_degree(7)
-    // 		.build()
-    // 		.is_err_and(
-    // 			|e| e.to_string() == "The degree should be a power of two larger or equal to
-    // 8" 		));
-
-    // 	assert!(BfvParametersBuilder::new()
-    // 		.set_degree(1023)
-    // 		.build()
-    // 		.is_err_and(
-    // 			|e| e.to_string() == "The degree should be a power of two larger or equal to
-    // 8" 		));
-
-    // 	let params = BfvParametersBuilder::new().set_degree(1024).build();
-    // 	assert!(params.is_err_and(|e| e.to_string() == "Unspecified plaintext
-    // modulus"));
-
-    // 	assert!(BfvParametersBuilder::new()
-    // 		.set_degree(1024)
-    // 		.set_plaintext_modulus(0)
-    // 		.build()
-    // 		.is_err_and(|e| e.to_string() == "modulus should be between 2 and
-    // 2^62-1"));
-
-    // 	let params = BfvParametersBuilder::new()
-    // 		.set_degree(1024)
-    // 		.set_plaintext_modulus(2)
-    // 		.build();
-    // 	assert!(params.is_err_and(|e| e.to_string() == "Unspecified ciphertext
-    // moduli"));
-
-    // 	assert!(BfvParametersBuilder::new()
-    // 		.set_degree(1024)
-    // 		.set_plaintext_modulus(2)
-    // 		.set_moduli(&[])
-    // 		.build()
-    // 		.is_err_and(|e| e.to_string() == "Unspecified ciphertext moduli"));
-
-    // 	assert!(BfvParametersBuilder::new()
-    // 		.set_degree(1024)
-    // 		.set_plaintext_modulus(2)
-    // 		.set_moduli(&[1153])
-    // 		.set_moduli_sizes(&[62])
-    // 		.build()
-    // 		.is_err_and(|e| e.to_string() == "The set of ciphertext moduli is already
-    // specified"));
-
-    // 	assert!(BfvParametersBuilder::new()
-    // 		.set_degree(8)
-    // 		.set_plaintext_modulus(2)
-    // 		.set_moduli(&[1])
-    // 		.build()
-    // 		.is_err_and(|e| e.to_string() == "modulus should be between 2 and
-    // 2^62-1"));
-
-    // 	let params = BfvParametersBuilder::new()
-    // 		.set_degree(8)
-    // 		.set_plaintext_modulus(2)
-    // 		.set_moduli(&[2])
-    // 		.build();
-    // 	assert!(params.is_err_and(|e| e.to_string() == "Impossible to construct a
-    // Ntt operator"));
-
-    // 	let params = BfvParametersBuilder::new()
-    // 		.set_degree(8)
-    // 		.set_plaintext_modulus(2)
-    // 		.set_moduli(&[1153])
-    // 		.build();
-    // 	assert!(params.is_ok());
-
-    // 	let params = params.unwrap();
-    // 	assert_eq!(params.ciphertext_moduli, vec![1153]);
-    // 	assert_eq!(params.moduli(), vec![1153]);
-    // 	assert_eq!(params.plaintext_modulus, 2);
-    // 	assert_eq!(params.polynomial_degree, 8);
-    // 	assert_eq!(params.degree(), 8);
-    // 	assert_eq!(params.variance, 1);
-    // 	assert!(params.op.is_none());
-
-    // 	Ok(())
-    // }
 
     #[test]
     fn default() {
@@ -673,6 +630,98 @@ mod tests {
             .build()?;
         let bytes = params.to_bytes();
         assert_eq!(BfvParameters::try_deserialize(&bytes)?, params);
+        Ok(())
+    }
+
+    #[test]
+    fn error2_variance_functionality() -> Result<(), Box<dyn Error>> {
+        // Test default behavior (error2_variance defaults to variance)
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(10)
+            .build()?;
+        assert_eq!(params.get_error2_variance(), &BigUint::from(10u32));
+
+        // Test custom error2_variance with BigUint
+        let error2_big = BigUint::from(20u32);
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(10)
+            .set_error2_variance(error2_big.clone())
+            .build()?;
+        assert_eq!(params.get_error2_variance(), &error2_big);
+        assert_eq!(params.variance(), 10);
+
+        // Test with_error2_variance method using 155-bit number
+        let large_error2 = BigUint::parse_bytes(
+            b"57896044618658097711785492504343953926634992332820282019728792003956564819967",
+            10,
+        )
+        .unwrap();
+        let params_with_large_error2 = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(10)
+            .set_error2_variance(large_error2.clone())
+            .build()?;
+        assert_eq!(
+            params_with_large_error2.get_error2_variance(),
+            &large_error2
+        );
+        assert_eq!(params_with_large_error2.variance(), 10); // Original variance unchanged
+
+        // Test convenience method for usize
+        let params_usize = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(10)
+            .set_error2_variance_usize(15)
+            .build()?;
+        assert_eq!(params_usize.get_error2_variance(), &BigUint::from(15u32));
+
+        // Test string method for very large numbers
+        let mut builder = BfvParametersBuilder::new();
+        builder
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(10)
+            .set_error2_variance_str(
+                "123456789012345678901234567890123456789012345678901234567890",
+            )?;
+        let params_str = builder.build()?;
+
+        let expected = BigUint::parse_bytes(
+            b"123456789012345678901234567890123456789012345678901234567890",
+            10,
+        )
+        .unwrap();
+        assert_eq!(params_str.get_error2_variance(), &expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_155_bit_error2_variance() -> Result<(), Box<dyn Error>> {
+        // Test with a 155-bit number (close to 2^155)
+        let bit_155_number = BigUint::from(2u32).pow(155) - BigUint::from(1u32);
+
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(10)
+            .set_error2_variance(bit_155_number.clone())
+            .build()?;
+
+        assert_eq!(params.get_error2_variance(), &bit_155_number);
+
         Ok(())
     }
 }

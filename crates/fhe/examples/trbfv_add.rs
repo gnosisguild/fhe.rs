@@ -16,6 +16,7 @@ use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use rayon::prelude::*;
+use std::time::Instant;
 use util::timeit::{timeit, timeit_n};
 
 fn print_notice_and_exit(error: Option<String>) {
@@ -41,14 +42,25 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Parameters
+    // BFV parameters
     let degree = 8192;
-    let plaintext_modulus: u64 = 16384;
-    let moduli = vec![
-        0x1FFFFFFEA0001, // 562949951979521
-        0x1FFFFFFE88001, // 562949951881217
-        0x1FFFFFFE48001, // 562949951619073
-    ];
+    let params = timeit!(
+        "Parameters generation",
+        bfv::BfvParametersBuilder::new()
+            .set_degree(degree)
+            .set_plaintext_modulus(1000)
+            .set_moduli(&[
+                0x00800000022a0001,
+                0x00800000021a0001,
+                0x0080000002120001,
+                0x0080000001f60001,
+            ])
+            .set_variance(10)
+            .set_error2_variance_str(
+                "52309181128222339698631578526730685514457152477762943514050560000"
+            )?
+            .build_arc()?
+    );
 
     // This executable is a command line tool which enables to specify
     // trBFV summations with party and threshold sizes.
@@ -60,8 +72,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut num_summed = 1000;
-    let mut num_parties = 10;
-    let mut threshold = 7;
+    let mut num_parties = 50;
+    let mut threshold = 10;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.
@@ -92,14 +104,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if num_summed == 0 || num_parties == 0 || threshold == 0 {
+    if num_summed == 0 || num_parties == 0 {
         print_notice_and_exit(Some(
             "Users, threshold, and party sizes must be nonzero".to_string(),
         ))
     }
-    if threshold >= num_parties {
+    if threshold > (num_parties - 1) / 2 {
         print_notice_and_exit(Some(
-            "Threshold must be less than number of parties".to_string(),
+            "Threshold must be strictly less than half the number of parties".to_string(),
         ))
     }
 
@@ -109,16 +121,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("\tnum_summed = {num_summed}");
     println!("\tnum_parties = {num_parties}");
     println!("\tthreshold = {threshold}");
-
-    // Let's generate the BFV parameters structure. This will be shared between parties
-    let params = timeit!(
-        "Parameters generation",
-        bfv::BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus)
-            .set_moduli(&moduli)
-            .build_arc()?
-    );
 
     // Party setup: each party generates a secret key and shares of a collective
     // public key.
@@ -265,38 +267,51 @@ fn main() -> Result<(), Box<dyn Error>> {
         Arc::new(sum)
     });
 
-    timeit!("Generate Decrypt Share (parallel)", {
-        parties.par_iter_mut().for_each(|party| {
-            party.d_share_poly = trbfv
-                .clone()
-                .decryption_share(
-                    tally.clone(),
-                    party.sk_poly_sum.clone(),
-                    party.es_poly_sum.clone(),
-                )
-                .unwrap();
-        });
+    // Measure decryption share generation (average per party)
+    let share_generation_start = Instant::now();
+
+    parties.par_iter_mut().for_each(|party| {
+        party.d_share_poly = trbfv
+            .clone()
+            .decryption_share(
+                tally.clone(),
+                party.sk_poly_sum.clone(),
+                party.es_poly_sum.clone(),
+            )
+            .unwrap();
     });
 
-    // gather d_share_polys
-    let mut d_share_polys: Vec<Poly> = Vec::new();
-    for party in parties.iter().take(threshold) {
-        d_share_polys.push(party.d_share_poly.clone());
-    }
+    let total_share_generation_time = share_generation_start.elapsed();
+    let avg_time_per_party = total_share_generation_time.as_millis() as f64 / num_parties as f64;
 
-    // decrypt result
-    let (_open_results, result) = timeit!("Threshold decrypt (combine shares)", {
-        let open_results = trbfv.decrypt(d_share_polys, tally.clone()).unwrap();
+    println!("Decryption share generation:");
+    println!(
+        "  Total time (parallel): {:.2?}",
+        total_share_generation_time
+    );
+    println!("  Average time per party: {:.2} ms", avg_time_per_party);
+
+    // Gather decryption shares from threshold+1 parties
+    let d_share_polys: Vec<Poly> = parties
+        .iter()
+        .take(threshold + 1)
+        .map(|party| party.d_share_poly.clone())
+        .collect();
+
+    // Measure share combination time separately
+    let result = timeit!("Share combination and final decryption", {
+        let open_results = trbfv.decrypt(d_share_polys, tally.clone())?;
         let result_vec = Vec::<u64>::try_decode(&open_results, Encoding::poly())?;
-        let result = result_vec[0];
-        (open_results, result)
-    });
+        Ok::<u64, Box<dyn Error>>(result_vec[0])
+    })?;
 
-    // Show summation result
-    println!("Sum result = {result} / {num_summed}");
-    let expected_result = numbers.iter().sum();
-    println!("Expected result = {expected_result} / {num_summed}");
-    assert_eq!(result, expected_result);
+    // Verify correctness
+    let expected_result: u64 = numbers.iter().sum();
+    println!("Computed result: {result}");
+    println!("Expected result: {expected_result}");
+
+    assert_eq!(result, expected_result, "Threshold computation failed!");
+    println!("Threshold BFV computation successful!");
 
     Ok(())
 }

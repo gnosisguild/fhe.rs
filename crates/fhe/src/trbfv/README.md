@@ -1,8 +1,11 @@
 # Threshold BFV (TRBFV)
 
-A pure-Rust implementation of threshold BFV homomorphic encryption based on the scheme described by Antoine Urban and Matthieu Rambaud in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
+A pure-Rust implementation of threshold BFV homomorphic encryption based on the work of Antoine Urban and Matthieu Rambaud in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
+The current implemenation is a passively secure version of the protocol (and so without PVSS etc). Also we omit for now the generation of the relinearization keys as we only perform additions over ciphertexts (and so the scheme we use for now for encryption is bfv described in section 4.1, and not lbfv described in section 4.3).
 
-This module enables distributed decryption among multiple parties where only a threshold number of parties are needed to decrypt ciphertexts. The implementation provides security against up to t-1 compromised parties in a threshold scheme.
+
+
+This module enables distributed decryption between `n` parties without necessarily involving all of them. Any number of parties between `threshold` and `n` is able to decrypt a ciphertext. The maximum thershold supported is `(n-1)/2`. 
 
 ## Architecture
 
@@ -29,7 +32,7 @@ For a complete working example demonstrating multi-party setup, share distributi
 
 The example can be run with configurable parameters:
 ```bash
-cargo run --example trbfv_add --num_parties=10 --threshold=7
+cargo run --example trbfv_add --num_parties=10 --threshold=4
 ```
 
 Basic usage pattern:
