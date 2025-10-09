@@ -82,7 +82,12 @@ impl Plaintext {
 
         for qi in ctx.moduli_operators() {
             let qi_modulus = BigInt::from(qi.modulus());
-            let delta = BigInt::from(qi.inv(qi.neg(self.par.plaintext())).unwrap());
+            let qm: u64 = qi.modulus();         // numeric q
+            let pm: u64 = self.par.plaintext(); // numeric plaintext modulus
+
+            // Reduce only if pm > q
+            let r: u64 = if pm > qm { pm % qm } else { pm };
+            let delta = BigInt::from(qi.inv(qi.neg(r)).unwrap());
 
             for x in m_v.iter() {
                 // Scale by delta, reduce by modulus, and ensure result is non-negative

@@ -386,7 +386,16 @@ impl BfvParametersBuilder {
         let mut delta_rests = vec![];
         for m in &moduli {
             let q = Modulus::new(*m)?;
-            delta_rests.push(q.inv(q.neg(plaintext_modulus.modulus())).unwrap())
+            let qm: u64 = q.modulus();         // numeric q
+            let pm: u64 = plaintext_modulus.modulus(); // numeric plaintext modulus
+
+            // Reduce only if pm > q
+            let r: u64 = if pm > qm { pm % qm } else { pm };
+
+
+            //delta_rests.push(q.neg(q.inv(plaintext_modulus.modulus()).unwrap()))
+            //delta_rests.push(q.inv(q.neg(plaintext_modulus.modulus())).unwrap())
+            delta_rests.push(q.inv(q.neg(r)).unwrap())
         }
 
         let mut ctx = Vec::with_capacity(moduli.len());

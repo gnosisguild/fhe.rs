@@ -135,6 +135,15 @@ impl Modulus {
         Self::reduce1(self.p - a, self.p)
     }
 
+   // pub const fn neg(&self, a: u64) -> u64 {
+   // let p = self.p;
+   // debug_assert!(p != 0);
+
+   // let a = if a >= p { a % p } else { a };
+   // // compute p - a, then canonicalize via reduce1
+   // Self::reduce1(p - a, p)
+   //}
+
     /// Modular negation in variable time.
     /// Aborts if a >= p in debug mode.
     ///

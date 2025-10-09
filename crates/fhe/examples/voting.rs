@@ -36,7 +36,7 @@ fn print_notice_and_exit(error: Option<String>) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let degree = 4096;
-    let plaintext_modulus: u64 = 4096;
+    let plaintext_modulus: u64 = 1099511627776;
     let moduli = vec![0xffffee001, 0xffffc4001, 0x1ffffe0001];
 
     // This executable is a command line tool which enables to specify
