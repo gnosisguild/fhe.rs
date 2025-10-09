@@ -256,6 +256,10 @@ pub struct BfvParametersBuilder {
     plaintext: u64,
     variance: usize,
     error2_variance: BigUint,
+    // CHANGE 1: Added flag to track if error2_variance was explicitly set
+    // This allows error2_variance to automatically follow variance unless
+    // the user explicitly sets a different value
+    error2_variance_explicitly_set: bool,
     ciphertext_moduli: Vec<u64>,
     ciphertext_moduli_sizes: Vec<usize>,
 }
@@ -269,6 +273,10 @@ impl BfvParametersBuilder {
             plaintext: Default::default(),
             variance: 10,
             error2_variance: BigUint::from(10u32), // Default to same as variance
+            // CHANGE 2: Initialize the flag to false
+            // Since error2_variance hasn't been explicitly set yet, it will
+            // track variance changes
+            error2_variance_explicitly_set: false,
             ciphertext_moduli: Default::default(),
             ciphertext_moduli_sizes: Default::default(),
         }
@@ -306,26 +314,44 @@ impl BfvParametersBuilder {
 
     /// Sets the error variance. Returns an error if the variance is not between
     /// one and sixteen.
+    ///
+    /// CHANGE 3: Modified to sync error2_variance unless it was explicitly set
+    /// This ensures backward compatibility - if you only set variance,
+    /// error2_variance will match it (standard BFV behavior)
     pub fn set_variance(&mut self, variance: usize) -> &mut Self {
         self.variance = variance;
+        // Only update error2_variance if it hasn't been explicitly set
+        // This maintains backward compatibility while allowing independent control
+        if !self.error2_variance_explicitly_set {
+            self.error2_variance = BigUint::from(variance as u32);
+        }
         self
     }
 
     /// Sets the error2 variance for threshold BFV using BigUint.
+    ///
+    /// CHANGE 4: Mark the flag as true when explicitly setting error2_variance
+    /// This prevents future set_variance() calls from overwriting this value
     pub fn set_error2_variance(&mut self, error2_variance: BigUint) -> &mut Self {
         self.error2_variance = error2_variance;
+        self.error2_variance_explicitly_set = true;
         self
     }
 
     /// Sets the error2 variance for threshold BFV from a usize.
     /// Convenience method for smaller values.
+    ///
+    /// CHANGE 5: Also marks the flag as true
     pub fn set_error2_variance_usize(&mut self, error2_variance: usize) -> &mut Self {
         self.error2_variance = BigUint::from(error2_variance);
+        self.error2_variance_explicitly_set = true;
         self
     }
 
     /// Sets the error2 variance for threshold BFV from a string representation.
     /// Useful for very large numbers that can't fit in standard integer types.
+    ///
+    /// CHANGE 6: Also marks the flag as true
     pub fn set_error2_variance_str(&mut self, error2_variance: &str) -> Result<&mut Self> {
         let big_uint = error2_variance.parse::<BigUint>().map_err(|_| {
             Error::ParametersError(ParametersError::InvalidPlaintext(format!(
@@ -334,6 +360,7 @@ impl BfvParametersBuilder {
             )))
         })?;
         self.error2_variance = big_uint;
+        self.error2_variance_explicitly_set = true;
         Ok(self)
     }
 
@@ -721,6 +748,74 @@ mod tests {
             .build()?;
 
         assert_eq!(params.get_error2_variance(), &bit_155_number);
+
+        Ok(())
+    }
+
+    // NEW TEST: Test that error2_variance tracks variance when not explicitly set
+    #[test]
+    fn test_error2_variance_tracks_variance() -> Result<(), Box<dyn Error>> {
+        // When only variance is set, error2_variance should match
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(15)
+            .build()?;
+
+        assert_eq!(params.variance(), 15);
+        assert_eq!(params.get_error2_variance(), &BigUint::from(15u32));
+
+        Ok(())
+    }
+
+    // NEW TEST: Test that explicitly set error2_variance is not overwritten
+    #[test]
+    fn test_error2_variance_independent_when_set() -> Result<(), Box<dyn Error>> {
+        // Set error2_variance first, then variance - error2_variance should stay
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_error2_variance_usize(20)
+            .set_variance(15)
+            .build()?;
+
+        assert_eq!(params.variance(), 15);
+        assert_eq!(params.get_error2_variance(), &BigUint::from(20u32));
+
+        // Set variance first, then error2_variance - error2_variance should be 20
+        let params2 = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(15)
+            .set_error2_variance_usize(20)
+            .build()?;
+
+        assert_eq!(params2.variance(), 15);
+        assert_eq!(params2.get_error2_variance(), &BigUint::from(20u32));
+
+        Ok(())
+    }
+
+    // NEW TEST: Test multiple variance changes without explicit error2_variance
+    #[test]
+    fn test_error2_variance_follows_multiple_variance_changes() -> Result<(), Box<dyn Error>> {
+        let mut builder = BfvParametersBuilder::new();
+        builder
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(5)
+            .set_variance(10)
+            .set_variance(15);
+
+        let params = builder.build()?;
+
+        // error2_variance should match the final variance value
+        assert_eq!(params.variance(), 15);
+        assert_eq!(params.get_error2_variance(), &BigUint::from(15u32));
 
         Ok(())
     }

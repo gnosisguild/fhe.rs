@@ -44,17 +44,20 @@ fn print_notice_and_exit(error: Option<String>) {
 fn main() -> Result<(), Box<dyn Error>> {
     // BFV parameters
     let degree = 8192;
+    let moduli = vec![
+        0x00800000022a0001,
+        0x00800000021a0001,
+        0x0080000002120001,
+        0x0080000001f60001,
+    ];
+    let max_modulus = *moduli.iter().max().unwrap();
+    let plaintext_modulus = max_modulus + 1;
     let params = timeit!(
         "Parameters generation",
         bfv::BfvParametersBuilder::new()
             .set_degree(degree)
-            .set_plaintext_modulus(1000)
-            .set_moduli(&[
-                0x00800000022a0001,
-                0x00800000021a0001,
-                0x0080000002120001,
-                0x0080000001f60001,
-            ])
+            .set_plaintext_modulus(plaintext_modulus)
+            .set_moduli(&moduli)
             .set_variance(10)
             .set_error2_variance_str(
                 "52309181128222339698631578526730685514457152477762943514050560000"
@@ -71,9 +74,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 1000;
-    let mut num_parties = 50;
-    let mut threshold = 10;
+    let mut num_summed = 100;
+    let mut num_parties = 20;
+    let mut threshold = 8;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.
@@ -139,7 +142,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
     // Setup trBFV module
-    let mut trbfv = TRBFV::new(num_parties, threshold, params.clone()).unwrap();
+    let mut trbfv: TRBFV = TRBFV::new(num_parties, threshold, params.clone()).unwrap();
 
     // Set up shares for each party in parallel
     println!("💻 Available CPU cores: {}", rayon::current_num_threads());
