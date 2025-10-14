@@ -56,7 +56,7 @@ name = "bfv_rgsw"
 harness = false
 
 [[bench]]
-name = "pvss_bfv"
+name = "trbfv_bfv_share"
 harness = false
 
 [[example]]
