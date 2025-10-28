@@ -12,8 +12,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // BFV parameters matching what we use for share encryption
     let degree = 8192;
     let moduli_bfv = vec![
-        0x0200000001ee0001, // 58 bits
-        0x0200000001b20001, // 58 bits
+        0x0400000001460001, // 59 bits
+        0x0400000000ea0001, // 59 bits
     ];
     let plaintext_modulus_bfv: u64 = 144115188075855872; // 2^57
 
