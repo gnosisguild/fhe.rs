@@ -44,14 +44,14 @@ fn print_notice_and_exit(error: Option<String>) {
 fn main() -> Result<(), Box<dyn Error>> {
     // BFV parameters
     let degree = 8192;
+    let plaintext_modulus: u64 = 1000;
     let moduli = vec![
         0x00800000022a0001,
         0x00800000021a0001,
         0x0080000002120001,
         0x0080000001f60001,
     ];
-    let max_modulus = *moduli.iter().max().unwrap();
-    let plaintext_modulus = max_modulus + 1;
+
     let params = timeit!(
         "Parameters generation",
         bfv::BfvParametersBuilder::new()
