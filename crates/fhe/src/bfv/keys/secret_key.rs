@@ -260,7 +260,7 @@ mod tests {
         let sk = SecretKey::random(&params, &mut rng);
         assert_eq!(sk.par, params);
 
-        sk.coeffs.iter().for_each(|ci| {
+        sk.coeffs.iter().for_each(|ci: &i64| {
             // Check that this is a small polynomial
             let sk_variance = params.variance as f32 / 20.0;
             assert!((*ci).abs() as f32 <= 2.0 * sk_variance)

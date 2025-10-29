@@ -422,6 +422,7 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62usize; 1])
+            .set_moduli_sizes(&[62usize; 1])
             .set_variance(10)
             .set_error2_variance_usize(20) // >= 16, will use uniform distribution
             .build_arc()?;
