@@ -142,7 +142,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
 
     // Setup trBFV module
-    let mut trbfv: TRBFV = TRBFV::new(num_parties, threshold, params.clone()).unwrap();
+    let trbfv = TRBFV::new(num_parties, threshold, params.clone()).unwrap();
 
     // Set up shares for each party in parallel
     println!("💻 Available CPU cores: {}", rayon::current_num_threads());
@@ -164,9 +164,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
 
                 // Clone trbfv for thread safety (it's cheap since it's just config)
-                let mut temp_trbfv = trbfv.clone();
+                let temp_trbfv = trbfv.clone();
                 let sk_sss = temp_trbfv
-                    .generate_secret_shares_from_poly(sk_poly)
+                    .generate_secret_shares_from_poly(sk_poly, rng)
                     .unwrap();
 
                 // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
@@ -184,7 +184,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager
-                    .generate_secret_shares_from_poly(esi_poly)
+                    .generate_secret_shares_from_poly(esi_poly, rng)
                     .unwrap();
 
                 Party {
@@ -227,7 +227,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
-            let mut temp_trbfv = trbfv.clone();
+            let temp_trbfv = trbfv.clone();
             party.sk_poly_sum = temp_trbfv
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
@@ -301,9 +301,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|party| party.d_share_poly.clone())
         .collect();
 
-    // Measure share combination time separately
-    let result = timeit!("Share combination and final decryption", {
-        let open_results = trbfv.decrypt(d_share_polys, tally.clone())?;
+    // decrypt result
+    let result = timeit!("Threshold decrypt (combine shares)", {
+        // Parties are 1-based for Shamir x-coordinates; we used the first (threshold+1) parties
+        let reconstructing_parties: Vec<usize> = (1..=threshold + 1).collect();
+        let open_results = trbfv
+            .decrypt(d_share_polys, reconstructing_parties, tally.clone())
+            .unwrap();
         let result_vec = Vec::<u64>::try_decode(&open_results, Encoding::poly())?;
         Ok::<u64, Box<dyn Error>>(result_vec[0])
     })?;

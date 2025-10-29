@@ -1047,13 +1047,13 @@ mod tests {
             assert!(e.is_err());
             assert_eq!(
                 e.unwrap_err().to_string(),
-                "The variance should be an integer between 1 and 16"
+                "The variance should be between 1 and 16"
             );
             let e = Poly::small(&ctx, Representation::PowerBasis, 17, &mut rng);
             assert!(e.is_err());
             assert_eq!(
                 e.unwrap_err().to_string(),
-                "The variance should be an integer between 1 and 16"
+                "The variance should be between 1 and 16"
             );
 
             for i in 1..=16 {

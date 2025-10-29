@@ -80,7 +80,7 @@ fn bench_data_sizes(c: &mut Criterion) {
     let crp = CommonRandomPoly::new(&params_trbfv, &mut thread_rng()).unwrap();
 
     // Setup trBFV
-    let mut trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
+    let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
 
     // Generate parties with threshold BFV keys and BFV encryption keys
     println!("\n📊 Generating party keys...");
@@ -102,13 +102,15 @@ fn bench_data_sizes(c: &mut Criterion) {
             .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
             .unwrap();
 
-        let sk_sss = trbfv.generate_secret_shares_from_poly(sk_poly).unwrap();
+        let sk_sss = trbfv
+            .generate_secret_shares_from_poly(sk_poly, &mut rng)
+            .unwrap();
 
         // Generate smudging error shares
         let esi_coeffs = trbfv.generate_smudging_error(100, &mut rng).unwrap();
         let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
         let esi_sss = share_manager
-            .generate_secret_shares_from_poly(esi_poly)
+            .generate_secret_shares_from_poly(esi_poly, &mut rng)
             .unwrap();
 
         // Generate BFV keys for share encryption
@@ -395,7 +397,7 @@ fn bench_timing_operations(c: &mut Criterion) {
     // Benchmark: Generate Shamir shares
     let mut rng = OsRng;
     let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-    let mut trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
+    let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
 
     group.bench_function("generate_shamir_shares", |b| {
         let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone());
@@ -405,7 +407,7 @@ fn bench_timing_operations(c: &mut Criterion) {
 
         b.iter(|| {
             trbfv
-                .generate_secret_shares_from_poly(sk_poly.clone())
+                .generate_secret_shares_from_poly(sk_poly.clone(), &mut rng)
                 .unwrap()
         });
     });
