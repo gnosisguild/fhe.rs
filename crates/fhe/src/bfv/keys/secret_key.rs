@@ -136,6 +136,56 @@ impl SecretKey {
             level,
         })
     }
+    /// Encrypt a plaintext using a provided seed for deterministic generation
+    /// of random polynomials aᵢ. Returns the ciphertext and the error polynomial.
+    pub(crate) fn encrypt_poly_with_seed_extended<R: RngCore + CryptoRng>(
+        &self,
+        p: &Poly,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+        rng: &mut R,
+    ) -> Result<(Ciphertext, Poly, Poly)> {
+        assert_eq!(p.representation(), &Representation::Ntt);
+
+        let level = self.par.level_of_ctx(p.ctx())?;
+
+        let mut s = Zeroizing::new(Poly::try_convert_from(
+            self.coeffs.as_ref(),
+            p.ctx(),
+            false,
+            Representation::PowerBasis,
+        )?);
+        s.change_representation(Representation::Ntt);
+
+        let mut a = Poly::random_from_seed(p.ctx(), Representation::Ntt, seed);
+        let a_s = Zeroizing::new(&a * s.as_ref());
+
+        let e = Poly::small(p.ctx(), Representation::Ntt, self.par.variance, rng)
+            .map_err(Error::MathError)?;
+
+        // Clone BEFORE enabling variable time to preserve restricted copies
+        let a_copy = a.clone();
+        let e_copy = e.clone();
+
+        let mut b = e.clone();
+        b -= &a_s;
+        b += p;
+
+        // Enable variable time only for the ciphertext components
+        unsafe {
+            a.allow_variable_time_computations();
+            b.allow_variable_time_computations()
+        }
+
+        let ct = Ciphertext {
+            par: self.par.clone(),
+            seed: Some(seed),
+            c: vec![b, a],
+            level,
+        };
+
+        // Return ciphertext and the restricted copies of a and e
+        Ok((ct, a_copy, e_copy))
+    }
 
     /// Encrypt a plaintext using a random seed for deterministic generation
     /// of random polynomials aᵢ.
@@ -148,6 +198,17 @@ impl SecretKey {
         thread_rng().fill(&mut seed);
 
         self.encrypt_poly_with_seed(p, seed, rng)
+    }
+    /// Encrypt a plaintext using a random seed and return the error
+    pub(crate) fn encrypt_poly_extended<R: RngCore + CryptoRng>(
+        &self,
+        p: &Poly,
+        rng: &mut R,
+    ) -> Result<(Ciphertext, Poly, Poly)> {
+        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        thread_rng().fill(&mut seed);
+
+        self.encrypt_poly_with_seed_extended(p, seed, rng)
     }
 
     /// Encrypt a plaintext using a provided seed for deterministic generation

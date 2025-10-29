@@ -37,6 +37,30 @@ impl PublicKey {
             c,
         }
     }
+    /// Generate a new [`PublicKey`] and return all components.
+    ///
+    /// Returns: (public_key, a, secret_key_clone, e)
+    pub fn new_extended<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        rng: &mut R,
+    ) -> (Self, Poly, SecretKey, Poly) {
+        let zero = Plaintext::zero(Encoding::poly(), &sk.par).unwrap();
+        let zero_poly = Zeroizing::new(zero.to_poly());
+
+        let (mut c, a, e) = sk.encrypt_poly_extended(zero_poly.as_ref(), rng).unwrap();
+
+        // Disallow variable time computations for public key (same as new())
+        c.c.iter_mut()
+            .for_each(|p| p.disallow_variable_time_computations());
+
+        let pk = Self {
+            par: sk.par.clone(),
+            c,
+        };
+
+        // a and e are already restricted (cloned before variable time was enabled)
+        (pk, a, sk.clone(), e)
+    }
 
     /// Encrypt a plaintext with the public key.
     /// The encryption is done in the same level as the plaintext.
@@ -84,53 +108,6 @@ impl PublicKey {
         };
 
         Ok((ciphertext, u, e1, e2))
-    }
-
-    /// New PK for PVSS
-    pub fn new_extended<R: RngCore + CryptoRng>(
-        sk: &SecretKey,
-        rng: &mut R,
-    ) -> Result<(Self, Poly, Poly, Poly)> {
-        let mut pk = Self::new(sk, rng);
-        let ct = pk.c.clone();
-        let ctx = pk.par.ctx_at_level(ct.level)?;
-
-        // SK
-        let boxed = sk.coeffs.clone();
-        let sk_vec = boxed.into_vec();
-        let mut sk_poly = Poly::try_convert_from(
-            &sk_vec,
-            sk.par.ctx_at_level(ct.level)?,
-            false,
-            Representation::PowerBasis,
-        )?;
-
-        // eek
-        let e = Poly::small(ctx, Representation::Ntt, pk.par.variance, rng)?;
-        // A
-        let a = ct.c[1].clone();
-
-        sk_poly.change_representation(Representation::Ntt);
-        // -A * sk + eek
-        let mut c0 = &sk_poly * &-a.clone();
-        c0 += &e;
-        // pk1 = ct1 = A
-        let mut c1 = a.clone();
-
-        // It is now safe to enable variable time computations.
-        unsafe {
-            c0.allow_variable_time_computations();
-            c1.allow_variable_time_computations()
-        }
-
-        pk.c = Ciphertext {
-            par: pk.par.clone(),
-            seed: None,
-            c: vec![c0, c1],
-            level: ct.level,
-        };
-
-        Ok((pk, a, sk_poly, e))
     }
 }
 
@@ -251,6 +228,7 @@ mod tests {
     use crate::bfv::{
         parameters::BfvParameters, parameters::BfvParametersBuilder, Encoding, Plaintext, SecretKey,
     };
+    use fhe_math::rq::traits::TryConvertFrom;
     use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
     use num_bigint::BigUint;
     use rand::thread_rng;
@@ -267,17 +245,6 @@ mod tests {
             sk.try_decrypt(&pk.c)?,
             Plaintext::zero(Encoding::poly(), &params)?
         );
-        Ok(())
-    }
-
-    #[test]
-    fn keygen_extended() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
-        let params = BfvParameters::default_arc(1, 8);
-        let sk = SecretKey::random(&params, &mut rng);
-        let (ct, _a, _sk, _e) = PublicKey::new_extended(&sk, &mut rng)?;
-        assert_eq!(ct.par, params);
-
         Ok(())
     }
 
@@ -503,6 +470,125 @@ mod tests {
 
             assert_eq!(pt2, pt);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_new_extended() -> Result<(), Box<dyn Error>> {
+        use fhe_math::rq::{Poly, Representation};
+
+        let mut rng = thread_rng();
+        let params = BfvParameters::default_arc(1, 8);
+
+        let sk = SecretKey::random(&params, &mut rng);
+
+        // Call new_extended
+        let (pk, a, sk_returned, e) = PublicKey::new_extended(&sk, &mut rng);
+
+        // Test 1: Verify the public key has correct parameters
+        assert_eq!(pk.par, params);
+        assert_eq!(pk.c.par, params);
+
+        // Test 2: Verify the ciphertext has 2 components [b, a]
+        assert_eq!(pk.c.c.len(), 2);
+
+        // Test 3: Verify that second component matches `a` (compare coefficients using method)
+        assert_eq!(pk.c.c[1].coefficients(), a.coefficients());
+        assert_eq!(pk.c.c[1].ctx(), a.ctx());
+        assert_eq!(pk.c.c[1].representation(), a.representation());
+
+        // Test 4: Verify secret key is correctly cloned
+        assert_eq!(sk_returned.coeffs, sk.coeffs);
+        assert_eq!(sk_returned.par, sk.par);
+
+        // Test 5: Verify that b = e - a*s (the core encryption equation)
+        let b = &pk.c.c[0];
+
+        // Create secret key in NTT representation
+        let mut s = Poly::try_convert_from(
+            sk.coeffs.as_ref(),
+            b.ctx(),
+            false,
+            Representation::PowerBasis,
+        )?;
+        s.change_representation(Representation::Ntt);
+
+        // Compute a * s
+        let mut a_s = a.clone();
+        a_s *= &s;
+
+        // Compute e - a*s
+        let mut expected_b = e.clone();
+        expected_b -= &a_s;
+
+        // Compare coefficients using method (semantic equality)
+        assert_eq!(
+            b.coefficients(),
+            expected_b.coefficients(),
+            "Public key equation b = e - a*s should hold"
+        );
+
+        // Test 6: Verify the public key can actually encrypt
+        let plaintext = Plaintext::zero(Encoding::poly(), &params)?;
+        let ciphertext = pk.try_encrypt(&plaintext, &mut rng)?;
+
+        // Test 7: Verify decryption works with the secret key
+        let pt2 = sk.try_decrypt(&ciphertext)?;
+        assert_eq!(pt2, plaintext);
+
+        // Test 8: Verify error polynomial has correct representation
+        assert_eq!(e.representation(), &Representation::Ntt);
+
+        // Test 9: Verify `a` has correct representation
+        assert_eq!(a.representation(), &Representation::Ntt);
+
+        // Note: We cannot directly test allow_variable_time_computations flag
+        // as it's a private field without a getter method. However, the implementation
+        // maintains the security properties as documented.
+
+        println!("✓ All tests passed!");
+        println!("  - Public key generated successfully");
+        println!("  - Extracted components: a, sk, e");
+        println!("  - Verified encryption equation: b = e - a*s");
+        println!("  - Encryption/decryption working correctly");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_new_vs_new_extended_consistency() -> Result<(), Box<dyn Error>> {
+        let mut rng = thread_rng();
+        let params = BfvParameters::default_arc(1, 8);
+
+        let sk = SecretKey::random(&params, &mut rng);
+
+        // Generate using both methods
+        let pk1 = PublicKey::new(&sk, &mut rng);
+        let (pk2, _, _, _) = PublicKey::new_extended(&sk, &mut rng);
+
+        // Both should have same parameters
+        assert_eq!(pk1.par, pk2.par);
+
+        // Both should produce valid ciphertexts with 2 components
+        assert_eq!(pk1.c.c.len(), 2);
+        assert_eq!(pk2.c.c.len(), 2);
+
+        // Both should be able to encrypt
+        let plaintext = Plaintext::zero(Encoding::poly(), &params)?;
+
+        let ct1 = pk1.try_encrypt(&plaintext, &mut rng)?;
+        let ct2 = pk2.try_encrypt(&plaintext, &mut rng)?;
+
+        // Both ciphertexts should decrypt correctly
+        let dec1 = sk.try_decrypt(&ct1)?;
+        let dec2 = sk.try_decrypt(&ct2)?;
+
+        assert_eq!(dec1, plaintext);
+        assert_eq!(dec2, plaintext);
+
+        println!("✓ Consistency test passed!");
+        println!("  - new() and new_extended() produce compatible keys");
 
         Ok(())
     }
