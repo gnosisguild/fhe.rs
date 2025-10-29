@@ -131,7 +131,7 @@ pub fn sample_vec_cbd<R: RngCore + CryptoRng>(
     rng: &mut R,
 ) -> Result<Vec<i64>, &'static str> {
     if !(1..=16).contains(&variance) {
-        return Err("The variance should be between 1 and 16");
+        return Err("The variance should be an integer between 1 and 16");
     }
 
     let mut out = Vec::with_capacity(vector_size);
