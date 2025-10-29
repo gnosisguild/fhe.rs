@@ -187,7 +187,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 let temp_trbfv = trbfv.clone();
                 let sk_sss = temp_trbfv
-                    .generate_secret_shares_from_poly(sk_poly, &mut rng)
+                    .generate_secret_shares_from_poly(sk_poly, rng)
                     .unwrap();
 
                 let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
@@ -210,7 +210,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager
-                    .generate_secret_shares_from_poly(esi_poly, &mut rng)
+                    .generate_secret_shares_from_poly(esi_poly, rng)
                     .unwrap();
 
                 let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
@@ -245,8 +245,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map(|(_sender_idx, party)| {
                     let mut sender_encrypted_shares = Vec::new();
 
-                    for receiver_idx in 0..num_parties {
-                        let receiver_pk = &pk_bfv_list[receiver_idx];
+                    for (receiver_idx, receiver_pk) in
+                        pk_bfv_list.iter().enumerate().take(num_parties)
+                    {
                         let mut rng = thread_rng();
 
                         let mut encrypted_sk_shares = Vec::new();
@@ -284,9 +285,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             .par_iter_mut()
             .enumerate()
             .for_each(|(receiver_idx, party)| {
-                for sender_idx in 0..num_parties {
+                for sender_encrypted in encrypted_shares.iter().take(num_parties) {
                     let (encrypted_sk_shares, encrypted_esi_shares) =
-                        &encrypted_shares[sender_idx][receiver_idx];
+                        &sender_encrypted[receiver_idx];
 
                     let mut node_share_m = Array::zeros((0, degree));
                     for ct in encrypted_sk_shares.iter() {

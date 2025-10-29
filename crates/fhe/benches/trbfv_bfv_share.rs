@@ -103,14 +103,14 @@ fn bench_data_sizes(c: &mut Criterion) {
             .unwrap();
 
         let sk_sss = trbfv
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
+            .generate_secret_shares_from_poly(sk_poly, rng)
             .unwrap();
 
         // Generate smudging error shares
         let esi_coeffs = trbfv.generate_smudging_error(100, &mut rng).unwrap();
         let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
         let esi_sss = share_manager
-            .generate_secret_shares_from_poly(esi_poly, &mut rng)
+            .generate_secret_shares_from_poly(esi_poly, rng)
             .unwrap();
 
         // Generate BFV keys for share encryption
@@ -152,14 +152,14 @@ fn bench_data_sizes(c: &mut Criterion) {
     let mut encrypted_shares_count = 0;
     let mut total_encrypted_size = 0;
 
-    for (_party_id, (_, _, _, _, sk_sss, esi_sss)) in parties.iter().enumerate() {
-        for receiver_idx in 0..num_parties {
-            let receiver_pk = &parties[receiver_idx].3;
+    for (_, _, _, _, sk_sss, esi_sss) in parties.iter() {
+        for (receiver_idx, receiver_party) in parties.iter().enumerate().take(num_parties) {
+            let receiver_pk = &receiver_party.3;
             let mut rng = thread_rng();
 
             // Encrypt sk shares
-            for m in 0..num_moduli {
-                let share_row = sk_sss[m].row(receiver_idx);
+            for sk_sss_m in sk_sss.iter().take(num_moduli) {
+                let share_row = sk_sss_m.row(receiver_idx);
                 let share_vec: Vec<u64> = share_row.to_vec();
 
                 let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv).unwrap();
@@ -172,8 +172,8 @@ fn bench_data_sizes(c: &mut Criterion) {
             }
 
             // Encrypt esi shares
-            for m in 0..num_moduli {
-                let share_row = esi_sss[m].row(receiver_idx);
+            for esi_sss_m in esi_sss.iter().take(num_moduli) {
+                let share_row = esi_sss_m.row(receiver_idx);
                 let share_vec: Vec<u64> = share_row.to_vec();
 
                 let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv).unwrap();
@@ -407,7 +407,7 @@ fn bench_timing_operations(c: &mut Criterion) {
 
         b.iter(|| {
             trbfv
-                .generate_secret_shares_from_poly(sk_poly.clone(), &mut rng)
+                .generate_secret_shares_from_poly(sk_poly.clone(), rng)
                 .unwrap()
         });
     });

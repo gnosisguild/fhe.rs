@@ -71,11 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     i,
                     values[i],
                     decoded[i],
-                    if decoded[i] > values[i] {
-                        decoded[i] - values[i]
-                    } else {
-                        values[i] - decoded[i]
-                    }
+                    decoded[i].abs_diff(values[i])
                 );
             }
         }
@@ -102,11 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     i,
                     values[i],
                     decrypted[i],
-                    if decrypted[i] > values[i] {
-                        decrypted[i] - values[i]
-                    } else {
-                        values[i] - decrypted[i]
-                    }
+                    decrypted[i].abs_diff(values[i])
                 );
             }
         }
