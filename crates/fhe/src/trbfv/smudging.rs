@@ -14,7 +14,7 @@ use crate::bfv::BfvParameters;
 use crate::Error;
 
 use num_bigint::{BigInt, BigUint, RandBigInt};
-use rand::{thread_rng, Rng};
+use rand::{CryptoRng, Rng, RngCore};
 use std::sync::Arc;
 
 /// Configuration for calculating optimal smudging variance in threshold BFV.
@@ -162,7 +162,10 @@ impl SmudgingNoiseGenerator {
     ///
     /// # Returns
     /// A vector of BigInt coefficients sampled from the normal distribution
-    pub fn generate_smudging_error(&self) -> Result<Vec<BigInt>, Error> {
+    pub fn generate_smudging_error<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<Vec<BigInt>, Error> {
         let degree = self.params.degree();
 
         // To sample the smudging noise from a normal distribution uncomment the following lines
@@ -174,14 +177,17 @@ impl SmudgingNoiseGenerator {
         // let samples = sample_bigint_normal_vec(&bound, degree);
 
         // Sample degree many noise coefficients uniformly from [-bound, bound]
-        let samples = self.sample_uniform_coefficients(degree);
+        let samples = self.sample_uniform_coefficients(degree, rng);
 
         Ok(samples)
     }
 
     /// Sample uniform coefficients from [-bound, bound]
-    fn sample_uniform_coefficients(&self, count: usize) -> Vec<BigInt> {
-        let mut rng = thread_rng();
+    fn sample_uniform_coefficients<R: RngCore + CryptoRng>(
+        &self,
+        count: usize,
+        rng: &mut R,
+    ) -> Vec<BigInt> {
         let mut samples = Vec::with_capacity(count);
 
         // Pre-calculate bound + 1 for efficiency
@@ -223,6 +229,7 @@ mod tests {
     use crate::bfv::BfvParametersBuilder;
     use num_traits::Signed;
     use num_traits::Zero;
+    use rand::thread_rng;
     use std::str::FromStr;
 
     fn test_params() -> Arc<BfvParameters> {
@@ -309,11 +316,12 @@ mod tests {
 
     #[test]
     fn test_noise_generation_small_bound() {
+        let mut rng = thread_rng();
         let params = test_params();
         let bound = BigUint::from(1000u64);
         let generator = SmudgingNoiseGenerator::new(params.clone(), bound);
 
-        let result = generator.generate_smudging_error();
+        let result = generator.generate_smudging_error(&mut rng);
         assert!(result.is_ok());
 
         let coefficients = result.unwrap();
@@ -327,22 +335,24 @@ mod tests {
 
     #[test]
     fn test_noise_generation_zero_bound() {
+        let mut rng = thread_rng();
         let params = test_params();
         let bound = BigUint::from(0u64);
         let generator = SmudgingNoiseGenerator::new(params.clone(), bound);
 
-        let coefficients = generator.generate_smudging_error().unwrap();
+        let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
         assert_eq!(coefficients.len(), params.degree());
         assert!(coefficients.iter().all(|x| x.is_zero()));
     }
 
     #[test]
     fn test_noise_generation_large_bound() {
+        let mut rng = thread_rng();
         let params = test_params();
         let large_bound = BigUint::from_str("123456789012345678901234567890").unwrap();
         let generator = SmudgingNoiseGenerator::new(params.clone(), large_bound.clone());
 
-        let coefficients = generator.generate_smudging_error().unwrap();
+        let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
         assert_eq!(coefficients.len(), params.degree());
 
         // Should generate non-zero coefficients with high probability
@@ -358,6 +368,7 @@ mod tests {
     //TODO Replace this test with a more accurate one
     #[test]
     fn test_realistic_parameters_workflow() {
+        let mut rng = thread_rng();
         let params = test_params();
         let n = 3;
         let m = 1;
@@ -368,7 +379,7 @@ mod tests {
 
         let bound = calculator.calculate_sm_bound().unwrap();
         let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
-        let coefficients = generator.generate_smudging_error().unwrap();
+        let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
 
         assert_eq!(coefficients.len(), params.degree());
     }

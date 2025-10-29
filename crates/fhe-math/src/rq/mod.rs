@@ -278,7 +278,7 @@ impl Poly {
     ) -> Result<Self> {
         if !(1..=16).contains(&variance) {
             Err(Error::Default(
-                "The variance should be between 1 and 16".to_string(),
+                "The variance should be an integer between 1 and 16".to_string(),
             ))
         } else {
             let coeffs = Zeroizing::new(
