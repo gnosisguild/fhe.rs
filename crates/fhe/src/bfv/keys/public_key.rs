@@ -615,7 +615,7 @@ mod tests {
         let params = BfvParameters::default_arc(1, 8);
         let sk = SecretKey::random(&params, &mut rng);
 
-        let (pk, a, s, e) = PublicKey::new_extended(&sk, &mut rng)?;
+        let (_pk, a, s, e) = PublicKey::new_extended(&sk, &mut rng)?;
 
         // Test that all returned polynomials are in NTT representation
         assert_eq!(a.representation(), &Representation::Ntt);
