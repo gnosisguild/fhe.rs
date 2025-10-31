@@ -55,6 +55,10 @@ harness = false
 name = "bfv_rgsw"
 harness = false
 
+[[bench]]
+name = "trbfv_bfv_share"
+harness = false
+
 [[example]]
 name = "mulpir"
 

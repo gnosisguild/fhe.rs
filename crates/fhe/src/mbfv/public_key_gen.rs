@@ -76,6 +76,41 @@ impl PublicKeyShare {
             p0_share: test.unwrap(),
         })
     }
+    /// Convert this PublicKeyShare to an individual PublicKey without aggregation.
+    ///
+    /// This creates a PublicKey that can be used for individual encryption/decryption
+    /// with the corresponding SecretKey. The resulting PublicKey is NOT suitable for
+    /// threshold operations - use aggregation for that.
+    // pub fn to_public_key(&self) -> Result<PublicKey> {
+    //     Ok(PublicKey {
+    //         c: Ciphertext::new(
+    //             vec![self.p0_share.clone(), self.crp.poly.clone()],
+    //             &self.par,
+    //         )?,
+    //         par: self.par.clone(),
+    //     })
+    // }
+    pub fn to_public_key(&self) -> Result<PublicKey> {
+        let mut p0 = self.p0_share.clone();
+        let mut p1 = self.crp.poly.clone();
+
+        // Ensure both are in NTT representation
+        if *p0.representation() != Representation::Ntt {
+            p0.change_representation(Representation::Ntt);
+        }
+        if *p1.representation() != Representation::Ntt {
+            p1.change_representation(Representation::Ntt);
+        }
+
+        // Disable variable time computations for public key security
+        p0.disallow_variable_time_computations();
+        p1.disallow_variable_time_computations();
+
+        Ok(PublicKey {
+            c: Ciphertext::new(vec![p0, p1], &self.par)?,
+            par: self.par.clone(),
+        })
+    }
 }
 
 impl Aggregate<PublicKeyShare> for PublicKey {

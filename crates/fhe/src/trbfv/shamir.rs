@@ -97,7 +97,23 @@ impl ShamirSecretSharing {
         self.evaluate_polynomial(polynomial)
     }
 
-    fn sample_polynomial<R: RngCore + CryptoRng>(
+    /// Samples a Shamir sharing polynomial over `Z_q` with a fixed constant term.
+    ///
+    /// This constructs the coefficient vector of a polynomial
+    /// `f(x) = c0 + c1*x + c2*x^2 + ... + c_T*x^T` where:
+    /// - `c0` is set **exactly** to the provided `secret` (not reduced modulo `q`)
+    /// - `c1..c_T` are sampled independently at random
+    ///
+    /// # Parameters
+    /// - `secret`: The constant term `c0`. It is inserted verbatim (no modular
+    ///   reduction). If `secret` may lie outside `[0, q)`, handle the lift gap
+    ///   externally (e.g., with a separate quotient `d` such that `secret - c0 = d*q`).
+    ///
+    /// # Returns
+    /// - `Vec<BigInt>` of length `self.threshold + 1` in **constant-first** order:
+    ///   `[c0, c1, ..., c_T]`, where `T = self.threshold`.
+    ///
+    pub fn sample_polynomial<R: RngCore + CryptoRng>(
         &self,
         secret: BigInt,
         rng: &mut R,

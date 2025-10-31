@@ -7,7 +7,7 @@ use fhe_math::{
     zq::Modulus,
 };
 use fhe_traits::{FheDecrypter, FheEncrypter, FheParametrized};
-use fhe_util::sample_vec_cbd;
+use fhe_util::sample_vec_cbd_f32;
 use itertools::Itertools;
 use num_bigint::BigUint;
 use rand::{thread_rng, CryptoRng, Rng, RngCore, SeedableRng};
@@ -35,7 +35,8 @@ impl ZeroizeOnDrop for SecretKey {}
 impl SecretKey {
     /// Generate a random [`SecretKey`].
     pub fn random<R: RngCore + CryptoRng>(par: &Arc<BfvParameters>, rng: &mut R) -> Self {
-        let s_coefficients = sample_vec_cbd(par.degree(), par.variance, rng).unwrap();
+        let sk_variance = (par.variance as f32) / 20.0;
+        let s_coefficients = sample_vec_cbd_f32(par.degree(), sk_variance, rng).unwrap();
         Self::new(s_coefficients, par)
     }
 
@@ -135,6 +136,56 @@ impl SecretKey {
             level,
         })
     }
+    /// Encrypt a plaintext using a provided seed for deterministic generation
+    /// of random polynomials aᵢ. Returns the ciphertext and the error polynomial.
+    pub(crate) fn encrypt_poly_with_seed_extended<R: RngCore + CryptoRng>(
+        &self,
+        p: &Poly,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+        rng: &mut R,
+    ) -> Result<(Ciphertext, Poly, Poly)> {
+        assert_eq!(p.representation(), &Representation::Ntt);
+
+        let level = self.par.level_of_ctx(p.ctx())?;
+
+        let mut s = Zeroizing::new(Poly::try_convert_from(
+            self.coeffs.as_ref(),
+            p.ctx(),
+            false,
+            Representation::PowerBasis,
+        )?);
+        s.change_representation(Representation::Ntt);
+
+        let mut a = Poly::random_from_seed(p.ctx(), Representation::Ntt, seed);
+        let a_s = Zeroizing::new(&a * s.as_ref());
+
+        let e = Poly::small(p.ctx(), Representation::Ntt, self.par.variance, rng)
+            .map_err(Error::MathError)?;
+
+        // Clone BEFORE enabling variable time to preserve restricted copies
+        let a_copy = a.clone();
+        let e_copy = e.clone();
+
+        let mut b = e.clone();
+        b -= &a_s;
+        b += p;
+
+        // Enable variable time only for the ciphertext components
+        unsafe {
+            a.allow_variable_time_computations();
+            b.allow_variable_time_computations()
+        }
+
+        let ct = Ciphertext {
+            par: self.par.clone(),
+            seed: Some(seed),
+            c: vec![b, a],
+            level,
+        };
+
+        // Return ciphertext and the restricted copies of a and e
+        Ok((ct, a_copy, e_copy))
+    }
 
     /// Encrypt a plaintext using a random seed for deterministic generation
     /// of random polynomials aᵢ.
@@ -147,6 +198,17 @@ impl SecretKey {
         thread_rng().fill(&mut seed);
 
         self.encrypt_poly_with_seed(p, seed, rng)
+    }
+    /// Encrypt a plaintext using a random seed and return the error
+    pub(crate) fn encrypt_poly_extended<R: RngCore + CryptoRng>(
+        &self,
+        p: &Poly,
+        rng: &mut R,
+    ) -> Result<(Ciphertext, Poly, Poly)> {
+        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        thread_rng().fill(&mut seed);
+
+        self.encrypt_poly_with_seed_extended(p, seed, rng)
     }
 
     /// Encrypt a plaintext using a provided seed for deterministic generation
@@ -259,9 +321,10 @@ mod tests {
         let sk = SecretKey::random(&params, &mut rng);
         assert_eq!(sk.par, params);
 
-        sk.coeffs.iter().for_each(|ci| {
+        sk.coeffs.iter().for_each(|ci: &i64| {
             // Check that this is a small polynomial
-            assert!((*ci).abs() <= 2 * sk.par.variance as i64)
+            let sk_variance = params.variance as f32 / 20.0;
+            assert!((*ci).abs() as f32 <= 2.0 * sk_variance)
         })
     }
 

@@ -1,4 +1,5 @@
-// Implementation of threshold addition using the `fhe` and `trbfv` crate.
+// Implementation of threshold addition using the `fhe` and `trbfv` crate
+// with BFV encryption of Shamir secret shares during transmission.
 
 mod util;
 
@@ -12,12 +13,12 @@ use fhe::{
 };
 
 use fhe_math::rq::{Poly, Representation};
-use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
+use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
 use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
 use rayon::prelude::*;
 use std::time::Instant;
-use util::timeit::{timeit, timeit_n};
+use util::timeit::timeit;
 
 fn print_notice_and_exit(error: Option<String>) {
     println!(
@@ -42,31 +43,57 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // BFV parameters
+    // Parameters for threshold BFV computation
     let degree = 8192;
-    let plaintext_modulus: u64 = 1000;
-    let moduli = vec![
+    let moduli_trbfv = vec![
         0x00800000022a0001,
         0x00800000021a0001,
         0x0080000002120001,
         0x0080000001f60001,
     ];
+    let plaintext_modulus_trbfv: u64 = 1000;
 
-    let params = timeit!(
-        "Parameters generation",
+    println!("Building trBFV parameters...");
+    let params_trbfv: Arc<bfv::BfvParameters> = timeit!(
+        "Parameters generation (threshold BFV)",
         bfv::BfvParametersBuilder::new()
             .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus)
-            .set_moduli(&moduli)
+            .set_plaintext_modulus(plaintext_modulus_trbfv)
+            .set_moduli(&moduli_trbfv)
             .set_variance(10)
             .set_error2_variance_str(
                 "52309181128222339698631578526730685514457152477762943514050560000"
             )?
             .build_arc()?
     );
+    println!("✓ trBFV parameters built successfully");
 
-    // This executable is a command line tool which enables to specify
-    // trBFV summations with party and threshold sizes.
+    // BFV parameters for share encryption (plaintext must be larger than trBFV moduli)
+    println!("\nBuilding BFV parameters for share encryption...");
+    let moduli_bfv = vec![0x0400000001460001, 0x0400000000ea0001];
+
+    let plaintext_modulus_bfv: u64 = 144115188075855872;
+
+    let params_bfv: Arc<bfv::BfvParameters> = timeit!(
+        "Parameters generation (share encryption BFV)",
+        bfv::BfvParametersBuilder::new()
+            .set_degree(degree)
+            .set_plaintext_modulus(plaintext_modulus_bfv)
+            .set_moduli(&moduli_bfv)
+            .set_variance(10)
+            .build_arc()?
+    );
+    println!("✓ BFV parameters built successfully");
+
+    println!("\nParameter sizes:");
+    println!("  Degree: {}", degree);
+    println!("  trBFV moduli: {:?}", params_trbfv.moduli());
+    println!(
+        "  BFV plaintext: {} (must be > trBFV moduli)",
+        plaintext_modulus_bfv
+    );
+    println!("  BFV ciphertext moduli: {:?}", params_bfv.moduli());
+
     let args: Vec<String> = env::args().skip(1).collect();
 
     // Print the help if requested.
@@ -75,8 +102,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut num_summed = 100;
-    let mut num_parties = 20;
-    let mut threshold = 8;
+    let mut num_parties = 3;
+    let mut threshold = 1;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.
@@ -118,15 +145,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
     }
 
-    // The parameters are within bound, let's go! Let's first display some
-    // information about the threshold sum.
-    println!("# Addition with trBFV");
+    println!("# Addition with trBFV (with encrypted share transmission)");
     println!("\tnum_summed = {num_summed}");
     println!("\tnum_parties = {num_parties}");
     println!("\tthreshold = {threshold}");
 
-    // Party setup: each party generates a secret key and shares of a collective
-    // public key.
     struct Party {
         pk_share: PublicKeyShare,
         sk_sss: Vec<Array2<u64>>,
@@ -136,48 +159,51 @@ fn main() -> Result<(), Box<dyn Error>> {
         sk_poly_sum: Poly,
         es_poly_sum: Poly,
         d_share_poly: Poly,
+        // BFV keys for share encryption
+        sk_bfv: SecretKey,
+        pk_bfv: PublicKey,
     }
 
-    // Generate a common reference poly for public key generation.
-    let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
+    let crp = CommonRandomPoly::new(&params_trbfv, &mut thread_rng())?;
+    let trbfv: TRBFV = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
 
-    // Setup trBFV module
-    let trbfv = TRBFV::new(num_parties, threshold, params.clone()).unwrap();
-
-    // Set up shares for each party in parallel
     println!("💻 Available CPU cores: {}", rayon::current_num_threads());
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
         (0..num_parties)
             .into_par_iter()
             .map(|_| {
-                // Each thread gets its own RNG to avoid contention
                 let mut rng = OsRng;
                 let mut thread_rng = thread_rng();
 
-                let sk_share = SecretKey::random(&params, &mut rng);
+                let sk_share = SecretKey::random(&params_trbfv, &mut rng);
                 let pk_share =
                     PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng).unwrap();
 
-                let mut share_manager = ShareManager::new(num_parties, threshold, params.clone());
+                let mut share_manager =
+                    ShareManager::new(num_parties, threshold, params_trbfv.clone());
                 let sk_poly = share_manager
                     .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
                     .unwrap();
 
-                // Clone trbfv for thread safety (it's cheap since it's just config)
                 let temp_trbfv = trbfv.clone();
                 let sk_sss = temp_trbfv
                     .generate_secret_shares_from_poly(sk_poly, rng)
                     .unwrap();
 
-                // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
                 let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
                 let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-                let sk_poly_sum =
-                    Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-                let es_poly_sum =
-                    Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-                let d_share_poly =
-                    Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+                let sk_poly_sum = Poly::zero(
+                    params_trbfv.ctx_at_level(0).unwrap(),
+                    Representation::PowerBasis,
+                );
+                let es_poly_sum = Poly::zero(
+                    params_trbfv.ctx_at_level(0).unwrap(),
+                    Representation::PowerBasis,
+                );
+                let d_share_poly = Poly::zero(
+                    params_trbfv.ctx_at_level(0).unwrap(),
+                    Representation::PowerBasis,
+                );
 
                 let esi_coeffs = temp_trbfv
                     .generate_smudging_error(num_summed, &mut rng)
@@ -186,6 +212,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let esi_sss = share_manager
                     .generate_secret_shares_from_poly(esi_poly, rng)
                     .unwrap();
+
+                let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
+                let pk_bfv = PublicKey::new(&sk_bfv, &mut thread_rng);
 
                 Party {
                     pk_share,
@@ -196,34 +225,96 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sk_poly_sum,
                     es_poly_sum,
                     d_share_poly,
+                    sk_bfv,
+                    pk_bfv,
                 }
             })
             .collect()
     });
 
-    // Swap shares mocking network comms, party 1 sends share 2 to party 2 etc.
-    let mut i = 0;
-    timeit_n!(
-        "Simulating network (share swapping per party)",
-        num_parties as u32,
-        {
-            for j in 0..num_parties {
-                let mut node_share_m = Array::zeros((0, degree));
-                let mut es_node_share_m = Array::zeros((0, degree));
-                for m in 0..params.moduli().len() {
-                    node_share_m
-                        .push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).clone()))
-                        .unwrap();
-                    es_node_share_m
-                        .push_row(ArrayView::from(&parties[j].esi_sss[m].row(i).clone()))
-                        .unwrap();
+    let pk_bfv_list: Vec<PublicKey> = parties.iter().map(|p| p.pk_bfv.clone()).collect();
+
+    println!("🔐 Encrypting and transmitting shares...");
+
+    // encrypted_shares[sender][receiver] contains (sk_shares, esi_shares)
+    let encrypted_shares: Vec<Vec<(Vec<Ciphertext>, Vec<Ciphertext>)>> =
+        timeit!("Share encryption (parallel)", {
+            parties
+                .par_iter()
+                .enumerate()
+                .map(|(_sender_idx, party)| {
+                    let mut sender_encrypted_shares = Vec::new();
+
+                    for (receiver_idx, receiver_pk) in
+                        pk_bfv_list.iter().enumerate().take(num_parties)
+                    {
+                        let mut rng = thread_rng();
+
+                        let mut encrypted_sk_shares = Vec::new();
+                        for m in 0..params_trbfv.moduli().len() {
+                            let share_row = party.sk_sss[m].row(receiver_idx);
+                            let share_vec: Vec<u64> = share_row.to_vec();
+                            let pt =
+                                Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv)
+                                    .unwrap();
+                            let ct = receiver_pk.try_encrypt(&pt, &mut rng).unwrap();
+                            encrypted_sk_shares.push(ct);
+                        }
+
+                        let mut encrypted_esi_shares = Vec::new();
+                        for m in 0..params_trbfv.moduli().len() {
+                            let share_row = party.esi_sss[m].row(receiver_idx);
+                            let share_vec: Vec<u64> = share_row.to_vec();
+                            let pt =
+                                Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv)
+                                    .unwrap();
+                            let ct = receiver_pk.try_encrypt(&pt, &mut rng).unwrap();
+                            encrypted_esi_shares.push(ct);
+                        }
+
+                        sender_encrypted_shares.push((encrypted_sk_shares, encrypted_esi_shares));
+                    }
+
+                    sender_encrypted_shares
+                })
+                .collect()
+        });
+
+    timeit!("Share decryption and collection (parallel)", {
+        parties
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(receiver_idx, party)| {
+                for sender_encrypted in encrypted_shares.iter().take(num_parties) {
+                    let (encrypted_sk_shares, encrypted_esi_shares) =
+                        &sender_encrypted[receiver_idx];
+
+                    let mut node_share_m = Array::zeros((0, degree));
+                    for ct in encrypted_sk_shares.iter() {
+                        let pt = party.sk_bfv.try_decrypt(ct).unwrap();
+                        let decrypted_share: Vec<u64> =
+                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
+
+                        node_share_m
+                            .push_row(ArrayView::from(&decrypted_share))
+                            .unwrap();
+                    }
+                    party.sk_sss_collected.push(node_share_m);
+
+                    let mut es_node_share_m = Array::zeros((0, degree));
+                    for ct in encrypted_esi_shares.iter() {
+                        let pt = party.sk_bfv.try_decrypt(ct).unwrap();
+                        let decrypted_share: Vec<u64> =
+                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
+
+                        es_node_share_m
+                            .push_row(ArrayView::from(&decrypted_share))
+                            .unwrap();
+                    }
+                    party.es_sss_collected.push(es_node_share_m);
                 }
-                parties[i].sk_sss_collected.push(node_share_m);
-                parties[i].es_sss_collected.push(es_node_share_m);
-            }
-            i += 1;
-        }
-    );
+            });
+    });
 
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
@@ -237,13 +328,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         });
     });
 
-    // Aggregation: same as previous mbfv aggregations
     let pk = timeit!("Public key aggregation", {
         let pk: PublicKey = parties.iter().map(|p| p.pk_share.clone()).aggregate()?;
         pk
     });
 
-    // Encrypted addition setup.
     let dist = Uniform::new_inclusive(0, 1);
     let numbers: Vec<u64> = dist
         .sample_iter(&mut thread_rng())
@@ -255,22 +344,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             .par_iter()
             .map(|&number| {
                 let mut rng = thread_rng();
-                let pt = Plaintext::try_encode(&[number], Encoding::poly(), &params).unwrap();
+                let pt = Plaintext::try_encode(&[number], Encoding::poly(), &params_trbfv).unwrap();
                 pk.try_encrypt(&pt, &mut rng).unwrap()
             })
             .collect()
     });
 
-    // calculation
     let tally = timeit!("Number tallying", {
-        let mut sum = Ciphertext::zero(&params);
+        let mut sum = Ciphertext::zero(&params_trbfv);
         for ct in &numbers_encrypted {
             sum += ct;
         }
         Arc::new(sum)
     });
 
-    // Measure decryption share generation (average per party)
     let share_generation_start = Instant::now();
 
     parties.par_iter_mut().for_each(|party| {
@@ -294,15 +381,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     println!("  Average time per party: {:.2} ms", avg_time_per_party);
 
-    // Gather decryption shares from threshold+1 parties
     let d_share_polys: Vec<Poly> = parties
         .iter()
         .take(threshold + 1)
         .map(|party| party.d_share_poly.clone())
         .collect();
 
-    // decrypt result
-    let result = timeit!("Threshold decrypt (combine shares)", {
+    let result = timeit!("Share combination and final decryption", {
         // Parties are 1-based for Shamir x-coordinates; we used the first (threshold+1) parties
         let reconstructing_parties: Vec<usize> = (1..=threshold + 1).collect();
         let open_results = trbfv
@@ -312,13 +397,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         Ok::<u64, Box<dyn Error>>(result_vec[0])
     })?;
 
-    // Verify correctness
     let expected_result: u64 = numbers.iter().sum();
     println!("Computed result: {result}");
     println!("Expected result: {expected_result}");
 
     assert_eq!(result, expected_result, "Threshold computation failed!");
-    println!("Threshold BFV computation successful!");
+    println!("✅ Threshold BFV computation with encrypted shares successful!");
 
     Ok(())
 }

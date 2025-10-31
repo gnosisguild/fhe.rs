@@ -122,19 +122,19 @@ pub fn get_smallest_prime_factor(moduli: &[u64]) -> Result<u64, FactorError> {
     factors.into_iter().min().ok_or(FactorError::NoResult)
 }
 
-/// Sample a vector of independent centered binomial distributions of a given
-/// variance. Returns an error if the variance is strictly larger than 16.
+/// Sample a vector of independent centered binomial distributions with usize variance.
+/// Supports integer variances from 1 to 16.
+/// Returns an error if variance is outside [1, 16].
 pub fn sample_vec_cbd<R: RngCore + CryptoRng>(
     vector_size: usize,
     variance: usize,
     rng: &mut R,
 ) -> Result<Vec<i64>, &'static str> {
     if !(1..=16).contains(&variance) {
-        return Err("The variance should be between 1 and 16");
+        return Err("The variance should be an integer between 1 and 16");
     }
 
     let mut out = Vec::with_capacity(vector_size);
-
     let number_bits = 4 * variance;
     let mask_add = ((u64::MAX >> (64 - number_bits)) >> (2 * variance)) as u128;
     let mask_sub = mask_add << (2 * variance);
@@ -156,6 +156,35 @@ pub fn sample_vec_cbd<R: RngCore + CryptoRng>(
         current_pool_nbits -= number_bits;
     }
 
+    Ok(out)
+}
+
+/// Sample a vector of independent centered binomial distributions with f32 variance.
+/// Supports variance = 0.5 (CBD(1), support {-1,0,1}) or integer variances up to 16.
+/// Returns an error if variance is outside [0.5, 16].
+pub fn sample_vec_cbd_f32<R: RngCore + CryptoRng>(
+    vector_size: usize,
+    variance: f32,
+    rng: &mut R,
+) -> Result<Vec<i64>, &'static str> {
+    if !(0.5..=16.0).contains(&variance) {
+        return Err("The variance should be between 0.5 and 16");
+    }
+
+    let mut out = Vec::with_capacity(vector_size);
+
+    if (variance - 0.5).abs() < f32::EPSILON {
+        // Special case: CBD(1) -> {-1,0,1}, variance = 0.5
+        for _ in 0..vector_size {
+            let b1 = rng.next_u32() & 1;
+            let b2 = rng.next_u32() & 1;
+            out.push((b1 as i64) - (b2 as i64));
+        }
+    } else {
+        // General case: integer variance -> CBD(2 * variance)
+        // Delegate to the usize version
+        return sample_vec_cbd(vector_size, variance as usize, rng);
+    }
     Ok(out)
 }
 
@@ -306,12 +335,11 @@ mod tests {
     use itertools::Itertools;
     use rand::{thread_rng, RngCore};
 
-    use crate::variance;
-
     use super::{
         get_smallest_prime_factor, inverse, is_prime, sample_vec_cbd, transcode_bidirectional,
         transcode_from_bytes, transcode_to_bytes,
     };
+    use crate::variance;
 
     #[test]
     fn prime() {
