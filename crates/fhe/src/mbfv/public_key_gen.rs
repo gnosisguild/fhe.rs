@@ -62,6 +62,48 @@ impl PublicKeyShare {
         Ok(Self { par, crp, p0_share })
     }
 
+    /// Extended version of `new` that returns intermediate values for debugging/testing.
+    ///
+    /// Returns: (pk_0, pk_1, sk_poly, e)
+    /// - pk_0: the p0_share (public key part 0 share) = -a*s + e
+    /// - pk_1: the crp_poly (common random polynomial `a`, public key part 1)
+    /// - sk_poly: the secret key polynomial in NTT form
+    /// - e: the error polynomial
+    pub fn new_extended<R: RngCore + CryptoRng>(
+        sk_share: &SecretKey,
+        crp: CommonRandomPoly,
+        rng: &mut R,
+    ) -> Result<(Poly, Poly, Poly, Poly)> {
+        let par = sk_share.par.clone();
+        let ctx = par.ctx_at_level(0)?;
+
+        // Convert secret key to usable polynomial
+        let mut s = Poly::try_convert_from(
+            sk_share.coeffs.as_ref(),
+            ctx,
+            false,
+            Representation::PowerBasis,
+        )?;
+        s.change_representation(Representation::Ntt);
+
+        // Sample error
+        let e = Poly::small(ctx, Representation::Ntt, par.variance, rng)?;
+
+        // Create p0_share (which is pk_0) = -a*s + e
+        // where `a` is the crp (common random polynomial)
+        let mut pk_0 = -crp.poly.clone();
+        pk_0.disallow_variable_time_computations();
+        pk_0.change_representation(Representation::Ntt);
+        pk_0 *= &s;
+        pk_0 += &e;
+        unsafe { pk_0.allow_variable_time_computations() }
+
+        // pk_1 is `a`, the common random polynomial (crp)
+        let pk_1 = crp.poly.clone();
+
+        Ok((pk_0, pk_1, s, e))
+    }
+
     /// Deserialize a PublicKeyShare from bytes with the given parameters and
     /// CRP
     pub fn deserialize(
@@ -212,5 +254,117 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_new_extended() {
+        let mut rng = thread_rng();
+
+        // Test with different parameter configurations
+        for par in [
+            BfvParameters::default_arc(1, 8),
+            BfvParameters::default_arc(6, 8),
+        ] {
+            let sk_share = SecretKey::random(&par, &mut rng);
+            let crp = CommonRandomPoly::new(&par, &mut rng).unwrap();
+
+            // Call new_extended
+            let (pk_0, pk_1, s, e) =
+                PublicKeyShare::new_extended(&sk_share, crp.clone(), &mut rng).unwrap();
+
+            // Verify pk_1 is the same as crp polynomial
+            assert_eq!(pk_1, crp.poly, "pk_1 should be the same as crp polynomial");
+
+            // Verify the relationship: pk_0 = -a*s + e
+            // Compute -a*s + e and compare with pk_0
+            let mut expected = -crp.poly.clone();
+            expected.disallow_variable_time_computations();
+            expected.change_representation(Representation::Ntt);
+            expected *= &s;
+            expected += &e;
+            unsafe { expected.allow_variable_time_computations() }
+
+            assert_eq!(pk_0, expected, "pk_0 should equal -a*s + e");
+
+            // Verify s is in NTT representation
+            assert_eq!(
+                *s.representation(),
+                Representation::Ntt,
+                "s should be in NTT form"
+            );
+
+            // Verify e is in NTT representation
+            assert_eq!(
+                *e.representation(),
+                Representation::Ntt,
+                "e should be in NTT form"
+            );
+
+            // Verify pk_0 is in NTT representation
+            assert_eq!(
+                *pk_0.representation(),
+                Representation::Ntt,
+                "pk_0 should be in NTT form"
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_extended_multiple_parties() {
+        let mut rng = thread_rng();
+        const NUM_PARTIES: usize = 5;
+
+        let par = BfvParameters::default_arc(1, 8);
+        let crp = CommonRandomPoly::new(&par, &mut rng).unwrap();
+
+        // Generate extended data for multiple parties
+        let mut extended_data = vec![];
+        for _ in 0..NUM_PARTIES {
+            let sk_share = SecretKey::random(&par, &mut rng);
+            let (pk_0, pk_1, s, e) =
+                PublicKeyShare::new_extended(&sk_share, crp.clone(), &mut rng).unwrap();
+            extended_data.push((pk_0, pk_1, s, e));
+        }
+
+        // Verify all parties have the same pk_1 (crp)
+        for (_, pk_1, _, _) in &extended_data {
+            assert_eq!(
+                *pk_1, crp.poly,
+                "All parties should have the same pk_1 (crp)"
+            );
+        }
+
+        // Verify the mathematical relationship holds for each party
+        for (pk_0, pk_1, s, e) in &extended_data {
+            let mut expected = -pk_1.clone();
+            expected.disallow_variable_time_computations();
+            expected.change_representation(Representation::Ntt);
+            expected *= s;
+            expected += e;
+            unsafe { expected.allow_variable_time_computations() }
+            assert_eq!(*pk_0, expected, "pk_0 should equal -a*s + e for each party");
+        }
+    }
+
+    #[test]
+    fn test_new_extended_consistency_with_new() {
+        let mut rng = thread_rng();
+
+        let par = BfvParameters::default_arc(1, 8);
+        let sk_share = SecretKey::random(&par, &mut rng);
+        let crp = CommonRandomPoly::new(&par, &mut rng).unwrap();
+
+        // Create PublicKeyShare using original new()
+        let pks = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
+
+        // Verify that new_extended produces pk_1 that matches the crp
+        let (_pk_0, pk_1, _s, _e) =
+            PublicKeyShare::new_extended(&sk_share, crp.clone(), &mut rng).unwrap();
+
+        assert_eq!(
+            pk_1, pks.crp.poly,
+            "pk_1 from new_extended should match crp from PublicKeyShare"
+        );
+        assert_eq!(pk_1, crp.poly, "pk_1 should be the crp polynomial");
     }
 }
