@@ -33,10 +33,16 @@ impl Zeroize for SecretKey {
 impl ZeroizeOnDrop for SecretKey {}
 
 impl SecretKey {
+    /// The variance used for secret key sampling
+    pub const SK_VARIANCE: f32 = 0.5;
+
+    /// Get the secret key bound (2 * variance).
+    pub fn sk_bound() -> f32 {
+        2.0 * Self::SK_VARIANCE
+    }
     /// Generate a random [`SecretKey`].
     pub fn random<R: RngCore + CryptoRng>(par: &Arc<BfvParameters>, rng: &mut R) -> Self {
-        let sk_variance = (par.variance as f32) / 20.0;
-        let s_coefficients = sample_vec_cbd_f32(par.degree(), sk_variance, rng).unwrap();
+        let s_coefficients = sample_vec_cbd_f32(par.degree(), Self::SK_VARIANCE, rng).unwrap();
         Self::new(s_coefficients, par)
     }
 
