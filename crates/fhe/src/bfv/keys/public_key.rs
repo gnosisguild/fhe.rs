@@ -7,6 +7,7 @@ use crate::{Error, Result};
 use fhe_math::rq::traits::TryConvertFrom as TCF;
 use fhe_math::rq::{Poly, Representation};
 use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
+use fhe_util::sample_vec_cbd_f32;
 use prost::Message;
 use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
@@ -80,6 +81,12 @@ impl PublicKey {
     ///
     /// This extended version returns the noise polynomials (u, e1, e2) used during encryption,
     /// which can be useful for debugging or verification purposes.
+    /// Encrypt a plaintext with the public key.
+    /// The encryption is done in the same level as the plaintext.
+    /// Returns the ciphertext and the noise polynomials.
+    ///
+    /// This extended version returns the noise polynomials (u, e1, e2) used during encryption,
+    /// which can be useful for debugging or verification purposes.
     pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
@@ -92,19 +99,41 @@ impl PublicKey {
 
         let ctx = self.par.ctx_at_level(ct.level)?;
 
-        // Standard variance for u and e1
-        let u = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
+        // Sample u from the same distribution as the secret key (CBD with variance 0.5)
+        let u_coefficients = Zeroizing::new(
+            sample_vec_cbd_f32(ctx.degree, SecretKey::SK_VARIANCE, rng)
+                .map_err(|e| Error::UnspecifiedInput(e.to_string()))?,
+        );
+        let mut u = Poly::try_convert_from(
+            u_coefficients.as_ref() as &[i64],
+            ctx,
+            false,
+            Representation::PowerBasis,
+        )?;
+        u.change_representation(Representation::Ntt);
+
+        // Standard variance for e1
         let e1 = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
 
         // error2_variance for e2 (supports both standard and threshold BFV)
         let e2 = Poly::error_2(ctx, Representation::Ntt, &self.par.error2_variance, rng)?;
 
         let m = Zeroizing::new(pt.to_poly());
-        let mut c0 = &u * &ct.c[0];
-        c0 += &e1;
+
+        // Clone u, e1, e2 BEFORE wrapping in Zeroizing, so we can return them
+        let u_copy = u.clone();
+        let e1_copy = e1.clone();
+        let e2_copy = e2.clone();
+
+        let u = Zeroizing::new(u);
+        let e1 = Zeroizing::new(e1);
+        let e2 = Zeroizing::new(e2);
+
+        let mut c0 = u.as_ref() * &ct.c[0];
+        c0 += e1.as_ref();
         c0 += &m;
-        let mut c1 = &u * &ct.c[1];
-        c1 += &e2;
+        let mut c1 = u.as_ref() * &ct.c[1];
+        c1 += e2.as_ref();
 
         // It is now safe to enable variable time computations.
         unsafe {
@@ -119,7 +148,7 @@ impl PublicKey {
             level: ct.level,
         };
 
-        Ok((ciphertext, u, e1, e2))
+        Ok((ciphertext, u_copy, e1_copy, e2_copy))
     }
 }
 
@@ -150,13 +179,20 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
 
         let ctx = self.par.ctx_at_level(ct.level)?;
 
-        // Standard variance for u and e1
-        let u = Zeroizing::new(Poly::small(
+        // Sample u from the same distribution as the secret key (CBD with variance 0.5)
+        let u_coefficients = Zeroizing::new(
+            sample_vec_cbd_f32(ctx.degree, SecretKey::SK_VARIANCE, rng)
+                .map_err(|e| Error::UnspecifiedInput(e.to_string()))?,
+        );
+        let mut u = Poly::try_convert_from(
+            u_coefficients.as_ref() as &[i64],
             ctx,
-            Representation::Ntt,
-            self.par.variance,
-            rng,
-        )?);
+            false,
+            Representation::PowerBasis,
+        )?;
+        u.change_representation(Representation::Ntt);
+        let u = Zeroizing::new(u);
+
         let e1 = Zeroizing::new(Poly::small(
             ctx,
             Representation::Ntt,
