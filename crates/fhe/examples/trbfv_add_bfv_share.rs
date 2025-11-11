@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
             .set_variance(3)
-            .set_error2_variance_str("3")?
+            .set_error1_variance_str("3")?
             .build_arc()?
     );
     println!("✓ trBFV parameters built successfully");
