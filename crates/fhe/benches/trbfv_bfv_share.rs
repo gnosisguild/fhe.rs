@@ -37,7 +37,7 @@ fn bench_data_sizes(c: &mut Criterion) {
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
             .set_variance(10)
-            .set_error2_variance_str(
+            .set_error1_variance_str(
                 "52309181128222339698631578526730685514457152477762943514050560000",
             )
             .unwrap()
@@ -360,7 +360,7 @@ fn bench_timing_operations(c: &mut Criterion) {
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
             .set_variance(10)
-            .set_error2_variance_str(
+            .set_error1_variance_str(
                 "52309181128222339698631578526730685514457152477762943514050560000",
             )
             .unwrap()
