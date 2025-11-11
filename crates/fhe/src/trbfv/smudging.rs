@@ -250,7 +250,7 @@ mod tests {
         // b_enc is now BigUint
         assert_eq!(
             config.b_enc,
-            BigUint::from(2u32) * params.get_error1_variance()
+            (BigUint::from(3u32) * params.get_error1_variance()).sqrt()
         );
         // b_e is u64
         assert_eq!(config.b_e, (params.variance() * 2) as u64);
