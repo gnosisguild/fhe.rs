@@ -256,7 +256,7 @@ mod tests {
         assert_eq!(config.b_e, (params.variance() * 2) as u64);
         assert_eq!(config.public_key_error, 2 * params.variance() as u64);
         assert_eq!(config.secret_key_bound, 5);
-        assert_eq!(config.lambda, 80);
+        assert_eq!(config.lambda, 2);
     }
 
     #[test]
