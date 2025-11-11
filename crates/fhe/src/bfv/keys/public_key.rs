@@ -113,10 +113,10 @@ impl PublicKey {
         u.change_representation(Representation::Ntt);
 
         // Standard variance for e1
-        let e1 = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
+        let e2 = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
 
-        // error2_variance for e2 (supports both standard and threshold BFV)
-        let e2 = Poly::error_2(ctx, Representation::Ntt, &self.par.error2_variance, rng)?;
+        // error1_variance for e1 (supports both standard and threshold BFV)
+        let e1 = Poly::error_1(ctx, Representation::Ntt, &self.par.error1_variance, rng)?;
 
         let m = Zeroizing::new(pt.to_poly());
 
@@ -161,12 +161,12 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
 
     /// Encrypt a plaintext using the public key.
     ///
-    /// This method uses the configured error2_variance for the e2 noise term,
-    /// which allows it to support both standard BFV (when error2_variance = variance)
-    /// and threshold BFV (when error2_variance is set to a larger value).
+    /// This method uses the configured error1_variance for the e2 noise term,
+    /// which allows it to support both standard BFV (when error1_variance = variance)
+    /// and threshold BFV (when error1_variance is set to a larger value).
     ///
-    /// For standard BFV: Set only `variance` in parameters (error2_variance will match automatically)
-    /// For threshold BFV: Explicitly set both `variance` and `error2_variance` in parameters
+    /// For standard BFV: Set only `variance` in parameters (error1_variance will match automatically)
+    /// For threshold BFV: Explicitly set both `variance` and `error1_variance` in parameters
     fn try_encrypt<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
@@ -193,18 +193,18 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
         u.change_representation(Representation::Ntt);
         let u = Zeroizing::new(u);
 
-        let e1 = Zeroizing::new(Poly::small(
+        let e2 = Zeroizing::new(Poly::small(
             ctx,
             Representation::Ntt,
             self.par.variance,
             rng,
         )?);
 
-        // error2_variance for e2 (supports both standard and threshold BFV)
-        let e2 = Zeroizing::new(Poly::error_2(
+        // error1_variance for e1 (supports both standard and threshold BFV)
+        let e1 = Zeroizing::new(Poly::error_1(
             ctx,
             Representation::Ntt,
-            &self.par.error2_variance,
+            &self.par.error1_variance,
             rng,
         )?);
 
@@ -354,7 +354,7 @@ mod tests {
             &params,
         )?;
 
-        // Test with default error2_variance (should be same as variance)
+        // Test with default error1_variance (should be same as variance)
         let ct = pk.try_encrypt(&pt, &mut rng)?;
         let pt2 = sk.try_decrypt(&ct)?;
 
@@ -362,9 +362,9 @@ mod tests {
             sk.measure_noise(&ct)?
         });
         assert_eq!(pt2, pt);
-        // Verify that error2_variance matches variance by default
+        // Verify that error1_variance matches variance by default
         assert_eq!(
-            params.get_error2_variance(),
+            params.get_error1_variance(),
             &BigUint::from(params.variance())
         );
 
@@ -372,16 +372,16 @@ mod tests {
     }
 
     #[test]
-    fn encrypt_decrypt_custom_error2_variance() -> Result<(), Box<dyn Error>> {
+    fn encrypt_decrypt_custom_error1_variance() -> Result<(), Box<dyn Error>> {
         let mut rng = thread_rng();
 
-        // Create parameters with custom error2_variance for threshold BFV
+        // Create parameters with custom error1_variance for threshold BFV
         let params = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62usize; 1])
             .set_variance(10)
-            .set_error2_variance_usize(15)
+            .set_error1_variance_usize(15)
             .build_arc()?;
 
         let sk = SecretKey::random(&params, &mut rng);
@@ -393,15 +393,15 @@ mod tests {
             &params,
         )?;
 
-        // This should use the configured error2_variance (15)
+        // This should use the configured error1_variance (15)
         let ct = pk.try_encrypt(&pt, &mut rng)?;
         let pt2 = sk.try_decrypt(&ct)?;
 
-        println!("Noise (custom error2_variance): {}", unsafe {
+        println!("Noise (custom error1_variance): {}", unsafe {
             sk.measure_noise(&ct)?
         });
         assert_eq!(pt2, pt);
-        assert_eq!(params.get_error2_variance(), &BigUint::from(15u32));
+        assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
         assert_eq!(params.variance(), 10); // Original variance unchanged
 
         Ok(())
@@ -430,17 +430,17 @@ mod tests {
     }
 
     #[test]
-    fn threshold_bfv_with_large_error2_variance() -> Result<(), Box<dyn Error>> {
+    fn threshold_bfv_with_large_error1_variance() -> Result<(), Box<dyn Error>> {
         let mut rng = thread_rng();
 
-        // Test with error2_variance >= 16 to trigger uniform distribution
+        // Test with error1_variance >= 16 to trigger uniform distribution
         let params = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62usize; 1])
             .set_moduli_sizes(&[62usize; 1])
             .set_variance(10)
-            .set_error2_variance_usize(20) // >= 16, will use uniform distribution
+            .set_error1_variance_usize(20) // >= 16, will use uniform distribution
             .build_arc()?;
 
         let sk = SecretKey::random(&params, &mut rng);
@@ -456,11 +456,11 @@ mod tests {
         let ct = pk.try_encrypt(&pt, &mut rng)?;
         let pt2 = sk.try_decrypt(&ct)?;
 
-        println!("Threshold BFV with large error2_variance: {}", unsafe {
+        println!("Threshold BFV with large error1_variance: {}", unsafe {
             sk.measure_noise(&ct)?
         });
         assert_eq!(pt2, pt);
-        assert_eq!(params.get_error2_variance(), &BigUint::from(20u32));
+        assert_eq!(params.get_error1_variance(), &BigUint::from(20u32));
 
         Ok(())
     }
@@ -477,29 +477,29 @@ mod tests {
             .set_variance(10)
             .build_arc()?;
 
-        // Threshold BFV: explicitly set different error2_variance
+        // Threshold BFV: explicitly set different error1_variance
         let params_threshold = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62usize; 1])
             .set_variance(10)
-            .set_error2_variance_usize(15)
+            .set_error1_variance_usize(15)
             .build_arc()?;
 
         // Verify standard BFV has matching variances
         assert_eq!(
-            params_standard.get_error2_variance(),
+            params_standard.get_error1_variance(),
             &BigUint::from(params_standard.variance())
         );
 
         // Verify threshold BFV has different variances
         assert_eq!(
-            params_threshold.get_error2_variance(),
+            params_threshold.get_error1_variance(),
             &BigUint::from(15u32)
         );
         assert_eq!(params_threshold.variance(), 10);
         assert_ne!(
-            params_threshold.get_error2_variance(),
+            params_threshold.get_error1_variance(),
             &BigUint::from(params_threshold.variance())
         );
 

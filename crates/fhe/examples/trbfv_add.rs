@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_plaintext_modulus(plaintext_modulus)
             .set_moduli(&moduli)
             .set_variance(10)
-            .set_error2_variance_str(
+            .set_error1_variance_str(
                 "52309181128222339698631578526730685514457152477762943514050560000"
             )?
             .build_arc()?
@@ -75,8 +75,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut num_summed = 100;
-    let mut num_parties = 20;
-    let mut threshold = 8;
+    let mut num_parties = 10;
+    let mut threshold = 4;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.

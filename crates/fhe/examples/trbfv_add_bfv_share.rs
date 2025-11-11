@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
             .set_variance(10)
-            .set_error2_variance_str(
+            .set_error1_variance_str(
                 "52309181128222339698631578526730685514457152477762943514050560000"
             )?
             .build_arc()?
@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 100;
+    let mut num_summed = 50;
     let mut num_parties = 3;
     let mut threshold = 1;
 

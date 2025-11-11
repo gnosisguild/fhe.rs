@@ -428,9 +428,9 @@ impl Poly {
         Ok(Zeroizing::new(poly))
     }
 
-    /// Generate error polynomial for e2 in threshold BFV
+    /// Generate error polynomial for e1 in threshold BFV
     /// Uses CBD for variance < 16, uniform distribution for variance >= 16
-    pub fn error_2<R: RngCore + CryptoRng>(
+    pub fn error_1<R: RngCore + CryptoRng>(
         ctx: &Arc<Context>,
         representation: Representation,
         variance: &BigUint,
