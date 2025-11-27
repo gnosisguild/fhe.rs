@@ -70,3 +70,7 @@ name = "util"
 
 [[example]]
 name = "voting"
+
+[[example]]
+name = "trbfv_add_bfv_share_bfv_sets"
+harness = false
