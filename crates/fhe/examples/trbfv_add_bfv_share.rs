@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Parameters for threshold BFV computation
     let degree = 512;
     let moduli_trbfv = vec![0xffffee001, 0xffffc4001];
-    let plaintext_modulus_trbfv: u64 = 10;
+    let plaintext_modulus_trbfv: u64 = 60;
 
     println!("Building trBFV parameters...");
     let params_trbfv: Arc<bfv::BfvParameters> = timeit!(
@@ -93,7 +93,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 3;
+    let mut num_summed = 50;
     let mut num_parties = 5;
     let mut threshold = 2;
 
@@ -225,6 +225,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let pk_bfv_list: Vec<PublicKey> = parties.iter().map(|p| p.pk_bfv.clone()).collect();
+    use fhe_math::zq::Modulus;
+
+    // Create Modulus objects for each trBFV modulus
+    let trbfv_moduli: Vec<Modulus> = params_trbfv
+        .moduli()
+        .iter()
+        .map(|&q| Modulus::new(q).unwrap())
+        .collect();
 
     println!("🔐 Encrypting and transmitting shares...");
 
@@ -282,25 +290,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                         &sender_encrypted[receiver_idx];
 
                     let mut node_share_m = Array::zeros((0, degree));
-                    for ct in encrypted_sk_shares.iter() {
+                    for (m, ct) in encrypted_sk_shares.iter().enumerate() {
                         let pt = party.sk_bfv.try_decrypt(ct).unwrap();
                         let decrypted_share: Vec<u64> =
                             Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
 
+                        // Reduce each coefficient to the correct trBFV modulus for level m
+                        let reduced_share = trbfv_moduli[m].reduce_vec_new(&decrypted_share);
+
                         node_share_m
-                            .push_row(ArrayView::from(&decrypted_share))
+                            .push_row(ArrayView::from(&reduced_share))
                             .unwrap();
                     }
                     party.sk_sss_collected.push(node_share_m);
 
                     let mut es_node_share_m = Array::zeros((0, degree));
-                    for ct in encrypted_esi_shares.iter() {
+                    for (m, ct) in encrypted_esi_shares.iter().enumerate() {
                         let pt = party.sk_bfv.try_decrypt(ct).unwrap();
                         let decrypted_share: Vec<u64> =
                             Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
 
+                        // Reduce each coefficient to the correct trBFV modulus for level m
+                        let reduced_share = trbfv_moduli[m].reduce_vec_new(&decrypted_share);
+
                         es_node_share_m
-                            .push_row(ArrayView::from(&decrypted_share))
+                            .push_row(ArrayView::from(&reduced_share))
                             .unwrap();
                     }
                     party.es_sss_collected.push(es_node_share_m);
