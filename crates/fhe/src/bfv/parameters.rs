@@ -8,7 +8,7 @@ use fhe_math::{
     rq::{scaler::Scaler, traits::TryConvertFrom, Context, Poly, Representation},
     zq::{primes::generate_prime, Modulus},
 };
-use fhe_traits::{Deserialize, FheParameters, Serialize};
+use fhe_traits::{Deserialize, DeserializeWithContext, FheParameters, Serialize};
 use itertools::Itertools;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -545,11 +545,28 @@ impl BfvParametersBuilder {
 
 impl Serialize for BfvParameters {
     fn to_bytes(&self) -> Vec<u8> {
+        // Serialize delta polynomials
+        let delta_polynomials: Vec<Vec<u8>> = self
+            .delta
+            .iter()
+            .map(|p| p.to_bytes())
+            .collect();
+
         Parameters {
             degree: self.polynomial_degree as u32,
             plaintext: self.plaintext_modulus,
             moduli: self.moduli.to_vec(),
             variance: self.variance as u32,
+            error1_variance: self.error1_variance.to_bytes_be(),
+            moduli_sizes: self.moduli_sizes.iter().map(|&s| s as u64).collect(),
+            q_mod_t: self.q_mod_t.to_vec(),
+            matrix_reps_index_map: self
+                .matrix_reps_index_map
+                .iter()
+                .map(|&i| i as u64)
+                .collect(),
+            delta_polynomials,
+            has_ntt_operator: self.op.is_some(),
         }
         .encode_to_vec()
     }
@@ -558,12 +575,144 @@ impl Serialize for BfvParameters {
 impl Deserialize for BfvParameters {
     fn try_deserialize(bytes: &[u8]) -> Result<Self> {
         let params: Parameters = Message::decode(bytes).map_err(|_| Error::SerializationError)?;
-        BfvParametersBuilder::new()
-            .set_degree(params.degree as usize)
-            .set_plaintext_modulus(params.plaintext)
-            .set_moduli(&params.moduli)
-            .set_variance(params.variance as usize)
-            .build()
+
+        // Check if we have extended serialization data (new format)
+        if !params.error1_variance.is_empty() {
+            // Deserialize from extended format (avoids rebuilding)
+            let error1_variance = BigUint::from_bytes_be(&params.error1_variance);
+
+            // Reconstruct plaintext modulus
+            let plaintext_modulus = Modulus::new(params.plaintext).map_err(|e| {
+                Error::ParametersError(ParametersError::InvalidPlaintext(e.to_string()))
+            })?;
+
+            // Reconstruct contexts (needed for deserializing delta polynomials)
+            let mut ctx = Vec::with_capacity(params.moduli.len());
+            for i in 0..params.moduli.len() {
+                let ctx_i = Context::new_arc(
+                    &params.moduli[..params.moduli.len() - i],
+                    params.degree as usize,
+                )?;
+                ctx.push(ctx_i);
+            }
+
+            // Deserialize delta polynomials using the reconstructed contexts
+            if params.delta_polynomials.len() != ctx.len() {
+                return Err(Error::SerializationError);
+            }
+
+            let mut delta = Vec::with_capacity(params.delta_polynomials.len());
+            for (i, delta_bytes) in params.delta_polynomials.iter().enumerate() {
+                // Use the corresponding context for this level
+                let delta_poly = Poly::from_bytes(delta_bytes, &ctx[i])?;
+                delta.push(delta_poly);
+            }
+
+            // Reconstruct NTT operator if it existed
+            let op = if params.has_ntt_operator {
+                NttOperator::new(&plaintext_modulus, params.degree as usize).map(Arc::new)
+            } else {
+                None
+            };
+
+            // Reconstruct plaintext context for scalers
+            let plaintext_ctx = Context::new_arc(&params.moduli[..1], params.degree as usize)?;
+
+            // Reconstruct scalers and mul_params (these need to be recomputed)
+            let mut scalers = Vec::with_capacity(ctx.len());
+            let mut mul_params = Vec::with_capacity(ctx.len());
+            let moduli_sizes: Vec<usize> = params
+                .moduli_sizes
+                .iter()
+                .map(|&s| s as usize)
+                .collect();
+
+            // Create extended basis for multiplication (same as in build)
+            let mut extended_basis = Vec::with_capacity(params.moduli.len() + 1);
+            let mut upper_bound = 1 << 62;
+            while extended_basis.len() != params.moduli.len() + 1 {
+                upper_bound = generate_prime(
+                    62,
+                    2 * params.degree as u64,
+                    upper_bound,
+                )
+                .ok_or_else(|| {
+                    Error::ParametersError(ParametersError::NotEnoughPrimes(
+                        62,
+                        params.degree as usize,
+                    ))
+                })?;
+                if !extended_basis.contains(&upper_bound)
+                    && !params.moduli.contains(&upper_bound)
+                {
+                    extended_basis.push(upper_bound);
+                }
+            }
+
+            for i in 0..ctx.len() {
+                let rns = RnsContext::new(&params.moduli[..params.moduli.len() - i])?;
+
+                scalers.push(Scaler::new(
+                    &ctx[i],
+                    &plaintext_ctx,
+                    ScalingFactor::new(
+                        &BigUint::from(plaintext_modulus.modulus()),
+                        rns.modulus(),
+                    ),
+                )?);
+
+                // Reconstruct multiplication parameters
+                let modulus_size = moduli_sizes[..moduli_sizes.len() - i].iter().sum::<usize>();
+                let n_moduli = (modulus_size + 60).div_ceil(62);
+                let mut mul_1_moduli = vec![];
+                mul_1_moduli
+                    .append(&mut params.moduli[..moduli_sizes.len() - i].to_vec());
+                mul_1_moduli.append(&mut extended_basis[..n_moduli].to_vec());
+                let mul_1_ctx = Context::new_arc(&mul_1_moduli, params.degree as usize)?;
+                mul_params.push(MultiplicationParameters::new(
+                    &ctx[i],
+                    &mul_1_ctx,
+                    ScalingFactor::one(),
+                    ScalingFactor::new(
+                        &BigUint::from(plaintext_modulus.modulus()),
+                        ctx[i].modulus(),
+                    ),
+                )?);
+            }
+
+            // Reconstruct matrix_reps_index_map
+            let matrix_reps_index_map: Box<[usize]> = params
+                .matrix_reps_index_map
+                .iter()
+                .map(|&i| i as usize)
+                .collect();
+
+            Ok(BfvParameters {
+                polynomial_degree: params.degree as usize,
+                plaintext_modulus: params.plaintext,
+                moduli: params.moduli.into_boxed_slice(),
+                moduli_sizes: moduli_sizes.into_boxed_slice(),
+                variance: params.variance as usize,
+                error1_variance,
+                ctx,
+                op,
+                delta: delta.into_boxed_slice(),
+                q_mod_t: params.q_mod_t.into_boxed_slice(),
+                scalers: scalers.into_boxed_slice(),
+                plaintext: plaintext_modulus,
+                mul_params: mul_params.into_boxed_slice(),
+                matrix_reps_index_map,
+            })
+        } else {
+            // Fall back to old format (rebuild from builder inputs)
+            let mut builder = BfvParametersBuilder::new();
+            builder
+                .set_degree(params.degree as usize)
+                .set_plaintext_modulus(params.plaintext)
+                .set_moduli(&params.moduli)
+                .set_variance(params.variance as usize);
+            builder.build()
+        }
     }
     type Error = Error;
 }
@@ -656,7 +805,14 @@ mod tests {
             .set_variance(4)
             .build()?;
         let bytes = params.to_bytes();
-        assert_eq!(BfvParameters::try_deserialize(&bytes)?, params);
+        let deserialized = BfvParameters::try_deserialize(&bytes)?;
+        // Verify all key fields are preserved
+        assert_eq!(deserialized.degree(), params.degree());
+        assert_eq!(deserialized.plaintext(), params.plaintext());
+        assert_eq!(deserialized.moduli(), params.moduli());
+        assert_eq!(deserialized.variance(), params.variance());
+        assert_eq!(deserialized.get_error1_variance(), params.get_error1_variance());
+        assert_eq!(deserialized, params);
         Ok(())
     }
 
@@ -816,6 +972,122 @@ mod tests {
         // error1_variance should match the final variance value
         assert_eq!(params.variance(), 15);
         assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
+
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_preserves_error1_variance() -> Result<(), Box<dyn Error>> {
+        // Test that error1_variance is properly serialized and deserialized
+        let large_error1_variance = BigUint::parse_bytes(
+            b"123456789012345678901234567890123456789012345678901234567890",
+            10,
+        )
+        .unwrap();
+
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(10)
+            .set_error1_variance(large_error1_variance.clone())
+            .build()?;
+
+        let bytes = params.to_bytes();
+        let deserialized = BfvParameters::try_deserialize(&bytes)?;
+
+        assert_eq!(
+            deserialized.get_error1_variance(),
+            &large_error1_variance
+        );
+        assert_eq!(deserialized.get_error1_variance(), params.get_error1_variance());
+
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_deserialize_comprehensive() -> Result<(), Box<dyn Error>> {
+        // Test with various parameter configurations
+        let test_cases = vec![
+            // Small parameters
+            (8, 2, vec![62], 10),
+            // Medium parameters
+            (16, 1153, vec![62, 62], 4),
+            // Larger parameters
+            (32, 1153, vec![62, 62, 61], 10),
+            // Multiple moduli
+            (64, 1153, vec![62, 62, 62, 61, 60], 10),
+        ];
+
+        for (degree, plaintext, moduli_sizes, variance) in test_cases {
+            let params = BfvParametersBuilder::new()
+                .set_degree(degree)
+                .set_plaintext_modulus(plaintext)
+                .set_moduli_sizes(&moduli_sizes)
+                .set_variance(variance)
+                .build()?;
+
+            let bytes = params.to_bytes();
+            let deserialized = BfvParameters::try_deserialize(&bytes)?;
+
+            // Verify all public fields
+            assert_eq!(deserialized.degree(), params.degree());
+            assert_eq!(deserialized.plaintext(), params.plaintext());
+            assert_eq!(deserialized.moduli(), params.moduli());
+            assert_eq!(deserialized.moduli_sizes(), params.moduli_sizes());
+            assert_eq!(deserialized.variance(), params.variance());
+            assert_eq!(deserialized.get_error1_variance(), params.get_error1_variance());
+            assert_eq!(deserialized.max_level(), params.max_level());
+
+            // Verify contexts are correctly reconstructed
+            assert_eq!(deserialized.ctx().len(), params.ctx().len());
+            for (i, (deser_ctx, orig_ctx)) in deserialized.ctx().iter().zip(params.ctx().iter()).enumerate() {
+                assert_eq!(deser_ctx.moduli(), orig_ctx.moduli(), "Context {} moduli mismatch", i);
+                assert_eq!(deser_ctx.degree, orig_ctx.degree, "Context {} degree mismatch", i);
+            }
+
+            // Verify full equality
+            assert_eq!(deserialized, params, "Parameters not equal for degree={}, plaintext={}, moduli_sizes={:?}", degree, plaintext, moduli_sizes);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_deserialize_preserves_all_computed_fields() -> Result<(), Box<dyn Error>> {
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62, 62, 62])
+            .set_variance(10)
+            .build()?;
+
+        let bytes = params.to_bytes();
+        let deserialized = BfvParameters::try_deserialize(&bytes)?;
+
+        // Verify computed arrays are preserved
+        assert_eq!(deserialized.moduli_sizes(), params.moduli_sizes());
+        assert_eq!(deserialized.q_mod_t.len(), params.q_mod_t.len());
+        assert_eq!(deserialized.matrix_reps_index_map.len(), params.matrix_reps_index_map.len());
+        assert_eq!(deserialized.delta.len(), params.delta.len());
+
+        // Verify q_mod_t values
+        for (i, (deser_val, orig_val)) in deserialized.q_mod_t.iter().zip(params.q_mod_t.iter()).enumerate() {
+            assert_eq!(deser_val, orig_val, "q_mod_t[{}] mismatch", i);
+        }
+
+        // Verify matrix_reps_index_map
+        for (i, (deser_val, orig_val)) in deserialized.matrix_reps_index_map.iter().zip(params.matrix_reps_index_map.iter()).enumerate() {
+            assert_eq!(deser_val, orig_val, "matrix_reps_index_map[{}] mismatch", i);
+        }
+
+        // Verify delta polynomials (they should be deserialized, not recomputed)
+        assert_eq!(deserialized.delta.len(), params.delta.len());
+        for (i, (deser_delta, orig_delta)) in deserialized.delta.iter().zip(params.delta.iter()).enumerate() {
+            // Compare by serializing both and checking equality
+            // This verifies the delta polynomials were correctly deserialized
+            assert_eq!(deser_delta.to_bytes(), orig_delta.to_bytes(), "delta[{}] mismatch", i);
+        }
 
         Ok(())
     }

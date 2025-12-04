@@ -48,6 +48,13 @@ message Parameters {
     repeated uint64 moduli = 2;
     uint64 plaintext = 3;
     uint32 variance = 4;
+    // Extended fields for full serialization (to avoid rebuilding)
+    bytes error1_variance = 5;  // BigUint serialized as bytes
+    repeated uint64 moduli_sizes = 6;
+    repeated uint64 q_mod_t = 7;
+    repeated uint64 matrix_reps_index_map = 8;
+    repeated bytes delta_polynomials = 9;  // Serialized Poly objects
+    bool has_ntt_operator = 10;  // Whether op is Some or None
 }
 
 message PublicKey {

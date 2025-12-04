@@ -78,6 +78,23 @@ pub struct Parameters {
     pub plaintext: u64,
     #[prost(uint32, tag = "4")]
     pub variance: u32,
+    /// Extended fields for full serialization (to avoid rebuilding)
+    ///
+    /// BigUint serialized as bytes
+    #[prost(bytes = "vec", tag = "5")]
+    pub error1_variance: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, repeated, tag = "6")]
+    pub moduli_sizes: ::prost::alloc::vec::Vec<u64>,
+    #[prost(uint64, repeated, tag = "7")]
+    pub q_mod_t: ::prost::alloc::vec::Vec<u64>,
+    #[prost(uint64, repeated, tag = "8")]
+    pub matrix_reps_index_map: ::prost::alloc::vec::Vec<u64>,
+    /// Serialized Poly objects
+    #[prost(bytes = "vec", repeated, tag = "9")]
+    pub delta_polynomials: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    /// Whether op is Some or None
+    #[prost(bool, tag = "10")]
+    pub has_ntt_operator: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
