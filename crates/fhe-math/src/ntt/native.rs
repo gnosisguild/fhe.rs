@@ -1,4 +1,6 @@
 use crate::zq::Modulus;
+use crate::Error;
+use fhe_traits::{Deserialize, Serialize};
 use itertools::Itertools;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -377,5 +379,175 @@ impl NttOperator {
         // A primitive root of unity is such that x^n = 1 mod p, and x^(n/p) != 1 mod p
         // for all prime p dividing n.
         (p.pow(a, n as u64) == 1) && (p.pow(a, (n / 2) as u64) != 1)
+    }
+}
+
+impl Serialize for NttOperator {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        // Serialize modulus (just the p value)
+        bytes.extend_from_slice(&self.p.modulus().to_le_bytes());
+        // Serialize p_twice
+        bytes.extend_from_slice(&self.p_twice.to_le_bytes());
+        // Serialize size
+        bytes.extend_from_slice(&(self.size as u64).to_le_bytes());
+        // Serialize omegas
+        bytes.extend_from_slice(&(self.omegas.len() as u64).to_le_bytes());
+        for omega in self.omegas.iter() {
+            bytes.extend_from_slice(&omega.to_le_bytes());
+        }
+        // Serialize omegas_shoup
+        for omega_shoup in self.omegas_shoup.iter() {
+            bytes.extend_from_slice(&omega_shoup.to_le_bytes());
+        }
+        // Serialize zetas_inv
+        for zeta_inv in self.zetas_inv.iter() {
+            bytes.extend_from_slice(&zeta_inv.to_le_bytes());
+        }
+        // Serialize zetas_inv_shoup
+        for zeta_inv_shoup in self.zetas_inv_shoup.iter() {
+            bytes.extend_from_slice(&zeta_inv_shoup.to_le_bytes());
+        }
+        // Serialize size_inv
+        bytes.extend_from_slice(&self.size_inv.to_le_bytes());
+        // Serialize size_inv_shoup
+        bytes.extend_from_slice(&self.size_inv_shoup.to_le_bytes());
+        bytes
+    }
+}
+
+impl Deserialize for NttOperator {
+    type Error = Error;
+
+    fn try_deserialize(bytes: &[u8]) -> std::result::Result<Self, Self::Error> {
+        let mut offset = 0;
+
+        // Deserialize modulus
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid NttOperator serialization".to_string()));
+        }
+        let p_value = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]);
+        offset += 8;
+        let p = Modulus::new(p_value)?;
+
+        // Deserialize p_twice
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid NttOperator serialization".to_string()));
+        }
+        let p_twice = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]);
+        offset += 8;
+
+        // Deserialize size
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid NttOperator serialization".to_string()));
+        }
+        let size = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+
+        // Deserialize omegas length
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid NttOperator serialization".to_string()));
+        }
+        let omegas_len = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+
+        // Deserialize omegas
+        if offset + omegas_len * 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid NttOperator serialization".to_string()));
+        }
+        let mut omegas = Vec::with_capacity(omegas_len);
+        for _ in 0..omegas_len {
+            let omega = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]);
+            omegas.push(omega);
+            offset += 8;
+        }
+
+        // Deserialize omegas_shoup
+        if offset + omegas_len * 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid NttOperator serialization".to_string()));
+        }
+        let mut omegas_shoup = Vec::with_capacity(omegas_len);
+        for _ in 0..omegas_len {
+            let omega_shoup = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]);
+            omegas_shoup.push(omega_shoup);
+            offset += 8;
+        }
+
+        // Deserialize zetas_inv
+        if offset + omegas_len * 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid NttOperator serialization".to_string()));
+        }
+        let mut zetas_inv = Vec::with_capacity(omegas_len);
+        for _ in 0..omegas_len {
+            let zeta_inv = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]);
+            zetas_inv.push(zeta_inv);
+            offset += 8;
+        }
+
+        // Deserialize zetas_inv_shoup
+        if offset + omegas_len * 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid NttOperator serialization".to_string()));
+        }
+        let mut zetas_inv_shoup = Vec::with_capacity(omegas_len);
+        for _ in 0..omegas_len {
+            let zeta_inv_shoup_val = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]);
+            zetas_inv_shoup.push(zeta_inv_shoup_val);
+            offset += 8;
+        }
+
+        // Deserialize size_inv
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid NttOperator serialization".to_string()));
+        }
+        let size_inv = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]);
+        offset += 8;
+
+        // Deserialize size_inv_shoup
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid NttOperator serialization".to_string()));
+        }
+        let size_inv_shoup = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]);
+
+        Ok(Self {
+            p,
+            p_twice,
+            size,
+            omegas: omegas.into_boxed_slice(),
+            omegas_shoup: omegas_shoup.into_boxed_slice(),
+            zetas_inv: zetas_inv.into_boxed_slice(),
+            zetas_inv_shoup: zetas_inv_shoup.into_boxed_slice(),
+            size_inv,
+            size_inv_shoup,
+        })
     }
 }

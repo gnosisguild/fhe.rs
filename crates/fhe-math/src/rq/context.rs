@@ -1,3 +1,4 @@
+use fhe_traits::{Deserialize, Serialize};
 use itertools::Itertools;
 use num_bigint::BigUint;
 use std::{fmt::Debug, sync::Arc};
@@ -159,6 +160,237 @@ impl Context {
             }
             Ok(current_ctx)
         }
+    }
+
+    /// Reconstruct the next_context chain from a list of contexts.
+    /// This is used during deserialization to rebuild the recursive structure.
+    pub fn reconstruct_chain(contexts: &mut [Arc<Context>]) {
+        for i in 0..contexts.len() {
+            if i + 1 < contexts.len() {
+                // Use Arc::get_mut to get a mutable reference, but we need to clone
+                // since we can't mutate Arc directly. Instead, we'll create a new Context.
+                let next_ctx = contexts[i + 1].clone();
+                let current = Arc::get_mut(&mut contexts[i])
+                    .expect("Context should be uniquely owned during reconstruction");
+                current.next_context = Some(next_ctx);
+            } else {
+                let current = Arc::get_mut(&mut contexts[i])
+                    .expect("Context should be uniquely owned during reconstruction");
+                current.next_context = None;
+            }
+        }
+    }
+}
+
+impl Serialize for Context {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        // Serialize moduli
+        bytes.extend_from_slice(&(self.moduli.len() as u64).to_le_bytes());
+        for m in self.moduli.iter() {
+            bytes.extend_from_slice(&m.to_le_bytes());
+        }
+        // Serialize degree
+        bytes.extend_from_slice(&(self.degree as u64).to_le_bytes());
+        // Serialize rns
+        let rns_bytes = self.rns.to_bytes();
+        bytes.extend_from_slice(&(rns_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&rns_bytes);
+        // Serialize ops (NTT operators)
+        bytes.extend_from_slice(&(self.ops.len() as u64).to_le_bytes());
+        for op in self.ops.iter() {
+            let op_bytes = op.to_bytes();
+            bytes.extend_from_slice(&(op_bytes.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&op_bytes);
+        }
+        // Serialize bitrev
+        bytes.extend_from_slice(&(self.bitrev.len() as u64).to_le_bytes());
+        for b in self.bitrev.iter() {
+            bytes.extend_from_slice(&(*b as u64).to_le_bytes());
+        }
+        // Serialize inv_last_qi_mod_qj
+        bytes.extend_from_slice(&(self.inv_last_qi_mod_qj.len() as u64).to_le_bytes());
+        for inv in self.inv_last_qi_mod_qj.iter() {
+            bytes.extend_from_slice(&inv.to_le_bytes());
+        }
+        // Serialize inv_last_qi_mod_qj_shoup
+        bytes.extend_from_slice(&(self.inv_last_qi_mod_qj_shoup.len() as u64).to_le_bytes());
+        for inv_shoup in self.inv_last_qi_mod_qj_shoup.iter() {
+            bytes.extend_from_slice(&inv_shoup.to_le_bytes());
+        }
+        // Note: We don't serialize next_context - it will be reconstructed
+        bytes
+    }
+}
+
+impl Deserialize for Context {
+    type Error = Error;
+
+    fn try_deserialize(bytes: &[u8]) -> std::result::Result<Self, Self::Error> {
+        let mut offset = 0;
+
+        // Deserialize moduli
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid Context serialization".to_string()));
+        }
+        let moduli_len = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+
+        let mut moduli = Vec::with_capacity(moduli_len);
+        for _ in 0..moduli_len {
+            if offset + 8 > bytes.len() {
+                return Err(Error::Serialization("Invalid Context serialization".to_string()));
+            }
+            let m = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]);
+            moduli.push(m);
+            offset += 8;
+        }
+
+        // Reconstruct q (Modulus operators) from moduli
+        let mut q = Vec::with_capacity(moduli_len);
+        for m in &moduli {
+            q.push(Modulus::new(*m)?);
+        }
+
+        // Deserialize degree
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid Context serialization".to_string()));
+        }
+        let degree = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+
+        // Deserialize rns
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid Context serialization".to_string()));
+        }
+        let rns_len = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+        if offset + rns_len > bytes.len() {
+            return Err(Error::Serialization("Invalid Context serialization".to_string()));
+        }
+        let rns = Arc::new(RnsContext::try_deserialize(&bytes[offset..offset + rns_len])?);
+        offset += rns_len;
+
+        // Deserialize ops (NTT operators)
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid Context serialization".to_string()));
+        }
+        let ops_len = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+
+        let mut ops = Vec::with_capacity(ops_len);
+        for _ in 0..ops_len {
+            if offset + 8 > bytes.len() {
+                return Err(Error::Serialization("Invalid Context serialization".to_string()));
+            }
+            let op_len = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]) as usize;
+            offset += 8;
+            if offset + op_len > bytes.len() {
+                return Err(Error::Serialization("Invalid Context serialization".to_string()));
+            }
+            let op = NttOperator::try_deserialize(&bytes[offset..offset + op_len])?;
+            ops.push(op);
+            offset += op_len;
+        }
+
+        // Deserialize bitrev
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid Context serialization".to_string()));
+        }
+        let bitrev_len = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+
+        let mut bitrev = Vec::with_capacity(bitrev_len);
+        for _ in 0..bitrev_len {
+            if offset + 8 > bytes.len() {
+                return Err(Error::Serialization("Invalid Context serialization".to_string()));
+            }
+            let b = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]) as usize;
+            bitrev.push(b);
+            offset += 8;
+        }
+
+        // Deserialize inv_last_qi_mod_qj
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid Context serialization".to_string()));
+        }
+        let inv_len = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+
+        let mut inv_last_qi_mod_qj = Vec::with_capacity(inv_len);
+        for _ in 0..inv_len {
+            if offset + 8 > bytes.len() {
+                return Err(Error::Serialization("Invalid Context serialization".to_string()));
+            }
+            let inv = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]);
+            inv_last_qi_mod_qj.push(inv);
+            offset += 8;
+        }
+
+        // Deserialize inv_last_qi_mod_qj_shoup
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid Context serialization".to_string()));
+        }
+        let inv_shoup_len = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+
+        let mut inv_last_qi_mod_qj_shoup = Vec::with_capacity(inv_shoup_len);
+        for _ in 0..inv_shoup_len {
+            if offset + 8 > bytes.len() {
+                return Err(Error::Serialization("Invalid Context serialization".to_string()));
+            }
+            let inv_shoup = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]);
+            inv_last_qi_mod_qj_shoup.push(inv_shoup);
+            offset += 8;
+        }
+
+        Ok(Self {
+            moduli: moduli.into_boxed_slice(),
+            q: q.into_boxed_slice(),
+            rns,
+            ops: ops.into_boxed_slice(),
+            degree,
+            bitrev: bitrev.into_boxed_slice(),
+            inv_last_qi_mod_qj: inv_last_qi_mod_qj.into_boxed_slice(),
+            inv_last_qi_mod_qj_shoup: inv_last_qi_mod_qj_shoup.into_boxed_slice(),
+            next_context: None, // Will be reconstructed later
+        })
     }
 }
 

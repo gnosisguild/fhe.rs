@@ -552,6 +552,16 @@ impl Serialize for BfvParameters {
             .map(|p| p.to_bytes())
             .collect();
 
+        // Serialize contexts (one per level)
+        let contexts: Vec<Vec<u8>> = self
+            .ctx
+            .iter()
+            .map(|ctx| ctx.to_bytes())
+            .collect();
+
+        // Serialize NTT operator if it exists
+        let ntt_operator = self.op.as_ref().map(|op| op.to_bytes()).unwrap_or_default();
+
         Parameters {
             degree: self.polynomial_degree as u32,
             plaintext: self.plaintext_modulus,
@@ -567,6 +577,8 @@ impl Serialize for BfvParameters {
                 .collect(),
             delta_polynomials,
             has_ntt_operator: self.op.is_some(),
+            contexts,
+            ntt_operator,
         }
         .encode_to_vec()
     }
@@ -586,17 +598,28 @@ impl Deserialize for BfvParameters {
                 Error::ParametersError(ParametersError::InvalidPlaintext(e.to_string()))
             })?;
 
-            // Reconstruct contexts (needed for deserializing delta polynomials)
-            let mut ctx = Vec::with_capacity(params.moduli.len());
-            for i in 0..params.moduli.len() {
-                let ctx_i = Context::new_arc(
-                    &params.moduli[..params.moduli.len() - i],
-                    params.degree as usize,
-                )?;
-                ctx.push(ctx_i);
+            // Deserialize contexts directly (avoids expensive NTT recomputation)
+            let mut ctx = Vec::with_capacity(params.contexts.len());
+            if !params.contexts.is_empty() {
+                // Deserialize each context
+                for ctx_bytes in &params.contexts {
+                    let ctx_i = Context::try_deserialize(ctx_bytes)?;
+                    ctx.push(Arc::new(ctx_i));
+                }
+                // Reconstruct the next_context chain
+                Context::reconstruct_chain(&mut ctx);
+            } else {
+                // Fallback: reconstruct contexts if not serialized (backward compatibility)
+                for i in 0..params.moduli.len() {
+                    let ctx_i = Context::new_arc(
+                        &params.moduli[..params.moduli.len() - i],
+                        params.degree as usize,
+                    )?;
+                    ctx.push(ctx_i);
+                }
             }
 
-            // Deserialize delta polynomials using the reconstructed contexts
+            // Deserialize delta polynomials using the deserialized contexts
             if params.delta_polynomials.len() != ctx.len() {
                 return Err(Error::SerializationError);
             }
@@ -608,8 +631,11 @@ impl Deserialize for BfvParameters {
                 delta.push(delta_poly);
             }
 
-            // Reconstruct NTT operator if it existed
-            let op = if params.has_ntt_operator {
+            // Deserialize NTT operator directly (avoids expensive recomputation)
+            let op = if params.has_ntt_operator && !params.ntt_operator.is_empty() {
+                Some(Arc::new(NttOperator::try_deserialize(&params.ntt_operator)?))
+            } else if params.has_ntt_operator {
+                // Fallback: reconstruct if not serialized (backward compatibility)
                 NttOperator::new(&plaintext_modulus, params.degree as usize).map(Arc::new)
             } else {
                 None

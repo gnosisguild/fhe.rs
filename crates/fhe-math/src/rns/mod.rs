@@ -3,6 +3,7 @@
 //! Residue-Number System operations.
 
 use crate::{zq::Modulus, Error, Result};
+use fhe_traits::{Deserialize, Serialize};
 use itertools::izip;
 use ndarray::ArrayView1;
 use num_bigint::BigUint;
@@ -136,6 +137,189 @@ impl RnsContext {
     /// Getter for the i-th garner coefficient.
     pub fn get_garner(&self, i: usize) -> Option<&BigUint> {
         self.garner.get(i)
+    }
+}
+
+impl Serialize for RnsContext {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        // Serialize moduli_u64
+        bytes.extend_from_slice(&(self.moduli_u64.len() as u64).to_le_bytes());
+        for m in &self.moduli_u64 {
+            bytes.extend_from_slice(&m.to_le_bytes());
+        }
+        // Serialize q_tilde
+        for q in &self.q_tilde {
+            bytes.extend_from_slice(&q.to_le_bytes());
+        }
+        // Serialize q_tilde_shoup
+        for q in &self.q_tilde_shoup {
+            bytes.extend_from_slice(&q.to_le_bytes());
+        }
+        // Serialize q_star (BigUint values)
+        bytes.extend_from_slice(&(self.q_star.len() as u64).to_le_bytes());
+        for q_star in &self.q_star {
+            let q_star_bytes = q_star.to_bytes_be();
+            bytes.extend_from_slice(&(q_star_bytes.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&q_star_bytes);
+        }
+        // Serialize garner (BigUint values)
+        bytes.extend_from_slice(&(self.garner.len() as u64).to_le_bytes());
+        for garner in &self.garner {
+            let garner_bytes = garner.to_bytes_be();
+            bytes.extend_from_slice(&(garner_bytes.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&garner_bytes);
+        }
+        // Serialize product (BigUint)
+        let product_bytes = self.product.to_bytes_be();
+        bytes.extend_from_slice(&(product_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&product_bytes);
+        bytes
+    }
+}
+
+impl Deserialize for RnsContext {
+    type Error = Error;
+
+    fn try_deserialize(bytes: &[u8]) -> std::result::Result<Self, Self::Error> {
+        let mut offset = 0;
+
+        // Deserialize moduli_u64
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+        }
+        let moduli_len = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+
+        let mut moduli_u64 = Vec::with_capacity(moduli_len);
+        for _ in 0..moduli_len {
+            if offset + 8 > bytes.len() {
+                return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+            }
+            let m = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]);
+            moduli_u64.push(m);
+            offset += 8;
+        }
+
+        // Reconstruct moduli from moduli_u64
+        let mut moduli = Vec::with_capacity(moduli_len);
+        for m in &moduli_u64 {
+            moduli.push(Modulus::new(*m)?);
+        }
+
+        // Deserialize q_tilde
+        let mut q_tilde = Vec::with_capacity(moduli_len);
+        for _ in 0..moduli_len {
+            if offset + 8 > bytes.len() {
+                return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+            }
+            let q = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]);
+            q_tilde.push(q);
+            offset += 8;
+        }
+
+        // Deserialize q_tilde_shoup
+        let mut q_tilde_shoup = Vec::with_capacity(moduli_len);
+        for _ in 0..moduli_len {
+            if offset + 8 > bytes.len() {
+                return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+            }
+            let q = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]);
+            q_tilde_shoup.push(q);
+            offset += 8;
+        }
+
+        // Deserialize q_star
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+        }
+        let q_star_len = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+
+        let mut q_star = Vec::with_capacity(q_star_len);
+        for _ in 0..q_star_len {
+            if offset + 8 > bytes.len() {
+                return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+            }
+            let len = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]) as usize;
+            offset += 8;
+            if offset + len > bytes.len() {
+                return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+            }
+            let q_star_val = BigUint::from_bytes_be(&bytes[offset..offset + len]);
+            q_star.push(q_star_val);
+            offset += len;
+        }
+
+        // Deserialize garner
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+        }
+        let garner_len = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+
+        let mut garner = Vec::with_capacity(garner_len);
+        for _ in 0..garner_len {
+            if offset + 8 > bytes.len() {
+                return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+            }
+            let len = u64::from_le_bytes([
+                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+            ]) as usize;
+            offset += 8;
+            if offset + len > bytes.len() {
+                return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+            }
+            let garner_val = BigUint::from_bytes_be(&bytes[offset..offset + len]);
+            garner.push(garner_val);
+            offset += len;
+        }
+
+        // Deserialize product
+        if offset + 8 > bytes.len() {
+            return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+        }
+        let product_len = u64::from_le_bytes([
+            bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+        if offset + product_len > bytes.len() {
+            return Err(Error::Serialization("Invalid RnsContext serialization".to_string()));
+        }
+        let product = BigUint::from_bytes_be(&bytes[offset..offset + product_len]);
+
+        Ok(Self {
+            moduli_u64,
+            moduli,
+            q_tilde,
+            q_tilde_shoup,
+            q_star,
+            garner,
+            product,
+        })
     }
 }
 

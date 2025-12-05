@@ -55,6 +55,8 @@ message Parameters {
     repeated uint64 matrix_reps_index_map = 8;
     repeated bytes delta_polynomials = 9;  // Serialized Poly objects
     bool has_ntt_operator = 10;  // Whether op is Some or None
+    repeated bytes contexts = 11;  // Serialized Context objects (one per level)
+    bytes ntt_operator = 12;  // Serialized NttOperator (if has_ntt_operator is true)
 }
 
 message PublicKey {

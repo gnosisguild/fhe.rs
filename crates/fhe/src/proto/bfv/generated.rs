@@ -95,6 +95,12 @@ pub struct Parameters {
     /// Whether op is Some or None
     #[prost(bool, tag = "10")]
     pub has_ntt_operator: bool,
+    /// Serialized Context objects (one per level)
+    #[prost(bytes = "vec", repeated, tag = "11")]
+    pub contexts: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    /// Serialized NttOperator (if has_ntt_operator is true)
+    #[prost(bytes = "vec", tag = "12")]
+    pub ntt_operator: ::prost::alloc::vec::Vec<u8>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
