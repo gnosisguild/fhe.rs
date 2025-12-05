@@ -24,11 +24,12 @@ use num_bigint::{BigInt, BigUint, RandBigInt, ToBigInt};
 use num_traits::{Signed, ToPrimitive};
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Possible representations of the underlying polynomial.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Representation {
     /// This is the list of coefficients ci, such that the polynomial is c0 + c1
     /// * x + ... + c_(degree - 1) * x^(degree - 1)
@@ -93,6 +94,18 @@ pub struct Poly {
     coefficients: Array2<u64>,
     /// Optional Shoup representation of coefficients for faster multiplication
     coefficients_shoup: Option<Array2<u64>>,
+}
+
+/// Serializable representation of [`Poly`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolyRaw {
+    pub representation: Representation,
+    pub has_lazy_coefficients: bool,
+    pub allow_variable_time_computations: bool,
+    pub rows: usize,
+    pub cols: usize,
+    pub coefficients: Vec<u64>,
+    pub coefficients_shoup: Option<Vec<u64>>,
 }
 
 impl AsRef<Poly> for Poly {
@@ -723,6 +736,63 @@ impl Poly {
             }
         });
         Ok(())
+    }
+}
+
+impl Poly {
+    /// Export this polynomial into a raw representation (without its context).
+    pub fn to_raw(&self) -> PolyRaw {
+        PolyRaw {
+            representation: self.representation.clone(),
+            has_lazy_coefficients: self.has_lazy_coefficients,
+            allow_variable_time_computations: self.allow_variable_time_computations,
+            rows: self.coefficients.shape()[0],
+            cols: self.coefficients.shape()[1],
+            coefficients: self.coefficients.iter().copied().collect(),
+            coefficients_shoup: self
+                .coefficients_shoup
+                .as_ref()
+                .map(|c| c.iter().copied().collect()),
+        }
+    }
+}
+
+impl PolyRaw {
+    /// Convert the raw polynomial back into a [`Poly`] tied to `ctx`.
+    pub fn into_poly(self, ctx: &Arc<Context>) -> Result<Poly> {
+        let expected = ctx.q.len() * ctx.degree;
+        if self.coefficients.len() != expected {
+            return Err(Error::Default("Invalid coefficient length".to_string()));
+        }
+        if self.rows * self.cols != expected
+            || self.rows != ctx.q.len()
+            || self.cols != ctx.degree
+        {
+            return Err(Error::Default(
+                "Context and polynomial dimensions do not match".to_string(),
+            ));
+        }
+
+        let coefficients = Array2::from_shape_vec((self.rows, self.cols), self.coefficients)
+            .map_err(|_| Error::Default("Invalid coefficient shape".to_string()))?;
+
+        let coefficients_shoup = if let Some(values) = self.coefficients_shoup {
+            Some(
+                Array2::from_shape_vec((self.rows, self.cols), values)
+                    .map_err(|_| Error::Default("Invalid shoup shape".to_string()))?,
+            )
+        } else {
+            None
+        };
+
+        Ok(Poly {
+            ctx: ctx.clone(),
+            representation: self.representation,
+            has_lazy_coefficients: self.has_lazy_coefficients,
+            allow_variable_time_computations: self.allow_variable_time_computations,
+            coefficients,
+            coefficients_shoup,
+        })
     }
 }
 
