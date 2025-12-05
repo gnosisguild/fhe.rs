@@ -8,11 +8,12 @@ use ndarray::ArrayView1;
 use num_bigint::BigUint;
 use num_bigint_dig::{BigInt as BigIntDig, BigUint as BigUintDig, ExtendedGcd, ModInverse};
 use num_traits::{cast::ToPrimitive, One, Zero};
+use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, fmt::Debug};
 
-mod scaler;
+pub mod scaler;
 
-pub use scaler::{RnsScaler, ScalingFactor};
+pub use scaler::{RnsScaler, RnsScalerRaw, ScalingFactor, ScalingFactorRaw};
 
 /// Context for a Residue Number System.
 #[derive(Default, Clone, PartialEq, Eq)]
@@ -25,6 +26,17 @@ pub struct RnsContext {
     garner: Vec<BigUint>,
     /// The product of all moduli in the RNS basis
     pub product: BigUint,
+}
+
+/// Serializable form of [`RnsContext`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RnsContextRaw {
+    pub moduli_u64: Vec<u64>,
+    pub q_tilde: Vec<u64>,
+    pub q_tilde_shoup: Vec<u64>,
+    pub q_star: Vec<Vec<u8>>,
+    pub garner: Vec<Vec<u8>>,
+    pub product: Vec<u8>,
 }
 
 impl Debug for RnsContext {
@@ -136,6 +148,49 @@ impl RnsContext {
     /// Getter for the i-th garner coefficient.
     pub fn get_garner(&self, i: usize) -> Option<&BigUint> {
         self.garner.get(i)
+    }
+}
+
+impl RnsContext {
+    /// Export this context into a raw representation.
+    pub fn to_raw(&self) -> RnsContextRaw {
+        RnsContextRaw {
+            moduli_u64: self.moduli_u64.clone(),
+            q_tilde: self.q_tilde.clone(),
+            q_tilde_shoup: self.q_tilde_shoup.clone(),
+            q_star: self.q_star.iter().map(|v| v.to_bytes_be()).collect(),
+            garner: self.garner.iter().map(|v| v.to_bytes_be()).collect(),
+            product: self.product.to_bytes_be(),
+        }
+    }
+}
+
+impl RnsContextRaw {
+    /// Build an [`RnsContext`] from its raw parts.
+    pub fn into_context(self) -> Result<RnsContext> {
+        let moduli = self
+            .moduli_u64
+            .iter()
+            .map(|m| Modulus::new(*m))
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(RnsContext {
+            moduli_u64: self.moduli_u64,
+            moduli,
+            q_tilde: self.q_tilde,
+            q_tilde_shoup: self.q_tilde_shoup,
+            q_star: self
+                .q_star
+                .into_iter()
+                .map(|bytes| BigUint::from_bytes_be(&bytes))
+                .collect(),
+            garner: self
+                .garner
+                .into_iter()
+                .map(|bytes| BigUint::from_bytes_be(&bytes))
+                .collect(),
+            product: BigUint::from_bytes_be(&self.product),
+        })
     }
 }
 

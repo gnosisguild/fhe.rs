@@ -8,6 +8,7 @@ use itertools::{izip, Itertools};
 use ndarray::{ArrayView1, ArrayViewMut1};
 use num_bigint::BigUint;
 use num_traits::{One, ToPrimitive, Zero};
+use serde::{Deserialize, Serialize};
 use std::{cmp::min, sync::Arc};
 
 /// Scaling factor when performing a RNS scaling.
@@ -16,6 +17,14 @@ pub struct ScalingFactor {
     numerator: BigUint,
     denominator: BigUint,
     pub(crate) is_one: bool,
+}
+
+/// Serializable representation of [`ScalingFactor`].
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScalingFactorRaw {
+    pub numerator: Vec<u8>,
+    pub denominator: Vec<u8>,
+    pub is_one: bool,
 }
 
 impl ScalingFactor {
@@ -36,6 +45,26 @@ impl ScalingFactor {
             denominator: BigUint::one(),
             is_one: true,
         }
+    }
+}
+
+impl ScalingFactor {
+    /// Export this scaling factor into a raw representation.
+    pub fn to_raw(&self) -> ScalingFactorRaw {
+        ScalingFactorRaw {
+            numerator: self.numerator.to_bytes_be(),
+            denominator: self.denominator.to_bytes_be(),
+            is_one: self.is_one,
+        }
+    }
+}
+
+impl ScalingFactorRaw {
+    /// Import a scaling factor from raw bytes.
+    pub fn into_scaling_factor(self) -> ScalingFactor {
+        let numerator = BigUint::from_bytes_be(&self.numerator);
+        let denominator = BigUint::from_bytes_be(&self.denominator);
+        ScalingFactor::new(&numerator, &denominator)
     }
 }
 
@@ -62,6 +91,25 @@ pub struct RnsScaler {
     theta_garner_lo: Box<[u64]>,
     theta_garner_hi: Box<[u64]>,
     theta_garner_shift: usize,
+}
+
+/// Serializable representation of [`RnsScaler`].
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RnsScalerRaw {
+    pub scaling_factor: ScalingFactorRaw,
+    pub gamma: Vec<u64>,
+    pub gamma_shoup: Vec<u64>,
+    pub theta_gamma_lo: u64,
+    pub theta_gamma_hi: u64,
+    pub theta_gamma_sign: bool,
+    pub omega: Vec<Vec<u64>>,
+    pub omega_shoup: Vec<Vec<u64>>,
+    pub theta_omega_lo: Vec<u64>,
+    pub theta_omega_hi: Vec<u64>,
+    pub theta_omega_sign: Vec<bool>,
+    pub theta_garner_lo: Vec<u64>,
+    pub theta_garner_hi: Vec<u64>,
+    pub theta_garner_shift: usize,
 }
 
 impl RnsScaler {
@@ -336,6 +384,62 @@ impl RnsScaler {
 
                 *out_i = qi.reduce_u128(yi)
             }
+        }
+    }
+}
+
+impl RnsScaler {
+    /// Export this scaler to a raw representation.
+    pub fn to_raw(&self) -> RnsScalerRaw {
+        RnsScalerRaw {
+            scaling_factor: self.scaling_factor.to_raw(),
+            gamma: self.gamma.to_vec(),
+            gamma_shoup: self.gamma_shoup.to_vec(),
+            theta_gamma_lo: self.theta_gamma_lo,
+            theta_gamma_hi: self.theta_gamma_hi,
+            theta_gamma_sign: self.theta_gamma_sign,
+            omega: self.omega.iter().map(|row| row.to_vec()).collect(),
+            omega_shoup: self.omega_shoup.iter().map(|row| row.to_vec()).collect(),
+            theta_omega_lo: self.theta_omega_lo.to_vec(),
+            theta_omega_hi: self.theta_omega_hi.to_vec(),
+            theta_omega_sign: self.theta_omega_sign.to_vec(),
+            theta_garner_lo: self.theta_garner_lo.to_vec(),
+            theta_garner_hi: self.theta_garner_hi.to_vec(),
+            theta_garner_shift: self.theta_garner_shift,
+        }
+    }
+}
+
+impl RnsScalerRaw {
+    /// Import a scaler from its raw form.
+    pub fn into_scaler(self, from: &Arc<RnsContext>, to: &Arc<RnsContext>) -> RnsScaler {
+        RnsScaler {
+            from: from.clone(),
+            to: to.clone(),
+            scaling_factor: self.scaling_factor.into_scaling_factor(),
+            gamma: self.gamma.into_boxed_slice(),
+            gamma_shoup: self.gamma_shoup.into_boxed_slice(),
+            theta_gamma_lo: self.theta_gamma_lo,
+            theta_gamma_hi: self.theta_gamma_hi,
+            theta_gamma_sign: self.theta_gamma_sign,
+            omega: self
+                .omega
+                .into_iter()
+                .map(|row| row.into_boxed_slice())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            omega_shoup: self
+                .omega_shoup
+                .into_iter()
+                .map(|row| row.into_boxed_slice())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            theta_omega_lo: self.theta_omega_lo.into_boxed_slice(),
+            theta_omega_hi: self.theta_omega_hi.into_boxed_slice(),
+            theta_omega_sign: self.theta_omega_sign.into_boxed_slice(),
+            theta_garner_lo: self.theta_garner_lo.into_boxed_slice(),
+            theta_garner_hi: self.theta_garner_hi.into_boxed_slice(),
+            theta_garner_shift: self.theta_garner_shift,
         }
     }
 }

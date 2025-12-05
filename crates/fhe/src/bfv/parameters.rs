@@ -3,9 +3,13 @@
 use crate::proto::bfv::Parameters;
 use crate::{Error, ParametersError, Result};
 use fhe_math::{
-    ntt::NttOperator,
-    rns::{RnsContext, ScalingFactor},
-    rq::{scaler::Scaler, traits::TryConvertFrom, Context, Poly, Representation},
+    ntt::{NttOperator, NttOperatorRaw},
+    rns::{RnsContext, RnsContextRaw, ScalingFactor},
+    rq::{
+        scaler::{Scaler, ScalerRaw},
+        traits::TryConvertFrom,
+        Context, Poly, PolyRaw, Representation,
+    },
     zq::{primes::generate_prime, Modulus},
 };
 use fhe_traits::{Deserialize, FheParameters, Serialize};
@@ -16,6 +20,7 @@ use prost::Message;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 /// Parameters for the BFV encryption scheme.
 #[derive(PartialEq, Eq)]
@@ -87,6 +92,8 @@ impl Debug for BfvParameters {
             .finish()
     }
 }
+
+const RAW_SERIALIZATION_VERSION: u32 = 1;
 
 impl FheParameters for BfvParameters {}
 
@@ -246,6 +253,162 @@ impl BfvParameters {
     pub fn with_error1_variance(mut self, error1_variance: BigUint) -> Self {
         self.error1_variance = error1_variance;
         self
+    }
+
+    /// Serialize the fully derived parameters into a raw representation.
+    ///
+    /// The resulting bytes capture every derived artifact (NTT tables, RNS
+    /// contexts, scalers, etc.) so that [`from_raw_bytes`] can reconstruct an
+    /// equivalent [`BfvParameters`] instance without recomputation. The format
+    /// is versioned and currently private to this crate.
+    pub fn to_raw_bytes(&self) -> Result<Vec<u8>> {
+        let mut registry = ContextRegistry::default();
+        let main_ctx_ids = self
+            .ctx
+            .iter()
+            .map(|ctx| registry.get_or_insert(ctx))
+            .collect::<Vec<_>>();
+
+        let scalers = self
+            .scalers
+            .iter()
+            .map(|scaler| RawScalerRef::from_scaler(scaler, &mut registry))
+            .collect::<Vec<_>>();
+
+        let delta = self
+            .delta
+            .iter()
+            .map(|poly| RawPolyEntry {
+                ctx_id: registry.get_or_insert(&poly.ctx),
+                poly: poly.to_raw(),
+            })
+            .collect::<Vec<_>>();
+
+        let mul_params = self
+            .mul_params
+            .iter()
+            .map(|mp| RawMultiplicationParameters::from_parameters(mp, &mut registry))
+            .collect::<Vec<_>>();
+
+        let moduli_sizes = self
+            .moduli_sizes
+            .iter()
+            .map(|value| usize_to_u32(*value, "moduli_sizes"))
+            .collect::<Result<Vec<_>>>()?;
+
+        let matrix_reps_index_map = self
+            .matrix_reps_index_map
+            .iter()
+            .map(|value| usize_to_u32(*value, "matrix_reps_index_map"))
+            .collect::<Result<Vec<_>>>()?;
+
+        let raw = RawBfvParameters {
+            version: RAW_SERIALIZATION_VERSION,
+            degree: usize_to_u32(self.polynomial_degree, "degree")?,
+            plaintext_modulus: self.plaintext_modulus,
+            moduli: self.moduli.to_vec(),
+            moduli_sizes,
+            variance: usize_to_u32(self.variance, "variance")?,
+            error1_variance: self.error1_variance.to_bytes_be(),
+            contexts: registry.into_contexts(),
+            main_ctx_ids,
+            op: self.op.as_ref().map(|op| op.to_raw()),
+            delta,
+            q_mod_t: self.q_mod_t.to_vec(),
+            scalers,
+            mul_params,
+            matrix_reps_index_map,
+        };
+
+        bincode::serialize(&raw).map_err(|_| Error::SerializationError)
+    }
+
+    /// Deserialize a raw representation without recomputing derived values.
+    ///
+    /// This expects bytes produced by [`to_raw_bytes`] using the same raw
+    /// serialization version. The function performs structural validation but
+    /// does not repeat the expensive mathematical checks enforced by
+    /// [`BfvParametersBuilder`].
+    pub fn from_raw_bytes(bytes: &[u8]) -> Result<Self> {
+        let raw: RawBfvParameters = bincode::deserialize(bytes).map_err(|_| Error::SerializationError)?;
+        if raw.version != RAW_SERIALIZATION_VERSION {
+            return Err(Error::DefaultError("Unsupported raw BFV parameter version".to_string()));
+        }
+
+        if raw.contexts.is_empty() {
+            return Err(Error::DefaultError(
+                "Raw BFV parameters contain no contexts".to_string(),
+            ));
+        }
+
+        let mut cache = vec![None; raw.contexts.len()];
+        for idx in 0..raw.contexts.len() {
+            build_context(idx, &raw.contexts, &mut cache)?;
+        }
+        let built_contexts = cache
+            .into_iter()
+            .map(|ctx| ctx.expect("context initialized"))
+            .collect::<Vec<_>>();
+
+        let ctx = raw
+            .main_ctx_ids
+            .iter()
+            .map(|id| ctx_by_id(&built_contexts, *id))
+            .collect::<Result<Vec<_>>>()?;
+
+        let op = if let Some(op_raw) = raw.op {
+            Some(Arc::new(op_raw.into_operator()?))
+        } else {
+            None
+        };
+
+        let delta = raw
+            .delta
+            .into_iter()
+            .map(|entry| entry.into_poly(&built_contexts))
+            .collect::<Result<Vec<_>>>()?
+            .into_boxed_slice();
+
+        let scalers = raw
+            .scalers
+            .into_iter()
+            .map(|entry| entry.into_scaler(&built_contexts))
+            .collect::<Result<Vec<_>>>()?
+            .into_boxed_slice();
+
+        let mul_params = raw
+            .mul_params
+            .into_iter()
+            .map(|entry| entry.into_parameters(&built_contexts))
+            .collect::<Result<Vec<_>>>()?
+            .into_boxed_slice();
+
+        Ok(BfvParameters {
+            polynomial_degree: raw.degree as usize,
+            plaintext_modulus: raw.plaintext_modulus,
+            moduli: raw.moduli.into_boxed_slice(),
+            moduli_sizes: raw
+                .moduli_sizes
+                .iter()
+                .map(|value| *value as usize)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            variance: raw.variance as usize,
+            error1_variance: BigUint::from_bytes_be(&raw.error1_variance),
+            ctx,
+            op,
+            delta,
+            q_mod_t: raw.q_mod_t.into_boxed_slice(),
+            scalers,
+            plaintext: Modulus::new(raw.plaintext_modulus)?,
+            mul_params,
+            matrix_reps_index_map: raw
+                .matrix_reps_index_map
+                .iter()
+                .map(|value| *value as usize)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        })
     }
 }
 
@@ -593,6 +756,226 @@ impl MultiplicationParameters {
     }
 }
 
+#[derive(Clone, SerdeSerialize, SerdeDeserialize)]
+struct RawBfvParameters {
+    version: u32,
+    degree: u32,
+    plaintext_modulus: u64,
+    moduli: Vec<u64>,
+    moduli_sizes: Vec<u32>,
+    variance: u32,
+    error1_variance: Vec<u8>,
+    contexts: Vec<RawContext>,
+    main_ctx_ids: Vec<u32>,
+    op: Option<NttOperatorRaw>,
+    delta: Vec<RawPolyEntry>,
+    q_mod_t: Vec<u64>,
+    scalers: Vec<RawScalerRef>,
+    mul_params: Vec<RawMultiplicationParameters>,
+    matrix_reps_index_map: Vec<u32>,
+}
+
+#[derive(Clone, SerdeSerialize, SerdeDeserialize)]
+struct RawContext {
+    moduli: Vec<u64>,
+    degree: u32,
+    bitrev: Vec<u32>,
+    inv_last_qi_mod_qj: Vec<u64>,
+    inv_last_qi_mod_qj_shoup: Vec<u64>,
+    rns: RnsContextRaw,
+    ops: Vec<NttOperatorRaw>,
+    next_context: Option<u32>,
+}
+
+#[derive(Clone, SerdeSerialize, SerdeDeserialize)]
+struct RawPolyEntry {
+    ctx_id: u32,
+    poly: PolyRaw,
+}
+
+impl RawPolyEntry {
+    fn into_poly(self, contexts: &[Arc<Context>]) -> Result<Poly> {
+        let ctx = ctx_by_id(contexts, self.ctx_id)?;
+        self.poly.into_poly(&ctx).map_err(Error::MathError)
+    }
+}
+
+#[derive(Clone, SerdeSerialize, SerdeDeserialize)]
+struct RawScalerRef {
+    scaler: ScalerRaw,
+    from_ctx: u32,
+    to_ctx: u32,
+}
+
+#[derive(Clone, SerdeSerialize, SerdeDeserialize)]
+struct RawMultiplicationParameters {
+    extender: RawScalerRef,
+    down_scaler: RawScalerRef,
+    from_ctx: u32,
+    to_ctx: u32,
+}
+
+#[derive(Default)]
+struct ContextRegistry {
+    contexts: Vec<RawContext>,
+    ids: HashMap<usize, u32>,
+}
+
+impl ContextRegistry {
+    fn get_or_insert(&mut self, ctx: &Arc<Context>) -> u32 {
+        let key = Arc::as_ptr(ctx) as usize;
+        if let Some(id) = self.ids.get(&key) {
+            return *id;
+        }
+
+        let next_context = ctx
+            .next_context
+            .as_ref()
+            .map(|next| self.get_or_insert(next));
+
+        let id = self.contexts.len() as u32;
+        self.ids.insert(key, id);
+        self.contexts
+            .push(RawContext::from_context(ctx, next_context));
+        id
+    }
+
+    fn into_contexts(self) -> Vec<RawContext> {
+        self.contexts
+    }
+}
+
+impl RawContext {
+    fn from_context(ctx: &Arc<Context>, next_context: Option<u32>) -> Self {
+        RawContext {
+            moduli: ctx.moduli.to_vec(),
+            degree: ctx.degree as u32,
+            bitrev: ctx.bitrev.iter().map(|v| *v as u32).collect(),
+            inv_last_qi_mod_qj: ctx.inv_last_qi_mod_qj.to_vec(),
+            inv_last_qi_mod_qj_shoup: ctx.inv_last_qi_mod_qj_shoup.to_vec(),
+            rns: ctx.rns.as_ref().to_raw(),
+            ops: ctx.ops.iter().map(|op| op.to_raw()).collect(),
+            next_context,
+        }
+    }
+}
+
+impl RawScalerRef {
+    fn from_scaler(scaler: &Scaler, registry: &mut ContextRegistry) -> Self {
+        Self {
+            scaler: scaler.to_raw(),
+            from_ctx: registry.get_or_insert(scaler.from_context()),
+            to_ctx: registry.get_or_insert(scaler.to_context()),
+        }
+    }
+
+    fn into_scaler(self, contexts: &[Arc<Context>]) -> Result<Scaler> {
+        let from = ctx_by_id(contexts, self.from_ctx)?;
+        let to = ctx_by_id(contexts, self.to_ctx)?;
+        self.scaler
+            .into_scaler(&from, &to)
+            .map_err(Error::MathError)
+    }
+}
+
+impl RawMultiplicationParameters {
+    fn from_parameters(mp: &MultiplicationParameters, registry: &mut ContextRegistry) -> Self {
+        Self {
+            extender: RawScalerRef::from_scaler(&mp.extender, registry),
+            down_scaler: RawScalerRef::from_scaler(&mp.down_scaler, registry),
+            from_ctx: registry.get_or_insert(&mp.from),
+            to_ctx: registry.get_or_insert(&mp.to),
+        }
+    }
+
+    fn into_parameters(self, contexts: &[Arc<Context>]) -> Result<MultiplicationParameters> {
+        Ok(MultiplicationParameters {
+            extender: self.extender.into_scaler(contexts)?,
+            down_scaler: self.down_scaler.into_scaler(contexts)?,
+            from: ctx_by_id(contexts, self.from_ctx)?,
+            to: ctx_by_id(contexts, self.to_ctx)?,
+        })
+    }
+}
+
+fn build_context(
+    idx: usize,
+    contexts: &[RawContext],
+    cache: &mut [Option<Arc<Context>>],
+) -> Result<Arc<Context>> {
+    if let Some(ctx) = &cache[idx] {
+        return Ok(ctx.clone());
+    }
+
+    let raw = contexts[idx].clone();
+    let next_context = match raw.next_context {
+        Some(next_id) => Some(build_context(next_id as usize, contexts, cache)?),
+        None => None,
+    };
+
+    let RawContext {
+        moduli,
+        degree,
+        bitrev,
+        inv_last_qi_mod_qj,
+        inv_last_qi_mod_qj_shoup,
+        rns,
+        ops,
+        next_context: _,
+    } = raw;
+
+    let q = moduli
+        .iter()
+        .copied()
+        .map(Modulus::new)
+        .collect::<std::result::Result<Vec<_>, fhe_math::Error>>()
+        .map_err(Error::MathError)?
+        .into_boxed_slice();
+
+    let moduli = moduli.into_boxed_slice();
+
+    let ops = ops
+        .into_iter()
+        .map(|op| op.into_operator())
+        .collect::<std::result::Result<Vec<_>, fhe_math::Error>>()
+        .map_err(Error::MathError)?
+        .into_boxed_slice();
+
+    let ctx = Arc::new(Context {
+        moduli,
+        q,
+        rns: Arc::new(rns.into_context().map_err(Error::MathError)?),
+        ops,
+        degree: degree as usize,
+        bitrev: bitrev
+            .into_iter()
+            .map(|v| v as usize)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        inv_last_qi_mod_qj: inv_last_qi_mod_qj.into_boxed_slice(),
+        inv_last_qi_mod_qj_shoup: inv_last_qi_mod_qj_shoup.into_boxed_slice(),
+        next_context,
+    });
+
+    cache[idx] = Some(ctx.clone());
+    Ok(ctx)
+}
+
+fn ctx_by_id(contexts: &[Arc<Context>], id: u32) -> Result<Arc<Context>> {
+    contexts
+        .get(id as usize)
+        .cloned()
+        .ok_or_else(|| Error::DefaultError(format!("Invalid context id {id}")))
+}
+
+fn usize_to_u32(value: usize, field: &str) -> Result<u32> {
+    value.try_into().map_err(|_| {
+        Error::DefaultError(format!(
+            "{field} value {value} does not fit into 32 bits"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BfvParameters, BfvParametersBuilder};
@@ -657,6 +1040,21 @@ mod tests {
             .build()?;
         let bytes = params.to_bytes();
         assert_eq!(BfvParameters::try_deserialize(&bytes)?, params);
+        Ok(())
+    }
+
+    #[test]
+    fn raw_roundtrip() -> Result<(), Box<dyn Error>> {
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62, 62])
+            .set_variance(6)
+            .build()?;
+
+        let raw = params.to_raw_bytes()?;
+        let restored = BfvParameters::from_raw_bytes(&raw)?;
+        assert_eq!(params, restored);
         Ok(())
     }
 

@@ -1,4 +1,5 @@
-use crate::zq::Modulus;
+use crate::{zq::Modulus, Result};
+use serde::{Deserialize, Serialize};
 use itertools::Itertools;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -16,6 +17,20 @@ pub struct NttOperator {
     zetas_inv_shoup: Box<[u64]>,
     size_inv: u64,
     size_inv_shoup: u64,
+}
+
+/// Serializable form of [`NttOperator`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NttOperatorRaw {
+    pub modulus: u64,
+    pub p_twice: u64,
+    pub size: usize,
+    pub omegas: Box<[u64]>,
+    pub omegas_shoup: Box<[u64]>,
+    pub zetas_inv: Box<[u64]>,
+    pub zetas_inv_shoup: Box<[u64]>,
+    pub size_inv: u64,
+    pub size_inv_shoup: u64,
 }
 
 impl NttOperator {
@@ -377,5 +392,39 @@ impl NttOperator {
         // A primitive root of unity is such that x^n = 1 mod p, and x^(n/p) != 1 mod p
         // for all prime p dividing n.
         (p.pow(a, n as u64) == 1) && (p.pow(a, (n / 2) as u64) != 1)
+    }
+}
+
+impl NttOperator {
+    /// Export this operator into a raw representation.
+    pub fn to_raw(&self) -> NttOperatorRaw {
+        NttOperatorRaw {
+            modulus: self.p.modulus(),
+            p_twice: self.p_twice,
+            size: self.size,
+            omegas: self.omegas.clone(),
+            omegas_shoup: self.omegas_shoup.clone(),
+            zetas_inv: self.zetas_inv.clone(),
+            zetas_inv_shoup: self.zetas_inv_shoup.clone(),
+            size_inv: self.size_inv,
+            size_inv_shoup: self.size_inv_shoup,
+        }
+    }
+}
+
+impl NttOperatorRaw {
+    /// Reconstruct an [`NttOperator`] from its raw representation.
+    pub fn into_operator(self) -> Result<NttOperator> {
+        Ok(NttOperator {
+            p: Modulus::new(self.modulus)?,
+            p_twice: self.p_twice,
+            size: self.size,
+            omegas: self.omegas,
+            omegas_shoup: self.omegas_shoup,
+            zetas_inv: self.zetas_inv,
+            zetas_inv_shoup: self.zetas_inv_shoup,
+            size_inv: self.size_inv,
+            size_inv_shoup: self.size_inv_shoup,
+        })
     }
 }

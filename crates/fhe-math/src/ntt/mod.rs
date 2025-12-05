@@ -3,7 +3,7 @@
 use fhe_util::is_prime;
 
 mod native;
-pub use native::NttOperator;
+pub use native::{NttOperator, NttOperatorRaw};
 
 /// Returns whether a modulus p is prime and supports the Number Theoretic
 /// Transform of size n.
