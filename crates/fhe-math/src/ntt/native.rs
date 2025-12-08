@@ -1,8 +1,8 @@
 use crate::{zq::Modulus, Result};
-use serde::{Deserialize, Serialize};
 use itertools::Itertools;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
 use std::iter::successors;
 
 /// Number-Theoretic Transform operator.
@@ -22,14 +22,23 @@ pub struct NttOperator {
 /// Serializable form of [`NttOperator`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NttOperatorRaw {
+    /// Modulus p. It is the modulus of the NTT.
     pub modulus: u64,
+    /// 2 * p.
     pub p_twice: u64,
+    /// Size of the NTT.
     pub size: usize,
+    /// Powers of the primitive root of unity.
     pub omegas: Box<[u64]>,
+    /// Shoup representation of the powers of the primitive root of unity.
     pub omegas_shoup: Box<[u64]>,
+    /// Powers of the inverse of the primitive root of unity.
     pub zetas_inv: Box<[u64]>,
+    /// Shoup representation of the powers of the inverse of the primitive root of unity.
     pub zetas_inv_shoup: Box<[u64]>,
+    /// Inverse of the size of the NTT.
     pub size_inv: u64,
+    /// Shoup representation of the inverse of the size of the NTT.
     pub size_inv_shoup: u64,
 }
 

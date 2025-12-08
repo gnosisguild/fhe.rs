@@ -24,7 +24,9 @@ pub struct Scaler {
 /// Serializable representation of [`Scaler`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalerRaw {
+    /// Number of common moduli.
     pub number_common_moduli: usize,
+    /// RNS scaler.
     pub rns_scaler: RnsScalerRaw,
 }
 

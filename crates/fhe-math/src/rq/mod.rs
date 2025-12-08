@@ -99,12 +99,19 @@ pub struct Poly {
 /// Serializable representation of [`Poly`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolyRaw {
+    /// Representation of the polynomial.
     pub representation: Representation,
+    /// Whether the coefficients are in lazy reduced form.
     pub has_lazy_coefficients: bool,
+    /// Whether variable time computations are allowed.
     pub allow_variable_time_computations: bool,
+    /// Number of rows in the coefficient matrix.
     pub rows: usize,
+    /// Number of columns in the coefficient matrix.
     pub cols: usize,
+    /// Coefficients in RNS form.
     pub coefficients: Vec<u64>,
+    /// Optional Shoup representation of coefficients for faster multiplication.
     pub coefficients_shoup: Option<Vec<u64>>,
 }
 
@@ -764,9 +771,7 @@ impl PolyRaw {
         if self.coefficients.len() != expected {
             return Err(Error::Default("Invalid coefficient length".to_string()));
         }
-        if self.rows * self.cols != expected
-            || self.rows != ctx.q.len()
-            || self.cols != ctx.degree
+        if self.rows * self.cols != expected || self.rows != ctx.q.len() || self.cols != ctx.degree
         {
             return Err(Error::Default(
                 "Context and polynomial dimensions do not match".to_string(),

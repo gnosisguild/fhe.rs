@@ -31,11 +31,17 @@ pub struct RnsContext {
 /// Serializable form of [`RnsContext`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RnsContextRaw {
+    /// Moduli in u64 form.
     pub moduli_u64: Vec<u64>,
+    /// q~.
     pub q_tilde: Vec<u64>,
+    /// Shoup representation of q~.
     pub q_tilde_shoup: Vec<u64>,
+    /// q*.
     pub q_star: Vec<Vec<u8>>,
+    /// Garner coefficients.
     pub garner: Vec<Vec<u8>>,
+    /// Product of the moduli.
     pub product: Vec<u8>,
 }
 

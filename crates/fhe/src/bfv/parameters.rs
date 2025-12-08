@@ -17,10 +17,10 @@ use itertools::Itertools;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use prost::Message;
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
-use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 /// Parameters for the BFV encryption scheme.
 #[derive(PartialEq, Eq)]
@@ -330,9 +330,12 @@ impl BfvParameters {
     /// does not repeat the expensive mathematical checks enforced by
     /// [`BfvParametersBuilder`].
     pub fn from_raw_bytes(bytes: &[u8]) -> Result<Self> {
-        let raw: RawBfvParameters = bincode::deserialize(bytes).map_err(|_| Error::SerializationError)?;
+        let raw: RawBfvParameters =
+            bincode::deserialize(bytes).map_err(|_| Error::SerializationError)?;
         if raw.version != RAW_SERIALIZATION_VERSION {
-            return Err(Error::DefaultError("Unsupported raw BFV parameter version".to_string()));
+            return Err(Error::DefaultError(
+                "Unsupported raw BFV parameter version".to_string(),
+            ));
         }
 
         if raw.contexts.is_empty() {
@@ -970,9 +973,7 @@ fn ctx_by_id(contexts: &[Arc<Context>], id: u32) -> Result<Arc<Context>> {
 
 fn usize_to_u32(value: usize, field: &str) -> Result<u32> {
     value.try_into().map_err(|_| {
-        Error::DefaultError(format!(
-            "{field} value {value} does not fit into 32 bits"
-        ))
+        Error::DefaultError(format!("{field} value {value} does not fit into 32 bits"))
     })
 }
 

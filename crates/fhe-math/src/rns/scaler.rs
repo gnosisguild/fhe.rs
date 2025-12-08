@@ -22,8 +22,11 @@ pub struct ScalingFactor {
 /// Serializable representation of [`ScalingFactor`].
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalingFactorRaw {
+    /// Numerator.
     pub numerator: Vec<u8>,
+    /// Denominator.
     pub denominator: Vec<u8>,
+    /// Whether the scaling factor is one.
     pub is_one: bool,
 }
 
@@ -96,19 +99,33 @@ pub struct RnsScaler {
 /// Serializable representation of [`RnsScaler`].
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RnsScalerRaw {
+    /// Scaling factor.
     pub scaling_factor: ScalingFactorRaw,
+    /// Gamma.
     pub gamma: Vec<u64>,
+    /// Shoup representation of gamma.
     pub gamma_shoup: Vec<u64>,
+    /// Theta gamma low.
     pub theta_gamma_lo: u64,
+    /// Theta gamma high.
     pub theta_gamma_hi: u64,
+    /// Theta gamma sign.
     pub theta_gamma_sign: bool,
+    /// Omega.
     pub omega: Vec<Vec<u64>>,
+    /// Shoup representation of omega.
     pub omega_shoup: Vec<Vec<u64>>,
+    /// Theta omega low.
     pub theta_omega_lo: Vec<u64>,
+    /// Theta omega high.
     pub theta_omega_hi: Vec<u64>,
+    /// Theta omega sign.
     pub theta_omega_sign: Vec<bool>,
+    /// Theta garner low.
     pub theta_garner_lo: Vec<u64>,
+    /// Theta garner high.
     pub theta_garner_hi: Vec<u64>,
+    /// Theta garner shift.
     pub theta_garner_shift: usize,
 }
 
