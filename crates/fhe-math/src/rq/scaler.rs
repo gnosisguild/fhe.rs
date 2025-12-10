@@ -4,11 +4,12 @@
 
 use super::{Context, Poly, Representation};
 use crate::{
-    rns::{RnsScaler, ScalingFactor},
+    rns::{scaler::RnsScalerRaw, RnsScaler, ScalingFactor},
     Error, Result,
 };
 use itertools::izip;
 use ndarray::{s, Array2, Axis};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Context extender.
@@ -18,6 +19,15 @@ pub struct Scaler {
     to: Arc<Context>,
     number_common_moduli: usize,
     scaler: RnsScaler,
+}
+
+/// Serializable representation of [`Scaler`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScalerRaw {
+    /// Number of common moduli.
+    pub number_common_moduli: usize,
+    /// RNS scaler.
+    pub rns_scaler: RnsScalerRaw,
 }
 
 impl Scaler {
@@ -131,6 +141,44 @@ impl Scaler {
                 has_lazy_coefficients: false,
             })
         }
+    }
+}
+
+impl Scaler {
+    /// Returns the source context associated with this scaler.
+    pub fn from_context(&self) -> &Arc<Context> {
+        &self.from
+    }
+
+    /// Returns the destination context associated with this scaler.
+    pub fn to_context(&self) -> &Arc<Context> {
+        &self.to
+    }
+}
+
+impl Scaler {
+    /// Export this scaler to a raw representation.
+    pub fn to_raw(&self) -> ScalerRaw {
+        ScalerRaw {
+            number_common_moduli: self.number_common_moduli,
+            rns_scaler: self.scaler.to_raw(),
+        }
+    }
+}
+
+impl ScalerRaw {
+    /// Rebuild a [`Scaler`] using the provided contexts.
+    pub fn into_scaler(self, from: &Arc<Context>, to: &Arc<Context>) -> Result<Scaler> {
+        if from.degree != to.degree {
+            return Err(Error::Default("Incompatible degrees".to_string()));
+        }
+
+        Ok(Scaler {
+            from: from.clone(),
+            to: to.clone(),
+            number_common_moduli: self.number_common_moduli,
+            scaler: self.rns_scaler.into_scaler(&from.rns, &to.rns),
+        })
     }
 }
 

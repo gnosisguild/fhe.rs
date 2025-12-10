@@ -16,7 +16,8 @@ bench = false # Disable default bench (we use criterion)
 fhe-math = { version = "^0.1.0-beta.7", path = "../fhe-math" }
 fhe-traits = { version = "^0.1.0-beta.7", path = "../fhe-traits" }
 fhe-util = { version = "^0.1.0-beta.7", path = "../fhe-util" }
-serde = "1.0.197"
+serde = { version = "1.0.197", features = ["derive"] }
+bincode = "1.3"
 num-bigint = { workspace = true, features = ["rand"] }
 
 doc-comment.workspace = true
