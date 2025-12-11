@@ -111,6 +111,7 @@ impl TRBFV {
     ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed (e.g., votes to count, numbers to sum)
+    /// * `lambda` - Statistical security parameter
     /// * `rng` - Cryptographically secure random number generator
     ///
     /// # Returns
@@ -118,10 +119,15 @@ impl TRBFV {
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         num_ciphertexts: usize,
+        lambda: usize,
         rng: &mut R,
     ) -> Result<Vec<BigInt>, Error> {
-        let config =
-            SmudgingBoundCalculatorConfig::new(self.params.clone(), self.n, num_ciphertexts);
+        let config = SmudgingBoundCalculatorConfig::new(
+            self.params.clone(),
+            self.n,
+            num_ciphertexts,
+            lambda,
+        );
         let calculator = SmudgingBoundCalculator::new(config);
         let generator = SmudgingNoiseGenerator::from_bound_calculator(calculator)?;
 
@@ -254,7 +260,7 @@ mod tests {
         let threshold = 1;
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
-        let result = trbfv.generate_smudging_error(1, &mut OsRng);
+        let result = trbfv.generate_smudging_error(1, 80, &mut OsRng);
         //Checking if all the coefficients of the smudging noise are different than 0,
         //having one equal to zero is hardly likely to happen if the smudging noise was generated.
         //TODO: add a test that calculates the empirical variance from the coefficients, so as to
@@ -277,7 +283,7 @@ mod tests {
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         // Test with multiple ciphertexts (this should increase the bound requirements)
-        let result = trbfv.generate_smudging_error(10, &mut OsRng);
+        let result = trbfv.generate_smudging_error(10, 80, &mut OsRng);
 
         for (poly_idx, poly) in result.iter().enumerate() {
             for (coeff_idx, coeff) in poly.iter().enumerate() {

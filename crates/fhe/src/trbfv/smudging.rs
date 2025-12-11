@@ -36,7 +36,7 @@ pub struct SmudgingBoundCalculatorConfig {
     pub public_key_error: u64,
     /// Secret key poly for infinity norm calculation
     pub secret_key_bound: u64,
-    /// Statistical Security parameter (fixed: 80)
+    /// Statistical Security parameter
     pub lambda: usize,
 }
 
@@ -47,7 +47,8 @@ impl SmudgingBoundCalculatorConfig {
     /// * `params` - BFV parameters
     /// * `n` - Number of parties in threshold scheme  
     /// * `m` - Number of ciphertexts to process
-    pub fn new(params: Arc<BfvParameters>, n: usize, m: usize) -> Self {
+    /// * `lambda` - Statistical security parameter
+    pub fn new(params: Arc<BfvParameters>, n: usize, m: usize, lambda: usize) -> Self {
         let variance = params.variance();
         let error1_variance = params.get_error1_variance().clone();
         // B_enc ≈ sqrt(3 * error1_variance)
@@ -61,7 +62,7 @@ impl SmudgingBoundCalculatorConfig {
             b_e: (2 * variance) as u64,
             public_key_error: (2 * variance) as u64,
             secret_key_bound: n as u64,
-            lambda: 80,
+            lambda,
         }
     }
 }
@@ -104,36 +105,44 @@ impl SmudgingBoundCalculator {
         // Calculate B_fresh = d·||e||_∞ + B_enc + d·B_e·||sk||_∞
         let b_fresh = &d * &e_norm + b_enc + &d * &b_e * &sk_norm;
 
-        // Calculate full modulus Q = ∏q_i
+        // Compute modulus product Q
         let mut q_full = BigUint::from(1u64);
         for &modulus in self.config.params.moduli() {
             q_full *= BigUint::from(modulus);
         }
 
-        // Calculate circuit depth bound B_c = m·(B_fresh + (Q mod t))
+        // Circuit correctness bound
         let t = BigUint::from(self.config.params.plaintext());
         let b_c = BigUint::from(self.config.m) * (&b_fresh + &q_full % &t);
 
-        // Security constraint: verify B_c < Q/(2t) for correctness
+        // Correctness check: B_c < Q/(2t)
         let q_over_2t = &q_full / (BigUint::from(2u64) * &t);
         if b_c >= q_over_2t {
             return Err(Error::UnspecifiedInput(
-                "Circuit too deep: B_c exceeds Q/(2t), violating correctness bound".to_string(),
+                "Circuit too deep or parameters too small: B_c exceeds Q/(2t), violating correctness bound".to_string(),
             ));
         }
 
-        // Calculate optimal B_sm: balance security (2^λ·B_c) and correctness ((Q/2t - B_c)/n)
-        let lower_bound = BigUint::from(2u64).pow(self.config.lambda as u32) * &b_c;
-        let upper_bound = (&q_over_2t - &b_c) / BigUint::from(self.config.n);
-        let b_sm = if upper_bound >= lower_bound {
-            lower_bound
+        if self.config.lambda >= 80 {
+            // Calculate optimal B_sm: balance security (2^λ·B_c) and correctness ((Q/2t - B_c)/n)
+            let lower_bound = BigUint::from(2u64).pow(self.config.lambda as u32) * &b_c;
+            let upper_bound = (&q_over_2t - &b_c) / BigUint::from(self.config.n);
+            let b_sm = if upper_bound >= lower_bound {
+                lower_bound
+            } else {
+                return Err(Error::UnspecifiedInput(
+                    "Upper bound is less than lower bound, cannot calculate B_sm".to_string(),
+                ));
+            };
+            Ok(b_sm)
         } else {
-            return Err(Error::UnspecifiedInput(
-                "Upper bound is less than lower bound, cannot calculate B_sm".to_string(),
-            ));
-        };
-
-        Ok(b_sm)
+            // WARNING: INSECURE PARAMETER SET.
+            // This is just for INSECURE parameter set.
+            // The security parameter is too low to calculate the optimal B_sm.
+            // We use a simple bound of 2 * B_c.
+            // This is not secure and should not be used in production.
+            Ok(b_c * BigUint::from(2u64))
+        }
     }
 }
 
@@ -249,11 +258,12 @@ mod tests {
     #[test]
     fn test_smudging_bound_calculator_config() {
         let params = test_params();
-        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2);
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2, 80);
 
         assert_eq!(config.params, params);
         assert_eq!(config.n, 5);
         assert_eq!(config.m, 2);
+        assert_eq!(config.lambda, 80);
         // b_enc is now BigUint
         assert_eq!(
             config.b_enc,
@@ -269,7 +279,7 @@ mod tests {
     #[test]
     fn test_smudging_bound_calculator_minimal_case() {
         let params = test_params();
-        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1);
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 80);
         let calculator = SmudgingBoundCalculator::new(config);
 
         let result = calculator.calculate_sm_bound();
@@ -306,7 +316,7 @@ mod tests {
     #[test]
     fn test_smudging_noise_generator_from_calculator() {
         let params = test_params();
-        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1);
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 80);
         let calculator = SmudgingBoundCalculator::new(config);
 
         let result = SmudgingNoiseGenerator::from_bound_calculator(calculator);
@@ -383,7 +393,7 @@ mod tests {
         let m = 1;
 
         // Try the complete workflow
-        let config = SmudgingBoundCalculatorConfig::new(params.clone(), n, m);
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), n, m, 80);
         let calculator = SmudgingBoundCalculator::new(config);
 
         let bound_result = calculator.calculate_sm_bound();
