@@ -44,14 +44,9 @@ fn print_notice_and_exit(error: Option<String>) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Parameters for threshold BFV computation
-    let degree = 8192;
-    let moduli_trbfv = vec![
-        0x00800000022a0001,
-        0x00800000021a0001,
-        0x0080000002120001,
-        0x0080000001f60001,
-    ];
-    let plaintext_modulus_trbfv: u64 = 1000;
+    let degree = 512;
+    let moduli_trbfv = vec![0xffffee001, 0xffffc4001];
+    let plaintext_modulus_trbfv: u64 = 10;
 
     println!("Building trBFV parameters...");
     let params_trbfv: Arc<bfv::BfvParameters> = timeit!(
@@ -60,27 +55,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
-            .set_variance(10)
-            .set_error1_variance_str(
-                "52309181128222339698631578526730685514457152477762943514050560000"
-            )?
+            .set_variance(3)
+            .set_error1_variance_str("3")?
             .build_arc()?
     );
     println!("✓ trBFV parameters built successfully");
 
     // BFV parameters for share encryption (plaintext must be larger than trBFV moduli)
     println!("\nBuilding BFV parameters for share encryption...");
-    let moduli_bfv = vec![0x0400000001460001, 0x0400000000ea0001];
-
-    let plaintext_modulus_bfv: u64 = 144115188075855872;
-
+    let moduli_bfv = vec![0x7fffffffe0001];
+    let plaintext_modulus_bfv: u64 = 0xffffee001;
     let params_bfv: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share encryption BFV)",
         bfv::BfvParametersBuilder::new()
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus_bfv)
             .set_moduli(&moduli_bfv)
-            .set_variance(10)
+            .set_variance(3)
             .build_arc()?
     );
     println!("✓ BFV parameters built successfully");
@@ -101,10 +92,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 50;
-    let mut num_parties = 3;
-    let mut threshold = 1;
-    let mut lambda = 80;
+    let mut num_summed = 3;
+    let mut num_parties = 5;
+    let mut threshold = 2;
+    let mut lambda = 2;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.

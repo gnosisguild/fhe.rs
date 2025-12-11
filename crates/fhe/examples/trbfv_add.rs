@@ -77,6 +77,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut num_summed = 100;
     let mut num_parties = 10;
     let mut threshold = 4;
+    let mut lambda = 80;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.
@@ -102,14 +103,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 threshold = parts[0].parse::<usize>()?
             }
+        } else if arg.starts_with("--lambda") {
+            let a: Vec<&str> = arg.rsplit('=').collect();
+            if a.len() != 2 || a[0].parse::<usize>().is_err() {
+                print_notice_and_exit(Some("Invalid `--lambda` argument".to_string()))
+            } else {
+                lambda = a[0].parse::<usize>()?
+            }
         } else {
             print_notice_and_exit(Some(format!("Unrecognized argument: {arg}")))
         }
     }
 
-    if num_summed == 0 || num_parties == 0 {
+    if num_summed == 0 || num_parties == 0 || lambda == 0 {
         print_notice_and_exit(Some(
-            "Users, threshold, and party sizes must be nonzero".to_string(),
+            "Users, threshold, party sizes, and lambda must be nonzero".to_string(),
         ))
     }
     if threshold > (num_parties - 1) / 2 {
@@ -124,6 +132,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("\tnum_summed = {num_summed}");
     println!("\tnum_parties = {num_parties}");
     println!("\tthreshold = {threshold}");
+    println!("\tlambda = {lambda}");
 
     // Party setup: each party generates a secret key and shares of a collective
     // public key.
@@ -180,7 +189,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
 
                 let esi_coeffs = temp_trbfv
-                    .generate_smudging_error(num_summed, &mut rng)
+                    .generate_smudging_error(num_summed, lambda, &mut rng)
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager
