@@ -153,6 +153,16 @@ impl PublicKeyShare {
             par: self.par.clone(),
         })
     }
+
+    /// Get a reference to the underlying p0_share polynomial
+    pub fn p0_share(&self) -> &Poly {
+        &self.p0_share
+    }
+
+    /// Get the underlying p0_share polynomial (consumes self)
+    pub fn into_p0_share(self) -> Poly {
+        self.p0_share
+    }
 }
 
 impl Aggregate<PublicKeyShare> for PublicKey {
