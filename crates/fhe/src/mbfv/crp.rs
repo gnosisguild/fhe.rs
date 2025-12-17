@@ -70,6 +70,16 @@ impl CommonRandomPoly {
             poly: test.unwrap(),
         })
     }
+
+    /// Get a reference to the underlying polynomial
+    pub fn poly(&self) -> &Poly {
+        &self.poly
+    }
+
+    /// Get the underlying polynomial (consumes self)
+    pub fn into_poly(self) -> Poly {
+        self.poly
+    }
 }
 
 impl Serialize for CommonRandomPoly {
