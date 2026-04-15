@@ -45,13 +45,8 @@ fn print_notice_and_exit(error: Option<String>) {
 fn main() -> Result<(), Box<dyn Error>> {
     // Parameters for threshold BFV computation
     let degree = 8192;
-    let moduli_trbfv = vec![
-        0x00800000022a0001,
-        0x00800000021a0001,
-        0x0080000002120001,
-        0x0080000001f60001,
-    ];
-    let plaintext_modulus_trbfv: u64 = 1000;
+    let moduli_trbfv = vec![0x0400000001460001, 0x0400000000ea0001, 0x0400000000920001];
+    let plaintext_modulus_trbfv: u64 = 131072;
 
     println!("Building trBFV parameters...");
     let params_trbfv: Arc<bfv::BfvParameters> = timeit!(
@@ -61,18 +56,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
             .set_variance(10)
-            .set_error1_variance_str(
-                "52309181128222339698631578526730685514457152477762943514050560000"
-            )?
+            .set_error1_variance_str("2331171231419734472395201298275918858425592709120")?
             .build_arc()?
     );
     println!("✓ trBFV parameters built successfully");
 
     // BFV parameters for share encryption (plaintext must be larger than trBFV moduli)
     println!("\nBuilding BFV parameters for share encryption...");
-    let moduli_bfv = vec![0x0400000001460001, 0x0400000000ea0001];
+    let moduli_bfv = vec![0x2000000001be0001, 0x2000000001960001];
 
-    let plaintext_modulus_bfv: u64 = 144115188075855872;
+    let plaintext_modulus_bfv: u64 = 1152921504606846976;
 
     let params_bfv: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share encryption BFV)",
@@ -102,9 +95,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut num_summed = 50;
-    let mut num_parties = 3;
-    let mut threshold = 1;
-    let mut lambda = 80;
+    let mut num_parties = 7;
+    let mut threshold = 3;
+    let mut lambda = 60;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.
