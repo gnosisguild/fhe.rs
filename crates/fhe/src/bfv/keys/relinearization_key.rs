@@ -242,9 +242,9 @@ impl From<&RelinearizationKey> for RelinearizationKeyProto {
 /// * `Err` if the protobuf is invalid or conversion fails
 impl TryConvertFrom<&RelinearizationKeyProto> for RelinearizationKey {
     fn try_convert_from(value: &RelinearizationKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
-        if value.ksk.is_some() {
+        if let Some(ksk_proto) = value.ksk.as_ref() {
             Ok(RelinearizationKey {
-                ksk: KeySwitchingKey::try_convert_from(value.ksk.as_ref().unwrap(), par)?,
+                ksk: KeySwitchingKey::try_convert_from(ksk_proto, par)?,
             })
         } else {
             Err(Error::DefaultError("Invalid serialization".to_string()))

@@ -250,8 +250,8 @@ impl DeserializeParametrized for PublicKey {
     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
         let proto: PublicKeyProto =
             Message::decode(bytes).map_err(|_| Error::SerializationError)?;
-        if proto.c.is_some() {
-            let mut c = Ciphertext::try_convert_from(&proto.c.unwrap(), par)?;
+        if let Some(ciphertext_proto) = proto.c.as_ref() {
+            let mut c = Ciphertext::try_convert_from(ciphertext_proto, par)?;
             if c.level != 0 {
                 Err(Error::SerializationError)
             } else {

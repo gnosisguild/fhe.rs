@@ -141,8 +141,10 @@ impl PartialEq for Plaintext {
     fn eq(&self, other: &Self) -> bool {
         let mut eq = self.par == other.par;
         eq &= self.value == other.value;
-        if self.encoding.is_some() && other.encoding.is_some() {
-            eq &= self.encoding.as_ref().unwrap() == other.encoding.as_ref().unwrap()
+        if let (Some(self_encoding), Some(other_encoding)) =
+            (self.encoding.as_ref(), other.encoding.as_ref())
+        {
+            eq &= self_encoding == other_encoding
         }
         eq
     }
