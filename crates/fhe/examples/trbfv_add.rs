@@ -169,8 +169,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut rng = rand::rng();
 
                 let sk_share = SecretKey::random(&params, &mut rng);
-                let pk_share =
-                    PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
+                let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
                 let mut share_manager = ShareManager::new(num_parties, threshold, params.clone());
                 let sk_poly = share_manager
@@ -257,10 +256,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Encrypted addition setup.
     let dist = Uniform::new_inclusive(0, 1).unwrap();
-    let numbers: Vec<u64> = dist
-        .sample_iter(&mut rng)
-        .take(num_summed)
-        .collect();
+    let numbers: Vec<u64> = dist.sample_iter(&mut rng).take(num_summed).collect();
 
     let numbers_encrypted: Vec<Ciphertext> = timeit!("Encrypting Numbers (parallel)", {
         numbers

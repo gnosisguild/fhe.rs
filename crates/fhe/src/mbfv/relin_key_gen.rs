@@ -2,8 +2,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::Error;
-use crate::bfv::{BfvParameters, KeySwitchingKey, RelinearizationKey, SecretKey};
 use crate::Result;
+use crate::bfv::{BfvParameters, KeySwitchingKey, RelinearizationKey, SecretKey};
 use fhe_math::rns::RnsContext;
 use fhe_math::rq::{Ntt, NttShoup, Poly, PowerBasis, traits::TryConvertFrom};
 use itertools::izip;

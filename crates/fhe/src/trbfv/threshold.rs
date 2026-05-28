@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::Error;
 /// Main threshold BFV orchestrator.
 ///
 /// This module provides the main TRBFV struct that coordinates between secret sharing,
@@ -28,7 +29,6 @@ use crate::trbfv::shares::ShareManager;
 use crate::trbfv::smudging::{
     SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
 };
-use crate::Error;
 use fhe_math::rq::{Ntt, Poly, PowerBasis};
 use fhe_traits::FheParametrized;
 use ndarray::Array2;

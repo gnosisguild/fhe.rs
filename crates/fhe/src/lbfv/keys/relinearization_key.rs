@@ -14,8 +14,8 @@ use crate::proto::bfv::{
 };
 use crate::{Error, Result};
 use fhe_math::rq::{
-    switcher::Switcher, traits::TryConvertFrom as TryConvertFromPoly, Context, Ntt, NttShoup,
-    Poly, PowerBasis, Representation,
+    Context, Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher,
+    traits::TryConvertFrom as TryConvertFromPoly,
 };
 use fhe_traits::{DeserializeParametrized, DeserializeWithContext, FheParametrized, Serialize};
 use itertools::izip;
@@ -104,18 +104,12 @@ impl LBFVRelinearizationKey {
 
         // Generate random polynomial 'r' from the key distribution
         let r: SecretKey = SecretKey::random(&sk.par, rng);
-        let r_poly = Poly::<PowerBasis>::try_convert_from(
-            r.coeffs.as_ref(),
-            ctx_ciphertext,
-            false,
-        )?;
+        let r_poly =
+            Poly::<PowerBasis>::try_convert_from(r.coeffs.as_ref(), ctx_ciphertext, false)?;
         let r_switched_up = r_poly.switch(&switcher_up)?;
 
-        let sk_poly = Poly::<PowerBasis>::try_convert_from(
-            sk.coeffs.as_ref(),
-            ctx_ciphertext,
-            false,
-        )?;
+        let sk_poly =
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx_ciphertext, false)?;
         let sk_switched_up = sk_poly.switch(&switcher_up)?;
 
         // Create key switching key from r to s using d1_seed if provided, otherwise

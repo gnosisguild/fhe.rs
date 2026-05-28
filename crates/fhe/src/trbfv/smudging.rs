@@ -216,11 +216,7 @@ impl SmudgingNoiseGenerator {
             let abs_value = magnitude;
 
             // Randomly choose sign (50/50 chance)
-            let sample = if rng.random() {
-                abs_value
-            } else {
-                -abs_value
-            };
+            let sample = if rng.random() { abs_value } else { -abs_value };
 
             samples.push(sample);
         }

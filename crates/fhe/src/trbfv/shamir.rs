@@ -1,10 +1,10 @@
+use fhe_util::rng08;
 /// Shamir Secret Sharing implementation for threshold BFV.
 ///
 /// This module provides a complete Shamir Secret Sharing implementation that integrates
 /// with the BFV parameter system.
 use num_bigint::{BigInt, RandBigInt};
 use num_traits::{One, Zero};
-use fhe_util::rng08;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;

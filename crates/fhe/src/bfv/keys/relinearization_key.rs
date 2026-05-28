@@ -158,10 +158,7 @@ impl RelinearizationKey {
 
     /// Relinearize a polynomial representing `c₂`, returning `(d₀, d₁) = c₂·s²`
     /// encrypted under `s`.
-    pub fn relinearizes_poly(
-        &self,
-        c2: &Poly<PowerBasis>,
-    ) -> Result<(Poly<Ntt>, Poly<Ntt>)> {
+    pub fn relinearizes_poly(&self, c2: &Poly<PowerBasis>) -> Result<(Poly<Ntt>, Poly<Ntt>)> {
         self.ksk.key_switch(c2)
     }
 }

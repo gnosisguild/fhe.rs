@@ -77,8 +77,7 @@ impl Plaintext {
         let cp = &ctx_lvl.cipher_plain_context;
         let threshold = &cp.plain_threshold;
         let plaintext_big = self.par.plaintext.as_biguint();
-        let mut m_scaled_by_delta =
-            Vec::with_capacity(ctx.moduli().len() * self.par.degree());
+        let mut m_scaled_by_delta = Vec::with_capacity(ctx.moduli().len() * self.par.degree());
 
         match &self.value {
             PlaintextValues::Small(v) => {
@@ -112,9 +111,7 @@ impl Plaintext {
             }
             PlaintextValues::Large(v) => {
                 let mut m_v = v.clone();
-                self.par
-                    .plaintext
-                    .scalar_mul_vec(&mut m_v, &cp.q_mod_t);
+                self.par.plaintext.scalar_mul_vec(&mut m_v, &cp.q_mod_t);
 
                 for qi in ctx.moduli_operators() {
                     let qi_u64 = **qi;
@@ -129,20 +126,18 @@ impl Plaintext {
                             reduced += &qi_modulus;
                         }
                         m_scaled_by_delta.push(
-                            reduced.to_u64().unwrap_or_else(|| {
-                                panic!("Value {reduced:?} too large for u64")
-                            }),
+                            reduced
+                                .to_u64()
+                                .unwrap_or_else(|| panic!("Value {reduced:?} too large for u64")),
                         );
                     }
                 }
             }
         }
 
-        let m_final = Array2::from_shape_vec(
-            (ctx.moduli().len(), self.par.degree()),
-            m_scaled_by_delta,
-        )
-        .unwrap();
+        let m_final =
+            Array2::from_shape_vec((ctx.moduli().len(), self.par.degree()), m_scaled_by_delta)
+                .unwrap();
         Poly::<PowerBasis>::try_convert_from(m_final, ctx, false)
             .unwrap()
             .into_ntt()
