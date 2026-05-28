@@ -1,19 +1,23 @@
 //! Secret keys for the BFV encryption scheme
 
-use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
-use crate::{Error, Result};
+use crate::bfv::{
+    BfvParameters, Ciphertext, Plaintext, parameters::PlaintextModulus, plaintext::PlaintextValues,
+};
+use crate::proto::bfv::SecretKey as SecretKeyProto;
+use crate::{Error, Result, SerializationError};
 use fhe_math::{
-    rq::{traits::TryConvertFrom, Poly, Representation},
+    rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom},
     zq::Modulus,
 };
-use fhe_traits::{FheDecrypter, FheEncrypter, FheParametrized};
+use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncrypter, FheParametrized, Serialize};
 use fhe_util::sample_vec_cbd_f32;
 use itertools::Itertools;
 use num_bigint::BigUint;
-use rand::{thread_rng, CryptoRng, Rng, RngCore, SeedableRng};
+use prost::Message;
+use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Secret key for the BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -30,7 +34,11 @@ impl Zeroize for SecretKey {
     }
 }
 
-impl ZeroizeOnDrop for SecretKey {}
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
 
 impl SecretKey {
     /// The variance used for secret key sampling
@@ -40,6 +48,7 @@ impl SecretKey {
     pub fn sk_bound() -> f32 {
         2.0 * Self::SK_VARIANCE
     }
+
     /// Generate a random [`SecretKey`].
     pub fn random<R: RngCore + CryptoRng>(par: &Arc<BfvParameters>, rng: &mut R) -> Self {
         let s_coefficients = sample_vec_cbd_f32(par.degree(), Self::SK_VARIANCE, rng).unwrap();
@@ -49,7 +58,7 @@ impl SecretKey {
     /// Generate a [`SecretKey`] from its coefficients.
     pub fn new(coeffs: Vec<i64>, par: &Arc<BfvParameters>) -> Self {
         Self {
-            par: par.clone(),
+            par: par.to_owned(),
             coeffs: coeffs.into_boxed_slice(),
         }
     }
@@ -64,31 +73,28 @@ impl SecretKey {
         let plaintext = Zeroizing::new(self.try_decrypt(ct)?);
         let m = Zeroizing::new(plaintext.to_poly());
 
-        // Let's create a secret key with the ciphertext context
-        let mut s = Zeroizing::new(Poly::try_convert_from(
-            self.coeffs.as_ref(),
-            ct.c[0].ctx(),
-            false,
-            Representation::PowerBasis,
-        )?);
-        s.change_representation(Representation::Ntt);
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), ct[0].ctx(), false)?
+                .into_ntt(),
+        );
         let mut si = s.clone();
 
-        // Let's disable variable time computations
-        let mut c = Zeroizing::new(ct.c[0].clone());
+        let mut c = Zeroizing::new(ct[0].clone());
         c.disallow_variable_time_computations();
 
-        for i in 1..ct.c.len() {
-            let mut cis = Zeroizing::new(ct.c[i].clone());
+        for i in 1..ct.len() {
+            let mut cis = Zeroizing::new(ct[i].clone());
             cis.disallow_variable_time_computations();
             *cis.as_mut() *= si.as_ref();
             *c.as_mut() += &cis;
             *si.as_mut() *= s.as_ref();
         }
         *c.as_mut() -= &m;
-        c.change_representation(Representation::PowerBasis);
+        let ctx = c.ctx().clone();
+        let c_inner = std::mem::replace(c.as_mut(), Poly::<Ntt>::zero(&ctx));
+        let c = Zeroizing::new(c_inner.into_power_basis());
 
-        let ciphertext_modulus = ct.c[0].ctx().modulus();
+        let ciphertext_modulus = ct[0].ctx().modulus();
         let mut noise = 0usize;
         for coeff in Vec::<BigUint>::from(c.as_ref()) {
             noise = std::cmp::max(
@@ -104,32 +110,24 @@ impl SecretKey {
     /// of random polynomials aᵢ.
     pub(crate) fn encrypt_poly_with_seed<R: RngCore + CryptoRng>(
         &self,
-        p: &Poly,
+        p: &Poly<Ntt>,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        assert_eq!(p.representation(), &Representation::Ntt);
+        let level = self.par.level_of_context(p.ctx())?;
 
-        let level = self.par.level_of_ctx(p.ctx())?;
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), p.ctx(), false)?.into_ntt(),
+        );
 
-        // Let's create a secret key with the ciphertext context
-        let mut s = Zeroizing::new(Poly::try_convert_from(
-            self.coeffs.as_ref(),
-            p.ctx(),
-            false,
-            Representation::PowerBasis,
-        )?);
-        s.change_representation(Representation::Ntt);
-
-        let mut a = Poly::random_from_seed(p.ctx(), Representation::Ntt, seed);
+        let mut a = Poly::<Ntt>::random_from_seed(p.ctx(), seed);
         let a_s = Zeroizing::new(&a * s.as_ref());
 
-        let mut b = Poly::small(p.ctx(), Representation::Ntt, self.par.variance, rng)
-            .map_err(Error::MathError)?;
+        let mut b =
+            Poly::<Ntt>::small(p.ctx(), self.par.variance, rng).map_err(Error::MathError)?;
         b -= &a_s;
         b += p;
 
-        // It is now safe to enable variable time computations.
         unsafe {
             a.allow_variable_time_computations();
             b.allow_variable_time_computations()
@@ -142,33 +140,25 @@ impl SecretKey {
             level,
         })
     }
-    /// Encrypt a plaintext using a provided seed for deterministic generation
-    /// of random polynomials aᵢ. Returns the ciphertext and the error polynomial.
+
+    /// Encrypt a plaintext using a provided seed and return the error polynomial.
     pub(crate) fn encrypt_poly_with_seed_extended<R: RngCore + CryptoRng>(
         &self,
-        p: &Poly,
+        p: &Poly<Ntt>,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
-    ) -> Result<(Ciphertext, Poly, Poly)> {
-        assert_eq!(p.representation(), &Representation::Ntt);
+    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>)> {
+        let level = self.par.level_of_context(p.ctx())?;
 
-        let level = self.par.level_of_ctx(p.ctx())?;
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), p.ctx(), false)?.into_ntt(),
+        );
 
-        let mut s = Zeroizing::new(Poly::try_convert_from(
-            self.coeffs.as_ref(),
-            p.ctx(),
-            false,
-            Representation::PowerBasis,
-        )?);
-        s.change_representation(Representation::Ntt);
-
-        let mut a = Poly::random_from_seed(p.ctx(), Representation::Ntt, seed);
+        let mut a = Poly::<Ntt>::random_from_seed(p.ctx(), seed);
         let a_s = Zeroizing::new(&a * s.as_ref());
 
-        let e = Poly::small(p.ctx(), Representation::Ntt, self.par.variance, rng)
-            .map_err(Error::MathError)?;
+        let e = Poly::<Ntt>::small(p.ctx(), self.par.variance, rng).map_err(Error::MathError)?;
 
-        // Clone BEFORE enabling variable time to preserve restricted copies
         let a_copy = a.clone();
         let e_copy = e.clone();
 
@@ -176,7 +166,6 @@ impl SecretKey {
         b -= &a_s;
         b += p;
 
-        // Enable variable time only for the ciphertext components
         unsafe {
             a.allow_variable_time_computations();
             b.allow_variable_time_computations()
@@ -189,7 +178,6 @@ impl SecretKey {
             level,
         };
 
-        // Return ciphertext and the restricted copies of a and e
         Ok((ct, a_copy, e_copy))
     }
 
@@ -197,22 +185,23 @@ impl SecretKey {
     /// of random polynomials aᵢ.
     pub(crate) fn encrypt_poly<R: RngCore + CryptoRng>(
         &self,
-        p: &Poly,
+        p: &Poly<Ntt>,
         rng: &mut R,
     ) -> Result<Ciphertext> {
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        thread_rng().fill(&mut seed);
+        rng.fill(&mut seed);
 
         self.encrypt_poly_with_seed(p, seed, rng)
     }
-    /// Encrypt a plaintext using a random seed and return the error
+
+    /// Encrypt a plaintext using a random seed and return the error polynomial.
     pub(crate) fn encrypt_poly_extended<R: RngCore + CryptoRng>(
         &self,
-        p: &Poly,
+        p: &Poly<Ntt>,
         rng: &mut R,
-    ) -> Result<(Ciphertext, Poly, Poly)> {
+    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>)> {
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        thread_rng().fill(&mut seed);
+        rng.fill(&mut seed);
 
         self.encrypt_poly_with_seed_extended(p, seed, rng)
     }
@@ -231,6 +220,45 @@ impl SecretKey {
     }
 }
 
+impl From<&SecretKey> for SecretKeyProto {
+    fn from(sk: &SecretKey) -> Self {
+        Self {
+            coeffs: sk.coeffs.to_vec(),
+        }
+    }
+}
+
+impl Serialize for SecretKey {
+    fn to_bytes(&self) -> Vec<u8> {
+        SecretKeyProto::from(self).encode_to_vec()
+    }
+}
+
+impl DeserializeParametrized for SecretKey {
+    type Error = Error;
+
+    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+        let proto: SecretKeyProto = Message::decode(bytes).map_err(|_| {
+            Error::SerializationError(SerializationError::ProtobufError {
+                message: "SecretKey decode".into(),
+            })
+        })?;
+
+        if proto.coeffs.len() != par.degree() {
+            return Err(Error::SerializationError(
+                SerializationError::InvalidFormat {
+                    reason: "SecretKey coeffs length and parameters degree mismatch".into(),
+                },
+            ));
+        }
+
+        Ok(Self {
+            par: par.clone(),
+            coeffs: proto.coeffs.into_boxed_slice(),
+        })
+    }
+}
+
 impl FheParametrized for SecretKey {
     type Parameters = BfvParameters;
 }
@@ -243,7 +271,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for SecretKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        assert_eq!(self.par, pt.par);
+        assert!(Arc::ptr_eq(&self.par, &pt.par));
         let m = Zeroizing::new(pt.to_poly());
         self.encrypt_poly(m.as_ref(), rng)
     }
@@ -253,54 +281,77 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
     type Error = Error;
 
     fn try_decrypt(&self, ct: &Ciphertext) -> Result<Plaintext> {
-        if self.par != ct.par {
+        if !Arc::ptr_eq(&self.par, &ct.par) {
             Err(Error::DefaultError(
                 "Incompatible BFV parameters".to_string(),
             ))
         } else {
-            // Let's create a secret key with the ciphertext context
-            let mut s = Zeroizing::new(Poly::try_convert_from(
-                self.coeffs.as_ref(),
-                ct.c[0].ctx(),
-                false,
-                Representation::PowerBasis,
-            )?);
-            s.change_representation(Representation::Ntt);
+            let s = Zeroizing::new(
+                Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), ct[0].ctx(), false)?
+                    .into_ntt(),
+            );
             let mut si = s.clone();
 
-            let mut c = Zeroizing::new(ct.c[0].clone());
+            let mut c = Zeroizing::new(ct[0].clone());
             c.disallow_variable_time_computations();
 
-            for i in 1..ct.c.len() {
-                let mut cis = Zeroizing::new(ct.c[i].clone());
+            for i in 1..ct.len() {
+                let mut cis = Zeroizing::new(ct[i].clone());
                 cis.disallow_variable_time_computations();
                 *cis.as_mut() *= si.as_ref();
                 *c.as_mut() += &cis;
-                *si.as_mut() *= s.as_ref();
+                if i + 1 < ct.len() {
+                    *si.as_mut() *= s.as_ref();
+                }
             }
-            c.change_representation(Representation::PowerBasis);
+            let ctx_lvl = self.par.context_level_at(ct.level).unwrap();
+            let ctx = c.ctx().clone();
+            let c_inner = std::mem::replace(c.as_mut(), Poly::<Ntt>::zero(&ctx));
+            let c_pb = Zeroizing::new(c_inner.into_power_basis());
+            let d = Zeroizing::new(c_pb.as_ref().scale(&ctx_lvl.cipher_plain_context.scaler)?);
 
-            let d = Zeroizing::new(c.scale(&self.par.scalers[ct.level])?);
+            let value = match self.par.plaintext {
+                PlaintextModulus::Small { .. } => {
+                    let mut v = Vec::<u64>::try_from(d.as_ref())?;
+                    let plaintext_modulus = self.par.plaintext();
+                    v.iter_mut().for_each(|vi| *vi += plaintext_modulus);
+                    let mut w = v[..self.par.degree()].to_vec();
 
-            // TODO: Can we handle plaintext moduli that are BigUint?
-            let v = Zeroizing::new(
-                Vec::<u64>::from(d.as_ref())
-                    .iter_mut()
-                    .map(|vi| *vi + self.par.plaintext.modulus())
-                    .collect_vec(),
-            );
-            let mut w = v[..self.par.degree()].to_vec();
-            let q = Modulus::new(self.par.moduli[0]).map_err(Error::MathError)?;
-            q.reduce_vec(&mut w);
-            self.par.plaintext.reduce_vec(&mut w);
+                    let q = Modulus::new(self.par.moduli[0]).map_err(Error::MathError)?;
+                    q.reduce_vec(&mut w);
+                    if let PlaintextModulus::Small { modulus: m, .. } = &self.par.plaintext {
+                        m.reduce_vec(&mut w);
+                    }
+                    PlaintextValues::Small(w.into_boxed_slice())
+                }
+                PlaintextModulus::Large(_) => {
+                    let v: Vec<BigUint> = Vec::<BigUint>::from(d.as_ref())
+                        .into_iter()
+                        .map(|vi| vi + self.par.plaintext_big())
+                        .collect_vec();
 
-            let mut poly =
-                Poly::try_convert_from(&w, ct.c[0].ctx(), false, Representation::PowerBasis)?;
-            poly.change_representation(Representation::Ntt);
+                    let mut w = v[..self.par.degree()].to_vec();
+                    let q_poly = d.as_ref().ctx().modulus();
+                    w.iter_mut().for_each(|wi| *wi %= q_poly);
+
+                    self.par.plaintext.reduce_vec(&mut w);
+                    PlaintextValues::Large(w.into_boxed_slice())
+                }
+            };
+
+            let poly = match &value {
+                PlaintextValues::Small(v) => {
+                    Poly::<PowerBasis>::try_convert_from(v.as_ref(), ct[0].ctx(), false)?
+                }
+                PlaintextValues::Large(v) => {
+                    Poly::<PowerBasis>::try_convert_from(v.as_ref(), ct[0].ctx(), false)?
+                }
+            }
+            .into_ntt();
 
             let pt = Plaintext {
                 par: self.par.clone(),
-                value: w.into_boxed_slice(),
+                value,
                 encoding: None,
                 poly_ntt: poly,
                 level: ct.level,
@@ -314,21 +365,22 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
 #[cfg(test)]
 mod tests {
     use super::SecretKey;
-    use crate::bfv::{parameters::BfvParameters, Encoding, Plaintext};
-    use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
-    use rand::{thread_rng, SeedableRng};
+    use crate::bfv::{Encoding, Plaintext, parameters::BfvParameters};
+    use crate::proto::bfv::SecretKey as SecretKeyProto;
+    use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
+    use prost::Message;
+    use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::error::Error;
 
     #[test]
     fn keygen() {
-        let mut rng = thread_rng();
-        let params = BfvParameters::default_arc(1, 8);
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 16);
         let sk = SecretKey::random(&params, &mut rng);
         assert_eq!(sk.par, params);
 
         sk.coeffs.iter().for_each(|ci: &i64| {
-            // Check that this is a small polynomial
             let sk_variance = params.variance as f32 / 20.0;
             assert!((*ci).abs() as f32 <= 2.0 * sk_variance)
         })
@@ -336,17 +388,18 @@ mod tests {
 
     #[test]
     fn encrypt_decrypt() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 16),
         ] {
             for level in 0..params.max_level() {
                 for _ in 0..20 {
                     let sk = SecretKey::random(&params, &mut rng);
+                    let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
 
                     let pt = Plaintext::try_encode(
-                        &params.plaintext.random_vec(params.degree(), &mut rng),
+                        &q.random_vec(params.degree(), &mut rng),
                         Encoding::poly_at_level(level),
                         &params,
                     )?;
@@ -364,34 +417,81 @@ mod tests {
 
     #[test]
     fn test_deterministic_encryption() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = BfvParameters::default_arc(6, 8);
         let sk = SecretKey::random(&params, &mut rng);
+        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
 
-        // Create a test plaintext
         let pt = Plaintext::try_encode(
-            &params.plaintext.random_vec(params.degree(), &mut rng),
+            &q.random_vec(params.degree(), &mut rng),
             Encoding::poly(),
             &params,
         )?;
 
-        // Create a fixed seed
         let seed = <ChaCha8Rng as SeedableRng>::Seed::default();
 
-        // Encrypt the same plaintext twice with the same seed
         let ct1 = sk.try_encrypt_with_seed(&pt, seed, &mut rng)?;
         let ct2 = sk.try_encrypt_with_seed(&pt, seed, &mut rng)?;
 
-        // The ciphertexts should be identical except for the error terms
-        assert_eq!(ct1.c[1], ct2.c[1]); // The 'a' polynomials should be identical
-        assert_ne!(ct1.c[0], ct2.c[0]); // The 'b' polynomials should differ due to random error
+        assert_eq!(ct1[1], ct2[1]);
+        assert_ne!(ct1[0], ct2[0]);
 
-        // Both should decrypt to the same plaintext
         let pt1 = sk.try_decrypt(&ct1)?;
         let pt2 = sk.try_decrypt(&ct2)?;
         assert_eq!(pt1, pt2);
         assert_eq!(pt1, pt);
 
         Ok(())
+    }
+
+    #[test]
+    fn measure_noise_within_modulus_bits() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+
+        let pt = Plaintext::try_encode(
+            &q.random_vec(params.degree(), &mut rng),
+            Encoding::poly_at_level(0),
+            &params,
+        )?;
+        let ct = sk.try_encrypt(&pt, &mut rng)?;
+        let noise = unsafe { sk.measure_noise(&ct)? };
+
+        let modulus_bits = ct[0].ctx().modulus().bits() as usize;
+        assert!(noise <= modulus_bits);
+
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_roundtrip() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(2, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let bytes = sk.to_bytes();
+        let decoded = SecretKey::from_bytes(&bytes, &params)?;
+
+        assert_eq!(decoded, sk);
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_invalid_length() {
+        let params = BfvParameters::default_arc(1, 16);
+        let mut proto = SecretKeyProto {
+            coeffs: vec![0; params.degree()],
+        };
+        proto.coeffs.pop();
+
+        let bytes = proto.encode_to_vec();
+        let err = SecretKey::from_bytes(&bytes, &params).unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::Error::SerializationError(crate::SerializationError::InvalidFormat { .. })
+        ));
     }
 }

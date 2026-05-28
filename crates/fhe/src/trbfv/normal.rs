@@ -13,7 +13,7 @@ pub fn sample_bigint_normal_vec(bound: &BigInt, n: usize) -> Vec<BigInt> {
     (0..n)
         .into_par_iter()
         .map(|_| {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             sample_single(bound, &mut rng)
         })
         .collect()
@@ -52,8 +52,8 @@ fn sample_truncated_ratio(rng: &mut impl Rng) -> f64 {
 
 /// Generate standard normal deviate using Box-Muller transform.
 fn box_muller(rng: &mut impl Rng) -> f64 {
-    let u1: f64 = rng.gen_range(f64::EPSILON..1.0);
-    let u2: f64 = rng.gen_range(0.0..1.0);
+    let u1: f64 = rng.random_range(f64::EPSILON..1.0);
+    let u2: f64 = rng.random_range(0.0..1.0);
     (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos()
 }
 
@@ -82,7 +82,7 @@ fn ratio_to_bigint(ratio: f64, bound: &BigInt) -> BigInt {
 mod tests {
     use super::*;
     use num_traits::Signed;
-    use rand::thread_rng;
+    use rand::rng;
     use std::str::FromStr;
 
     #[test]
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_box_muller_properties() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let samples: Vec<f64> = (0..1000).map(|_| box_muller(&mut rng)).collect();
 
         // Basic statistical properties (rough checks)

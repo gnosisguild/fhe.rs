@@ -1,34 +1,24 @@
 #![crate_name = "fhe_util"]
 #![crate_type = "lib"]
-#![warn(missing_docs, unused_imports)]
 
 //! Utilities for the fhe.rs library.
+
+pub mod rng08;
 
 #[cfg(test)]
 extern crate proptest;
 
-use rand::{CryptoRng, Rng, RngCore};
+use rand::{CryptoRng, RngCore};
 
-use num_bigint_dig::{prime::probably_prime, BigUint, ModInverse};
-use num_traits::{cast::ToPrimitive, PrimInt};
+use num_bigint_dig::{BigUint, ModInverse, prime::probably_prime};
+use num_traits::{PrimInt, cast::ToPrimitive};
 use prime_factorization::Factorization;
 use rand_distr::{Distribution, Normal};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
-use std::{error::Error, fmt, panic::UnwindSafe};
-
-/// Define catch_unwind to silence the panic in unit tests.
-pub fn catch_unwind<F, R>(f: F) -> std::thread::Result<R>
-where
-    F: FnOnce() -> R + UnwindSafe,
-{
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let r = std::panic::catch_unwind(f);
-    std::panic::set_hook(prev_hook);
-    r
-}
+use std::{error::Error, fmt};
 
 /// Returns whether the modulus p is prime; this function is 100% accurate.
+#[must_use]
 pub fn is_prime(p: u64) -> bool {
     probably_prime(&BigUint::from(p), 0)
 }
@@ -189,7 +179,7 @@ pub fn sample_vec_cbd_f32<R: RngCore + CryptoRng>(
 }
 
 /// Sample a vector of normal distributions of a given variance.
-pub fn sample_vec_normal<R: Rng + CryptoRng>(
+pub fn sample_vec_normal<R: RngCore + CryptoRng>(
     vector_size: usize,
     variance: usize,
     rng: &mut R,
@@ -207,6 +197,8 @@ pub fn sample_vec_normal<R: Rng + CryptoRng>(
 }
 
 /// Transcodes a vector of u64 of `nbits`-bit numbers into a vector of bytes.
+#[must_use]
+#[expect(clippy::expect_used, reason = "bounds are validated before use")]
 pub fn transcode_to_bytes(a: &[u64], nbits: usize) -> Vec<u8> {
     assert!(0 < nbits && nbits <= 64);
 
@@ -219,8 +211,11 @@ pub fn transcode_to_bytes(a: &[u64], nbits: usize) -> Vec<u8> {
     let mut current_value_nbits = 0;
     while current_index < a.len() {
         if current_value_nbits < 8 {
-            debug_assert!(64 - a[current_index].leading_zeros() <= nbits as u32);
-            current_value |= ((a[current_index] as u128) & mask) << current_value_nbits;
+            let value = a
+                .get(current_index)
+                .expect("current_index is guaranteed to be within bounds");
+            debug_assert!(64 - value.leading_zeros() <= nbits as u32);
+            current_value |= ((*value as u128) & mask) << current_value_nbits;
             current_value_nbits += nbits;
             current_index += 1;
         }
@@ -242,6 +237,8 @@ pub fn transcode_to_bytes(a: &[u64], nbits: usize) -> Vec<u8> {
 }
 
 /// Transcodes a vector of u8 into a vector of u64 of `nbits`-bit numbers.
+#[must_use]
+#[expect(clippy::expect_used, reason = "bounds are validated before use")]
 pub fn transcode_from_bytes(b: &[u8], nbits: usize) -> Vec<u64> {
     assert!(0 < nbits && nbits <= 64);
     let mask = (u64::MAX >> (64 - nbits)) as u128;
@@ -254,7 +251,10 @@ pub fn transcode_from_bytes(b: &[u8], nbits: usize) -> Vec<u64> {
     let mut current_index = 0;
     while current_index < b.len() {
         if current_value_nbits < nbits {
-            current_value |= (b[current_index] as u128) << current_value_nbits;
+            let value = b
+                .get(current_index)
+                .expect("current_index is guaranteed to be within bounds");
+            current_value |= (*value as u128) << current_value_nbits;
             current_value_nbits += 8;
             current_index += 1;
         }
@@ -276,6 +276,8 @@ pub fn transcode_from_bytes(b: &[u8], nbits: usize) -> Vec<u64> {
 
 /// Transcodes a vector of u64 of `input_nbits`-bit numbers into a vector of u64
 /// of `output_nbits`-bit numbers.
+#[must_use]
+#[expect(clippy::expect_used, reason = "bounds are validated before use")]
 pub fn transcode_bidirectional(a: &[u64], input_nbits: usize, output_nbits: usize) -> Vec<u64> {
     assert!(0 < input_nbits && input_nbits <= 64);
     assert!(0 < output_nbits && output_nbits <= 64);
@@ -290,8 +292,11 @@ pub fn transcode_bidirectional(a: &[u64], input_nbits: usize, output_nbits: usiz
     let mut current_value_nbits = 0;
     while current_index < a.len() {
         if current_value_nbits < output_nbits {
-            debug_assert!(64 - a[current_index].leading_zeros() <= input_nbits as u32);
-            current_value |= ((a[current_index] as u128) & input_mask) << current_value_nbits;
+            let value = a
+                .get(current_index)
+                .expect("current_index is guaranteed to be within bounds");
+            debug_assert!(64 - value.leading_zeros() <= input_nbits as u32);
+            current_value |= ((*value as u128) & input_mask) << current_value_nbits;
             current_value_nbits += input_nbits;
             current_index += 1;
         }
@@ -314,6 +319,7 @@ pub fn transcode_bidirectional(a: &[u64], input_nbits: usize, output_nbits: usiz
 
 /// Computes the modular multiplicative inverse of `a` modulo `p`. Returns
 /// `None` if `a` is not invertible modulo `p`.
+#[must_use]
 pub fn inverse(a: u64, p: u64) -> Option<u64> {
     let p = BigUint::from(p);
     let a = BigUint::from(a);
@@ -332,8 +338,14 @@ pub fn variance<T: PrimInt>(values: &[T]) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    // Expect indexing in tests for convenience
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "performance or example code relies on validated indices"
+    )]
+
     use itertools::Itertools;
-    use rand::{thread_rng, RngCore};
+    use rand::RngCore;
 
     use super::{
         get_smallest_prime_factor, inverse, is_prime, sample_vec_cbd, transcode_bidirectional,
@@ -397,17 +409,18 @@ mod tests {
 
     #[test]
     fn sample_cbd() {
-        assert!(sample_vec_cbd(10, 0, &mut thread_rng()).is_err());
-        assert!(sample_vec_cbd(10, 17, &mut thread_rng()).is_err());
+        let mut rng = rand::rng();
+        assert!(sample_vec_cbd(10, 0, &mut rng).is_err());
+        assert!(sample_vec_cbd(10, 17, &mut rng).is_err());
 
         for var in 1..=16 {
             for size in 0..=100 {
-                let v = sample_vec_cbd(size, var, &mut thread_rng()).unwrap();
+                let v = sample_vec_cbd(size, var, &mut rng).unwrap();
                 assert_eq!(v.len(), size);
             }
 
             // Verifies that the min, max are in absolute value smaller than 2 * var
-            let v = sample_vec_cbd(100000, var, &mut thread_rng()).unwrap();
+            let v = sample_vec_cbd(100000, var, &mut rng).unwrap();
             assert!(v.iter().map(|vi| vi.abs()).max().unwrap() <= 2 * var as i64);
 
             // Verifies that the variance is correct. We could probably refine the bound
@@ -419,7 +432,7 @@ mod tests {
 
     #[test]
     fn transcode_self_consistency() {
-        let mut rng = thread_rng();
+        let mut rng = rand::rng();
 
         for size in 1..=100 {
             let input = (0..size).map(|_| rng.next_u64()).collect_vec();
@@ -449,6 +462,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn transcode_known_roundtrip() {
+        let input = vec![0x1u64, 0x2u64, 0x3u64, 0x4u64];
+        let bytes = transcode_to_bytes(&input, 4);
+        let decoded = transcode_from_bytes(&bytes, 4);
+        assert_eq!(&decoded[..input.len()], input);
+    }
+
+    #[test]
+    fn transcode_empty_roundtrip() {
+        let input: Vec<u64> = Vec::new();
+        let bytes = transcode_to_bytes(&input, 8);
+        assert!(bytes.is_empty());
+        let decoded = transcode_from_bytes(&bytes, 8);
+        assert!(decoded.is_empty());
     }
 
     #[test]

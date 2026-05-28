@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use fhe::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::{CommonRandomPoly, PublicKeyShare};
 use fhe::trbfv::{ShareManager, TRBFV};
@@ -103,14 +103,14 @@ fn bench_data_sizes(c: &mut Criterion) {
             .unwrap();
 
         let sk_sss = trbfv
-            .generate_secret_shares_from_poly(sk_poly, rng)
+            .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
         // Generate smudging error shares
         let esi_coeffs = trbfv.generate_smudging_error(100, 80, &mut rng).unwrap();
         let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
         let esi_sss = share_manager
-            .generate_secret_shares_from_poly(esi_poly, rng)
+            .generate_secret_shares_from_poly(esi_poly, &mut rng)
             .unwrap();
 
         // Generate BFV keys for share encryption
@@ -407,7 +407,7 @@ fn bench_timing_operations(c: &mut Criterion) {
 
         b.iter(|| {
             trbfv
-                .generate_secret_shares_from_poly(sk_poly.clone(), rng)
+                .generate_secret_shares_from_poly(sk_poly.clone(), &mut rng)
                 .unwrap()
         });
     });

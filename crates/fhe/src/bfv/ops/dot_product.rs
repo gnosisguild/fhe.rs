@@ -1,24 +1,26 @@
 use std::cmp::min;
 
-use fhe_math::rq::{dot_product as poly_dot_product, traits::TryConvertFrom, Poly, Representation};
-use itertools::{izip, Itertools};
+use fhe_math::rq::{Ntt, Poly, dot_product as poly_dot_product, traits::TryConvertFrom};
+use itertools::{Itertools, izip};
 use ndarray::{Array, Array2};
 
 use crate::{
-    bfv::{Ciphertext, Plaintext},
     Error, Result,
+    bfv::{Ciphertext, Plaintext},
 };
 
 /// Computes the Fused-Mul-Add operation `out[i] += x[i] * y[i]`
 unsafe fn fma(out: &mut [u128], x: &[u64], y: &[u64]) {
     let n = out.len();
-    assert_eq!(x.len(), n);
-    assert_eq!(y.len(), n);
+    debug_assert_eq!(x.len(), n);
+    debug_assert_eq!(y.len(), n);
 
     macro_rules! fma_at {
         ($idx:expr) => {
-            *out.get_unchecked_mut($idx) +=
-                (*x.get_unchecked($idx) as u128) * (*y.get_unchecked($idx) as u128);
+            unsafe {
+                *out.get_unchecked_mut($idx) +=
+                    (*x.get_unchecked($idx) as u128) * (*y.get_unchecked($idx) as u128);
+            }
         };
     }
 
@@ -63,14 +65,14 @@ where
         ));
     }
     let ct_first = ct.clone().next().unwrap();
-    let ctx = ct_first.c[0].ctx();
+    let ctx = ct_first[0].ctx();
 
     if izip!(ct.clone(), pt.clone()).any(|(cti, pti)| {
-        cti.par != ct_first.par || pti.par != ct_first.par || cti.c.len() != ct_first.c.len()
+        cti.par != ct_first.par || pti.par != ct_first.par || cti.len() != ct_first.len()
     }) {
         return Err(Error::DefaultError("Mismatched parameters".to_string()));
     }
-    if ct.clone().any(|cti| cti.c.len() != ct_first.c.len()) {
+    if ct.clone().any(|cti| cti.len() != ct_first.len()) {
         return Err(Error::DefaultError(
             "Mismatched number of parts in the ciphertexts".to_string(),
         ));
@@ -86,15 +88,15 @@ where
     if count as u128 > *min_of_max {
         // Too many ciphertexts for the optimized method, instead, we call
         // `poly_dot_product`.
-        let c = (0..ct_first.c.len())
+        let c = (0..ct_first.len())
             .map(|i| {
                 poly_dot_product(
-                    ct.clone().map(|cti| unsafe { cti.c.get_unchecked(i) }),
+                    ct.clone().map(|cti| unsafe { cti.get_unchecked(i) }),
                     pt.clone().map(|pti| &pti.poly_ntt),
                 )
                 .map_err(Error::MathError)
             })
-            .collect::<Result<Vec<Poly>>>()?;
+            .collect::<Result<Vec<Poly<Ntt>>>>()?;
 
         Ok(Ciphertext {
             par: ct_first.par.clone(),
@@ -103,10 +105,10 @@ where
             level: ct_first.level,
         })
     } else {
-        let mut acc = Array::zeros((ct_first.c.len(), ctx.moduli().len(), ct_first.par.degree()));
+        let mut acc = Array::zeros((ct_first.len(), ctx.moduli().len(), ct_first.par.degree()));
         for (ciphertext, plaintext) in izip!(ct, pt) {
             let pt_coefficients = plaintext.poly_ntt.coefficients();
-            for (mut acci, ci) in izip!(acc.outer_iter_mut(), ciphertext.c.iter()) {
+            for (mut acci, ci) in izip!(acc.outer_iter_mut(), ciphertext.iter()) {
                 let ci_coefficients = ci.coefficients();
                 for (mut accij, cij, pij) in izip!(
                     acci.outer_iter_mut(),
@@ -125,7 +127,7 @@ where
         }
 
         // Reduce
-        let mut c = Vec::with_capacity(ct_first.c.len());
+        let mut c = Vec::with_capacity(ct_first.len());
         for acci in acc.outer_iter() {
             let mut coeffs = Array2::zeros((ctx.moduli().len(), ct_first.par.degree()));
             for (mut outij, accij, q) in izip!(
@@ -137,12 +139,7 @@ where
                     unsafe { *outij_coeff = q.reduce_u128_vt(*accij_coeff) }
                 }
             }
-            c.push(Poly::try_convert_from(
-                coeffs,
-                ctx,
-                true,
-                Representation::Ntt,
-            )?)
+            c.push(Poly::<Ntt>::try_convert_from(coeffs, ctx, true)?)
         }
 
         Ok(Ciphertext {
@@ -159,29 +156,37 @@ mod tests {
     use super::dot_product_scalar;
     use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
     use fhe_traits::{FheEncoder, FheEncrypter};
-    use itertools::{izip, Itertools};
-    use rand::thread_rng;
+    use itertools::{Itertools, izip};
+    use rand::rng;
     use std::error::Error;
 
     #[test]
     fn test_dot_product_scalar() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
+        let empty_ct: Vec<Ciphertext> = Vec::new();
+        let empty_pt: Vec<Plaintext> = Vec::new();
+        assert!(dot_product_scalar(empty_ct.iter(), empty_pt.iter()).is_err());
+
         for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(2, 16),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(2, 32),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
             for size in 1..128 {
                 let ct = (0..size)
                     .map(|_| {
-                        let v = params.plaintext.random_vec(params.degree(), &mut rng);
+                        let v = fhe_math::zq::Modulus::new(params.plaintext())
+                            .unwrap()
+                            .random_vec(params.degree(), &mut rng);
                         let pt = Plaintext::try_encode(&v, Encoding::simd(), &params).unwrap();
                         sk.try_encrypt(&pt, &mut rng).unwrap()
                     })
                     .collect_vec();
                 let pt = (0..size)
                     .map(|_| {
-                        let v = params.plaintext.random_vec(params.degree(), &mut rng);
+                        let v = fhe_math::zq::Modulus::new(params.plaintext())
+                            .unwrap()
+                            .random_vec(params.degree(), &mut rng);
                         Plaintext::try_encode(&v, Encoding::simd(), &params).unwrap()
                     })
                     .collect_vec();

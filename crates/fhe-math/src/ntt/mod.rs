@@ -3,7 +3,14 @@
 use fhe_util::is_prime;
 
 mod native;
-pub use native::{NttOperator, NttOperatorRaw};
+
+#[cfg(feature = "tfhe-ntt")]
+mod tfhe;
+
+#[cfg(not(feature = "tfhe-ntt"))]
+pub use native::NttOperator;
+#[cfg(feature = "tfhe-ntt")]
+pub use tfhe::NttOperator;
 
 /// Returns whether a modulus p is prime and supports the Number Theoretic
 /// Transform of size n.
@@ -17,14 +24,14 @@ pub(crate) fn supports_ntt(p: u64, n: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use rand::thread_rng;
+    use rand::rng;
 
-    use super::{supports_ntt, NttOperator};
+    use super::{NttOperator, supports_ntt};
     use crate::zq::Modulus;
 
     #[test]
     fn constructor() {
-        for size in [8, 1024] {
+        for size in [32, 1024] {
             for p in [1153, 4611686018326724609] {
                 let q = Modulus::new(p).unwrap();
                 let supports_ntt = supports_ntt(p, size);
@@ -43,9 +50,9 @@ mod tests {
     #[test]
     fn bijection() {
         let ntests = 100;
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
-        for size in [8, 1024] {
+        for size in [32, 1024] {
             for p in [1153, 4611686018326724609] {
                 let q = Modulus::new(p).unwrap();
 
@@ -77,9 +84,9 @@ mod tests {
     #[test]
     fn forward_lazy() {
         let ntests = 100;
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
-        for size in [8, 1024] {
+        for size in [32, 1024] {
             for p in [1153, 4611686018326724609] {
                 let q = Modulus::new(p).unwrap();
 

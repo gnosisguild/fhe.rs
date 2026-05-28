@@ -1,8 +1,8 @@
 //! Traits used for the BFV homomorphic encryption scheme.
 
+use crate::Result;
 use crate::bfv::{BfvParameters, Ciphertext, RelinearizationKey as BfvRelinearizationKey};
 use crate::lbfv::LBFVRelinearizationKey;
-use crate::Result;
 use std::fmt::Debug;
 use std::sync::Arc;
 

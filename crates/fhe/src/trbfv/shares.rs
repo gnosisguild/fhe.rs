@@ -1,15 +1,15 @@
+use crate::Error;
 /// Share collection and management for threshold BFV.
 ///
 /// This module provides the ShareManager struct that handles aggregation of secret shares
 /// and computation of decryption shares in the threshold BFV scheme.
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::shamir::ShamirSecretSharing;
-use crate::Error;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
 use fhe_math::{
     rns::{RnsContext, ScalingFactor},
-    rq::{scaler::Scaler, Context, Poly, Representation},
+    rq::{Context, Ntt, Poly, PowerBasis, scaler::Scaler},
 };
 use itertools::Itertools;
 use ndarray::Array2;
@@ -19,6 +19,7 @@ use num_traits::ToPrimitive;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
+use std::convert::TryFrom;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -77,34 +78,41 @@ impl ShareManager {
     ///
     /// # Returns
     /// A Zeroizing<Poly> in PowerBasis representation
-    pub fn coeffs_to_poly<T>(&self, coeffs: T, ctx: &Arc<Context>) -> Result<Zeroizing<Poly>, Error>
+    pub fn coeffs_to_poly<T>(
+        &self,
+        coeffs: T,
+        ctx: &Arc<Context>,
+    ) -> Result<Zeroizing<Poly<PowerBasis>>, Error>
     where
-        Poly: TryConvertFrom<T>,
+        Poly<PowerBasis>: TryConvertFrom<T>,
     {
-        let poly = Poly::try_convert_from(coeffs, ctx, false, Representation::PowerBasis)?;
+        let poly = Poly::<PowerBasis>::try_convert_from(coeffs, ctx, false)?;
         Ok(Zeroizing::new(poly))
     }
 
     /// Convenience method using level 0 context from parameters.
-    pub fn coeffs_to_poly_level0<T>(&self, coeffs: T) -> Result<Zeroizing<Poly>, Error>
+    pub fn coeffs_to_poly_level0<T>(&self, coeffs: T) -> Result<Zeroizing<Poly<PowerBasis>>, Error>
     where
-        Poly: TryConvertFrom<T>,
+        Poly<PowerBasis>: TryConvertFrom<T>,
     {
-        let ctx = self.params.ctx_at_level(0)?;
+        let ctx = self.params.context_at_level(0)?;
         self.coeffs_to_poly(coeffs, ctx)
     }
     /// Convert a vector of BigInt coefficients into a Poly in full RNS representation
     /// at level 0 using the BFV context.
-    pub fn bigints_to_poly(&self, bigints: &[BigInt]) -> Result<Zeroizing<Poly>, Error> {
-        use fhe_math::rq::Poly;
-        Poly::from_bigints(bigints, &self.params.ctx[0]).map_err(Error::MathError)
+    pub fn bigints_to_poly(
+        &self,
+        bigints: &[BigInt],
+    ) -> Result<Zeroizing<Poly<PowerBasis>>, Error> {
+        let ctx = self.params.context_at_level(0)?;
+        Poly::<PowerBasis>::from_bigints(bigints, ctx).map_err(Error::from)
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
     pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
         &mut self,
-        poly: Zeroizing<Poly>,
-        mut rng: R,
+        poly: Zeroizing<Poly<PowerBasis>>,
+        rng: &mut R,
     ) -> Result<Vec<Array2<u64>>, Error> {
         let moduli: Vec<u64> = poly.ctx().moduli().to_vec();
 
@@ -121,7 +129,7 @@ impl ShareManager {
         let coeff_rows: Vec<_> = coefficients.outer_iter().collect();
 
         // Generate seeds deterministically from the input RNG
-        let seeds: Vec<u64> = (0..moduli.len()).map(|_| rng.gen()).collect();
+        let seeds: Vec<u64> = (0..moduli.len()).map(|_| rng.random()).collect();
 
         let return_vec: Result<Vec<Array2<u64>>, Error> = moduli
             .par_iter()
@@ -183,21 +191,18 @@ impl ShareManager {
     pub fn aggregate_collected_shares(
         &self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
-    ) -> Result<Poly, Error> {
-        let ctx = self.params.ctx_at_level(0).unwrap();
+    ) -> Result<Poly<PowerBasis>, Error> {
+        let ctx = self.params.context_at_level(0)?;
 
         let sum_poly = sk_sss_collected
             .par_iter()
             .take(self.n)
             .map(|item| {
-                let mut poly_j = Poly::zero(ctx, Representation::PowerBasis);
+                let mut poly_j = Poly::<PowerBasis>::zero(ctx);
                 poly_j.set_coefficients(item.clone());
                 poly_j
             })
-            .reduce(
-                || Poly::zero(ctx, Representation::PowerBasis),
-                |acc, poly| &acc + &poly,
-            );
+            .reduce(|| Poly::<PowerBasis>::zero(ctx), |acc, poly| &acc + &poly);
 
         Ok(sum_poly)
     }
@@ -217,20 +222,13 @@ impl ShareManager {
     pub fn decryption_share(
         &self,
         ciphertext: Arc<Ciphertext>,
-        mut sk_i: Poly,
-        es_i: Poly,
-    ) -> Result<Poly, Error> {
-        // decrypt
-        // mul c1 * sk
-        // then add c0 + (c1*sk) + es
-        let mut c0 = ciphertext.c[0].clone();
-        c0.change_representation(Representation::PowerBasis);
-        sk_i.change_representation(Representation::Ntt);
-        let mut c1 = ciphertext.c[1].clone();
-        c1.change_representation(Representation::Ntt);
-        let mut c1sk = &c1 * &sk_i;
-        c1sk.change_representation(Representation::PowerBasis);
-        let d_share_poly = &c0 + &c1sk + es_i;
+        sk_i: Poly<Ntt>,
+        es_i: Poly<PowerBasis>,
+    ) -> Result<Poly<PowerBasis>, Error> {
+        let c0 = ciphertext.c[0].clone().into_power_basis();
+        let c1 = ciphertext.c[1].clone();
+        let c1sk = (&c1 * &sk_i).into_power_basis();
+        let d_share_poly = c0 + c1sk + es_i;
         //let d_share_poly = &c0 + &c1sk;
         Ok(d_share_poly)
     }
@@ -248,7 +246,7 @@ impl ShareManager {
     /// The decrypted plaintext
     pub fn decrypt_from_shares(
         &self,
-        d_share_polys: Vec<Poly>,
+        d_share_polys: Vec<Poly<PowerBasis>>,
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
@@ -304,10 +302,8 @@ impl ShareManager {
         let arr_matrix =
             Array2::from_shape_vec((self.params.moduli().len(), self.params.degree()), m_data)
                 .unwrap();
-        let mut result_poly = Poly::zero(
-            self.params.ctx_at_level(0).unwrap(),
-            Representation::PowerBasis,
-        );
+        let ctx = self.params.context_at_level(0)?;
+        let mut result_poly = Poly::<PowerBasis>::zero(ctx);
         result_poly.set_coefficients(arr_matrix);
 
         let plaintext_ctx = Context::new_arc(&self.params.moduli()[..1], self.params.degree())
@@ -340,24 +336,27 @@ impl ShareManager {
                 .map_err(Error::MathError)?,
         );
         let v = Zeroizing::new(
-            Vec::<u64>::from(d.as_ref())
-                .iter_mut()
-                .map(|vi| *vi + par.plaintext.modulus())
+            Vec::<u64>::try_from(d.as_ref())
+                .map_err(Error::from)?
+                .into_iter()
+                .map(|vi| vi + par.plaintext.as_u64().unwrap_or(0))
                 .collect_vec(),
         );
         let mut w = v[..par.degree()].to_vec();
-        let q = Modulus::new(par.moduli[0]).map_err(Error::MathError)?;
+        let q = Modulus::new(par.moduli()[0]).map_err(Error::MathError)?;
         q.reduce_vec(&mut w);
-        par.plaintext.reduce_vec(&mut w);
+        if let Some(t) = par.plaintext.as_u64() {
+            Modulus::new(t)
+                .map_err(Error::MathError)?
+                .reduce_vec(&mut w);
+        }
 
-        let mut poly =
-            Poly::try_convert_from(&w, ciphertext.c[0].ctx(), false, Representation::PowerBasis)
-                .map_err(Error::MathError)?;
-        poly.change_representation(Representation::Ntt);
+        let poly =
+            Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt();
 
         let pt = Plaintext {
             par: par.clone(),
-            value: w.into_boxed_slice(),
+            value: crate::bfv::PlaintextValues::Small(w.into_boxed_slice()),
             encoding: None,
             poly_ntt: poly,
             level: ciphertext.level,
@@ -371,7 +370,7 @@ mod tests {
     use super::*;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
-    use rand::{rngs::OsRng, thread_rng};
+    use rand::rng;
 
     fn test_params() -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
@@ -398,7 +397,7 @@ mod tests {
 
         // Test with i64 coefficients
         let coeffs = vec![1i64, 2, 3, 4].into_boxed_slice();
-        let ctx = params.ctx_at_level(0).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
         let poly = manager.coeffs_to_poly(coeffs.as_ref(), ctx).unwrap();
         assert_eq!(poly.ctx(), ctx);
 
@@ -435,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_decryption_share_computation() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = test_params();
         let n = 3;
         //Fix threshold to be 0 for the purpose of this test so that any single party can decrypt.
@@ -455,13 +454,13 @@ mod tests {
 
         // Generate polynomials for decryption share
         let sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
-        let ctx = params.ctx_at_level(0).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
         //Setting smuding noise to be zero in this test
-        let es_poly = Poly::zero(ctx, Representation::PowerBasis);
+        let es_poly = Poly::<PowerBasis>::zero(ctx);
 
         // Compute decryption share
         let decryption_share = manager
-            .decryption_share(ct.clone(), (*sk_poly).clone(), es_poly)
+            .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
             .unwrap();
 
         let shares = vec![decryption_share.clone()];
@@ -479,12 +478,12 @@ mod tests {
 
     #[test]
     fn test_threshold_decryption_workflow() {
-        let mut rng = OsRng;
+        let mut rng = rng();
         let params = test_params();
         let n = 3;
         let threshold = 1;
 
-        let ctx = params.ctx_at_level(0).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
@@ -499,14 +498,13 @@ mod tests {
             .unwrap();
 
         let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, rng)
+            .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
         let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = vec![vec![], vec![], vec![]];
 
-        let mut sk_poly_sums: Vec<Poly> = (0..n)
-            .map(|_| Poly::zero(ctx, Representation::PowerBasis))
-            .collect();
+        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
+            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
 
         for i in 0..n {
             let mut node_share_m = Array2::zeros((0, params.degree()));
@@ -534,12 +532,12 @@ mod tests {
         //Testing for decryption between parties 0 and 1
         //TODO Add tests for decyption between different parties than the first ones
         for i in 0..(threshold + 1) {
-            let ctx = params.ctx_at_level(0).unwrap();
+            let ctx = params.context_at_level(0).unwrap();
             //Setting smuding noise to be zero in this test
-            let es_poly = Poly::zero(ctx, Representation::PowerBasis);
+            let es_poly = Poly::<PowerBasis>::zero(ctx);
 
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone(), es_poly)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -563,12 +561,12 @@ mod tests {
 
     #[test]
     fn test_threshold_decryption_workflow_arbitrary_parties_small() {
-        let mut rng = OsRng;
+        let mut rng = rng();
         let params = test_params();
         let n = 5;
         let threshold = 2; // need 3 parties
 
-        let ctx = params.ctx_at_level(0).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
@@ -583,15 +581,14 @@ mod tests {
             .unwrap();
 
         let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, rng)
+            .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
         let mut sk_sss_collected: Vec<Vec<Array2<u64>>> =
             vec![vec![], vec![], vec![], vec![], vec![]];
 
-        let mut sk_poly_sums: Vec<Poly> = (0..n)
-            .map(|_| Poly::zero(ctx, Representation::PowerBasis))
-            .collect();
+        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
+            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
 
         for i in 0..n {
             let mut node_share_m = Array2::zeros((0, params.degree()));
@@ -621,10 +618,10 @@ mod tests {
         // Each chosen party generates their decryption share
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
-            let ctx = params.ctx_at_level(0).unwrap();
-            let es_poly = Poly::zero(ctx, Representation::PowerBasis);
+            let ctx = params.context_at_level(0).unwrap();
+            let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone(), es_poly)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -646,12 +643,12 @@ mod tests {
 
     #[test]
     fn test_threshold_decryption_workflow_arbitrary_parties_large() {
-        let mut rng = OsRng;
+        let mut rng = rng();
         let params = test_params();
         let n = 20;
         let threshold = 7; // need 8 parties
 
-        let ctx = params.ctx_at_level(0).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
@@ -666,14 +663,13 @@ mod tests {
             .unwrap();
 
         let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, rng)
+            .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
         let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
 
-        let mut sk_poly_sums: Vec<Poly> = (0..n)
-            .map(|_| Poly::zero(ctx, Representation::PowerBasis))
-            .collect();
+        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
+            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
 
         for i in 0..n {
             let mut node_share_m = Array2::zeros((0, params.degree()));
@@ -705,10 +701,10 @@ mod tests {
         // Each chosen party generates their decryption share
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
-            let ctx = params.ctx_at_level(0).unwrap();
-            let es_poly = Poly::zero(ctx, Representation::PowerBasis);
+            let ctx = params.context_at_level(0).unwrap();
+            let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone(), es_poly)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -730,12 +726,12 @@ mod tests {
 
     #[test]
     fn test_threshold_decryption_wrong_indices_fails() {
-        let mut rng = OsRng;
+        let mut rng = rng();
         let params = test_params();
         let n = 10;
         let threshold = 4; // need 5 parties
 
-        let ctx = params.ctx_at_level(0).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
@@ -750,14 +746,13 @@ mod tests {
             .unwrap();
 
         let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, rng)
+            .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
         let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
 
-        let mut sk_poly_sums: Vec<Poly> = (0..n)
-            .map(|_| Poly::zero(ctx, Representation::PowerBasis))
-            .collect();
+        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
+            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
 
         for i in 0..n {
             let mut node_share_m = Array2::zeros((0, params.degree()));
@@ -786,10 +781,10 @@ mod tests {
         // Each chosen party generates their decryption share
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
-            let ctx = params.ctx_at_level(0).unwrap();
-            let es_poly = Poly::zero(ctx, Representation::PowerBasis);
+            let ctx = params.context_at_level(0).unwrap();
+            let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone(), es_poly)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -836,12 +831,12 @@ mod tests {
 
     #[test]
     fn test_threshold_decryption_random_party_order() {
-        let mut rng = OsRng;
+        let mut rng = rng();
         let params = test_params();
         let n = 15;
         let threshold = 7; // need 8 parties
 
-        let ctx = params.ctx_at_level(0).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
@@ -856,14 +851,13 @@ mod tests {
             .unwrap();
 
         let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, rng)
+            .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
         let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
 
-        let mut sk_poly_sums: Vec<Poly> = (0..n)
-            .map(|_| Poly::zero(ctx, Representation::PowerBasis))
-            .collect();
+        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
+            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
 
         for i in 0..n {
             let mut node_share_m = Array2::zeros((0, params.degree()));
@@ -895,10 +889,10 @@ mod tests {
         // Each chosen party generates their decryption share in the same (non-increasing) order
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
-            let ctx = params.ctx_at_level(0).unwrap();
-            let es_poly = Poly::zero(ctx, Representation::PowerBasis);
+            let ctx = params.context_at_level(0).unwrap();
+            let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone(), es_poly)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
                 .unwrap();
             decryption_shares.push(share);
         }

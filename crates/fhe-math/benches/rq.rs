@@ -1,13 +1,14 @@
+#![expect(missing_docs, reason = "examples/benches/tests omit docs by design")]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "performance or example code relies on validated indices"
+)]
 use criterion::measurement::WallTime;
-use criterion::{criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion};
-use fhe_math::rq::*;
-use itertools::{izip, Itertools};
-use rand::thread_rng;
-use std::{
-    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
-    sync::Arc,
-    time::Duration,
-};
+use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main};
+use fhe_math::rq::{Context, Ntt, NttShoup, Poly, PowerBasis, dot_product, traits::TryConvertFrom};
+use itertools::{Itertools, izip};
+use rand::rng;
+use std::{sync::Arc, time::Duration};
 
 static MODULI: &[u64; 4] = &[
     562949954093057,
@@ -33,12 +34,12 @@ macro_rules! bench_op {
             $name.to_string()
         };
         let mut group = create_group($c, name);
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
         for degree in DEGREE {
             let ctx = Arc::new(Context::new(&MODULI[..1], *degree).unwrap());
-            let p = Poly::random(&ctx, Representation::Ntt, &mut rng);
-            let mut q = Poly::random(&ctx, Representation::Ntt, &mut rng);
+            let p = Poly::<Ntt>::random(&ctx, &mut rng);
+            let mut q = Poly::<Ntt>::random(&ctx, &mut rng);
             if $vt {
                 unsafe { q.allow_variable_time_computations() }
             }
@@ -61,12 +62,12 @@ macro_rules! bench_op_unary {
             $name.to_string()
         };
         let mut group = create_group($c, name);
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
         for degree in DEGREE {
             let ctx = Arc::new(Context::new(&MODULI[..1], *degree).unwrap());
-            let p = Poly::random(&ctx, Representation::Ntt, &mut rng);
-            let mut q = Poly::random(&ctx, Representation::Ntt, &mut rng);
+            let p = Poly::<Ntt>::random(&ctx, &mut rng);
+            let mut q = Poly::<Ntt>::random(&ctx, &mut rng);
             if $vt {
                 unsafe { q.allow_variable_time_computations() }
             }
@@ -89,12 +90,12 @@ macro_rules! bench_op_assign {
             $name.to_string()
         };
         let mut group = create_group($c, name);
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
         for degree in DEGREE {
             let ctx = Arc::new(Context::new(&MODULI[..1], *degree).unwrap());
-            let mut p = Poly::random(&ctx, Representation::Ntt, &mut rng);
-            let mut q = Poly::random(&ctx, Representation::Ntt, &mut rng);
+            let mut p = Poly::<Ntt>::random(&ctx, &mut rng);
+            let mut q = Poly::<Ntt>::random(&ctx, &mut rng);
             if $vt {
                 unsafe { q.allow_variable_time_computations() }
             }
@@ -111,29 +112,44 @@ macro_rules! bench_op_assign {
 
 pub fn rq_op_benchmark(c: &mut Criterion) {
     for vt in [false, true] {
-        bench_op!(c, "rq_add", <&Poly>::add, vt);
-        bench_op_assign!(c, "rq_add_assign", Poly::add_assign, vt);
-        bench_op!(c, "rq_sub", <&Poly>::sub, vt);
-        bench_op_assign!(c, "rq_sub_assign", Poly::sub_assign, vt);
-        bench_op!(c, "rq_mul", <&Poly>::mul, vt);
-        bench_op_assign!(c, "rq_mul_assign", Poly::mul_assign, vt);
-        bench_op_unary!(c, "rq_neg", <&Poly>::neg, vt);
+        bench_op!(c, "rq_add", |p, q| p + q, vt);
+        bench_op_assign!(
+            c,
+            "rq_add_assign",
+            |p: &mut Poly<Ntt>, q: &Poly<Ntt>| *p += q,
+            vt
+        );
+        bench_op!(c, "rq_sub", |p, q| p - q, vt);
+        bench_op_assign!(
+            c,
+            "rq_sub_assign",
+            |p: &mut Poly<Ntt>, q: &Poly<Ntt>| *p -= q,
+            vt
+        );
+        bench_op!(c, "rq_mul", |p, q| p * q, vt);
+        bench_op_assign!(
+            c,
+            "rq_mul_assign",
+            |p: &mut Poly<Ntt>, q: &Poly<Ntt>| *p *= q,
+            vt
+        );
+        bench_op_unary!(c, "rq_neg", |p: &Poly<_>| -p, vt);
     }
 }
 
 pub fn rq_dot_product(c: &mut Criterion) {
     let mut group = create_group(c, "rq_dot_product".to_string());
-    let mut rng = thread_rng();
+    let mut rng = rng();
     for degree in DEGREE {
         for i in [1, 4] {
             let ctx = Arc::new(Context::new(&MODULI[..i], *degree).unwrap());
             let p_vec = (0..256)
-                .map(|_| Poly::random(&ctx, Representation::Ntt, &mut rng))
+                .map(|_| Poly::<Ntt>::random(&ctx, &mut rng))
                 .collect_vec();
-            let mut q_vec = (0..256)
-                .map(|_| Poly::random(&ctx, Representation::Ntt, &mut rng))
+            let q_vec = (0..256)
+                .map(|_| Poly::<Ntt>::random(&ctx, &mut rng))
                 .collect_vec();
-            let mut out = Poly::zero(&ctx, Representation::Ntt);
+            let mut out = Poly::<Ntt>::zero(&ctx);
 
             group.bench_function(
                 BenchmarkId::from_parameter(format!("naive/{}/{}", degree, ctx.modulus().bits())),
@@ -144,9 +160,11 @@ pub fn rq_dot_product(c: &mut Criterion) {
                 },
             );
 
-            q_vec
-                .iter_mut()
-                .for_each(|qi| qi.change_representation(Representation::NttShoup));
+            let q_vec_shoup = q_vec
+                .iter()
+                .cloned()
+                .map(Poly::<Ntt>::into_ntt_shoup)
+                .collect_vec();
             group.bench_function(
                 BenchmarkId::from_parameter(format!(
                     "naive_shoup/{}/{}",
@@ -155,14 +173,12 @@ pub fn rq_dot_product(c: &mut Criterion) {
                 )),
                 |b| {
                     b.iter(|| {
-                        izip!(p_vec.iter(), q_vec.iter()).for_each(|(pi, qi)| out += &(pi * qi))
+                        izip!(p_vec.iter(), q_vec_shoup.iter())
+                            .for_each(|(pi, qi)| out += &(pi * qi))
                     });
                 },
             );
 
-            q_vec
-                .iter_mut()
-                .for_each(|qi| qi.change_representation(Representation::Ntt));
             group.bench_function(
                 BenchmarkId::from_parameter(format!("opt/{}/{}", degree, ctx.modulus().bits())),
                 |b| {
@@ -178,16 +194,15 @@ pub fn rq_benchmark(c: &mut Criterion) {
     group.warm_up_time(Duration::from_millis(100));
     group.measurement_time(Duration::from_secs(1));
 
-    let mut rng = thread_rng();
+    let mut rng = rng();
     for degree in DEGREE {
         for nmoduli in 1..=MODULI.len() {
             if !nmoduli.is_power_of_two() {
                 continue;
             }
             let ctx = Arc::new(Context::new(&MODULI[..nmoduli], *degree).unwrap());
-            let mut p = Poly::random(&ctx, Representation::Ntt, &mut rng);
-            let mut q = Poly::random(&ctx, Representation::Ntt, &mut rng);
-            q.change_representation(Representation::NttShoup);
+            let mut p = Poly::<Ntt>::random(&ctx, &mut rng);
+            let q = Poly::<NttShoup>::random(&ctx, &mut rng);
 
             group.bench_function(
                 BenchmarkId::new("mul_shoup", format!("{}/{}", degree, ctx.modulus().bits())),
@@ -206,6 +221,7 @@ pub fn rq_benchmark(c: &mut Criterion) {
                 },
             );
 
+            let p_pb = Poly::<PowerBasis>::random(&ctx, &mut rng);
             group.bench_function(
                 BenchmarkId::new(
                     "change_representation/PowerBasis_to_Ntt",
@@ -213,14 +229,12 @@ pub fn rq_benchmark(c: &mut Criterion) {
                 ),
                 |b| {
                     b.iter(|| {
-                        unsafe {
-                            p.override_representation(Representation::PowerBasis);
-                        }
-                        p.change_representation(Representation::Ntt)
+                        let _ = p_pb.clone().into_ntt();
                     });
                 },
             );
 
+            let p_ntt = Poly::<Ntt>::random(&ctx, &mut rng);
             group.bench_function(
                 BenchmarkId::new(
                     "change_representation/Ntt_to_PowerBasis",
@@ -228,20 +242,16 @@ pub fn rq_benchmark(c: &mut Criterion) {
                 ),
                 |b| {
                     b.iter(|| {
-                        unsafe {
-                            p.override_representation(Representation::Ntt);
-                        }
-                        p.change_representation(Representation::PowerBasis)
+                        let _ = p_ntt.clone().into_power_basis();
                     });
                 },
             );
 
-            p.change_representation(Representation::Ntt);
-            q.change_representation(Representation::Ntt);
-
             unsafe {
-                q.allow_variable_time_computations();
-                q.change_representation(Representation::NttShoup);
+                let mut q_vt = q.clone();
+                q_vt.allow_variable_time_computations();
+                let mut p_vt = p.clone();
+                p_vt.allow_variable_time_computations();
 
                 group.bench_function(
                     BenchmarkId::new(
@@ -249,11 +259,12 @@ pub fn rq_benchmark(c: &mut Criterion) {
                         format!("{}/{}", degree, ctx.modulus().bits()),
                     ),
                     |b| {
-                        b.iter(|| p *= &q);
+                        b.iter(|| p_vt *= &q_vt);
                     },
                 );
 
-                p.allow_variable_time_computations();
+                let mut p_pb_vt = Poly::<PowerBasis>::random(&ctx, &mut rng);
+                p_pb_vt.allow_variable_time_computations();
 
                 group.bench_function(
                     BenchmarkId::new(
@@ -262,12 +273,13 @@ pub fn rq_benchmark(c: &mut Criterion) {
                     ),
                     |b| {
                         b.iter(|| {
-                            p.override_representation(Representation::PowerBasis);
-                            p.change_representation(Representation::Ntt)
+                            let _ = p_pb_vt.clone().into_ntt();
                         });
                     },
                 );
 
+                let mut p_ntt_vt = Poly::<Ntt>::random(&ctx, &mut rng);
+                p_ntt_vt.allow_variable_time_computations();
                 group.bench_function(
                     BenchmarkId::new(
                         "change_representation/Ntt_to_PowerBasis_vt",
@@ -275,8 +287,7 @@ pub fn rq_benchmark(c: &mut Criterion) {
                     ),
                     |b| {
                         b.iter(|| {
-                            p.override_representation(Representation::Ntt);
-                            p.change_representation(Representation::PowerBasis)
+                            let _ = p_ntt_vt.clone().into_power_basis();
                         });
                     },
                 );
@@ -287,5 +298,33 @@ pub fn rq_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(rq, rq_op_benchmark, rq_dot_product, rq_benchmark);
+pub fn rq_convert_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rq_convert");
+    group.warm_up_time(Duration::from_millis(100));
+    group.measurement_time(Duration::from_secs(1));
+
+    for degree in DEGREE {
+        for nmoduli in 1..=MODULI.len() {
+            let ctx = Arc::new(Context::new(&MODULI[..nmoduli], *degree).unwrap());
+            let v: Vec<u64> = (0..*degree as u64).collect();
+            let slice = v.as_slice();
+
+            group.bench_function(
+                BenchmarkId::new("try_convert_from_slice", format!("{}/{}", degree, nmoduli)),
+                |b| {
+                    b.iter(|| Poly::<PowerBasis>::try_convert_from(slice, &ctx, false).unwrap());
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(
+    rq,
+    rq_op_benchmark,
+    rq_dot_product,
+    rq_benchmark,
+    rq_convert_benchmark
+);
 criterion_main!(rq);

@@ -1,13 +1,18 @@
 #![warn(missing_docs, unused_imports)]
+// Expect indexing in this performance-critical RNS implementation
+#![expect(
+    clippy::indexing_slicing,
+    reason = "performance or example code relies on validated indices"
+)]
 
 //! Residue-Number System operations.
 
-use crate::{zq::Modulus, Error, Result};
-use itertools::izip;
+use crate::{Error, Result, zq::Modulus};
+use itertools::{Itertools, izip};
 use ndarray::ArrayView1;
 use num_bigint::BigUint;
 use num_bigint_dig::{BigInt as BigIntDig, BigUint as BigUintDig, ExtendedGcd, ModInverse};
-use num_traits::{cast::ToPrimitive, One, Zero};
+use num_traits::{One, Zero, cast::ToPrimitive};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, fmt::Debug};
 
@@ -86,33 +91,33 @@ impl RnsContext {
                 product_dig *= &BigUintDig::from(moduli_u64[i]);
             }
 
-            let mut moduli = Vec::with_capacity(moduli_u64.len());
-            let mut q_tilde = Vec::with_capacity(moduli_u64.len());
-            let mut q_tilde_shoup = Vec::with_capacity(moduli_u64.len());
-            let mut q_star = Vec::with_capacity(moduli_u64.len());
-            let mut garner = Vec::with_capacity(moduli_u64.len());
-
-            for modulus in moduli_u64 {
-                moduli.push(Modulus::new(*modulus)?);
-                // q* = product / modulus
-                let q_star_i = &product / modulus;
-                // q~ = (product / modulus) ^ (-1) % modulus
-                let q_tilde_i = (&product_dig / modulus)
-                    .mod_inverse(&BigUintDig::from(*modulus))
-                    .unwrap()
-                    .to_u64()
-                    .unwrap();
-                // garner = (q*) * (q~)
-                let garner_i = &q_star_i * q_tilde_i;
-                q_tilde.push(q_tilde_i);
-                garner.push(garner_i);
-                q_star.push(q_star_i);
-                q_tilde_shoup.push(
-                    Modulus::new(*modulus)
+            #[expect(
+                clippy::type_complexity,
+                reason = "complex tuple is produced by multiunzip"
+            )]
+            let (moduli, q_tilde, q_tilde_shoup, q_star, garner): (
+                Vec<Modulus>,
+                Vec<u64>,
+                Vec<u64>,
+                Vec<BigUint>,
+                Vec<BigUint>,
+            ) = moduli_u64
+                .iter()
+                .map(|modulus| {
+                    let m = Modulus::new(*modulus)?;
+                    let q_star_i = &product / modulus;
+                    let q_tilde_i = (&product_dig / modulus)
+                        .mod_inverse(&BigUintDig::from(*modulus))
                         .unwrap()
-                        .shoup(q_tilde_i.to_u64().unwrap()),
-                );
-            }
+                        .to_u64()
+                        .unwrap();
+                    let garner_i = &q_star_i * q_tilde_i;
+                    let q_tilde_shoup_i = m.shoup(q_tilde_i);
+                    Ok((m, q_tilde_i, q_tilde_shoup_i, q_star_i, garner_i))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .multiunzip();
 
             Ok(Self {
                 moduli_u64: moduli_u64.to_owned(),
@@ -127,23 +132,25 @@ impl RnsContext {
     }
 
     /// Returns the product of the moduli used when creating the RNS context.
+    #[must_use]
     pub const fn modulus(&self) -> &BigUint {
         &self.product
     }
 
     /// Project a BigUint into its rests.
+    #[must_use]
     pub fn project(&self, a: &BigUint) -> Vec<u64> {
-        let mut rests = Vec::with_capacity(self.moduli_u64.len());
-        for modulus in &self.moduli_u64 {
-            rests.push((a % modulus).to_u64().unwrap())
-        }
-        rests
+        self.moduli_u64
+            .iter()
+            .map(|modulus| (a % modulus).to_u64().unwrap())
+            .collect()
     }
 
     /// Lift rests into a BigUint.
     ///
     /// Aborts if the number of rests is different than the number of moduli in
     /// debug mode.
+    #[must_use]
     pub fn lift(&self, rests: ArrayView1<u64>) -> BigUint {
         let mut result = BigUint::zero();
         izip!(rests.iter(), self.garner.iter())
@@ -152,6 +159,7 @@ impl RnsContext {
     }
 
     /// Getter for the i-th garner coefficient.
+    #[must_use]
     pub fn get_garner(&self, i: usize) -> Option<&BigUint> {
         self.garner.get(i)
     }
@@ -284,7 +292,7 @@ mod tests {
             BigUint::from(product - 1)
         );
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for _ in 0..ntests {
             let b = BigUint::from(rng.next_u64() % product);

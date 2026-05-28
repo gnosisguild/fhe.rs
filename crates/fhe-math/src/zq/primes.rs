@@ -6,6 +6,7 @@ use num_bigint::BigUint;
 /// Returns whether the modulus supports optimized multiplication and reduction.
 /// These optimized operations are possible when the modulus verifies
 /// Equation (1) of <https://hal.archives-ouvertes.fr/hal-01242273/document>.
+#[must_use]
 pub fn supports_opt(p: u64) -> bool {
     if p.leading_zeros() < 1 {
         return false;
@@ -25,6 +26,7 @@ pub fn supports_opt(p: u64) -> bool {
 /// Generate a `num_bits`-bit prime, congruent to 1 mod `modulo`, strictly
 /// smaller than `upper_bound`. Note that `num_bits` must belong to (10..=62),
 /// and upper_bound must be <= 1 << num_bits.
+#[must_use]
 pub fn generate_prime(num_bits: usize, modulo: u64, upper_bound: u64) -> Option<u64> {
     if !(10..=62).contains(&num_bits) {
         None
@@ -59,7 +61,6 @@ pub fn generate_prime(num_bits: usize, modulo: u64, upper_bound: u64) -> Option<
 #[cfg(test)]
 mod tests {
     use super::generate_prime;
-    use fhe_util::catch_unwind;
 
     // Verifies that the same moduli as in the NFLlib library are generated.
     // <https://github.com/quarkslab/NFLlib/blob/master/include/nfl/params.hpp>
@@ -102,7 +103,10 @@ mod tests {
 
     #[test]
     fn upper_bound() {
-        debug_assert!(catch_unwind(|| generate_prime(62, 2 * 1048576, (1 << 62) + 1)).is_err());
+        #[cfg(debug_assertions)]
+        assert!(
+            std::panic::catch_unwind(|| generate_prime(62, 2 * 1048576, (1 << 62) + 1)).is_err()
+        );
     }
 
     #[test]

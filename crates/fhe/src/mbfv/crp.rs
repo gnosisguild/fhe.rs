@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use crate::bfv::BfvParameters;
 use crate::Result;
-use fhe_math::rq::Poly;
+use crate::bfv::BfvParameters;
+use fhe_math::rq::{Ntt, Poly};
 use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -11,7 +11,7 @@ use rand_chacha::ChaCha8Rng;
 // TODO CRS->CRP implementation. For now just a random polynomial.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct CommonRandomPoly {
-    pub(crate) poly: Poly,
+    pub(crate) poly: Poly<Ntt>,
 }
 
 impl CommonRandomPoly {
@@ -47,8 +47,8 @@ impl CommonRandomPoly {
         level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx = par.ctx_at_level(level)?;
-        let poly = Poly::random(ctx, fhe_math::rq::Representation::Ntt, rng);
+        let ctx = par.context_at_level(level)?;
+        let poly = Poly::<Ntt>::random(ctx, rng);
         Ok(Self { poly })
     }
 
@@ -58,34 +58,31 @@ impl CommonRandomPoly {
         level: usize,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
     ) -> Result<Self> {
-        let ctx = par.ctx_at_level(level)?;
-        let poly = Poly::random_from_seed(ctx, fhe_math::rq::Representation::Ntt, seed);
+        let ctx = par.context_at_level(level)?;
+        let poly = Poly::<Ntt>::random_from_seed(ctx, seed);
         Ok(Self { poly })
     }
 
-    /// Deserialize a CRP from bytes
+    /// Deserialize a CRP from bytes.
     pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
-        let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
-        Ok(Self {
-            poly: test.unwrap(),
-        })
+        let ctx = par.context_at_level(0)?;
+        let poly = Poly::<Ntt>::from_bytes(bytes, ctx)?;
+        Ok(Self { poly })
     }
 
-    /// Get a reference to the underlying polynomial
-    pub fn poly(&self) -> &Poly {
+    /// Get a reference to the underlying polynomial.
+    pub fn poly(&self) -> &Poly<Ntt> {
         &self.poly
     }
 
-    /// Get the underlying polynomial (consumes self)
-    pub fn into_poly(self) -> Poly {
+    /// Get the underlying polynomial (consumes self).
+    pub fn into_poly(self) -> Poly<Ntt> {
         self.poly
     }
 }
 
 impl Serialize for CommonRandomPoly {
     fn to_bytes(&self) -> Vec<u8> {
-        //PublicKeyProto::from(self).encode_to_vec()
-        //Vec::new()
         self.poly.to_bytes()
     }
 }

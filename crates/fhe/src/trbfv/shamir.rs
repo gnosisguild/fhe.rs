@@ -4,6 +4,7 @@
 /// with the BFV parameter system.
 use num_bigint::{BigInt, RandBigInt};
 use num_traits::{One, Zero};
+use fhe_util::rng08;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
@@ -124,14 +125,14 @@ impl ShamirSecretSharing {
 
         // Generate seeds deterministically from the input RNG
         // This is done so clients can test using deterministic rngs
-        let seeds: Vec<u64> = (0..self.threshold).map(|_| rng.gen()).collect();
+        let seeds: Vec<u64> = (0..self.threshold).map(|_| rng.random()).collect();
 
         // Use the seeds
         let random_coefficients: Vec<BigInt> = seeds
             .into_par_iter()
             .map(|seed| {
                 let mut rng = ChaCha20Rng::seed_from_u64(seed);
-                rng.gen_bigint_range(&low, &high)
+                rng08::adapt(&mut rng).gen_bigint_range(&low, &high)
             })
             .collect();
         coefficients.extend(random_coefficients);
@@ -304,7 +305,7 @@ mod tests {
             .unwrap(),
         };
         let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
-        let shares = sss.split(secret.clone(), &mut rand::thread_rng());
+        let shares = sss.split(secret.clone(), &mut rand::rng());
         assert_eq!(secret, sss.recover(&shares[0..sss.threshold + 1]));
     }
 }

@@ -2,8 +2,8 @@
 
 //! Polynomial modulus switcher.
 
-use super::{scaler::Scaler, Context, Poly};
-use crate::{rns::ScalingFactor, Result};
+use super::{Context, Poly, ScaleRepresentation, scaler::Scaler};
+use crate::{Result, rns::ScalingFactor};
 use std::sync::Arc;
 
 /// Context switcher.
@@ -21,7 +21,7 @@ impl Switcher {
     }
 
     /// Switch a polynomial.
-    pub(crate) fn switch(&self, p: &Poly) -> Result<Poly> {
+    pub(crate) fn switch<R: ScaleRepresentation>(&self, p: &Poly<R>) -> Result<Poly<R>> {
         self.scaler.scale(p)
     }
 }

@@ -29,7 +29,7 @@ use crate::trbfv::smudging::{
     SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
 };
 use crate::Error;
-use fhe_math::rq::Poly;
+use fhe_math::rq::{Ntt, Poly, PowerBasis};
 use fhe_traits::FheParametrized;
 use ndarray::Array2;
 use num_bigint::BigInt;
@@ -79,8 +79,8 @@ impl TRBFV {
     /// Vector of share matrices, one per BFV modulus. Each matrix has dimensions [n, degree].
     pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
         &self,
-        poly: Zeroizing<Poly>,
-        rng: R,
+        poly: Zeroizing<Poly<PowerBasis>>,
+        rng: &mut R,
     ) -> Result<Vec<Array2<u64>>, Error> {
         let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
         share_manager.generate_secret_shares_from_poly(poly, rng)
@@ -99,7 +99,7 @@ impl TRBFV {
     pub fn aggregate_collected_shares(
         &self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
-    ) -> Result<Poly, Error> {
+    ) -> Result<Poly<PowerBasis>, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
         share_manager.aggregate_collected_shares(sk_sss_collected)
     }
@@ -148,9 +148,9 @@ impl TRBFV {
     pub fn decryption_share(
         &self,
         ciphertext: Arc<Ciphertext>,
-        sk_i: Poly,
-        es_i: Poly,
-    ) -> Result<Poly, Error> {
+        sk_i: Poly<Ntt>,
+        es_i: Poly<PowerBasis>,
+    ) -> Result<Poly<PowerBasis>, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
         share_manager.decryption_share(ciphertext, sk_i, es_i)
     }
@@ -168,7 +168,7 @@ impl TRBFV {
     /// The decrypted plaintext
     pub fn decrypt(
         &self,
-        d_share_polys: Vec<Poly>,
+        d_share_polys: Vec<Poly<PowerBasis>>,
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
@@ -185,10 +185,10 @@ impl FheParametrized for TRBFV {
 mod tests {
     use super::*;
     use crate::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
-    use fhe_math::rq::{Poly, Representation};
+    use fhe_math::rq::Poly;
     use fhe_traits::{FheEncoder, FheEncrypter};
     use num_traits::Zero;
-    use rand::{rngs::OsRng, thread_rng};
+    use rand::rng;
 
     fn test_params() -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     #[allow(unused_mut)]
     fn test_secret_sharing_integration() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let n: usize = 5;
         let threshold = 2;
         let params = test_params();
@@ -242,7 +242,7 @@ mod tests {
             .coeffs_to_poly_level0(sk.coeffs.clone().as_ref())
             .unwrap();
         let shares = trbfv
-            .generate_secret_shares_from_poly(sk_poly, rand::thread_rng())
+            .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
         // Check that we got the right number of shares
@@ -260,7 +260,8 @@ mod tests {
         let threshold = 1;
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
-        let result = trbfv.generate_smudging_error(1, 80, &mut OsRng);
+        let mut rng = rng();
+        let result = trbfv.generate_smudging_error(1, 80, &mut rng);
         //Checking if all the coefficients of the smudging noise are different than 0,
         //having one equal to zero is hardly likely to happen if the smudging noise was generated.
         //TODO: add a test that calculates the empirical variance from the coefficients, so as to
@@ -283,7 +284,8 @@ mod tests {
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         // Test with multiple ciphertexts (this should increase the bound requirements)
-        let result = trbfv.generate_smudging_error(10, 80, &mut OsRng);
+        let mut rng = rng();
+        let result = trbfv.generate_smudging_error(10, 80, &mut rng);
 
         for (poly_idx, poly) in result.iter().enumerate() {
             for (coeff_idx, coeff) in poly.iter().enumerate() {
@@ -298,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_decryption_share_generation() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = test_params();
         let n = 3;
         let threshold = 1;
@@ -317,11 +319,11 @@ mod tests {
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();
-        let ctx = params.ctx_at_level(0).unwrap();
-        let es_poly = Poly::zero(ctx, Representation::PowerBasis);
+        let ctx = params.context_at_level(0).unwrap();
+        let es_poly = Poly::<PowerBasis>::zero(ctx);
 
         let decryption_share = trbfv
-            .decryption_share(ct, (*sk_poly).clone(), es_poly)
+            .decryption_share(ct, (*sk_poly).clone().into_ntt(), es_poly)
             .unwrap();
 
         assert_eq!(decryption_share.coefficients().ncols(), params.degree());
@@ -333,7 +335,7 @@ mod tests {
     //plaintext.
     #[test]
     fn test_full_threshold_decrypt_workflow() {
-        let mut rng = OsRng;
+        let mut rng = rng();
         let params = test_params();
         let n = 3;
         let threshold = 1;
@@ -361,11 +363,11 @@ mod tests {
             let sk_poly = share_manager
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
                 .unwrap();
-            let ctx = params.ctx_at_level(0).unwrap();
-            let es_poly = Poly::zero(ctx, Representation::PowerBasis);
+            let ctx = params.context_at_level(0).unwrap();
+            let es_poly = Poly::<PowerBasis>::zero(ctx);
 
             let share = trbfv_instances[i]
-                .decryption_share(ct.clone(), (*sk_poly).clone(), es_poly)
+                .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -414,14 +416,14 @@ mod tests {
         assert_eq!(trbfv.threshold, 1);
 
         // Test that basic operations work
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let sk = SecretKey::random(&params, &mut rng);
         let share_manager = ShareManager::new(3, 1, params.clone());
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();
 
-        let shares = trbfv.generate_secret_shares_from_poly(sk_poly, rand::thread_rng());
+        let shares = trbfv.generate_secret_shares_from_poly(sk_poly, &mut rng);
         assert!(shares.is_ok());
     }
 }

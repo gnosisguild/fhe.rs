@@ -2,7 +2,7 @@
  * This module contains the public key for the l-BFV encryption scheme.
  */
 
-use crate::{Error, Result};
+use crate::{Error, Result, SerializationError};
 use std::sync::Arc;
 
 use prost::Message;
@@ -11,10 +11,10 @@ use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
 use crate::bfv::{
-    traits::TryConvertFrom, BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey,
+    BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
 };
 use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
-use fhe_math::rq::{switcher::Switcher, Poly, Representation};
+use fhe_math::rq::{Ntt, NttShoup, Poly, Representation, switcher::Switcher};
 use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 
 /// Public key for the L-BFV encryption scheme.
@@ -46,7 +46,7 @@ impl LBFVPublicKey {
         let zero = Plaintext::zero(Encoding::poly(), &sk.par).unwrap();
         let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.par.moduli().len());
         let mut seed_rng = ChaCha8Rng::from_seed(seed); // This is used to generate the seeds for the ciphertexts by creating a new
-                                                        // ChaCha8Rng from the input seed
+        // ChaCha8Rng from the input seed
 
         // Create a vector of ciphertexts, each encrypting zero, for each RNS modulus
         // [(b₁, a₁), ..., (bₗ, aₗ)].
@@ -84,7 +84,7 @@ impl LBFVPublicKey {
         &self,
         pt: &Plaintext,
         rng: &mut R,
-    ) -> Result<(Ciphertext, Poly, Poly, Poly)> {
+    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
         if self.c.is_empty() {
             return Err(Error::DefaultError(
                 "Public key has no ciphertexts available".to_string(),
@@ -94,13 +94,13 @@ impl LBFVPublicKey {
         // Use only the first ciphertext from the array
         let mut ct = self.c[0].clone();
         while ct.level != pt.level {
-            ct.mod_switch_to_next_level()?;
+            ct.switch_down()?;
         }
 
-        let ctx = self.par.ctx_at_level(ct.level)?;
-        let u = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
-        let e1 = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
-        let e2 = Poly::small(ctx, Representation::Ntt, self.par.variance, rng)?;
+        let ctx = self.par.context_at_level(ct.level)?;
+        let u = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
+        let e1 = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
+        let e2 = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
 
         let m = Zeroizing::new(pt.to_poly());
         let mut c0 = u.as_ref() * &ct.c[0];
@@ -147,7 +147,7 @@ impl LBFVPublicKey {
         ciphertext_level: usize,
         key_level: usize,
         rep: Representation,
-    ) -> Result<Vec<Poly>> {
+    ) -> Result<Vec<Poly<NttShoup>>> {
         // Necessary checks
         if ciphertext_level > self.par.max_level() {
             return Err(Error::DefaultError(
@@ -161,7 +161,7 @@ impl LBFVPublicKey {
             return Err(Error::DefaultError("Key level must be 0".to_string()));
         }
 
-        let key_ctx = self.par.ctx_at_level(key_level)?;
+        let key_ctx = self.par.context_at_level(key_level)?;
         if self.c[0].c[0].ctx() != key_ctx {
             return Err(Error::DefaultError(
                 "Public key is not at level 0".to_string(),
@@ -170,7 +170,7 @@ impl LBFVPublicKey {
 
         // Note: key switching is redundant for now.
         // Create switcher to mod switch from initial to final context (for when public key is at different level than ciphertext)
-        let ciphertext_ctx = self.par.ctx_at_level(ciphertext_level)?;
+        let ciphertext_ctx = self.par.context_at_level(ciphertext_level)?;
         let switcher = Switcher::new(ciphertext_ctx, key_ctx)?;
 
         // Extract (l - level) b polynomials and change representation accordingly
@@ -179,11 +179,16 @@ impl LBFVPublicKey {
         for i in 0..new_l {
             let mut poly = self.c[i].c[0].clone();
             if poly.ctx() != key_ctx {
-                println!("Switching from level {ciphertext_level} to level {key_level}");
-                poly.change_representation(Representation::PowerBasis);
-                poly = poly.mod_switch_to(&switcher)?;
+                poly = poly.switch(&switcher)?;
             }
-            poly.change_representation(rep.clone());
+            let poly = match rep {
+                Representation::NttShoup => poly.into_ntt_shoup(),
+                _ => {
+                    return Err(Error::DefaultError(
+                        "l-BFV extract_b_polynomials requires NttShoup representation".to_string(),
+                    ));
+                }
+            };
             b_polynomials.push(poly);
         }
         Ok(b_polynomials)
@@ -211,28 +216,13 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         // Use only the first ciphertext from the array
         let mut ct = self.c[0].clone();
         while ct.level != pt.level {
-            ct.mod_switch_to_next_level()?;
+            ct.switch_down()?;
         }
 
-        let ctx = self.par.ctx_at_level(ct.level)?;
-        let u = Zeroizing::new(Poly::small(
-            ctx,
-            Representation::Ntt,
-            self.par.variance,
-            rng,
-        )?);
-        let e1 = Zeroizing::new(Poly::small(
-            ctx,
-            Representation::Ntt,
-            self.par.variance,
-            rng,
-        )?);
-        let e2 = Zeroizing::new(Poly::small(
-            ctx,
-            Representation::Ntt,
-            self.par.variance,
-            rng,
-        )?);
+        let ctx = self.par.context_at_level(ct.level)?;
+        let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
+        let e1 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
+        let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
 
         let m = Zeroizing::new(pt.to_poly());
         let mut c0 = u.as_ref() * &ct.c[0];
@@ -276,18 +266,29 @@ impl DeserializeParametrized for LBFVPublicKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: LBFVPublicKeyProto =
-            Message::decode(bytes).map_err(|_| Error::SerializationError)?;
+        let proto: LBFVPublicKeyProto = Message::decode(bytes).map_err(|e| {
+            Error::SerializationError(SerializationError::ProtobufError {
+                message: e.to_string(),
+            })
+        })?;
 
         if proto.c.is_empty() {
-            return Err(Error::SerializationError);
+            return Err(Error::SerializationError(
+                SerializationError::InvalidFormat {
+                    reason: "LBFV public key has no ciphertexts".to_string(),
+                },
+            ));
         }
 
         let mut c: Vec<Ciphertext> = Vec::with_capacity(proto.c.len());
         for ct_proto in proto.c {
             let mut ct = Ciphertext::try_convert_from(&ct_proto, par)?;
             if ct.level != 0 {
-                return Err(Error::SerializationError);
+                return Err(Error::SerializationError(
+                    SerializationError::InvalidFormat {
+                        reason: "LBFV public key ciphertext must be at level 0".to_string(),
+                    },
+                ));
             }
             // The polynomials of a public key should not allow for variable time
             // computation.
@@ -300,7 +301,11 @@ impl DeserializeParametrized for LBFVPublicKey {
         let seed = if !proto.seed.is_empty() {
             let mut seed_array = <ChaCha8Rng as SeedableRng>::Seed::default();
             if proto.seed.len() != seed_array.len() {
-                return Err(Error::SerializationError);
+                return Err(Error::SerializationError(
+                    SerializationError::InvalidFormat {
+                        reason: "Invalid LBFV public key seed length".to_string(),
+                    },
+                ));
             }
             seed_array.copy_from_slice(&proto.seed);
             Some(seed_array)
@@ -321,14 +326,15 @@ impl DeserializeParametrized for LBFVPublicKey {
 mod tests {
     use super::LBFVPublicKey;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
+    use fhe_math::zq::Modulus;
     use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
-    use rand::{thread_rng, SeedableRng};
+    use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::error::Error;
 
     #[test]
     fn keygen() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng);
@@ -347,7 +353,7 @@ mod tests {
 
     #[test]
     fn encrypt_decrypt() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
             BfvParameters::default_arc(1, 8),
             BfvParameters::default_arc(6, 8),
@@ -358,7 +364,7 @@ mod tests {
                     let pk = LBFVPublicKey::new(&sk, &mut rng);
 
                     let pt = Plaintext::try_encode(
-                        &params.plaintext.random_vec(params.degree(), &mut rng),
+                        &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
                         Encoding::poly_at_level(level),
                         &params,
                     )?;
@@ -376,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_serialize() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
             BfvParameters::default_arc(1, 8),
             BfvParameters::default_arc(6, 8),
@@ -391,7 +397,7 @@ mod tests {
 
     #[test]
     fn test_deterministic_public_key() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = BfvParameters::default_arc(6, 8);
         let sk = SecretKey::random(&params, &mut rng);
 

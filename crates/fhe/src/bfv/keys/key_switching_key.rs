@@ -2,22 +2,22 @@
 //! Brakerski-Vaikuntanathan key switching through decomposition technique
 //! adapted to RNS as described in the HPS optimization paper (https://eprint.iacr.org/2018/117)
 
-use crate::bfv::{traits::TryConvertFrom as BfvTryConvertFrom, BfvParameters, SecretKey};
+use crate::bfv::{BfvParameters, SecretKey, traits::TryConvertFrom as BfvTryConvertFrom};
 use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
 use crate::{Error, Result};
-use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::rq::Context;
+use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::{
     rns::RnsContext,
-    rq::{Poly, Representation},
+    rq::{Ntt, NttShoup, Poly, PowerBasis},
 };
 use fhe_traits::{DeserializeWithContext, Serialize};
-use itertools::{izip, Itertools};
+use itertools::{Itertools, izip};
 use num_bigint::BigUint;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Key switching key for the BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -28,11 +28,11 @@ pub struct KeySwitchingKey {
     /// Seed used to generate c1 polynomials.
     pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
 
-    /// Key switching elements c0.
-    pub c0: Box<[Poly]>,
+    /// The key switching elements c0.
+    pub(crate) c0: Box<[Poly<NttShoup>]>,
 
-    /// Key switching elements c1.
-    pub c1: Box<[Poly]>,
+    /// The key switching elements c1.
+    pub(crate) c1: Box<[Poly<NttShoup>]>,
 
     /// Max level and context of polynomials that can be key switched. This
     /// defines the decomposition basis of the key switching key.
@@ -58,7 +58,7 @@ impl KeySwitchingKey {
     /// `from` using a random seed for generating c1 values.
     pub fn new<R: RngCore + CryptoRng>(
         sk: &SecretKey,
-        from: &Poly,
+        from: &Poly<PowerBasis>,
         ciphertext_level: usize,
         ksk_level: usize,
         rng: &mut R,
@@ -70,19 +70,20 @@ impl KeySwitchingKey {
     }
 
     /// Generate a [`KeySwitchingKey`] with a provided seed for generating c1
-    /// values
+    /// values.
     pub fn new_with_seed<R: RngCore + CryptoRng>(
         sk: &SecretKey,
-        from: &Poly,
+        from: &Poly<PowerBasis>,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         ciphertext_level: usize,
         ksk_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx_ksk = sk.par.ctx_at_level(ksk_level)?;
-        let ctx_ciphertext = sk.par.ctx_at_level(ciphertext_level)?;
+        let par = sk.par.clone();
+        let ctx_ksk = par.context_at_level(ksk_level)?.clone();
+        let ctx_ciphertext = par.context_at_level(ciphertext_level)?.clone();
 
-        if from.ctx() != ctx_ksk {
+        if from.ctx() != &ctx_ksk {
             return Err(Error::DefaultError(
                 "Incorrect context for polynomial from".to_string(),
             ));
@@ -93,33 +94,33 @@ impl KeySwitchingKey {
             let log_modulus = modulus.next_power_of_two().ilog2() as usize;
             let log_base = log_modulus / 2;
 
-            let c1 = Self::generate_c1(ctx_ksk, seed, log_modulus.div_ceil(log_base));
+            let c1 = Self::generate_c1(&ctx_ksk, seed, log_modulus.div_ceil(log_base));
             let c0 = Self::generate_c0_decomposition(sk, from, &c1, rng, log_base)?;
 
             Ok(Self {
-                par: sk.par.clone(),
+                par,
                 seed: Some(seed),
                 c0: c0.into_boxed_slice(),
                 c1: c1.into_boxed_slice(),
                 ciphertext_level,
-                ctx_ciphertext: ctx_ciphertext.clone(),
+                ctx_ciphertext,
                 ksk_level,
-                ctx_ksk: ctx_ksk.clone(),
+                ctx_ksk,
                 log_base,
             })
         } else {
-            let c1 = Self::generate_c1(ctx_ksk, seed, ctx_ciphertext.moduli().len());
+            let c1 = Self::generate_c1(&ctx_ksk, seed, ctx_ciphertext.moduli().len());
             let c0 = Self::generate_c0(sk, from, &c1, rng)?;
 
             Ok(Self {
-                par: sk.par.clone(),
+                par,
                 seed: Some(seed),
                 c0: c0.into_boxed_slice(),
                 c1: c1.into_boxed_slice(),
                 ciphertext_level,
-                ctx_ciphertext: ctx_ciphertext.clone(),
+                ctx_ciphertext,
                 ksk_level,
-                ctx_ksk: ctx_ksk.clone(),
+                ctx_ksk,
                 log_base: 0,
             })
         }
@@ -135,13 +136,13 @@ impl KeySwitchingKey {
         ctx: &Arc<Context>,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         size: usize,
-    ) -> Vec<Poly> {
+    ) -> Vec<Poly<NttShoup>> {
         let mut c1 = Vec::with_capacity(size);
         let mut rng = ChaCha8Rng::from_seed(seed);
         (0..size).for_each(|_| {
             let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
             rng.fill(&mut seed_i);
-            let mut a = Poly::random_from_seed(ctx, Representation::NttShoup, seed_i);
+            let mut a = Poly::<NttShoup>::random_from_seed(ctx, seed_i);
             unsafe { a.allow_variable_time_computations() }
             c1.push(a);
         });
@@ -151,116 +152,46 @@ impl KeySwitchingKey {
     /// Generate the c0 component of the key switching key (KSK) using the
     /// Brakerski-Vaikuntanathan key switching through decomposition
     /// technique adapted to RNS as described in the HPS optimization paper (https://eprint.iacr.org/2018/117).
-    ///
-    /// A key switching key consists of two components (c0,c1) = (KS_0, KS_1).
-    /// This function generates the KS_0 component while KS_1 is generated
-    /// separately as random polynomials.
-    ///
-    /// For each RNS modulus q_i in the basis, KS_0[i] is computed as:
-    /// KS_0[i] = [e_i - a_i·s + p·g_i]_{Q}
-    /// where:
-    /// - e_i is a small error polynomial in RNS
-    /// - a_i is the i-th random polynomial from KS_1 in RNS
-    /// - s is the secret key in RNS
-    /// - p is the input polynomial in RNS
-    /// - g_i is the RNS basis conversion factor (q̃_i · q*_i) for the current
-    ///   modulus q_i
-    ///
-    /// The size of the KS_0 vector is the same as the number of RNS moduli in
-    /// the ciphertext context, meaning polynomials, when they are key switched,
-    /// are decomposed by each modulus in the ciphertext context. This key
-    /// already has the basis of the decomposition that the deocmposed
-    /// polynomials then dot-product with to perform the key switching.
-    ///
-    /// Each element of KS_0 therefore corresponds to operations performed in
-    /// RNS, with its own error polynomial e_i and random polynomial a_i,
-    /// resulting in a collection of RNS polynomials that form the complete
-    /// KS_0 component. Each element of KS_0 is a polynomial with context equal
-    /// to the key switching key context.
-    ///
-    /// # Arguments
-    ///
-    /// * `sk` - The secret key
-    /// * `from` - The original key to switch from (in RNS representation).
-    /// * `c1` - The KS_1 polynomials (containing a_i for i in 0..k-1)
-    /// * `rng` - Random number generator
-    ///
-    /// # Returns
-    ///
-    /// * `Result<Vec<Poly>>` - The generated KS_0 polynomials, where each
-    ///   element corresponds to an RNS polynomial
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// * The c1 vector is empty
-    /// * The `from` polynomial is not in power basis representation
     fn generate_c0<R: RngCore + CryptoRng>(
         sk: &SecretKey,
-        from: &Poly,
-        c1: &[Poly],
+        from: &Poly<PowerBasis>,
+        c1: &[Poly<NttShoup>],
         rng: &mut R,
-    ) -> Result<Vec<Poly>> {
+    ) -> Result<Vec<Poly<NttShoup>>> {
         if c1.is_empty() {
             return Err(Error::DefaultError("Empty number of c1's".to_string()));
         }
-        if from.representation() != &Representation::PowerBasis {
-            return Err(Error::DefaultError(
-                "Unexpected representation for from".to_string(),
-            ));
-        }
 
-        let mut s = Zeroizing::new(Poly::try_convert_from(
-            sk.coeffs.as_ref(),
-            c1[0].ctx(),
-            false,
-            Representation::PowerBasis,
-        )?);
-        s.change_representation(Representation::Ntt);
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c1[0].ctx(), false)?
+                .into_ntt(),
+        );
 
-        // Up to size because that is the decomposition basis set by c1. We only need
-        // the garner coefficients for the moduli we are using (g₁, ..., g_size).
         let rns = RnsContext::new(&sk.par.moduli[..c1.len()])?;
 
-        // For each of the RNS moduli qi, we compute the following:
-        // a_s = a*s
-        // b = e - a*s
-        // gi = qi_tilde * qi_star
-        // g_i_from = poly * qi_tilde * qi_star
-        // b = poly * qi_tilde * qi_star - a*s + e
         let c0 = c1
             .iter()
             .enumerate()
             .map(|(i, c1i)| {
-                // a_s = a*s
-                let mut a_s = Zeroizing::new(c1i.clone());
+                let mut a_s = Zeroizing::new(c1i.clone().into_ntt());
                 a_s.disallow_variable_time_computations();
-                a_s.change_representation(Representation::Ntt);
                 *a_s.as_mut() *= s.as_ref();
-                a_s.change_representation(Representation::PowerBasis);
+                let ctx = a_s.ctx().clone();
+                let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
+                let a_s_pb = a_s_inner.into_power_basis();
 
-                // b = e - a*s
-                let mut b =
-                    Poly::small(a_s.ctx(), Representation::PowerBasis, sk.par.variance, rng)?;
-                b -= &a_s;
+                let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.par.variance, rng)?;
+                b -= &a_s_pb;
 
-                // gi = qi_tilde * qi_star
                 let gi = rns.get_garner(i).unwrap();
-
-                // g_i_from = poly * qi_tilde * qi_star
-                // We expect that every RNS component of g_i_from has all zero coefficients
-                // except for the i-th RNS component
                 let g_i_from = Zeroizing::new(gi * from);
 
-                // b = poly * qi_tilde * qi_star - a*s + e
                 b += &g_i_from;
 
-                // It is now safe to enable variable time computations.
                 unsafe { b.allow_variable_time_computations() }
-                b.change_representation(Representation::NttShoup);
-                Ok(b)
+                Ok(b.into_ntt_shoup())
             })
-            .collect::<Result<Vec<Poly>>>()?;
+            .collect::<Result<Vec<Poly<NttShoup>>>>()?;
 
         Ok(c0)
     }
@@ -269,91 +200,46 @@ impl KeySwitchingKey {
     /// key polynomial.
     fn generate_c0_decomposition<R: RngCore + CryptoRng>(
         sk: &SecretKey,
-        from: &Poly,
-        c1: &[Poly],
+        from: &Poly<PowerBasis>,
+        c1: &[Poly<NttShoup>],
         rng: &mut R,
         log_base: usize,
-    ) -> Result<Vec<Poly>> {
+    ) -> Result<Vec<Poly<NttShoup>>> {
         if c1.is_empty() {
             return Err(Error::DefaultError("Empty number of c1's".to_string()));
         }
-
-        if from.representation() != &Representation::PowerBasis {
-            return Err(Error::DefaultError(
-                "Unexpected representation for from".to_string(),
-            ));
-        }
-
-        let mut s = Zeroizing::new(Poly::try_convert_from(
-            sk.coeffs.as_ref(),
-            c1[0].ctx(),
-            false,
-            Representation::PowerBasis,
-        )?);
-        s.change_representation(Representation::Ntt);
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c1[0].ctx(), false)?
+                .into_ntt(),
+        );
 
         let c0 = c1
             .iter()
             .enumerate()
             .map(|(i, c1i)| {
-                let mut a_s = Zeroizing::new(c1i.clone());
+                let mut a_s = Zeroizing::new(c1i.clone().into_ntt());
                 a_s.disallow_variable_time_computations();
-                a_s.change_representation(Representation::Ntt);
                 *a_s.as_mut() *= s.as_ref();
-                a_s.change_representation(Representation::PowerBasis);
+                let ctx = a_s.ctx().clone();
+                let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
+                let a_s_pb = a_s_inner.into_power_basis();
 
-                let mut b =
-                    Poly::small(a_s.ctx(), Representation::PowerBasis, sk.par.variance, rng)?;
-                b -= &a_s;
+                let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.par.variance, rng)?;
+                b -= &a_s_pb;
 
                 let power = BigUint::from(1u64 << (i * log_base));
                 b += &(from * &power);
 
-                // It is now safe to enable variable time computations.
                 unsafe { b.allow_variable_time_computations() }
-                b.change_representation(Representation::NttShoup);
-                Ok(b)
+                Ok(b.into_ntt_shoup())
             })
-            .collect::<Result<Vec<Poly>>>()?;
+            .collect::<Result<Vec<Poly<NttShoup>>>>()?;
 
         Ok(c0)
     }
 
-    /// Key switch a polynomial from one secret key to another using the
-    /// Brakerski-Vaikuntanathan key switching through decomposition
-    /// technique adapted to RNS as described in the HPS optimization paper (https://eprint.iacr.org/2018/117).
-    ///
-    /// This function performs key switching on a polynomial `p` encrypted under
-    /// one secret key to obtain a ciphertext encrypted under a different
-    /// secret key. Unlike key switching a full ciphertext, this function
-    /// only handles the switching of a single polynomial (typically C1 of a
-    /// ciphertext) and does not add any existing C0 term to the result.
-    /// This makes it more flexible for use in various homomorphic
-    /// operations where different handling of the C0 term may be desired.
-    ///
-    /// The function supports two modes of operation:
-    /// - When `log_base = 0`: Direct key switching without decomposition
-    ///   (hybrid key switching)
-    /// - When `log_base > 0`: Key switching with base-2^log_base decomposition
-    ///   (RNS decomposition key switching)
-    ///
-    /// # Arguments
-    ///
-    /// * `p` - The input polynomial to key switch, must be in power basis
-    ///   representation
-    ///
-    /// # Returns
-    ///
-    /// * `Result<(Poly, Poly)>` - A tuple containing (C0, C1) of the key
-    ///   switched result
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// * The input polynomial's context doesn't match the expected ciphertext
-    ///   context
-    /// * The input polynomial is not in power basis representation
-    pub fn key_switch(&self, p: &Poly) -> Result<(Poly, Poly)> {
+    /// Key switch a polynomial.
+    pub fn key_switch(&self, p: &Poly<PowerBasis>) -> Result<(Poly<Ntt>, Poly<Ntt>)> {
         if self.log_base != 0 {
             return self.key_switch_decomposition(p);
         }
@@ -363,42 +249,80 @@ impl KeySwitchingKey {
                 "The input polynomial does not have the correct context. Its RNS representation needs to match that of the key switching key decomposition context, or in other words, the key switching key ciphertext context.".to_string(),
             ));
         }
-        if p.representation() != &Representation::PowerBasis {
-            return Err(Error::DefaultError("Incorrect representation".to_string()));
-        }
-
-        let mut c0 = Poly::zero(&self.ctx_ksk, Representation::Ntt);
-        let mut c1 = Poly::zero(&self.ctx_ksk, Representation::Ntt);
-        for (c2_i_coefficients, c0_i, c1_i) in izip!(
-            p.coefficients().outer_iter(),
-            self.c0.iter(),
-            self.c1.iter()
-        ) {
-            // Takes the coefficients of [p]_{qi} and converts them to an RNS representation
-            // by taking [[p]_qi]_qj for every RNS basis qj!
+        let mut c0 = Poly::<Ntt>::zero(&self.ctx_ksk);
+        let mut c1 = Poly::<Ntt>::zero(&self.ctx_ksk);
+        let p_coefficients = p.coefficients();
+        for (c2_i_coefficients, c0_i, c1_i) in
+            izip!(p_coefficients.outer_iter(), self.c0.iter(), self.c1.iter())
+        {
             let mut c2_i = unsafe {
-                Poly::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
+                Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
                     c2_i_coefficients.as_slice().unwrap(),
                     &self.ctx_ksk,
                 )
             };
             c0 += &(&c2_i * c0_i);
 
-            c2_i *= c1_i; // Re-uses memory, is faster
+            c2_i *= c1_i;
             c1 += &c2_i;
         }
         Ok((c0, c1))
     }
 
-    /// Key switch a polynomial.
-    fn key_switch_decomposition(&self, p: &Poly) -> Result<(Poly, Poly)> {
+    /// Key switch a polynomial, writing the result in-place.
+    pub fn key_switch_assign(
+        &self,
+        p: &Poly<PowerBasis>,
+        c0: &mut Poly<Ntt>,
+        c1: &mut Poly<Ntt>,
+    ) -> Result<()> {
+        if self.log_base != 0 {
+            let (k0, k1) = self.key_switch_decomposition(p)?;
+            *c0 = k0;
+            *c1 = k1;
+            return Ok(());
+        }
+
         if p.ctx().as_ref() != self.ctx_ciphertext.as_ref() {
             return Err(Error::DefaultError(
                 "The input polynomial does not have the correct context.".to_string(),
             ));
         }
-        if p.representation() != &Representation::PowerBasis {
-            return Err(Error::DefaultError("Incorrect representation".to_string()));
+        if c0.ctx().as_ref() != self.ctx_ksk.as_ref() {
+            *c0 = Poly::<Ntt>::zero(&self.ctx_ksk);
+        } else {
+            c0.zeroize();
+        }
+
+        if c1.ctx().as_ref() != self.ctx_ksk.as_ref() {
+            *c1 = Poly::<Ntt>::zero(&self.ctx_ksk);
+        } else {
+            c1.zeroize();
+        }
+
+        let p_coefficients = p.coefficients();
+        for (c2_i_coefficients, c0_i, c1_i) in
+            izip!(p_coefficients.outer_iter(), self.c0.iter(), self.c1.iter())
+        {
+            let mut c2_i = unsafe {
+                Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
+                    c2_i_coefficients.as_slice().unwrap(),
+                    &self.ctx_ksk,
+                )
+            };
+            *c0 += &(&c2_i * c0_i);
+            c2_i *= c1_i;
+            *c1 += &c2_i;
+        }
+        Ok(())
+    }
+
+    /// Key switch a polynomial using base decomposition.
+    fn key_switch_decomposition(&self, p: &Poly<PowerBasis>) -> Result<(Poly<Ntt>, Poly<Ntt>)> {
+        if p.ctx().as_ref() != self.ctx_ciphertext.as_ref() {
+            return Err(Error::DefaultError(
+                "The input polynomial does not have the correct context.".to_string(),
+            ));
         }
 
         let log_modulus = p
@@ -417,11 +341,11 @@ impl KeySwitchingKey {
             coefficients.iter_mut().for_each(|c| *c >>= self.log_base);
         });
 
-        let mut c0 = Poly::zero(&self.ctx_ksk, Representation::Ntt);
-        let mut c1 = Poly::zero(&self.ctx_ksk, Representation::Ntt);
+        let mut c0 = Poly::<Ntt>::zero(&self.ctx_ksk);
+        let mut c1 = Poly::<Ntt>::zero(&self.ctx_ksk);
         for (c2_i_coefficients, c0_i, c1_i) in izip!(c2i.iter(), self.c0.iter(), self.c1.iter()) {
             let mut c2_i = unsafe {
-                Poly::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
+                Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
                     c2_i_coefficients.as_slice(),
                     &self.ctx_ksk,
                 )
@@ -460,8 +384,8 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
     fn try_convert_from(value: &KeySwitchingKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
         let ciphertext_level = value.ciphertext_level as usize;
         let ksk_level = value.ksk_level as usize;
-        let ctx_ksk = par.ctx_at_level(ksk_level)?;
-        let ctx_ciphertext = par.ctx_at_level(ciphertext_level)?;
+        let ctx_ksk = par.context_at_level(ksk_level)?.clone();
+        let ctx_ciphertext = par.context_at_level(ciphertext_level)?.clone();
 
         let c0_size: usize;
         let log_base = value.log_base as usize;
@@ -501,20 +425,20 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
         };
 
         let c1 = if let Some(seed) = seed {
-            Self::generate_c1(ctx_ksk, seed, value.c0.len())
+            Self::generate_c1(&ctx_ksk, seed, value.c0.len())
         } else {
             value
                 .c1
                 .iter()
-                .map(|c1i| Poly::from_bytes(c1i, ctx_ksk).map_err(Error::MathError))
-                .collect::<Result<Vec<Poly>>>()?
+                .map(|c1i| Poly::<NttShoup>::from_bytes(c1i, &ctx_ksk).map_err(Error::MathError))
+                .collect::<Result<Vec<Poly<NttShoup>>>>()?
         };
 
         let c0 = value
             .c0
             .iter()
-            .map(|c0i| Poly::from_bytes(c0i, ctx_ksk).map_err(Error::MathError))
-            .collect::<Result<Vec<Poly>>>()?;
+            .map(|c0i| Poly::<NttShoup>::from_bytes(c0i, &ctx_ksk).map_err(Error::MathError))
+            .collect::<Result<Vec<Poly<NttShoup>>>>()?;
 
         Ok(Self {
             par: par.clone(),
@@ -522,9 +446,9 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
             c0: c0.into_boxed_slice(),
             c1: c1.into_boxed_slice(),
             ciphertext_level,
-            ctx_ciphertext: ctx_ciphertext.clone(),
+            ctx_ciphertext,
             ksk_level,
-            ctx_ksk: ctx_ksk.clone(),
+            ctx_ksk,
             log_base: value.log_base as usize,
         })
     }
@@ -533,27 +457,27 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
 #[cfg(test)]
 mod tests {
     use crate::bfv::{
-        keys::key_switching_key::KeySwitchingKey, traits::TryConvertFrom, BfvParameters, SecretKey,
+        BfvParameters, SecretKey, keys::key_switching_key::KeySwitchingKey, traits::TryConvertFrom,
     };
     use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
     use fhe_math::{
         rns::RnsContext,
-        rq::{traits::TryConvertFrom as TryConvertFromPoly, Poly, Representation},
+        rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom as TryConvertFromPoly},
     };
     use num_bigint::BigUint;
-    use rand::thread_rng;
+    use rand::rng;
     use std::error::Error;
 
     #[test]
     fn constructor() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(6, 8),
-            BfvParameters::default_arc(3, 8),
+            BfvParameters::default_arc(6, 16),
+            BfvParameters::default_arc(3, 16),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
-            let ctx = params.ctx_at_level(0)?;
-            let p = Poly::small(ctx, Representation::PowerBasis, 10, &mut rng)?;
+            let ctx = params.context_at_level(0)?;
+            let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
             let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng);
             assert!(ksk.is_ok());
         }
@@ -562,15 +486,15 @@ mod tests {
 
     #[test]
     fn constructor_last_level() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(6, 8),
-            BfvParameters::default_arc(3, 8),
+            BfvParameters::default_arc(6, 16),
+            BfvParameters::default_arc(3, 16),
         ] {
             let level = params.moduli().len() - 1;
             let sk = SecretKey::random(&params, &mut rng);
-            let ctx = params.ctx_at_level(level)?;
-            let p = Poly::small(ctx, Representation::PowerBasis, 10, &mut rng)?;
+            let ctx = params.context_at_level(level)?;
+            let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
             let ksk = KeySwitchingKey::new(&sk, &p, level, level, &mut rng);
             assert!(ksk.is_ok());
         }
@@ -579,32 +503,25 @@ mod tests {
 
     #[test]
     fn key_switch() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
-        for params in [BfvParameters::default_arc(6, 8)] {
+        let mut rng = rng();
+        for params in [BfvParameters::default_arc(6, 16)] {
             for _ in 0..100 {
                 let sk = SecretKey::random(&params, &mut rng);
-                let ctx = params.ctx_at_level(0)?;
-                let mut p = Poly::small(ctx, Representation::PowerBasis, 10, &mut rng)?;
+                let ctx = params.context_at_level(0)?;
+                let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
                 let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
-                let mut s = Poly::try_convert_from(
-                    sk.coeffs.as_ref(),
-                    ctx,
-                    false,
-                    Representation::PowerBasis,
-                )
-                .map_err(crate::Error::MathError)?;
-                s.change_representation(Representation::Ntt);
+                let s = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)
+                    .map_err(crate::Error::MathError)?
+                    .into_ntt();
 
-                let mut input = Poly::random(ctx, Representation::PowerBasis, &mut rng);
+                let input = Poly::<PowerBasis>::random(ctx, &mut rng);
                 let (c0, c1) = ksk.key_switch(&input)?;
 
-                let mut c2 = &c0 + &(&c1 * &s);
-                c2.change_representation(Representation::PowerBasis);
+                let c2 = (&c0 + &(&c1 * &s)).into_power_basis();
 
-                input.change_representation(Representation::Ntt);
-                p.change_representation(Representation::Ntt);
-                let mut c3 = &input * &p;
-                c3.change_representation(Representation::PowerBasis);
+                let input_ntt = input.into_ntt();
+                let p_ntt = p.into_ntt();
+                let c3 = (&input_ntt * &p_ntt).into_power_basis();
 
                 let rns = RnsContext::new(&params.moduli)?;
                 Vec::<BigUint>::from(&(&c2 - &c3)).iter().for_each(|b| {
@@ -616,33 +533,49 @@ mod tests {
     }
 
     #[test]
+    fn key_switch_assign_matches() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        {
+            let params = BfvParameters::default_arc(6, 16);
+            let sk = SecretKey::random(&params, &mut rng);
+            let ctx = params.context_at_level(0)?;
+            let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+            let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
+            let input = Poly::<PowerBasis>::random(ctx, &mut rng);
+
+            let (c0, c1) = ksk.key_switch(&input)?;
+
+            let mut a0 = Poly::<Ntt>::zero(&ksk.ctx_ksk);
+            let mut a1 = Poly::<Ntt>::zero(&ksk.ctx_ksk);
+            ksk.key_switch_assign(&input, &mut a0, &mut a1)?;
+
+            assert_eq!(c0, a0);
+            assert_eq!(c1, a1);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn key_switch_decomposition() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
-        for params in [BfvParameters::default_arc(6, 8)] {
+        let mut rng = rng();
+        for params in [BfvParameters::default_arc(6, 16)] {
             for _ in 0..100 {
                 let sk = SecretKey::random(&params, &mut rng);
-                let ctx = params.ctx_at_level(5)?;
-                let mut p = Poly::small(ctx, Representation::PowerBasis, 10, &mut rng)?;
+                let ctx = params.context_at_level(5)?;
+                let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
                 let ksk = KeySwitchingKey::new(&sk, &p, 5, 5, &mut rng)?;
-                let mut s = Poly::try_convert_from(
-                    sk.coeffs.as_ref(),
-                    ctx,
-                    false,
-                    Representation::PowerBasis,
-                )
-                .map_err(crate::Error::MathError)?;
-                s.change_representation(Representation::Ntt);
+                let s = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)
+                    .map_err(crate::Error::MathError)?
+                    .into_ntt();
 
-                let mut input = Poly::random(ctx, Representation::PowerBasis, &mut rng);
+                let input = Poly::<PowerBasis>::random(ctx, &mut rng);
                 let (c0, c1) = ksk.key_switch(&input)?;
 
-                let mut c2 = &c0 + &(&c1 * &s);
-                c2.change_representation(Representation::PowerBasis);
+                let c2 = (&c0 + &(&c1 * &s)).into_power_basis();
 
-                input.change_representation(Representation::Ntt);
-                p.change_representation(Representation::Ntt);
-                let mut c3 = &input * &p;
-                c3.change_representation(Representation::PowerBasis);
+                let input_ntt = input.into_ntt();
+                let p_ntt = p.into_ntt();
+                let c3 = (&input_ntt * &p_ntt).into_power_basis();
 
                 let rns = RnsContext::new(ctx.moduli())?;
                 Vec::<BigUint>::from(&(&c2 - &c3)).iter().for_each(|b| {
@@ -658,14 +591,14 @@ mod tests {
 
     #[test]
     fn proto_conversion() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(6, 8),
-            BfvParameters::default_arc(3, 8),
+            BfvParameters::default_arc(6, 16),
+            BfvParameters::default_arc(3, 16),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
-            let ctx = params.ctx_at_level(0)?;
-            let p = Poly::small(ctx, Representation::PowerBasis, 10, &mut rng)?;
+            let ctx = params.context_at_level(0)?;
+            let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
             let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
             let ksk_proto = KeySwitchingKeyProto::from(&ksk);
             assert_eq!(ksk, KeySwitchingKey::try_convert_from(&ksk_proto, &params)?);
@@ -675,22 +608,16 @@ mod tests {
 
     #[test]
     fn compare_constructors() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [BfvParameters::default_arc(6, 8)] {
             let sk = SecretKey::random(&params, &mut rng);
-            let ctx = params.ctx_at_level(0)?;
-            let p = Poly::small(ctx, Representation::PowerBasis, 10, &mut rng)?;
+            let ctx = params.context_at_level(0)?;
+            let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
 
-            // Create first key with new()
             let ksk1 = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
-
-            // Get the seed from the first key
             let seed = ksk1.seed.expect("Key should have a seed");
-
-            // Create second key with new_with_seed() using the same seed
             let ksk2 = KeySwitchingKey::new_with_seed(&sk, &p, seed, 0, 0, &mut rng)?;
 
-            // Compare c1 values
             assert_eq!(ksk1.c1.len(), ksk2.c1.len());
             for (c1_1, c1_2) in ksk1.c1.iter().zip(ksk2.c1.iter()) {
                 assert_eq!(c1_1, c1_2);
