@@ -71,11 +71,13 @@ impl CommonRandomPoly {
     }
 
     /// Get a reference to the underlying polynomial.
+    #[must_use]
     pub fn poly(&self) -> &Poly<Ntt> {
         &self.poly
     }
 
     /// Get the underlying polynomial (consumes self).
+    #[must_use]
     pub fn into_poly(self) -> Poly<Ntt> {
         self.poly
     }

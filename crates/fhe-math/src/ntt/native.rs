@@ -27,6 +27,7 @@ pub struct NttOperator {
 }
 
 /// Serializable form of [`NttOperator`].
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NttOperatorRaw {
     /// Modulus p. It is the modulus of the NTT.
@@ -372,8 +373,10 @@ impl NttOperator {
     }
 }
 
+#[allow(dead_code)]
 impl NttOperator {
     /// Export this operator into a raw representation.
+    #[must_use]
     pub fn to_raw(&self) -> NttOperatorRaw {
         NttOperatorRaw {
             modulus: *self.p,
@@ -389,6 +392,7 @@ impl NttOperator {
     }
 }
 
+#[allow(dead_code)]
 impl NttOperatorRaw {
     /// Reconstruct an [`NttOperator`] from its raw representation.
     pub fn into_operator(self) -> Result<NttOperator> {

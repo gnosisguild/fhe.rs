@@ -65,6 +65,7 @@ impl ShamirSecretSharing {
     /// # Returns
     ///
     /// A new `ShamirSecretSharing` instance configured with the given parameters.
+    #[must_use]
     pub fn new(threshold: usize, share_amount: usize, prime: BigInt) -> Self {
         Self {
             threshold,
@@ -166,6 +167,7 @@ impl ShamirSecretSharing {
     /// # Panics
     ///
     /// Panics if the number of shares provided is not equal to the threshold + one.
+    #[must_use]
     pub fn recover(&self, shares: &[(usize, BigInt)]) -> BigInt {
         assert!(shares.len() == (self.threshold + 1), "wrong shares number");
         let (xs, ys): (Vec<usize>, Vec<BigInt>) = shares.iter().cloned().unzip();
@@ -177,6 +179,8 @@ impl ShamirSecretSharing {
         }
     }
 
+    // indices i and item iterate 0..len, same as xs_bigint.len() and ys.len()
+    #[allow(clippy::indexing_slicing)]
     fn lagrange_interpolation(&self, x: BigInt, xs: Vec<usize>, ys: Vec<BigInt>) -> BigInt {
         let len = xs.len();
         let xs_bigint: Vec<BigInt> = xs.iter().map(|x| BigInt::from(*x as i64)).collect();
@@ -258,6 +262,7 @@ impl ShamirSecretSharing {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     #[test]

@@ -484,6 +484,7 @@ impl Modulus {
     /// # Safety
     /// This function is not constant time and its timing may reveal information
     /// about the values being centered.
+    #[must_use]
     pub unsafe fn center_vec_vt(&self, a: &[u64]) -> Vec<i64> {
         a.iter()
             .map(|ai| unsafe { self.center_vt(*ai) })

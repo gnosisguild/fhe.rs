@@ -4,6 +4,8 @@
 //! encrypted under per-party BFV keys before exchange, then decrypted locally
 //! before threshold decryption.
 
+#![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
+
 mod util;
 
 use std::{env, error::Error, process::exit, sync::Arc};

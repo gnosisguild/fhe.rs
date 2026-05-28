@@ -182,6 +182,7 @@ impl FheParametrized for TRBFV {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};

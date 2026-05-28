@@ -54,6 +54,7 @@ impl GenericRelinearizationKey {
     }
 
     /// Get the key level of the relinearization key
+    #[must_use]
     pub fn key_level(&self) -> usize {
         match self {
             GenericRelinearizationKey::Standard(rk) => rk.key_level(),
@@ -62,6 +63,7 @@ impl GenericRelinearizationKey {
     }
 
     /// Get the ciphertext level of the relinearization key
+    #[must_use]
     pub fn ciphertext_level(&self) -> usize {
         match self {
             GenericRelinearizationKey::Standard(rk) => rk.ciphertext_level(),
@@ -70,6 +72,7 @@ impl GenericRelinearizationKey {
     }
 
     /// Get the BFV parameters of the relinearization key
+    #[must_use]
     pub fn parameters(&self) -> Arc<BfvParameters> {
         match self {
             GenericRelinearizationKey::Standard(rk) => rk.parameters(),

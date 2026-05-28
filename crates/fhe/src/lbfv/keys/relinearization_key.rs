@@ -202,6 +202,7 @@ impl LBFVRelinearizationKey {
     /// # Returns
     /// * `Ok(())` - If relinearization succeeds. The input ciphertext is modified in-place to have 2 parts (degree 1).
     /// * `Err` - If the ciphertext does not have exactly 3 parts or is at the wrong level.
+    #[allow(clippy::indexing_slicing)] // ct.c checked to have exactly 3 elements above; c[0..1] always valid BFV invariant
     pub fn relinearizes(&self, ct: &mut Ciphertext) -> Result<()> {
         if ct.c.len() != 3 {
             Err(Error::DefaultError(
@@ -255,6 +256,7 @@ impl LBFVRelinearizationKey {
     /// # Returns
     /// * `usize` - The ciphertext level of the relinearization key which is the same
     ///   as the ciphertext level of the key switching key.
+    #[must_use]
     pub fn ciphertext_level(&self) -> usize {
         self.ksk_r_to_s.ciphertext_level
     }
@@ -264,6 +266,7 @@ impl LBFVRelinearizationKey {
     /// # Returns
     /// * `Arc<Context>` - The ciphertext context of the relinearization key which is the same
     ///   as the ciphertext context of the key switching key.
+    #[must_use]
     pub fn ciphertext_ctx(&self) -> Arc<Context> {
         self.ksk_r_to_s.ctx_ciphertext.clone()
     }
@@ -273,6 +276,7 @@ impl LBFVRelinearizationKey {
     /// # Returns
     /// * `usize` - The key level of the relinearization key which is the same
     ///   as the key level of the key switching key.
+    #[must_use]
     pub fn key_level(&self) -> usize {
         self.ksk_r_to_s.ksk_level
     }
@@ -282,6 +286,7 @@ impl LBFVRelinearizationKey {
     /// # Returns
     /// * `Arc<Context>` - The key context of the relinearization key which is the same
     ///   as the key context of the key switching key.
+    #[must_use]
     pub fn key_ctx(&self) -> Arc<Context> {
         self.ksk_r_to_s.ctx_ksk.clone()
     }
@@ -291,6 +296,7 @@ impl LBFVRelinearizationKey {
     /// # Returns
     /// * `Arc<BfvParameters>` - The BFV parameters of the relinearization key which is the same
     ///   as the BFV parameters of the key switching key.
+    #[must_use]
     pub fn parameters(&self) -> Arc<BfvParameters> {
         self.ksk_r_to_s.par.clone()
     }
@@ -449,6 +455,7 @@ impl DeserializeParametrized for LBFVRelinearizationKey {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::bfv::{Encoding, Plaintext};

@@ -5,6 +5,7 @@ use crate::Error;
 /// Helper functions to create threshold-specific errors using the general Error types.
 impl Error {
     /// Create an invalid party count error.
+    #[must_use]
     pub fn invalid_party_count(got: usize, min: usize) -> Self {
         Error::TooFewValues {
             actual: got,
@@ -13,6 +14,7 @@ impl Error {
     }
 
     /// Create an insufficient shares error.
+    #[must_use]
     pub fn insufficient_shares(got: usize, required: usize) -> Self {
         Error::TooFewValues {
             actual: got,
@@ -21,6 +23,7 @@ impl Error {
     }
 
     /// Create a threshold too large error.
+    #[must_use]
     pub fn threshold_too_large(threshold: usize, n: usize) -> Self {
         Error::UnspecifiedInput(format!(
             "Threshold {threshold} must be strictly less than half the number of parties {n}"
@@ -28,6 +31,7 @@ impl Error {
     }
 
     /// Create an invalid party ID error.
+    #[must_use]
     pub fn invalid_party_id(party_id: usize, max_party_id: usize) -> Self {
         Error::UnspecifiedInput(format!(
             "Invalid party ID: {party_id}, must be between 0 and {max_party_id}"
@@ -41,6 +45,7 @@ impl Error {
     }
 
     /// Create a smudging error.
+    #[must_use]
     pub fn smudging(msg: String) -> Self {
         Error::UnspecifiedInput(msg)
     }
@@ -64,11 +69,13 @@ impl Error {
     }
 
     /// Create a malformed shares error.
+    #[must_use]
     pub fn malformed_shares(party_id: usize, reason: String) -> Self {
         Error::UnspecifiedInput(format!("Malformed shares from party {party_id}: {reason}"))
     }
 
     /// Create an inconsistent degree error.
+    #[must_use]
     pub fn inconsistent_degree(expected: usize, got: usize) -> Self {
         Error::UnspecifiedInput(format!(
             "Inconsistent polynomial degree: expected {expected}, found {got}"
@@ -76,6 +83,7 @@ impl Error {
     }
 
     /// Create an inconsistent moduli error.
+    #[must_use]
     pub fn inconsistent_moduli(expected: usize, got: usize) -> Self {
         Error::UnspecifiedInput(format!(
             "Inconsistent moduli: expected {expected} moduli, found {got}"

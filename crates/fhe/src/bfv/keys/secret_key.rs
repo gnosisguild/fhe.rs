@@ -45,17 +45,20 @@ impl SecretKey {
     pub const SK_VARIANCE: f32 = 0.5;
 
     /// Get the secret key bound (2 * variance).
+    #[must_use]
     pub fn sk_bound() -> f32 {
         2.0 * Self::SK_VARIANCE
     }
 
     /// Generate a random [`SecretKey`].
+    #[must_use]
     pub fn random<R: RngCore + CryptoRng>(par: &Arc<BfvParameters>, rng: &mut R) -> Self {
         let s_coefficients = sample_vec_cbd_f32(par.degree(), Self::SK_VARIANCE, rng).unwrap();
         Self::new(s_coefficients, par)
     }
 
     /// Generate a [`SecretKey`] from its coefficients.
+    #[must_use]
     pub fn new(coeffs: Vec<i64>, par: &Arc<BfvParameters>) -> Self {
         Self {
             par: par.to_owned(),

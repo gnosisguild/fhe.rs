@@ -60,6 +60,7 @@ impl ScalingFactor {
 
 impl ScalingFactor {
     /// Export this scaling factor into a raw representation.
+    #[must_use]
     pub fn to_raw(&self) -> ScalingFactorRaw {
         ScalingFactorRaw {
             numerator: self.numerator.to_bytes_be(),
@@ -71,6 +72,7 @@ impl ScalingFactor {
 
 impl ScalingFactorRaw {
     /// Import a scaling factor from raw bytes.
+    #[must_use]
     pub fn into_scaling_factor(self) -> ScalingFactor {
         let numerator = BigUint::from_bytes_be(&self.numerator);
         let denominator = BigUint::from_bytes_be(&self.denominator);
@@ -419,6 +421,7 @@ impl RnsScaler {
 
 impl RnsScaler {
     /// Export this scaler to a raw representation.
+    #[must_use]
     pub fn to_raw(&self) -> RnsScalerRaw {
         RnsScalerRaw {
             scaling_factor: self.scaling_factor.to_raw(),
@@ -441,6 +444,7 @@ impl RnsScaler {
 
 impl RnsScalerRaw {
     /// Import a scaler from its raw form.
+    #[must_use]
     pub fn into_scaler(self, from: &Arc<RnsContext>, to: &Arc<RnsContext>) -> RnsScaler {
         RnsScaler {
             from: from.clone(),

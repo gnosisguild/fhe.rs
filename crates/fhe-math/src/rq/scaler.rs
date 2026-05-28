@@ -138,11 +138,13 @@ impl Scaler {
 
 impl Scaler {
     /// Returns the source context associated with this scaler.
+    #[must_use]
     pub fn from_context(&self) -> &Arc<Context> {
         &self.from
     }
 
     /// Returns the destination context associated with this scaler.
+    #[must_use]
     pub fn to_context(&self) -> &Arc<Context> {
         &self.to
     }
@@ -150,6 +152,7 @@ impl Scaler {
 
 impl Scaler {
     /// Export this scaler to a raw representation.
+    #[must_use]
     pub fn to_raw(&self) -> ScalerRaw {
         ScalerRaw {
             number_common_moduli: self.number_common_moduli,

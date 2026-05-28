@@ -9,6 +9,7 @@ use rand::Rng;
 use rayon::prelude::*;
 
 /// Draw `n` samples from centered truncated Gaussian with sigma = bound/3.
+#[must_use]
 pub fn sample_bigint_normal_vec(bound: &BigInt, n: usize) -> Vec<BigInt> {
     (0..n)
         .into_par_iter()
@@ -62,12 +63,11 @@ fn ratio_to_bigint(ratio: f64, bound: &BigInt) -> BigInt {
     debug_assert!((-1.0..=1.0).contains(&ratio));
 
     // Fast path for small bounds
-    if let Some(bf) = bound.to_f64() {
-        if bf.is_finite() {
-            if let Some(v) = (ratio * bf).round().to_i128() {
-                return BigInt::from(v);
-            }
-        }
+    if let Some(bf) = bound.to_f64()
+        && bf.is_finite()
+        && let Some(v) = (ratio * bf).round().to_i128()
+    {
+        return BigInt::from(v);
     }
 
     // High-precision path for large bounds

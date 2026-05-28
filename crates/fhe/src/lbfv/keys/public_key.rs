@@ -80,6 +80,7 @@ impl LBFVPublicKey {
     /// Encrypt a plaintext with the public key.
     /// The encryption is done in the same level as the plaintext.
     /// Returns the ciphertext and the noise polynomials.
+    #[allow(clippy::indexing_slicing, clippy::type_complexity)] // ct.c always has exactly 2 components (BFV invariant)
     pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
@@ -142,6 +143,8 @@ impl LBFVPublicKey {
     ///   - The key level is not 0 (current limitation)
     ///   - The public key is not at level 0
     ///   - Any polynomial operations fail during mod switching or representation changes
+    // self.c[0..new_l] is always valid (self.c has self.l elements, new_l <= self.l)
+    #[allow(clippy::indexing_slicing)]
     pub fn extract_b_polynomials(
         &self,
         ciphertext_level: usize,
@@ -183,7 +186,7 @@ impl LBFVPublicKey {
             }
             let poly = match rep {
                 Representation::NttShoup => poly.into_ntt_shoup(),
-                _ => {
+                Representation::PowerBasis | Representation::Ntt => {
                     return Err(Error::DefaultError(
                         "l-BFV extract_b_polynomials requires NttShoup representation".to_string(),
                     ));
@@ -202,6 +205,7 @@ impl FheParametrized for LBFVPublicKey {
 impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
     type Error = Error;
 
+    #[allow(clippy::indexing_slicing)] // ct.c always has exactly 2 components (BFV invariant)
     fn try_encrypt<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
@@ -323,6 +327,7 @@ impl DeserializeParametrized for LBFVPublicKey {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::LBFVPublicKey;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};

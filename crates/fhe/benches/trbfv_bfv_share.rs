@@ -1,9 +1,10 @@
+//! Benchmarks for threshold BFV share operations.
 use criterion::{Criterion, criterion_group, criterion_main};
 use fhe::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::{CommonRandomPoly, PublicKeyShare};
 use fhe::trbfv::{ShareManager, TRBFV};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use rand::{rngs::OsRng, thread_rng};
+use rand::rng as make_rng;
 use std::sync::Arc;
 
 fn format_bytes(bytes: usize) -> String {
@@ -77,7 +78,7 @@ fn bench_data_sizes(c: &mut Criterion) {
     );
 
     // Generate Common Reference Polynomial
-    let crp = CommonRandomPoly::new(&params_trbfv, &mut thread_rng()).unwrap();
+    let crp = CommonRandomPoly::new(&params_trbfv, &mut make_rng()).unwrap();
 
     // Setup trBFV
     let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
@@ -89,12 +90,11 @@ fn bench_data_sizes(c: &mut Criterion) {
     let mut all_esi_shares = Vec::new();
 
     for _party_id in 0..num_parties {
-        let mut rng = OsRng;
-        let mut thread_rng = thread_rng();
+        let mut rng = make_rng();
 
         // Generate threshold BFV keys
         let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng).unwrap();
+        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut make_rng()).unwrap();
 
         // Generate Shamir shares of the secret key
         let mut share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone());
@@ -115,7 +115,7 @@ fn bench_data_sizes(c: &mut Criterion) {
 
         // Generate BFV keys for share encryption
         let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
-        let pk_bfv = PublicKey::new(&sk_bfv, &mut thread_rng);
+        let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
 
         all_sk_shares.push(sk_sss.clone());
         all_esi_shares.push(esi_sss.clone());
@@ -155,7 +155,7 @@ fn bench_data_sizes(c: &mut Criterion) {
     for (_, _, _, _, sk_sss, esi_sss) in parties.iter() {
         for (receiver_idx, receiver_party) in parties.iter().enumerate().take(num_parties) {
             let receiver_pk = &receiver_party.3;
-            let mut rng = thread_rng();
+            let mut rng = make_rng();
 
             // Encrypt sk shares
             for sk_sss_m in sk_sss.iter().take(num_moduli) {
@@ -387,15 +387,15 @@ fn bench_timing_operations(c: &mut Criterion) {
     // Benchmark: Generate BFV key pair for share encryption
     group.bench_function("generate_bfv_keypair", |b| {
         b.iter(|| {
-            let mut rng = OsRng;
+            let mut rng = make_rng();
             let sk = SecretKey::random(&params_bfv, &mut rng);
-            let pk = PublicKey::new(&sk, &mut thread_rng());
+            let pk = PublicKey::new(&sk, &mut make_rng());
             (sk, pk)
         });
     });
 
     // Benchmark: Generate Shamir shares
-    let mut rng = OsRng;
+    let mut rng = make_rng();
     let sk_share = SecretKey::random(&params_trbfv, &mut rng);
     let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
 
@@ -413,20 +413,20 @@ fn bench_timing_operations(c: &mut Criterion) {
     });
 
     // Benchmark: Encrypt a single share
-    let sk_bfv = SecretKey::random(&params_bfv, &mut OsRng);
-    let pk_bfv = PublicKey::new(&sk_bfv, &mut thread_rng());
+    let sk_bfv = SecretKey::random(&params_bfv, &mut make_rng());
+    let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
     let test_share: Vec<u64> = (0..degree).map(|i| i as u64 % 1000).collect();
 
     group.bench_function("encrypt_single_share", |b| {
         b.iter(|| {
             let pt = Plaintext::try_encode(&test_share, Encoding::poly(), &params_bfv).unwrap();
-            pk_bfv.try_encrypt(&pt, &mut thread_rng()).unwrap()
+            pk_bfv.try_encrypt(&pt, &mut make_rng()).unwrap()
         });
     });
 
     // Benchmark: Decrypt a single share
     let pt = Plaintext::try_encode(&test_share, Encoding::poly(), &params_bfv).unwrap();
-    let ct = pk_bfv.try_encrypt(&pt, &mut thread_rng()).unwrap();
+    let ct = pk_bfv.try_encrypt(&pt, &mut make_rng()).unwrap();
 
     group.bench_function("decrypt_single_share", |b| {
         b.iter(|| {

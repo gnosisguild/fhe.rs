@@ -71,6 +71,7 @@ impl FhePlaintext for Plaintext {
 impl Plaintext {
     /// Centered reduction for Greco/threshold BFV: scale by `q mod t`, center each
     /// coefficient with threshold `(p-1)/2`, multiply by per-limb delta, then lift to NTT.
+    #[allow(clippy::panic)] // panic is unreachable: values are computed mod a u64-sized modulus
     pub(crate) fn to_poly(&self) -> Poly<Ntt> {
         let ctx_lvl = self.par.context_level_at(self.level).unwrap();
         let ctx = &ctx_lvl.poly_context;

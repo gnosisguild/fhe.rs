@@ -51,6 +51,7 @@ impl ShareManager {
     /// - `n`: Total number of parties
     /// - `threshold`: Minimum number of shares required for reconstruction
     /// - `params`: BFV parameters
+    #[must_use]
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Self {
         //Note that in case we consider in the future using qi's that are not prime numbers (so
         //they would be only satisfying the condition of being coprime to each other which is
@@ -109,6 +110,8 @@ impl ShareManager {
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
+    // seeds[i] is indexed for i in 0..moduli.len(), which equals seeds.len()
+    #[allow(clippy::indexing_slicing)]
     pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
         &mut self,
         poly: Zeroizing<Poly<PowerBasis>>,
@@ -116,7 +119,10 @@ impl ShareManager {
     ) -> Result<Vec<Array2<u64>>, Error> {
         let moduli: Vec<u64> = poly.ctx().moduli().to_vec();
 
-        let min_modulus = moduli.iter().min().expect("moduli vector is empty");
+        let min_modulus = moduli
+            .iter()
+            .min()
+            .ok_or_else(|| Error::DefaultError("moduli vector is empty".to_string()))?;
 
         assert!(
             self.n < (*min_modulus).try_into().unwrap(),
@@ -219,6 +225,7 @@ impl ShareManager {
     ///
     /// # Returns
     /// A decryption share polynomial that contributes to the final decryption
+    #[allow(clippy::indexing_slicing)] // BFV ciphertext always has exactly 2 components
     pub fn decryption_share(
         &self,
         ciphertext: Arc<Ciphertext>,
@@ -244,6 +251,8 @@ impl ShareManager {
     ///
     /// # Returns
     /// The decrypted plaintext
+    // All indexing is on vectors built with known sizes matching the index ranges
+    #[allow(clippy::indexing_slicing)]
     pub fn decrypt_from_shares(
         &self,
         d_share_polys: Vec<Poly<PowerBasis>>,
@@ -366,6 +375,12 @@ impl ShareManager {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};

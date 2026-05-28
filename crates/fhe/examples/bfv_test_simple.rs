@@ -4,6 +4,8 @@
 //! decryption recovers the original data. Useful when validating parameter sets
 //! used alongside threshold BFV workflows.
 
+#![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
+
 use fhe::bfv::{BfvParameters, BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use std::error::Error;

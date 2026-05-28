@@ -159,11 +159,13 @@ impl BfvParameters {
     }
 
     /// Returns the variance
+    #[must_use]
     pub const fn variance(&self) -> usize {
         self.variance
     }
 
     /// Get the error1_variance
+    #[must_use]
     pub fn get_error1_variance(&self) -> &BigUint {
         &self.error1_variance
     }
@@ -354,6 +356,7 @@ impl BfvParameters {
     }
 
     /// Create a new BfvParameters with custom error1_variance for threshold BFV
+    #[must_use]
     pub fn with_error1_variance(mut self, error1_variance: BigUint) -> Self {
         self.error1_variance = error1_variance;
         self

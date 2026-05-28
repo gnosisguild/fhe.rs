@@ -59,6 +59,7 @@ impl RelinearizationKey {
     }
 
     /// Generate a [`RelinearizationKey`] from a [`KeySwitchingKey`].
+    #[must_use]
     pub fn new_from_ksk(ksk: KeySwitchingKey) -> Self {
         Self { ksk }
     }
@@ -142,16 +143,19 @@ impl RelinearizationKey {
     }
 
     /// Get the parameters of the relinearization key
+    #[must_use]
     pub fn parameters(&self) -> Arc<BfvParameters> {
         self.ksk.par.clone()
     }
 
     /// Get the ciphertext level of the relinearization key
+    #[must_use]
     pub fn ciphertext_level(&self) -> usize {
         self.ksk.ciphertext_level
     }
 
     /// Get the key level of the relinearization key
+    #[must_use]
     pub fn key_level(&self) -> usize {
         self.ksk.ksk_level
     }

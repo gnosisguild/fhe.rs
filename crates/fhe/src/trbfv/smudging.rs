@@ -46,9 +46,10 @@ impl SmudgingBoundCalculatorConfig {
     ///
     /// # Arguments
     /// * `params` - BFV parameters
-    /// * `n` - Number of parties in threshold scheme  
+    /// * `n` - Number of parties in threshold scheme
     /// * `m` - Number of ciphertexts to process
     /// * `lambda` - Statistical security parameter
+    #[must_use]
     pub fn new(params: Arc<BfvParameters>, n: usize, m: usize, lambda: usize) -> Self {
         let variance = params.variance();
         let error1_variance = params.get_error1_variance().clone();
@@ -78,6 +79,7 @@ pub struct SmudgingBoundCalculator {
 
 impl SmudgingBoundCalculator {
     /// Create a new bound calculator.
+    #[must_use]
     pub fn new(config: SmudgingBoundCalculatorConfig) -> Self {
         Self { config }
     }
@@ -159,6 +161,7 @@ pub struct SmudgingNoiseGenerator {
 
 impl SmudgingNoiseGenerator {
     /// Create a new noise generator with calculated variance.
+    #[must_use]
     pub fn new(params: Arc<BfvParameters>, smudging_bound: BigUint) -> Self {
         Self {
             params,
@@ -198,6 +201,7 @@ impl SmudgingNoiseGenerator {
     }
 
     /// Sample uniform coefficients from [-bound, bound]
+    #[allow(clippy::indexing_slicing)] // [0] index into vec created with count=1, always valid
     fn sample_uniform_coefficients<R: RngCore + CryptoRng>(
         &self,
         count: usize,
@@ -225,11 +229,13 @@ impl SmudgingNoiseGenerator {
     }
 
     /// Get the polynomial degree.
+    #[must_use]
     pub fn degree(&self) -> usize {
         self.params.degree()
     }
 
     /// Get the smudging variance.
+    #[must_use]
     pub fn smudging_bound(&self) -> &BigUint {
         &self.smudging_bound
     }

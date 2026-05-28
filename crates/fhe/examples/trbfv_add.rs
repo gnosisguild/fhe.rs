@@ -5,6 +5,8 @@
 //! sharing. Run with `--help` for CLI options (`--num_summed`, `--num_parties`,
 //! `--threshold`, `--lambda`).
 
+#![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
+
 mod util;
 
 use std::{env, error::Error, process::exit, sync::Arc};

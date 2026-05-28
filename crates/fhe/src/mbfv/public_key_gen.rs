@@ -63,6 +63,7 @@ impl PublicKeyShare {
     /// - pk_1: the crp_poly (common random polynomial `a`, public key part 1)
     /// - sk_poly: the secret key polynomial in NTT form
     /// - e: the error polynomial
+    #[allow(clippy::type_complexity)]
     pub fn new_extended<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
         crp: CommonRandomPoly,
@@ -130,11 +131,13 @@ impl PublicKeyShare {
     }
 
     /// Get a reference to the underlying p0_share polynomial.
+    #[must_use]
     pub fn p0_share(&self) -> &Poly<Ntt> {
         &self.p0_share
     }
 
     /// Get the underlying p0_share polynomial (consumes self).
+    #[must_use]
     pub fn into_p0_share(self) -> Poly<Ntt> {
         self.p0_share
     }

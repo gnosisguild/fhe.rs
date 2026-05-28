@@ -167,6 +167,7 @@ impl RnsContext {
 
 impl RnsContext {
     /// Export this context into a raw representation.
+    #[must_use]
     pub fn to_raw(&self) -> RnsContextRaw {
         RnsContextRaw {
             moduli_u64: self.moduli_u64.clone(),
