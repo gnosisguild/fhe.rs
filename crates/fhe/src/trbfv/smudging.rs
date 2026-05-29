@@ -14,8 +14,7 @@ use crate::bfv::BfvParameters;
 use crate::Error;
 
 use num_bigint::{BigInt, BigUint};
-use num_traits::Signed;
-use rand::{CryptoRng, Rng, RngCore};
+use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
 
 /// Configuration for calculating optimal smudging variance in threshold BFV.
@@ -200,32 +199,14 @@ impl SmudgingNoiseGenerator {
         Ok(samples)
     }
 
-    /// Sample uniform coefficients from [-bound, bound]
-    #[allow(clippy::indexing_slicing)] // [0] index into vec created with count=1, always valid
+    /// Sample uniform coefficients from `[-bound, bound]`.
     fn sample_uniform_coefficients<R: RngCore + CryptoRng>(
         &self,
         count: usize,
         rng: &mut R,
     ) -> Vec<BigInt> {
-        let mut samples = Vec::with_capacity(count);
-
-        for _ in 0..count {
-            // Sample magnitude from [0, bound]
-            let magnitude = fhe_math::rq::sample_uniform_coefficients_bigint(
-                &BigInt::from(self.smudging_bound.clone()),
-                1,
-                rng,
-            )[0]
-            .abs();
-            let abs_value = magnitude;
-
-            // Randomly choose sign (50/50 chance)
-            let sample = if rng.random() { abs_value } else { -abs_value };
-
-            samples.push(sample);
-        }
-
-        samples
+        let bound = BigInt::from(self.smudging_bound.clone());
+        fhe_math::rq::sample_uniform_coefficients_bigint(&bound, count, rng)
     }
 
     /// Get the polynomial degree.

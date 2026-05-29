@@ -339,6 +339,12 @@ impl ShareManager {
         let scalers = scalers?;
 
         let par = ciphertext.par.clone();
+        let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
+            Error::DefaultError(
+                "threshold BFV decrypt_from_shares requires a u64 plaintext modulus".to_string(),
+            )
+        })?;
+
         let d = Zeroizing::new(
             result_poly
                 .scale(&scalers[ciphertext.level])
@@ -348,17 +354,15 @@ impl ShareManager {
             Vec::<u64>::try_from(d.as_ref())
                 .map_err(Error::from)?
                 .into_iter()
-                .map(|vi| vi + par.plaintext.as_u64().unwrap_or(0))
+                .map(|vi| vi + ptxt_u64)
                 .collect_vec(),
         );
         let mut w = v[..par.degree()].to_vec();
         let q = Modulus::new(par.moduli()[0]).map_err(Error::MathError)?;
         q.reduce_vec(&mut w);
-        if let Some(t) = par.plaintext.as_u64() {
-            Modulus::new(t)
-                .map_err(Error::MathError)?
-                .reduce_vec(&mut w);
-        }
+        Modulus::new(ptxt_u64)
+            .map_err(Error::MathError)?
+            .reduce_vec(&mut w);
 
         let poly =
             Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt();
