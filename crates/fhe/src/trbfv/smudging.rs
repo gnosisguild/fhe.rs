@@ -125,7 +125,7 @@ impl SmudgingBoundCalculator {
             ));
         }
 
-        if self.config.lambda >= 60 {
+        if self.config.lambda >= 40 {
             // Calculate optimal B_sm: balance security (2^λ·B_c) and correctness ((Q/2t - B_c)/n)
             let lower_bound = BigUint::from(2u64).pow(self.config.lambda as u32) * &b_c;
             let upper_bound = (&q_over_2t - &b_c) / BigUint::from(self.config.n);
