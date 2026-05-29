@@ -1,16 +1,16 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::bfv::{BfvParameters, KeySwitchingKey, RelinearizationKey, SecretKey};
-use crate::errors::Result;
 use crate::Error;
+use crate::Result;
+use crate::bfv::{BfvParameters, KeySwitchingKey, RelinearizationKey, SecretKey};
 use fhe_math::rns::RnsContext;
-use fhe_math::rq::{traits::TryConvertFrom, Poly, Representation};
+use fhe_math::rq::{Ntt, NttShoup, Poly, PowerBasis, traits::TryConvertFrom};
 use itertools::izip;
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
-use super::round::{R1Aggregated, Round, R1, R2};
+use super::round::{R1, R1Aggregated, R2, Round};
 use super::{Aggregate, CommonRandomPoly};
 
 /// A party's share in the relinearization key generation protocol.
@@ -18,8 +18,8 @@ use super::{Aggregate, CommonRandomPoly};
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct RelinKeyShare<R: Round = R1> {
     pub(crate) par: Arc<BfvParameters>,
-    pub(crate) h0: Box<[Poly]>,
-    pub(crate) h1: Box<[Poly]>,
+    pub(crate) h0: Box<[Poly<Ntt>]>,
+    pub(crate) h1: Box<[Poly<Ntt>]>,
     last_round: Option<Arc<RelinKeyShare<R1Aggregated>>>,
     _phantom_data: PhantomData<R>,
 }
@@ -44,7 +44,7 @@ pub struct RelinKeyShare<R: Round = R1> {
 ///         .build_arc()?;
 ///
 /// // Party perspective
-/// let mut rng = rand::thread_rng();
+/// let mut rng = rand::rng();
 /// let sk_share = SecretKey::random(&parameters, &mut rng);
 /// let crp = CommonRandomPoly::new_vec(&parameters, &mut rng)?;
 /// let rlk_generator = RelinKeyGenerator::new(&sk_share, &crp, &mut rng)?;
@@ -66,7 +66,7 @@ pub struct RelinKeyShare<R: Round = R1> {
 pub struct RelinKeyGenerator<'a, 'b> {
     sk_share: &'a SecretKey,
     crp: &'b [CommonRandomPoly],
-    u: Zeroizing<Poly>,
+    u: Zeroizing<Poly<Ntt>>,
 }
 
 impl<'a, 'b> RelinKeyGenerator<'a, 'b> {
@@ -80,7 +80,7 @@ impl<'a, 'b> RelinKeyGenerator<'a, 'b> {
         rng: &mut R,
     ) -> Result<Self> {
         let par = sk_share.par.clone();
-        let ctx = par.ctx_at_level(0)?;
+        let ctx = par.context_at_level(0)?;
         if ctx.moduli().len() == 1 {
             Err(Error::DefaultError(
                 "These parameters do not support key switching".to_string(),
@@ -91,7 +91,7 @@ impl<'a, 'b> RelinKeyGenerator<'a, 'b> {
                     .to_string(),
             ))
         } else {
-            let u = Zeroizing::new(Poly::small(ctx, Representation::Ntt, par.variance, rng)?);
+            let u = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
             Ok(Self { sk_share, crp, u })
         }
     }
@@ -115,12 +115,12 @@ impl RelinKeyShare<R1> {
     fn new<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
         crp: &[CommonRandomPoly],
-        u: &Zeroizing<Poly>,
+        u: &Zeroizing<Poly<Ntt>>,
         rng: &mut R,
     ) -> Result<Self> {
         let par = sk_share.par.clone();
 
-        if crp.len() != par.ctx_at_level(0)?.moduli().len() {
+        if crp.len() != par.context_at_level(0)?.moduli().len() {
             Err(Error::DefaultError(
                 "The size of the CRP polynomial vector must equal the number of ciphertext moduli."
                     .to_string(),
@@ -141,32 +141,27 @@ impl RelinKeyShare<R1> {
     fn generate_h0<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
         crp: &[CommonRandomPoly],
-        u: &Zeroizing<Poly>,
+        u: &Zeroizing<Poly<Ntt>>,
         rng: &mut R,
-    ) -> Result<Box<[Poly]>> {
+    ) -> Result<Box<[Poly<Ntt>]>> {
         let par = sk_share.par.clone();
-        let ctx = par.ctx_at_level(0)?;
+        let ctx = par.context_at_level(0)?;
 
-        let s = Zeroizing::new(Poly::try_convert_from(
-            sk_share.coeffs.as_ref(),
-            ctx,
-            false,
-            Representation::PowerBasis,
-        )?);
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+        );
         let rns = RnsContext::new(&sk_share.par.moduli[..crp.len()])?;
         let h0 = crp
             .iter()
             .enumerate()
             .map(|(i, a)| {
                 let w = rns.get_garner(i).unwrap();
-                let mut w_s = Zeroizing::new(w * s.as_ref());
-                w_s.change_representation(Representation::Ntt);
+                let w_s = Zeroizing::new(w * s.as_ref());
 
-                let e = Zeroizing::new(Poly::small(ctx, Representation::Ntt, par.variance, rng)?);
+                let e = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
 
                 let mut h = -a.poly.clone();
                 h.disallow_variable_time_computations();
-                h.change_representation(Representation::Ntt);
                 h *= u.as_ref();
                 h += w_s.as_ref();
                 h += e.as_ref();
@@ -180,24 +175,19 @@ impl RelinKeyShare<R1> {
         sk_share: &SecretKey,
         crp: &[CommonRandomPoly],
         rng: &mut R,
-    ) -> Result<Box<[Poly]>> {
+    ) -> Result<Box<[Poly<Ntt>]>> {
         let par = sk_share.par.clone();
-        let ctx = par.ctx_at_level(0)?;
-        let mut s = Zeroizing::new(Poly::try_convert_from(
-            sk_share.coeffs.as_ref(),
-            ctx,
-            false,
-            Representation::PowerBasis,
-        )?);
-        s.change_representation(Representation::Ntt);
+        let ctx = par.context_at_level(0)?;
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+        );
 
         let h1 = crp
             .iter()
             .map(|a| {
                 let mut h = a.poly.clone();
                 h.disallow_variable_time_computations();
-                h.change_representation(Representation::Ntt);
-                let e = Zeroizing::new(Poly::small(ctx, Representation::Ntt, par.variance, rng)?);
+                let e = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
                 h *= s.as_ref();
                 h += e.as_ref();
                 Ok(h)
@@ -213,7 +203,10 @@ impl Aggregate<RelinKeyShare<R1>> for RelinKeyShare<R1Aggregated> {
         T: IntoIterator<Item = RelinKeyShare<R1>>,
     {
         let mut shares = iter.into_iter();
-        let share = shares.next().ok_or(Error::TooFewValues(0, 1))?;
+        let share = shares.next().ok_or(Error::TooFewValues {
+            actual: 0,
+            minimum: 1,
+        })?;
         let mut h0 = share.h0;
         let mut h1 = share.h1;
         for sh in shares {
@@ -234,7 +227,7 @@ impl Aggregate<RelinKeyShare<R1>> for RelinKeyShare<R1Aggregated> {
 impl RelinKeyShare<R2> {
     fn new<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
-        u: &Zeroizing<Poly>,
+        u: &Zeroizing<Poly<Ntt>>,
         r1: &Arc<RelinKeyShare<R1Aggregated>>,
         rng: &mut R,
     ) -> Result<Self> {
@@ -252,27 +245,22 @@ impl RelinKeyShare<R2> {
 
     fn generate_h0<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
-        r1_h0: &[Poly],
+        r1_h0: &[Poly<Ntt>],
         rng: &mut R,
-    ) -> Result<Box<[Poly]>> {
+    ) -> Result<Box<[Poly<Ntt>]>> {
         let par = sk_share.par.clone();
-        let ctx = par.ctx_at_level(0)?;
+        let ctx = par.context_at_level(0)?;
 
-        let mut s = Zeroizing::new(Poly::try_convert_from(
-            sk_share.coeffs.as_ref(),
-            ctx,
-            false,
-            Representation::PowerBasis,
-        )?);
-        s.change_representation(Representation::Ntt);
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+        );
         let h0 = r1_h0
             .iter()
             .map(|h| {
-                let e = Zeroizing::new(Poly::small(ctx, Representation::Ntt, par.variance, rng)?);
+                let e = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
 
                 let mut h_prime = h.clone();
                 h_prime.disallow_variable_time_computations();
-                h_prime.change_representation(Representation::Ntt);
                 h_prime *= s.as_ref();
 
                 h_prime += e.as_ref();
@@ -284,19 +272,15 @@ impl RelinKeyShare<R2> {
 
     fn generate_h1<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
-        u: &Zeroizing<Poly>,
-        r1_h1: &[Poly],
+        u: &Zeroizing<Poly<Ntt>>,
+        r1_h1: &[Poly<Ntt>],
         rng: &mut R,
-    ) -> Result<Box<[Poly]>> {
+    ) -> Result<Box<[Poly<Ntt>]>> {
         let par = sk_share.par.clone();
-        let ctx = par.ctx_at_level(0)?;
-        let mut s = Zeroizing::new(Poly::try_convert_from(
-            sk_share.coeffs.as_ref(),
-            ctx,
-            false,
-            Representation::PowerBasis,
-        )?);
-        s.change_representation(Representation::Ntt);
+        let ctx = par.context_at_level(0)?;
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+        );
 
         let u_s = Zeroizing::new(u.as_ref() - s.as_ref());
 
@@ -305,8 +289,7 @@ impl RelinKeyShare<R2> {
             .map(|h| {
                 let mut h_prime = h.clone();
                 h_prime.disallow_variable_time_computations();
-                h_prime.change_representation(Representation::Ntt);
-                let e = Zeroizing::new(Poly::small(ctx, Representation::Ntt, par.variance, rng)?);
+                let e = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
                 h_prime *= u_s.as_ref();
                 h_prime += e.as_ref();
                 Ok(h_prime)
@@ -322,9 +305,12 @@ impl Aggregate<RelinKeyShare<R2>> for RelinearizationKey {
         T: IntoIterator<Item = RelinKeyShare<R2>>,
     {
         let mut shares = iter.into_iter();
-        let share = shares.next().ok_or(Error::TooFewValues(0, 1))?;
+        let share = shares.next().ok_or(Error::TooFewValues {
+            actual: 0,
+            minimum: 1,
+        })?;
         let par = share.par.clone();
-        let ctx = par.ctx_at_level(0)?.clone();
+        let ctx = par.context_at_level(0)?.clone();
         let r1 = share.last_round.ok_or(Error::DefaultError(
             "Shares from round 2 should include a copy for the round 1 aggregation.".to_string(),
         ))?;
@@ -340,16 +326,21 @@ impl Aggregate<RelinKeyShare<R2>> for RelinearizationKey {
             );
         }
 
-        let mut c0 = h0;
-        izip!(c0.iter_mut(), h1.iter()).for_each(|(c0, h1)| {
-            *c0 += h1;
-            c0.change_representation(Representation::NttShoup);
-        });
+        let mut c0 = Vec::from(h0);
+        izip!(c0.iter_mut(), h1.iter()).for_each(|(c0, h1)| *c0 += h1);
+        let c0 = c0
+            .into_iter()
+            .map(Poly::<Ntt>::into_ntt_shoup)
+            .collect::<Vec<Poly<NttShoup>>>()
+            .into_boxed_slice();
 
-        let mut c1 = r1.h1.clone();
-        c1.iter_mut().for_each(|c1| {
-            c1.change_representation(Representation::NttShoup);
-        });
+        let c1 = r1
+            .h1
+            .iter()
+            .cloned()
+            .map(Poly::<Ntt>::into_ntt_shoup)
+            .collect::<Vec<Poly<NttShoup>>>()
+            .into_boxed_slice();
 
         let ksk = KeySwitchingKey {
             par,
@@ -368,23 +359,30 @@ impl Aggregate<RelinKeyShare<R2>> for RelinearizationKey {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
-    use rand::thread_rng;
+    use rand::rng;
 
     use crate::{
-        bfv::{BfvParameters, Encoding, Multiplicator, Plaintext, PublicKey},
-        mbfv::{AggregateIter, DecryptionShare, PublicKeyShare},
+        bfv::{
+            BfvParameters, Encoding, Multiplicator, Plaintext, PublicKey, RelinearizationKey,
+            SecretKey,
+        },
+        mbfv::{
+            Aggregate as _, AggregateIter, CommonRandomPoly, DecryptionShare, PublicKeyShare,
+            RelinKeyGenerator,
+        },
     };
 
     const NUM_PARTIES: usize = 5;
 
     #[test]
     fn relinearization_works() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for par in [
-            BfvParameters::default_arc(3, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(3, 16),
+            BfvParameters::default_arc(6, 32),
         ] {
             // Just support level 0 for now.
             let level = 0;
@@ -429,8 +427,12 @@ mod tests {
                     .unwrap();
 
                 // Create a couple random encrypted polynomials
-                let v1 = par.plaintext.random_vec(par.degree(), &mut rng);
-                let v2 = par.plaintext.random_vec(par.degree(), &mut rng);
+                let v1 = fhe_math::zq::Modulus::new(par.plaintext())
+                    .unwrap()
+                    .random_vec(par.degree(), &mut rng);
+                let v2 = fhe_math::zq::Modulus::new(par.plaintext())
+                    .unwrap()
+                    .random_vec(par.degree(), &mut rng);
                 let pt1 = Plaintext::try_encode(&v1, Encoding::simd_at_level(level), &par).unwrap();
                 let pt2 = Plaintext::try_encode(&v2, Encoding::simd_at_level(level), &par).unwrap();
                 let ct1 = public_key.try_encrypt(&pt1, &mut rng).unwrap();
@@ -442,7 +444,7 @@ mod tests {
                     multiplicator.enable_mod_switching().unwrap();
                 }
                 let ct = Arc::new(multiplicator.multiply(&ct1, &ct2).unwrap());
-                assert_eq!(ct.c.len(), 2);
+                assert_eq!(ct.len(), 2);
 
                 // Parties perform a collective decryption
                 let pt = party_sks
@@ -452,7 +454,9 @@ mod tests {
                     .unwrap();
 
                 let mut expected = v1.clone();
-                par.plaintext.mul_vec(&mut expected, &v2);
+                fhe_math::zq::Modulus::new(par.plaintext())
+                    .unwrap()
+                    .mul_vec(&mut expected, &v2);
                 assert_eq!(
                     Vec::<u64>::try_decode(&pt, Encoding::simd_at_level(pt.level)).unwrap(),
                     expected

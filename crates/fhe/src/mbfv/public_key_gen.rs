@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
-use crate::errors::Result;
-use crate::Error;
-use fhe_math::rq::{traits::TryConvertFrom, Poly, Representation};
+use crate::{Error, Result};
+use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
 use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
@@ -18,7 +17,7 @@ use super::{Aggregate, CommonRandomPoly};
 pub struct PublicKeyShare {
     pub(crate) par: Arc<BfvParameters>,
     pub(crate) crp: CommonRandomPoly,
-    pub(crate) p0_share: Poly,
+    pub(crate) p0_share: Poly<Ntt>,
 }
 
 impl PublicKeyShare {
@@ -38,23 +37,18 @@ impl PublicKeyShare {
         rng: &mut R,
     ) -> Result<Self> {
         let par = sk_share.par.clone();
-        let ctx = par.ctx_at_level(0)?;
+        let ctx = par.context_at_level(0)?;
 
         // Convert secret key to usable polynomial
-        let mut s = Zeroizing::new(Poly::try_convert_from(
-            sk_share.coeffs.as_ref(),
-            ctx,
-            false,
-            Representation::PowerBasis,
-        )?);
-        s.change_representation(Representation::Ntt);
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+        );
 
         // Sample error
-        let e = Zeroizing::new(Poly::small(ctx, Representation::Ntt, par.variance, rng)?);
+        let e = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
         // Create p0_i share
         let mut p0_share = -crp.poly.clone();
         p0_share.disallow_variable_time_computations();
-        p0_share.change_representation(Representation::Ntt);
         p0_share *= s.as_ref();
         p0_share += e.as_ref();
         unsafe { p0_share.allow_variable_time_computations() }
@@ -69,39 +63,29 @@ impl PublicKeyShare {
     /// - pk_1: the crp_poly (common random polynomial `a`, public key part 1)
     /// - sk_poly: the secret key polynomial in NTT form
     /// - e: the error polynomial
+    #[allow(clippy::type_complexity)]
     pub fn new_extended<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
         crp: CommonRandomPoly,
         rng: &mut R,
-    ) -> Result<(Poly, Poly, Poly, Poly)> {
+    ) -> Result<(Poly<Ntt>, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
         let par = sk_share.par.clone();
-        let ctx = par.ctx_at_level(0)?;
+        let ctx = par.context_at_level(0)?;
 
-        // Convert secret key to usable polynomial
-        let mut s = Poly::try_convert_from(
-            sk_share.coeffs.as_ref(),
-            ctx,
-            false,
-            Representation::PowerBasis,
-        )?;
-        s.change_representation(Representation::Ntt);
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+        );
+        let e = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
 
-        // Sample error
-        let e = Poly::small(ctx, Representation::Ntt, par.variance, rng)?;
-
-        // Create p0_share (which is pk_0) = -a*s + e
-        // where `a` is the crp (common random polynomial)
         let mut pk_0 = -crp.poly.clone();
         pk_0.disallow_variable_time_computations();
-        pk_0.change_representation(Representation::Ntt);
-        pk_0 *= &s;
-        pk_0 += &e;
+        pk_0 *= s.as_ref();
+        pk_0 += e.as_ref();
         unsafe { pk_0.allow_variable_time_computations() }
 
-        // pk_1 is `a`, the common random polynomial (crp)
         let pk_1 = crp.poly.clone();
 
-        Ok((pk_0, pk_1, s, e))
+        Ok((pk_0, pk_1, (*s).clone(), (*e).clone()))
     }
 
     /// Deserialize a PublicKeyShare from bytes with the given parameters and
@@ -111,11 +95,12 @@ impl PublicKeyShare {
         par: &Arc<BfvParameters>,
         crp: CommonRandomPoly,
     ) -> Result<Self> {
-        let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
+        let ctx = par.context_at_level(0)?;
+        let p0_share = Poly::<Ntt>::from_bytes(bytes, ctx)?;
         Ok(Self {
             par: par.clone(),
-            crp: crp.clone(),
-            p0_share: test.unwrap(),
+            crp,
+            p0_share,
         })
     }
     /// Convert this PublicKeyShare to an individual PublicKey without aggregation.
@@ -136,15 +121,6 @@ impl PublicKeyShare {
         let mut p0 = self.p0_share.clone();
         let mut p1 = self.crp.poly.clone();
 
-        // Ensure both are in NTT representation
-        if *p0.representation() != Representation::Ntt {
-            p0.change_representation(Representation::Ntt);
-        }
-        if *p1.representation() != Representation::Ntt {
-            p1.change_representation(Representation::Ntt);
-        }
-
-        // Disable variable time computations for public key security
         p0.disallow_variable_time_computations();
         p1.disallow_variable_time_computations();
 
@@ -154,13 +130,15 @@ impl PublicKeyShare {
         })
     }
 
-    /// Get a reference to the underlying p0_share polynomial
-    pub fn p0_share(&self) -> &Poly {
+    /// Get a reference to the underlying p0_share polynomial.
+    #[must_use]
+    pub fn p0_share(&self) -> &Poly<Ntt> {
         &self.p0_share
     }
 
-    /// Get the underlying p0_share polynomial (consumes self)
-    pub fn into_p0_share(self) -> Poly {
+    /// Get the underlying p0_share polynomial (consumes self).
+    #[must_use]
+    pub fn into_p0_share(self) -> Poly<Ntt> {
         self.p0_share
     }
 }
@@ -171,7 +149,10 @@ impl Aggregate<PublicKeyShare> for PublicKey {
         T: IntoIterator<Item = PublicKeyShare>,
     {
         let mut shares = iter.into_iter();
-        let share = shares.next().ok_or(Error::TooFewValues(0, 1))?;
+        let share = shares.next().ok_or(Error::TooFewValues {
+            actual: 0,
+            minimum: 1,
+        })?;
         let mut p0 = share.p0_share;
         for sh in shares {
             p0 += &sh.p0_share;
@@ -219,12 +200,15 @@ impl Serialize for PublicKeyShare {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use fhe_traits::{FheEncoder, FheEncrypter};
-    use rand::thread_rng;
+    use rand::rng;
 
-    use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
+    use crate::{
+        bfv::{BfvParameters, Encoding, Plaintext, PublicKey, SecretKey},
+        mbfv::{Aggregate as _, CommonRandomPoly},
+    };
+
+    use super::PublicKeyShare;
 
     const NUM_PARTIES: usize = 11;
 
@@ -233,10 +217,10 @@ mod tests {
     // encryptions complete without error. See a full encrypt->decrypt test in
     // `secret_key_switch`.
     fn protocol_creates_valid_pk() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for par in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 32),
         ] {
             for level in 0..=par.max_level() {
                 for _ in 0..20 {
@@ -255,7 +239,9 @@ mod tests {
 
                     // Use it to encrypt a random polynomial
                     let pt = Plaintext::try_encode(
-                        &par.plaintext.random_vec(par.degree(), &mut rng),
+                        &fhe_math::zq::Modulus::new(par.plaintext())
+                            .unwrap()
+                            .random_vec(par.degree(), &mut rng),
                         Encoding::poly_at_level(level),
                         &par,
                     )
@@ -268,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_new_extended() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
         // Test with different parameter configurations
         for par in [
@@ -289,39 +275,21 @@ mod tests {
             // Compute -a*s + e and compare with pk_0
             let mut expected = -crp.poly.clone();
             expected.disallow_variable_time_computations();
-            expected.change_representation(Representation::Ntt);
             expected *= &s;
             expected += &e;
             unsafe { expected.allow_variable_time_computations() }
 
             assert_eq!(pk_0, expected, "pk_0 should equal -a*s + e");
 
-            // Verify s is in NTT representation
-            assert_eq!(
-                *s.representation(),
-                Representation::Ntt,
-                "s should be in NTT form"
-            );
-
-            // Verify e is in NTT representation
-            assert_eq!(
-                *e.representation(),
-                Representation::Ntt,
-                "e should be in NTT form"
-            );
-
-            // Verify pk_0 is in NTT representation
-            assert_eq!(
-                *pk_0.representation(),
-                Representation::Ntt,
-                "pk_0 should be in NTT form"
-            );
+            assert_eq!(s.representation(), fhe_math::rq::Representation::Ntt);
+            assert_eq!(e.representation(), fhe_math::rq::Representation::Ntt);
+            assert_eq!(pk_0.representation(), fhe_math::rq::Representation::Ntt);
         }
     }
 
     #[test]
     fn test_new_extended_multiple_parties() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         const NUM_PARTIES: usize = 5;
 
         let par = BfvParameters::default_arc(1, 8);
@@ -348,7 +316,6 @@ mod tests {
         for (pk_0, pk_1, s, e) in &extended_data {
             let mut expected = -pk_1.clone();
             expected.disallow_variable_time_computations();
-            expected.change_representation(Representation::Ntt);
             expected *= s;
             expected += e;
             unsafe { expected.allow_variable_time_computations() }
@@ -358,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_new_extended_consistency_with_new() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
         let par = BfvParameters::default_arc(1, 8);
         let sk_share = SecretKey::random(&par, &mut rng);

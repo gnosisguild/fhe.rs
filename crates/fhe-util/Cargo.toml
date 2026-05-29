@@ -2,21 +2,24 @@
 name = "fhe-util"
 description = "Utilities for the fhe.rs library"
 authors.workspace = true
-documentation.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 repository.workspace = true
-version.workspace = true
 rust-version.workspace = true
+version = "0.1.1"
+
+[lints]
+workspace = true
 
 [dependencies]
-itertools.workspace = true
 num-bigint-dig = { workspace = true, features = ["prime"] }
 num-traits.workspace = true
 prime_factorization.workspace = true
 rand.workspace = true
+rand_v08 = { package = "rand", version = "0.8" }
 rayon.workspace = true
 rand_distr.workspace = true
 
 [dev-dependencies]
+itertools.workspace = true
 proptest.workspace = true

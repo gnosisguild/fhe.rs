@@ -1,4 +1,4 @@
-# fhe [![fhe crate version](https://img.shields.io/crates/v/fhe.svg)](https://crates.io/crates/fhe)
+# fhe [![fhe crate version](https://img.shields.io/crates/v/fhe.svg)](https://crates.io/crates/fhe) [![documentation](https://docs.rs/fhe/badge.svg)](https://docs.rs/fhe)
 
 **A pure-Rust implementation of fully homomorphic encryption schemes based on Ring-LWE.**
 
@@ -9,6 +9,15 @@ This library provides implementations of:
 * BFV, the Brakerski-Fan-Vercauteren (BFV) homomorphic encryption scheme.
   More precisely, this library implements a leveled variant of the [HPS](https://eprint.iacr.org/2018/117) (Halevi--Polyakov--Shoup) RNS-variant of the scheme.
 
+## Installation
+
+Add the following to your `Cargo.toml`:
+
+```toml
+[dependencies]
+fhe = "0.2.0"
+```
+
 ## Example
 
 Below is a simple example using BFV of an homomorphic multiplication.
@@ -17,7 +26,7 @@ One ciphertext encrypts the value `20` using the secret key, and one ciphertext 
 ```rust
 use fhe::bfv::{BfvParametersBuilder, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe_traits::*;
-use rand::{rngs::OsRng, thread_rng};
+use rand::rng;
 use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -26,9 +35,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_moduli(&[0x3fffffff000001])
             .set_plaintext_modulus(1 << 10)
             .build_arc()?;
-    let mut rng = thread_rng();
-
-    let secret_key = SecretKey::random(&parameters, &mut OsRng);
+    let mut rng = rng();
+    let secret_key = SecretKey::random(&parameters, &mut rng);
     let public_key = PublicKey::new(&secret_key, &mut rng);
 
     let plaintext_1 = Plaintext::try_encode(&[20_u64], Encoding::poly(), &parameters)?;
@@ -75,6 +83,5 @@ Run tests with `cargo test`.
 ## ⚠️ Security / Stability
 
 The implementations in this crate have never been independently audited for security.
-Additionally, no promise on the API and ABI stability will be made until version `1.0.0` of the crate.
 
 Use at your own risk.

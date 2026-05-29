@@ -1,4 +1,13 @@
+// Expect indexing in examples for simplicity
+#![expect(
+    clippy::indexing_slicing,
+    reason = "performance or example code relies on validated indices"
+)]
+
 //! Utility functions for the examples
+
+// Example utilities are shared across multiple binaries, so some items are unused per-target.
+#![allow(dead_code, unused_imports, unused_macros)]
 
 use fhe::bfv;
 use fhe_traits::FheEncoder;
@@ -7,7 +16,6 @@ use std::{cmp::min, fmt, sync::Arc, time::Duration};
 
 /// Macros to time code and display a human-readable duration.
 pub mod timeit {
-    #[allow(unused_macros)]
     macro_rules! timeit_n {
         ($name:expr, $loops:expr, $code:expr) => {{
             use util::DisplayDuration;
@@ -25,7 +33,6 @@ pub mod timeit {
         }};
     }
 
-    #[allow(unused_macros)]
     macro_rules! timeit {
         ($name:expr, $code:expr) => {{
             use util::DisplayDuration;
@@ -36,9 +43,7 @@ pub mod timeit {
         }};
     }
 
-    #[allow(unused_imports)]
     pub(crate) use timeit;
-    #[allow(unused_imports)]
     pub(crate) use timeit_n;
 }
 
@@ -65,7 +70,7 @@ impl fmt::Display for DisplayDuration {
 /// Generate a database of elements of the form [i || 0...0] where i is the 4B
 /// little endian encoding of the index. When the element size is less than 4B,
 /// the encoding is truncated.
-#[allow(dead_code)]
+#[must_use]
 pub fn generate_database(database_size: usize, elements_size: usize) -> Vec<Vec<u8>> {
     assert!(database_size > 0 && elements_size > 0);
     let mut database = vec![vec![0u8; elements_size]; database_size];
@@ -76,7 +81,8 @@ pub fn generate_database(database_size: usize, elements_size: usize) -> Vec<Vec<
     database
 }
 
-#[allow(dead_code)]
+/// Compute the number of elements per plaintext given a size configuration.
+#[must_use]
 pub fn number_elements_per_plaintext(
     degree: usize,
     plaintext_nbits: usize,
@@ -85,7 +91,9 @@ pub fn number_elements_per_plaintext(
     (plaintext_nbits * degree) / (elements_size * 8)
 }
 
-#[allow(dead_code)]
+/// Encode a database into BFV plaintexts, returning the encoded rows and
+/// layout.
+#[must_use]
 pub fn encode_database(
     database: &[Vec<u8>],
     par: Arc<bfv::BfvParameters>,
@@ -104,6 +112,7 @@ pub fn encode_database(
     let dimension_2 = number_rows.div_ceil(dimension_1);
     println!("dimensions = {dimension_1} {dimension_2}");
     println!("dimension = {}", dimension_1 * dimension_2);
+
     let mut preprocessed_database =
         vec![
             bfv::Plaintext::zero(bfv::Encoding::poly_at_level(level), &par).unwrap();
@@ -124,5 +133,4 @@ pub fn encode_database(
     (preprocessed_database, (dimension_1, dimension_2))
 }
 
-#[allow(dead_code)]
 fn main() {}

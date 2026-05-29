@@ -1,11 +1,18 @@
+//! Smoke test for BFV encrypt/decrypt with custom parameters.
+//!
+//! Encodes several plaintext values, encrypts with a public key, and checks that
+//! decryption recovers the original data. Useful when validating parameter sets
+//! used alongside threshold BFV workflows.
+
+#![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
+
 use fhe::bfv::{BfvParameters, BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use rand::thread_rng;
 use std::error::Error;
 use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     println!("=== Testing BFV with different values ===\n");
 

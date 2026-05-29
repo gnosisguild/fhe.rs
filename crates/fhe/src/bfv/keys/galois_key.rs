@@ -1,16 +1,16 @@
 //! Galois keys for the BFV encryption scheme
 
 use super::key_switching_key::KeySwitchingKey;
-use crate::bfv::{traits::TryConvertFrom, BfvParameters, Ciphertext, SecretKey};
+use crate::bfv::{BfvParameters, Ciphertext, SecretKey, traits::TryConvertFrom};
 use crate::proto::bfv::{GaloisKey as GaloisKeyProto, KeySwitchingKey as KeySwitchingKeyProto};
 use crate::{Error, Result};
 use fhe_math::rq::{
-    switcher::Switcher, traits::TryConvertFrom as TryConvertFromPoly, Poly, Representation,
-    SubstitutionExponent,
+    Ntt, Poly, PowerBasis, SubstitutionExponent, switcher::Switcher,
+    traits::TryConvertFrom as TryConvertFromPoly,
 };
 use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Galois key for the BFV encryption scheme.
 /// A Galois key is a special type of key switching key,
@@ -30,22 +30,20 @@ impl GaloisKey {
         galois_key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx_galois_key = sk.par.ctx_at_level(galois_key_level)?;
-        let ctx_ciphertext = sk.par.ctx_at_level(ciphertext_level)?;
+        let ctx_galois_key = sk.par.context_at_level(galois_key_level)?;
+        let ctx_ciphertext = sk.par.context_at_level(ciphertext_level)?;
 
         let ciphertext_exponent =
             SubstitutionExponent::new(ctx_ciphertext, exponent).map_err(Error::MathError)?;
 
         let switcher_up = Switcher::new(ctx_ciphertext, ctx_galois_key)?;
-        let s = Zeroizing::new(Poly::try_convert_from(
+        let s = Zeroizing::new(Poly::<PowerBasis>::try_convert_from(
             sk.coeffs.as_ref(),
             ctx_ciphertext,
             false,
-            Representation::PowerBasis,
         )?);
         let s_sub = Zeroizing::new(s.substitute(&ciphertext_exponent)?);
-        let mut s_sub_switched_up = Zeroizing::new(s_sub.mod_switch_to(&switcher_up)?);
-        s_sub_switched_up.change_representation(Representation::PowerBasis);
+        let s_sub_switched_up = Zeroizing::new(s_sub.switch(&switcher_up)?);
 
         let ksk = KeySwitchingKey::new(
             sk,
@@ -64,22 +62,21 @@ impl GaloisKey {
     /// Relinearize a [`Ciphertext`] using the [`GaloisKey`]
     pub fn relinearize(&self, ct: &Ciphertext) -> Result<Ciphertext> {
         // assert_eq!(ct.par, self.ksk.par);
-        assert_eq!(ct.c.len(), 2);
+        assert_eq!(ct.len(), 2);
 
-        let mut c2 = ct.c[1].substitute(&self.element)?;
-        c2.change_representation(Representation::PowerBasis);
+        let c2 = ct[1].substitute(&self.element)?.into_power_basis();
         let (mut c0, mut c1) = self.ksk.key_switch(&c2)?;
 
-        if c0.ctx() != ct.c[0].ctx() {
-            c0.change_representation(Representation::PowerBasis);
-            c1.change_representation(Representation::PowerBasis);
-            c0.mod_switch_down_to(ct.c[0].ctx())?;
-            c1.mod_switch_down_to(ct.c[1].ctx())?;
-            c0.change_representation(Representation::Ntt);
-            c1.change_representation(Representation::Ntt);
+        if c0.ctx() != ct[0].ctx() {
+            let mut c0_pb = c0.into_power_basis();
+            let mut c1_pb = c1.into_power_basis();
+            c0_pb.switch_down_to(ct[0].ctx())?;
+            c1_pb.switch_down_to(ct[1].ctx())?;
+            c0 = c0_pb.into_ntt();
+            c1 = c1_pb.into_ntt();
         }
 
-        c0 += &ct.c[0].substitute(&self.element)?;
+        c0 += &ct[0].substitute(&self.element)?;
 
         Ok(Ciphertext {
             par: ct.par.clone(),
@@ -87,6 +84,43 @@ impl GaloisKey {
             c: vec![c0, c1],
             level: self.ksk.ciphertext_level,
         })
+    }
+
+    /// Relinearize a [`Ciphertext`] writing the result into `out`.
+    pub fn relinearize_into(&self, ct: &Ciphertext, out: &mut Ciphertext) -> Result<()> {
+        assert_eq!(ct.len(), 2);
+
+        if out.len() != 2 || out[0].ctx() != ct[0].ctx() || out[1].ctx() != ct[1].ctx() {
+            out.c = vec![
+                Poly::<Ntt>::zero(ct[0].ctx()),
+                Poly::<Ntt>::zero(ct[1].ctx()),
+            ];
+        }
+        out.par = ct.par.clone();
+        out.seed = None;
+        out.level = self.ksk.ciphertext_level;
+
+        let (out0_slice, out1_slice) = out.split_at_mut(1);
+        let out0 = &mut out0_slice[0];
+        let out1 = &mut out1_slice[0];
+
+        out0.zeroize();
+        out1.zeroize();
+
+        let c2 = ct[1].substitute(&self.element)?.into_power_basis();
+        self.ksk.key_switch_assign(&c2, out0, out1)?;
+
+        if out0.ctx() != ct[0].ctx() {
+            let mut out0_pb = out0.clone().into_power_basis();
+            let mut out1_pb = out1.clone().into_power_basis();
+            out0_pb.switch_down_to(ct[0].ctx())?;
+            out1_pb.switch_down_to(ct[1].ctx())?;
+            *out0 = out0_pb.into_ntt();
+            *out1 = out1_pb.into_ntt();
+        }
+
+        *out0 += &ct[0].substitute(&self.element)?;
+        Ok(())
     }
 }
 
@@ -101,10 +135,10 @@ impl From<&GaloisKey> for GaloisKeyProto {
 
 impl TryConvertFrom<&GaloisKeyProto> for GaloisKey {
     fn try_convert_from(value: &GaloisKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
-        if let Some(ksk_proto) = value.ksk.as_ref() {
-            let ksk = KeySwitchingKey::try_convert_from(ksk_proto, par)?;
+        if let Some(ksk) = &value.ksk {
+            let ksk = KeySwitchingKey::try_convert_from(ksk, par)?;
 
-            let ctx = par.ctx_at_level(ksk.ciphertext_level)?;
+            let ctx = par.context_at_level(ksk.ciphertext_level)?;
             let element = SubstitutionExponent::new(ctx, value.exponent as usize)
                 .map_err(Error::MathError)?;
 
@@ -118,22 +152,26 @@ impl TryConvertFrom<&GaloisKeyProto> for GaloisKey {
 #[cfg(test)]
 mod tests {
     use super::GaloisKey;
-    use crate::bfv::{traits::TryConvertFrom, BfvParameters, Encoding, Plaintext, SecretKey};
+    use crate::bfv::{
+        BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
+    };
     use crate::proto::bfv::GaloisKey as GaloisKeyProto;
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-    use rand::thread_rng;
+    use rand::rng;
     use std::error::Error;
 
     #[test]
     fn relinearization() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(6, 8),
-            BfvParameters::default_arc(3, 8),
+            BfvParameters::default_arc(6, 16),
+            BfvParameters::default_arc(3, 16),
         ] {
             for _ in 0..30 {
                 let sk = SecretKey::random(&params, &mut rng);
-                let v = params.plaintext.random_vec(params.degree(), &mut rng);
+                let v = fhe_math::zq::Modulus::new(params.plaintext())
+                    .unwrap()
+                    .random_vec(params.degree(), &mut rng);
                 let row_size = params.degree() >> 1;
 
                 let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
@@ -175,11 +213,33 @@ mod tests {
     }
 
     #[test]
-    fn proto_conversion() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+    fn relinearization_into() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(6, 8),
-            BfvParameters::default_arc(4, 8),
+            BfvParameters::default_arc(6, 16),
+            BfvParameters::default_arc(3, 16),
+        ] {
+            let sk = SecretKey::random(&params, &mut rng);
+            let pt = Plaintext::try_encode(&[1u64, 2, 3, 4][..], Encoding::simd(), &params)?;
+            let ct = sk.try_encrypt(&pt, &mut rng)?;
+            let gk = GaloisKey::new(&sk, 3, 0, 0, &mut rng)?;
+
+            let ct_expected = gk.relinearize(&ct)?;
+
+            let mut out = Ciphertext::zero(&ct.par);
+            gk.relinearize_into(&ct, &mut out)?;
+
+            assert_eq!(ct_expected, out);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn proto_conversion() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        for params in [
+            BfvParameters::default_arc(6, 16),
+            BfvParameters::default_arc(4, 16),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
             let gk = GaloisKey::new(&sk, 9, 0, 0, &mut rng)?;

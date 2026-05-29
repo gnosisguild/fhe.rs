@@ -1,4 +1,11 @@
-// Implementation of threshold addition using the `fhe` and `trbfv` crate.
+//! Threshold BFV addition over encrypted integers.
+//!
+//! Parties generate distributed keys, encrypt a batch of values, homomorphically
+//! sum them, and decrypt the tally via threshold decryption with Shamir secret
+//! sharing. Run with `--help` for CLI options (`--num_summed`, `--num_parties`,
+//! `--threshold`, `--lambda`).
+
+#![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 
 mod util;
 
@@ -11,10 +18,10 @@ use fhe::{
     trbfv::{ShareManager, TRBFV},
 };
 
-use fhe_math::rq::{Poly, Representation};
+use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
-use rand::{distributions::Uniform, prelude::Distribution, rngs::OsRng, thread_rng};
+use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
 use util::timeit::{timeit, timeit_n};
@@ -142,13 +149,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         esi_sss: Vec<Array2<u64>>,
         sk_sss_collected: Vec<Array2<u64>>,
         es_sss_collected: Vec<Array2<u64>>,
-        sk_poly_sum: Poly,
-        es_poly_sum: Poly,
-        d_share_poly: Poly,
+        sk_poly_sum: Poly<PowerBasis>,
+        es_poly_sum: Poly<PowerBasis>,
+        d_share_poly: Poly<PowerBasis>,
     }
 
     // Generate a common reference poly for public key generation.
-    let crp = CommonRandomPoly::new(&params, &mut thread_rng())?;
+    let mut rng = rand::rng();
+    let crp = CommonRandomPoly::new(&params, &mut rng)?;
 
     // Setup trBFV module
     let trbfv = TRBFV::new(num_parties, threshold, params.clone()).unwrap();
@@ -160,12 +168,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             .into_par_iter()
             .map(|_| {
                 // Each thread gets its own RNG to avoid contention
-                let mut rng = OsRng;
-                let mut thread_rng = thread_rng();
+                let mut rng = rand::rng();
 
                 let sk_share = SecretKey::random(&params, &mut rng);
-                let pk_share =
-                    PublicKeyShare::new(&sk_share, crp.clone(), &mut thread_rng).unwrap();
+                let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
                 let mut share_manager = ShareManager::new(num_parties, threshold, params.clone());
                 let sk_poly = share_manager
@@ -175,25 +181,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // Clone trbfv for thread safety (it's cheap since it's just config)
                 let temp_trbfv = trbfv.clone();
                 let sk_sss = temp_trbfv
-                    .generate_secret_shares_from_poly(sk_poly, rng)
+                    .generate_secret_shares_from_poly(sk_poly, &mut rng)
                     .unwrap();
 
                 // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
                 let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
                 let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-                let sk_poly_sum =
-                    Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-                let es_poly_sum =
-                    Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
-                let d_share_poly =
-                    Poly::zero(params.ctx_at_level(0).unwrap(), Representation::PowerBasis);
+                let ctx = params.context_at_level(0).unwrap();
+                let sk_poly_sum = Poly::<PowerBasis>::zero(ctx);
+                let es_poly_sum = Poly::<PowerBasis>::zero(ctx);
+                let d_share_poly = Poly::<PowerBasis>::zero(ctx);
 
                 let esi_coeffs = temp_trbfv
                     .generate_smudging_error(num_summed, lambda, &mut rng)
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager
-                    .generate_secret_shares_from_poly(esi_poly, rng)
+                    .generate_secret_shares_from_poly(esi_poly, &mut rng)
                     .unwrap();
 
                 Party {
@@ -253,17 +257,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
 
     // Encrypted addition setup.
-    let dist = Uniform::new_inclusive(0, 1);
-    let numbers: Vec<u64> = dist
-        .sample_iter(&mut thread_rng())
-        .take(num_summed)
-        .collect();
+    let dist = Uniform::new_inclusive(0, 1).unwrap();
+    let numbers: Vec<u64> = dist.sample_iter(&mut rng).take(num_summed).collect();
 
     let numbers_encrypted: Vec<Ciphertext> = timeit!("Encrypting Numbers (parallel)", {
         numbers
             .par_iter()
             .map(|&number| {
-                let mut rng = thread_rng();
+                let mut rng = rand::rng();
                 let pt = Plaintext::try_encode(&[number], Encoding::poly(), &params).unwrap();
                 pk.try_encrypt(&pt, &mut rng).unwrap()
             })
@@ -287,7 +288,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .clone()
             .decryption_share(
                 tally.clone(),
-                party.sk_poly_sum.clone(),
+                party.sk_poly_sum.clone().into_ntt(),
                 party.es_poly_sum.clone(),
             )
             .unwrap();
@@ -304,7 +305,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  Average time per party: {:.2} ms", avg_time_per_party);
 
     // Gather decryption shares from threshold+1 parties
-    let d_share_polys: Vec<Poly> = parties
+    let d_share_polys: Vec<Poly<PowerBasis>> = parties
         .iter()
         .take(threshold + 1)
         .map(|party| party.d_share_poly.clone())

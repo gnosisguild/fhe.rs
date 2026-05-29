@@ -2,12 +2,14 @@
 name = "fhe-traits"
 description = "Traits for the fhe.rs library"
 authors.workspace = true
-documentation.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 repository.workspace = true
-version.workspace = true
 rust-version.workspace = true
+version = "0.1.1"
+
+[lints]
+workspace = true
 
 [lib]
 bench = false  # Disable default bench (we use criterion)

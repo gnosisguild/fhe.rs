@@ -1,3 +1,10 @@
+// Expect indexing in examples for simplicity
+#![expect(missing_docs, reason = "examples/benches/tests omit docs by design")]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "performance or example code relies on validated indices"
+)]
+
 // Implementation of SealPIR using the `fhe` crate.
 //
 // SealPIR is a Private Information Retrieval scheme that enables a client to
@@ -6,11 +13,12 @@
 // We use the same parameters as in Microsoft's public implementation
 // <https://github.com/microsoft/SealPIR> to enable an apple-to-apple comparison.
 
+mod pir;
 mod util;
 
-use console::style;
+use clap::Parser;
 use fhe::bfv;
-use fhe_math::rq::{traits::TryConvertFrom, Context, Poly, Representation};
+use fhe_math::rq::{Ntt, Poly, traits::TryConvertFrom};
 use fhe_traits::{
     DeserializeParametrized, FheDecoder, FheDecrypter, FheEncoder, FheEncoderVariableTime,
     FheEncrypter, Serialize,
@@ -18,93 +26,34 @@ use fhe_traits::{
 use fhe_util::{inverse, transcode_bidirectional, transcode_to_bytes};
 use indicatif::HumanBytes;
 use itertools::Itertools;
-use rand::{rngs::OsRng, thread_rng, RngCore};
-use std::{env, error::Error, process::exit, sync::Arc};
+use rand::{RngCore, rng};
+use std::error::Error;
 use util::{
     encode_database, generate_database, number_elements_per_plaintext,
     timeit::{timeit, timeit_n},
 };
 
-fn print_notice_and_exit(max_element_size: usize, error: Option<String>) {
-    println!(
-        "{} SealPIR with fhe.rs",
-        style("  overview:").magenta().bold()
-    );
-    println!(
-        "{} sealpir [-h] [--help] [--database_size=<value>] [--element_size=<value>]",
-        style("     usage:").magenta().bold()
-    );
-    println!(
-        "{} {} must be at least 1, and {} must be between 1 and {}",
-        style("constraints:").magenta().bold(),
-        style("database_size").blue(),
-        style("element_size").blue(),
-        max_element_size
-    );
-    if let Some(error) = error {
-        println!("{} {}", style("     error:").red().bold(), error);
-    }
-    exit(0);
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::init();
+
     let degree = 4096usize;
     let plaintext_modulus = 2056193u64;
     let moduli_sizes = [36, 36, 37];
+
+    let args = pir::Cli::parse();
+    let database_size = args.database_size;
+    let elements_size = args.element_size;
+    let mut rng = rng();
 
     // Compute what is the maximum byte-length of an element to fit within one
     // ciphertext. Each coefficient of the ciphertext polynomial can contain
     // floor(log2(plaintext_modulus)) bits.
     let max_element_size = ((plaintext_modulus.ilog2() as usize) * degree) / 8;
-
-    // This executable is a command line tool which enables to specify different
-    // database and element sizes.
-    let args: Vec<String> = env::args().skip(1).collect();
-
-    // Print the help if requested.
-    if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
-        print_notice_and_exit(max_element_size, None)
-    }
-
-    // Use the default values from <https://github.com/microsoft/SealPIR>.
-    let mut database_size = 1 << 16;
-    let mut elements_size = 1024;
-
-    // Update the database size and/or element size depending on the arguments
-    // provided.
-    for arg in &args {
-        if arg.starts_with("--database_size") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(
-                    max_element_size,
-                    Some("Invalid `--database_size` command".to_string()),
-                )
-            } else {
-                database_size = a[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--element_size") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(
-                    max_element_size,
-                    Some("Invalid `--element_size` command".to_string()),
-                )
-            } else {
-                elements_size = a[0].parse::<usize>()?
-            }
-        } else {
-            print_notice_and_exit(
-                max_element_size,
-                Some(format!("Unrecognized command: {arg}")),
-            )
-        }
-    }
     if elements_size > max_element_size || elements_size == 0 || database_size == 0 {
-        print_notice_and_exit(
-            max_element_size,
-            Some("Element or database sizes out of bound".to_string()),
-        )
+        log::error!(
+            "Invalid parameters: database_size = {database_size}, elements_size = {elements_size}. The maximum element size if {max_element_size}."
+        );
+        clap::Error::new(clap::error::ErrorKind::InvalidValue).exit();
     }
 
     // The parameters are within bound, let's go! Let's first display some
@@ -144,12 +93,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // the server will which enable to obliviously expand a ciphertext up to (dim1 +
     // dim2) values, i.e. with expansion level ceil(log2(dim1 + dim2)).
     let (sk, ek_expansion_serialized) = timeit!("Client setup", {
-        let sk = bfv::SecretKey::random(&params, &mut OsRng);
+        let sk = bfv::SecretKey::random(&params, &mut rng);
         let level = (dim1 + dim2).next_power_of_two().ilog2() as usize;
         println!("expansion_level = {level}");
         let ek_expansion = bfv::EvaluationKeyBuilder::new_leveled(&sk, 1, 0)?
             .enable_expansion(level)?
-            .build(&mut thread_rng())?;
+            .build(&mut rng)?;
         let ek_expansion_serialized = ek_expansion.to_bytes();
         (sk, ek_expansion_serialized)
     });
@@ -174,7 +123,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // has been dropped already; the reason is that the expansion will happen at
     // level 0 (with all three moduli) and then one of the moduli will be dropped
     // to reduce the noise.
-    let index = (thread_rng().next_u64() as usize) % database_size;
+    let index = (rng.next_u64() as usize) % database_size;
     let query = timeit!("Client query", {
         let level = (dim1 + dim2).next_power_of_two().ilog2();
         let query_index = index
@@ -188,7 +137,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         pt[query_index / dim2] = inv;
         pt[dim1 + (query_index % dim2)] = inv;
         let query_pt = bfv::Plaintext::try_encode(&pt, bfv::Encoding::poly_at_level(1), &params)?;
-        let query: bfv::Ciphertext = sk.try_encrypt(&query_pt, &mut thread_rng())?;
+        let query: bfv::Ciphertext = sk.try_encrypt(&query_pt, &mut rng)?;
         query.to_bytes()
     });
     println!("📄 Query: {}", HumanBytes(query.len() as u64));
@@ -216,7 +165,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let dot_product_mod_switch = move |i, database: &[bfv::Plaintext]| {
             let column = database.iter().skip(i).step_by(dim2);
             let mut c = bfv::dot_product_scalar(query_vec.iter(), column)?;
-            c.mod_switch_to_last_level()?;
+            c.switch_to_level(c.max_switchable_level())?;
             Ok(c)
         };
 
@@ -232,7 +181,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .div_ceil(plaintext_modulus.ilog2() as usize),
                 );
                 pt_values.append(&mut transcode_bidirectional(
-                    c.get(0).unwrap().coefficients().as_slice().unwrap(),
+                    c.first().unwrap().coefficients().as_slice().unwrap(),
                     64 - params.moduli()[0].leading_zeros() as usize,
                     plaintext_modulus.ilog2() as usize,
                 ));
@@ -242,22 +191,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                     plaintext_modulus.ilog2() as usize,
                 ));
                 unsafe {
-                    Ok(bfv::PlaintextVec::try_encode_vt(
+                    bfv::PlaintextVec::try_encode_vt(
                         &pt_values,
                         bfv::Encoding::poly_at_level(1),
                         &params,
-                    )?
-                    .0)
+                    )
                 }
             })
-            .collect::<fhe::Result<Vec<Vec<bfv::Plaintext>>>>()?;
+            .collect::<fhe::Result<Vec<bfv::PlaintextVec>>>()?;
         (0..fold[0].len())
             .map(|i| {
                 let mut outi = bfv::dot_product_scalar(
                     expanded_query[dim1..].iter(),
-                    fold.iter().map(|pts| pts.get(i).unwrap()),
+                    fold.iter().map(|pts| &pts[i]),
                 )?;
-                outi.mod_switch_to_last_level()?;
+                outi.switch_to_level(outi.max_switchable_level())?;
                 Ok(outi.to_bytes())
             })
             .collect::<fhe::Result<Vec<Vec<u8>>>>()?
@@ -304,11 +252,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         poly0.truncate(params.degree());
         poly1.truncate(params.degree());
 
-        let ctx = Arc::new(Context::new(&params.moduli()[..1], params.degree())?);
+        let ctx = params.context_at_level(2)?;
         let ct = bfv::Ciphertext::new(
             vec![
-                Poly::try_convert_from(poly0, &ctx, true, Representation::Ntt)?,
-                Poly::try_convert_from(poly1, &ctx, true, Representation::Ntt)?,
+                Poly::<Ntt>::try_convert_from(poly0, ctx, true)?,
+                Poly::<Ntt>::try_convert_from(poly1, ctx, true)?,
             ],
             &params,
         )?;

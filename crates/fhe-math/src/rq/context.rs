@@ -2,7 +2,7 @@ use itertools::Itertools;
 use num_bigint::BigUint;
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{ntt::NttOperator, rns::RnsContext, zq::Modulus, Error, Result};
+use crate::{Error, Result, ntt::NttOperator, rns::RnsContext, zq::Modulus};
 
 /// Struct that holds the context associated with elements in rq.
 #[derive(Default, Clone, PartialEq, Eq)]
@@ -54,20 +54,20 @@ impl Context {
                 "The degree is not a power of two larger or equal to 8".to_string(),
             ))
         } else {
-            let mut q = Vec::with_capacity(moduli.len());
             let rns = Arc::new(RnsContext::new(moduli)?);
-            let mut ops = Vec::with_capacity(moduli.len());
-            for modulus in moduli {
-                let qi = Modulus::new(*modulus)?;
-                if let Some(op) = NttOperator::new(&qi, degree) {
-                    q.push(qi);
-                    ops.push(op);
-                } else {
-                    return Err(Error::Default(
-                        "Impossible to construct a Ntt operator".to_string(),
-                    ));
-                }
-            }
+            let (q, ops): (Vec<Modulus>, Vec<NttOperator>) = moduli
+                .iter()
+                .map(|modulus| {
+                    let qi = Modulus::new(*modulus)?;
+                    NttOperator::new(&qi, degree)
+                        .ok_or_else(|| {
+                            Error::Default("Impossible to construct a Ntt operator".to_string())
+                        })
+                        .map(|op| (qi, op))
+                })
+                .collect::<Result<Vec<(Modulus, NttOperator)>>>()?
+                .into_iter()
+                .unzip();
             let bitrev = (0..degree)
                 .map(|j| j.reverse_bits() >> (degree.leading_zeros() + 1))
                 .collect_vec();
@@ -107,16 +107,19 @@ impl Context {
     }
 
     /// Returns the modulus as a BigUint.
+    #[must_use]
     pub fn modulus(&self) -> &BigUint {
         self.rns.modulus()
     }
 
     /// Returns a reference to the moduli in this context.
+    #[must_use]
     pub fn moduli(&self) -> &[u64] {
         &self.moduli
     }
 
     /// Returns a reference to the moduli as Modulus in this context.
+    #[must_use]
     pub fn moduli_operators(&self) -> &[Modulus] {
         &self.q
     }
@@ -181,7 +184,7 @@ mod tests {
     fn context_constructor() {
         for modulus in MODULI {
             // modulus is = 1 modulo 2 * 8
-            assert!(Context::new(&[*modulus], 8).is_ok());
+            assert!(Context::new(&[*modulus], 16).is_ok());
 
             if supports_ntt(*modulus, 128) {
                 assert!(Context::new(&[*modulus], 128).is_ok());
@@ -191,7 +194,7 @@ mod tests {
         }
 
         // All moduli in MODULI are = 1 modulo 2 * 8
-        assert!(Context::new(MODULI, 8).is_ok());
+        assert!(Context::new(MODULI, 16).is_ok());
 
         // This should fail since 1153 != 1 moduli 2 * 128
         assert!(Context::new(MODULI, 128).is_err());
@@ -200,10 +203,10 @@ mod tests {
     #[test]
     fn next_context() -> Result<(), Box<dyn Error>> {
         // A context should have a children pointing to a context with one less modulus.
-        let context = Arc::new(Context::new(MODULI, 8)?);
+        let context = Arc::new(Context::new(MODULI, 16)?);
         assert_eq!(
             context.next_context,
-            Some(Arc::new(Context::new(&MODULI[..MODULI.len() - 1], 8)?))
+            Some(Arc::new(Context::new(&MODULI[..MODULI.len() - 1], 16)?))
         );
 
         // We can go down the chain of the MODULI.len() - 1 context's.
@@ -221,13 +224,13 @@ mod tests {
     #[test]
     fn niterations_to() -> Result<(), Box<dyn Error>> {
         // A context should have a children pointing to a context with one less modulus.
-        let context = Arc::new(Context::new(MODULI, 8)?);
+        let context = Arc::new(Context::new(MODULI, 16)?);
 
         assert_eq!(context.niterations_to(&context).ok(), Some(0));
 
         assert_eq!(
             context
-                .niterations_to(&Arc::new(Context::new(&MODULI[1..], 8)?))
+                .niterations_to(&Arc::new(Context::new(&MODULI[1..], 16)?))
                 .err(),
             Some(crate::Error::InvalidContext)
         );
@@ -235,7 +238,7 @@ mod tests {
         for i in 1..MODULI.len() {
             assert_eq!(
                 context
-                    .niterations_to(&Arc::new(Context::new(&MODULI[..MODULI.len() - i], 8)?))
+                    .niterations_to(&Arc::new(Context::new(&MODULI[..MODULI.len() - i], 16)?))
                     .ok(),
                 Some(i)
             );

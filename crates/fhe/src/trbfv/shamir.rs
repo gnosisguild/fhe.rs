@@ -1,3 +1,4 @@
+use fhe_util::rng08;
 /// Shamir Secret Sharing implementation for threshold BFV.
 ///
 /// This module provides a complete Shamir Secret Sharing implementation that integrates
@@ -64,6 +65,7 @@ impl ShamirSecretSharing {
     /// # Returns
     ///
     /// A new `ShamirSecretSharing` instance configured with the given parameters.
+    #[must_use]
     pub fn new(threshold: usize, share_amount: usize, prime: BigInt) -> Self {
         Self {
             threshold,
@@ -124,14 +126,14 @@ impl ShamirSecretSharing {
 
         // Generate seeds deterministically from the input RNG
         // This is done so clients can test using deterministic rngs
-        let seeds: Vec<u64> = (0..self.threshold).map(|_| rng.gen()).collect();
+        let seeds: Vec<u64> = (0..self.threshold).map(|_| rng.random()).collect();
 
         // Use the seeds
         let random_coefficients: Vec<BigInt> = seeds
             .into_par_iter()
             .map(|seed| {
                 let mut rng = ChaCha20Rng::seed_from_u64(seed);
-                rng.gen_bigint_range(&low, &high)
+                rng08::adapt(&mut rng).gen_bigint_range(&low, &high)
             })
             .collect();
         coefficients.extend(random_coefficients);
@@ -165,6 +167,7 @@ impl ShamirSecretSharing {
     /// # Panics
     ///
     /// Panics if the number of shares provided is not equal to the threshold + one.
+    #[must_use]
     pub fn recover(&self, shares: &[(usize, BigInt)]) -> BigInt {
         assert!(shares.len() == (self.threshold + 1), "wrong shares number");
         let (xs, ys): (Vec<usize>, Vec<BigInt>) = shares.iter().cloned().unzip();
@@ -176,6 +179,8 @@ impl ShamirSecretSharing {
         }
     }
 
+    // indices i and item iterate 0..len, same as xs_bigint.len() and ys.len()
+    #[allow(clippy::indexing_slicing)]
     fn lagrange_interpolation(&self, x: BigInt, xs: Vec<usize>, ys: Vec<BigInt>) -> BigInt {
         let len = xs.len();
         let xs_bigint: Vec<BigInt> = xs.iter().map(|x| BigInt::from(*x as i64)).collect();
@@ -257,6 +262,7 @@ impl ShamirSecretSharing {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     #[test]
@@ -304,7 +310,7 @@ mod tests {
             .unwrap(),
         };
         let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
-        let shares = sss.split(secret.clone(), &mut rand::thread_rng());
+        let shares = sss.split(secret.clone(), &mut rand::rng());
         assert_eq!(secret, sss.recover(&shares[0..sss.threshold + 1]));
     }
 }

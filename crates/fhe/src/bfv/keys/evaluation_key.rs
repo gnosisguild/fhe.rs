@@ -1,9 +1,9 @@
 //! Leveled evaluation keys for the BFV encryption scheme.
 
-use crate::bfv::{keys::GaloisKey, traits::TryConvertFrom, BfvParameters, Ciphertext, SecretKey};
+use crate::bfv::{BfvParameters, Ciphertext, SecretKey, keys::GaloisKey, traits::TryConvertFrom};
 use crate::proto::bfv::{EvaluationKey as EvaluationKeyProto, GaloisKey as GaloisKeyProto};
 use crate::{Error, Result};
-use fhe_math::rq::{traits::TryConvertFrom as TryConvertFromPoly, Poly, Representation};
+use fhe_math::rq::{NttShoup, Poly, PowerBasis, traits::TryConvertFrom as TryConvertFromPoly};
 use fhe_math::zq::Modulus;
 use fhe_traits::{DeserializeParametrized, FheParametrized, Serialize};
 use prost::Message;
@@ -33,12 +33,13 @@ pub struct EvaluationKey {
     rot_to_gk_exponent: HashMap<usize, usize>,
 
     /// Monomials used in expansion
-    monomials: Vec<Poly>,
+    monomials: Vec<Poly<NttShoup>>,
 }
 
 impl EvaluationKey {
     /// Reports whether the evaluation key enables to compute an homomorphic
     /// inner sums.
+    #[must_use]
     pub fn supports_inner_sum(&self) -> bool {
         let mut ret = self.gk.contains_key(&(self.par.degree() * 2 - 1));
         let mut i = 1;
@@ -59,6 +60,7 @@ impl EvaluationKey {
             ))
         } else {
             let mut out = ct.clone();
+            let mut tmp = Ciphertext::zero(&ct.par);
 
             let mut i = 1;
             while i < ct.par.degree() / 2 {
@@ -66,12 +68,14 @@ impl EvaluationKey {
                     .gk
                     .get(self.rot_to_gk_exponent.get(&i).unwrap())
                     .unwrap();
-                out += &gk.relinearize(&out)?;
+                gk.relinearize_into(&out, &mut tmp)?;
+                out += &tmp;
                 i *= 2
             }
 
             let gk = self.gk.get(&(self.par.degree() * 2 - 1)).unwrap();
-            out += &gk.relinearize(&out)?;
+            gk.relinearize_into(&out, &mut tmp)?;
+            out += &tmp;
 
             Ok(out)
         }
@@ -79,6 +83,7 @@ impl EvaluationKey {
 
     /// Reports whether the evaluation key enables to rotate the rows of the
     /// plaintext.
+    #[must_use]
     pub fn supports_row_rotation(&self) -> bool {
         self.gk.contains_key(&(self.par.degree() * 2 - 1))
     }
@@ -91,12 +96,15 @@ impl EvaluationKey {
             ))
         } else {
             let gk = self.gk.get(&(self.par.degree() * 2 - 1)).unwrap();
-            gk.relinearize(ct)
+            let mut out = Ciphertext::zero(&ct.par);
+            gk.relinearize_into(ct, &mut out)?;
+            Ok(out)
         }
     }
 
     /// Reports whether the evaluation key enables to rotate the columns of the
     /// plaintext.
+    #[must_use]
     pub fn supports_column_rotation_by(&self, i: usize) -> bool {
         if let Some(exp) = self.rot_to_gk_exponent.get(&i) {
             self.gk.contains_key(exp)
@@ -116,11 +124,14 @@ impl EvaluationKey {
                 .gk
                 .get(self.rot_to_gk_exponent.get(&i).unwrap())
                 .unwrap();
-            gk.relinearize(ct)
+            let mut out = Ciphertext::zero(&ct.par);
+            gk.relinearize_into(ct, &mut out)?;
+            Ok(out)
         }
     }
 
     /// Reports whether the evaluation key supports oblivious expansion.
+    #[must_use]
     pub fn supports_expansion(&self, level: usize) -> bool {
         if level == 0 {
             true
@@ -141,7 +152,7 @@ impl EvaluationKey {
     /// ciphertexts.
     pub fn expands(&self, ct: &Ciphertext, size: usize) -> Result<Vec<Ciphertext>> {
         let level = size.next_power_of_two().ilog2() as usize;
-        if ct.c.len() != 2 {
+        if ct.len() != 2 {
             Err(Error::DefaultError(
                 "The ciphertext is not of size 2".to_string(),
             ))
@@ -150,20 +161,26 @@ impl EvaluationKey {
         } else if self.supports_expansion(level) {
             let mut out = vec![Ciphertext::zero(&ct.par); 1 << level];
             out[0] = ct.clone();
+            let mut sub = Ciphertext::zero(&ct.par);
 
             // We use the Oblivious expansion algorithm of
             // https://eprint.iacr.org/2019/1483.pdf
             for l in 0..level {
                 let monomial = &self.monomials[l];
                 let gk = self.gk.get(&((self.par.degree() >> l) + 1)).unwrap();
-                for i in 0..(1 << l) {
-                    let sub = gk.relinearize(&out[i])?;
-                    if (1 << l) | i < size {
-                        out[(1 << l) | i] = &out[i] - &sub;
-                        out[(1 << l) | i].c[0] *= monomial;
-                        out[(1 << l) | i].c[1] *= monomial;
+                let step = 1 << l;
+                let (low, high) = out.split_at_mut(step);
+                for i in 0..step {
+                    gk.relinearize_into(&low[i], &mut sub)?;
+                    let j = step | i;
+                    if j < size {
+                        let target = &mut high[i];
+                        target.clone_from(&low[i]);
+                        *target -= &sub;
+                        target[0] *= monomial;
+                        target[1] *= monomial;
                     }
-                    out[i] += &sub;
+                    low[i] += &sub;
                 }
             }
             out.truncate(size);
@@ -272,7 +289,6 @@ impl EvaluationKeyBuilder {
     }
 
     /// Allow expansion by this evaluation key.
-    #[allow(unused_must_use)]
     pub fn enable_expansion(&mut self, level: usize) -> Result<&mut Self> {
         if level >= 64 - self.sk.par.degree().leading_zeros() as usize {
             Err(Error::DefaultError("Invalid level 2".to_string()))
@@ -283,14 +299,12 @@ impl EvaluationKeyBuilder {
     }
 
     /// Allow this evaluation key to compute homomorphic inner sums.
-    #[allow(unused_must_use)]
     pub fn enable_inner_sum(&mut self) -> Result<&mut Self> {
         self.inner_sum = true;
         Ok(self)
     }
 
     /// Allow this evaluation key to homomorphically rotate the plaintext rows.
-    #[allow(unused_must_use)]
     pub fn enable_row_rotation(&mut self) -> Result<&mut Self> {
         self.row_rotation = true;
         Ok(self)
@@ -298,7 +312,6 @@ impl EvaluationKeyBuilder {
 
     /// Allow this evaluation key to homomorphically rotate the plaintext
     /// columns.
-    #[allow(unused_must_use)]
     pub fn enable_column_rotation(&mut self, i: usize) -> Result<&mut Self> {
         if let Some(exp) = self.rot_to_gk_exponent.get(&i) {
             self.column_rotation.insert(*exp);
@@ -339,19 +352,14 @@ impl EvaluationKeyBuilder {
             indices.insert((self.sk.par.degree() >> l) + 1);
         }
 
-        let ciphertext_ctx = self.sk.par.ctx_at_level(self.ciphertext_level)?;
+        let ciphertext_ctx = self.sk.par.context_at_level(self.ciphertext_level)?;
         for l in 0..self.sk.par.degree().ilog2() {
             let mut monomial = vec![0i64; self.sk.par.degree()];
             monomial[self.sk.par.degree() - (1 << l)] = -1;
-            let mut monomial = Poly::try_convert_from(
-                &monomial,
-                ciphertext_ctx,
-                true,
-                Representation::PowerBasis,
-            )?;
+            let mut monomial =
+                Poly::<PowerBasis>::try_convert_from(&monomial, ciphertext_ctx, true)?;
             unsafe { monomial.allow_variable_time_computations() }
-            monomial.change_representation(Representation::NttShoup);
-            ek.monomials.push(monomial);
+            ek.monomials.push(monomial.into_ntt_shoup());
         }
 
         for index in indices {
@@ -401,20 +409,15 @@ impl TryConvertFrom<&EvaluationKeyProto> for EvaluationKey {
             gk.insert(key.element.exponent, key);
         }
 
-        let ciphertext_ctx = par.ctx_at_level(value.ciphertext_level as usize)?;
+        let ciphertext_ctx = par.context_at_level(value.ciphertext_level as usize)?;
         let mut monomials = Vec::with_capacity(par.degree().ilog2() as usize);
         for l in 0..par.degree().ilog2() {
             let mut monomial = vec![0i64; par.degree()];
             monomial[par.degree() - (1 << l)] = -1;
-            let mut monomial = Poly::try_convert_from(
-                &monomial,
-                ciphertext_ctx,
-                true,
-                Representation::PowerBasis,
-            )?;
+            let mut monomial =
+                Poly::<PowerBasis>::try_convert_from(&monomial, ciphertext_ctx, true)?;
             unsafe { monomial.allow_variable_time_computations() }
-            monomial.change_representation(Representation::NttShoup);
-            monomials.push(monomial);
+            monomials.push(monomial.into_ntt_shoup());
         }
 
         Ok(EvaluationKey {
@@ -431,19 +434,19 @@ impl TryConvertFrom<&EvaluationKeyProto> for EvaluationKey {
 #[cfg(test)]
 mod tests {
     use super::{EvaluationKey, EvaluationKeyBuilder};
-    use crate::bfv::{traits::TryConvertFrom, BfvParameters, Encoding, Plaintext, SecretKey};
+    use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey, traits::TryConvertFrom};
     use crate::proto::bfv::EvaluationKey as LeveledEvaluationKeyProto;
     use fhe_traits::{
         DeserializeParametrized, FheDecoder, FheDecrypter, FheEncoder, FheEncrypter, Serialize,
     };
     use itertools::izip;
-    use rand::thread_rng;
+    use rand::rng;
     use std::{cmp::min, error::Error};
 
     #[test]
     fn builder() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 16);
         let sk = SecretKey::random(&params, &mut rng);
 
         let max_level = params.max_level();
@@ -459,9 +462,11 @@ mod tests {
                 assert!(!builder.build(&mut rng)?.supports_expansion(1));
                 assert!(builder.build(&mut rng)?.supports_expansion(0));
                 assert!(builder.enable_column_rotation(0).is_err());
-                assert!(builder
-                    .enable_expansion(64 - params.degree().leading_zeros() as usize)
-                    .is_err());
+                assert!(
+                    builder
+                        .enable_expansion(64 - params.degree().leading_zeros() as usize)
+                        .is_err()
+                );
 
                 builder.enable_column_rotation(1)?;
                 assert!(builder.build(&mut rng)?.supports_column_rotation_by(1));
@@ -477,14 +482,18 @@ mod tests {
                 builder.enable_inner_sum()?;
                 assert!(builder.build(&mut rng)?.supports_inner_sum());
                 assert!(builder.build(&mut rng)?.supports_expansion(1));
-                assert!(!builder
-                    .build(&mut rng)?
-                    .supports_expansion(64 - 1 - params.degree().leading_zeros() as usize));
+                assert!(
+                    !builder
+                        .build(&mut rng)?
+                        .supports_expansion(64 - 1 - params.degree().leading_zeros() as usize)
+                );
 
                 builder.enable_expansion(64 - 1 - params.degree().leading_zeros() as usize)?;
-                assert!(builder
-                    .build(&mut rng)?
-                    .supports_expansion(64 - 1 - params.degree().leading_zeros() as usize));
+                assert!(
+                    builder
+                        .build(&mut rng)?
+                        .supports_expansion(64 - 1 - params.degree().leading_zeros() as usize)
+                );
 
                 assert!(builder.build(&mut rng).is_ok());
 
@@ -515,10 +524,10 @@ mod tests {
 
     #[test]
     fn inner_sum() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(6, 8),
-            BfvParameters::default_arc(5, 8),
+            BfvParameters::default_arc(6, 16),
+            BfvParameters::default_arc(5, 16),
         ] {
             for _ in 0..25 {
                 for ciphertext_level in 0..=params.max_level() {
@@ -532,9 +541,11 @@ mod tests {
                         .enable_inner_sum()?
                         .build(&mut rng)?;
 
-                        let v = params.plaintext.random_vec(params.degree(), &mut rng);
-                        let expected = params
-                            .plaintext
+                        let v = fhe_math::zq::Modulus::new(params.plaintext())
+                            .unwrap()
+                            .random_vec(params.degree(), &mut rng);
+                        let expected = fhe_math::zq::Modulus::new(params.plaintext())
+                            .unwrap()
                             .reduce_u128(v.iter().map(|vi| *vi as u128).sum());
 
                         let pt = Plaintext::try_encode(
@@ -559,10 +570,10 @@ mod tests {
 
     #[test]
     fn row_rotation() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(6, 8),
-            BfvParameters::default_arc(5, 8),
+            BfvParameters::default_arc(6, 16),
+            BfvParameters::default_arc(5, 16),
         ] {
             for _ in 0..50 {
                 for ciphertext_level in 0..=params.max_level() {
@@ -576,7 +587,9 @@ mod tests {
                         .enable_row_rotation()?
                         .build(&mut rng)?;
 
-                        let v = params.plaintext.random_vec(params.degree(), &mut rng);
+                        let v = fhe_math::zq::Modulus::new(params.plaintext())
+                            .unwrap()
+                            .random_vec(params.degree(), &mut rng);
                         let row_size = params.degree() >> 1;
                         let mut expected = vec![0u64; params.degree()];
                         expected[..row_size].copy_from_slice(&v[row_size..]);
@@ -604,10 +617,10 @@ mod tests {
 
     #[test]
     fn column_rotation() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(6, 8),
-            BfvParameters::default_arc(5, 8),
+            BfvParameters::default_arc(6, 16),
+            BfvParameters::default_arc(5, 16),
         ] {
             let row_size = params.degree() >> 1;
             for _ in 0..50 {
@@ -623,7 +636,9 @@ mod tests {
                             .enable_column_rotation(i)?
                             .build(&mut rng)?;
 
-                            let v = params.plaintext.random_vec(params.degree(), &mut rng);
+                            let v = fhe_math::zq::Modulus::new(params.plaintext())
+                                .unwrap()
+                                .random_vec(params.degree(), &mut rng);
                             let row_size = params.degree() >> 1;
                             let mut expected = vec![0u64; params.degree()];
                             expected[..row_size - i].copy_from_slice(&v[i..row_size]);
@@ -659,10 +674,10 @@ mod tests {
 
     #[test]
     fn expansion() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(6, 8),
-            BfvParameters::default_arc(5, 8),
+            BfvParameters::default_arc(6, 16),
+            BfvParameters::default_arc(5, 16),
         ] {
             let log_degree = 64 - 1 - params.degree().leading_zeros();
             for _ in 0..15 {
@@ -680,7 +695,9 @@ mod tests {
 
                             assert!(ek.supports_expansion(i));
                             assert!(!ek.supports_expansion(i + 1));
-                            let v = params.plaintext.random_vec(1 << i, &mut rng);
+                            let v = fhe_math::zq::Modulus::new(params.plaintext())
+                                .unwrap()
+                                .random_vec(1 << i, &mut rng);
                             let pt = Plaintext::try_encode(
                                 &v,
                                 Encoding::poly_at_level(ciphertext_level),
@@ -692,7 +709,9 @@ mod tests {
                             assert_eq!(ct2.len(), 1 << i);
                             for (vi, ct2i) in izip!(&v, &ct2) {
                                 let mut expected = vec![0u64; params.degree()];
-                                expected[0] = params.plaintext.mul(*vi, (1 << i) as u64);
+                                expected[0] = fhe_math::zq::Modulus::new(params.plaintext())
+                                    .unwrap()
+                                    .mul(*vi, (1 << i) as u64);
                                 let pt = sk.try_decrypt(ct2i)?;
                                 assert_eq!(
                                     expected,
@@ -713,11 +732,11 @@ mod tests {
 
     #[test]
     fn proto_conversion() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
-            BfvParameters::default_arc(5, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 16),
+            BfvParameters::default_arc(5, 16),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
 
@@ -757,10 +776,10 @@ mod tests {
 
     #[test]
     fn serialize() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 16),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
 

@@ -1,8 +1,8 @@
 //! Traits used for the BFV homomorphic encryption scheme.
 
+use crate::Result;
 use crate::bfv::{BfvParameters, Ciphertext, RelinearizationKey as BfvRelinearizationKey};
 use crate::lbfv::LBFVRelinearizationKey;
-use crate::Result;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -54,6 +54,7 @@ impl GenericRelinearizationKey {
     }
 
     /// Get the key level of the relinearization key
+    #[must_use]
     pub fn key_level(&self) -> usize {
         match self {
             GenericRelinearizationKey::Standard(rk) => rk.key_level(),
@@ -62,6 +63,7 @@ impl GenericRelinearizationKey {
     }
 
     /// Get the ciphertext level of the relinearization key
+    #[must_use]
     pub fn ciphertext_level(&self) -> usize {
         match self {
             GenericRelinearizationKey::Standard(rk) => rk.ciphertext_level(),
@@ -70,6 +72,7 @@ impl GenericRelinearizationKey {
     }
 
     /// Get the BFV parameters of the relinearization key
+    #[must_use]
     pub fn parameters(&self) -> Arc<BfvParameters> {
         match self {
             GenericRelinearizationKey::Standard(rk) => rk.parameters(),

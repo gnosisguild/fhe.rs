@@ -1,7 +1,8 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+#![expect(missing_docs, reason = "examples/benches/tests omit docs by design")]
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fhe_math::rns::{RnsContext, RnsScaler, ScalingFactor};
 use num_bigint::BigUint;
-use rand::{thread_rng, RngCore};
+use rand::{RngCore, rng};
 use std::sync::Arc;
 
 pub fn rns_benchmark(c: &mut Criterion) {
@@ -20,7 +21,7 @@ pub fn rns_benchmark(c: &mut Criterion) {
         4611686018106523649,
     ];
 
-    let mut rng = thread_rng();
+    let mut rng = rng();
     let mut x = vec![];
     for qi in &q {
         x.push(rng.next_u64() % *qi);

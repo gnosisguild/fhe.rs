@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
-use fhe_math::{
-    rq::{traits::TryConvertFrom, Poly, Representation},
-    zq::Modulus,
-};
+use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
 use fhe_traits::{DeserializeWithContext, Serialize};
 use itertools::Itertools;
+use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
-use crate::bfv::{BfvParameters, Ciphertext, Plaintext, SecretKey};
+use crate::bfv::{BfvParameters, Ciphertext, Plaintext, PlaintextValues, SecretKey};
 use crate::{Error, Result};
 
 use super::Aggregate;
@@ -28,7 +27,7 @@ pub struct SecretKeySwitchShare {
     /// The original input ciphertext
     // Probably doesn't need to be Arc in real usage but w/e
     pub(crate) ct: Arc<Ciphertext>,
-    pub(crate) h_share: Poly,
+    pub(crate) h_share: Poly<Ntt>,
 }
 
 impl SecretKeySwitchShare {
@@ -50,39 +49,39 @@ impl SecretKeySwitchShare {
             ));
         }
         // Note: M-BFV implementation only supports ciphertext of length 2
-        if ct.c.len() != 2 {
-            return Err(Error::TooManyValues(ct.c.len(), 2));
+        if ct.len() != 2 {
+            return Err(Error::TooManyValues {
+                actual: ct.len(),
+                limit: 2,
+            });
         }
 
         let par = sk_input_share.par.clone();
-        let mut s_in = Zeroizing::new(Poly::try_convert_from(
-            sk_input_share.coeffs.as_ref(),
-            ct.c[0].ctx(),
-            false,
-            Representation::PowerBasis,
-        )?);
-        s_in.change_representation(Representation::Ntt);
-        let mut s_out = Zeroizing::new(Poly::try_convert_from(
-            sk_output_share.coeffs.as_ref(),
-            ct.c[0].ctx(),
-            false,
-            Representation::PowerBasis,
-        )?);
-        s_out.change_representation(Representation::Ntt);
+        let s_in = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(
+                sk_input_share.coeffs.as_ref(),
+                ct[0].ctx(),
+                false,
+            )?
+            .into_ntt(),
+        );
+        let s_out = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(
+                sk_output_share.coeffs.as_ref(),
+                ct[0].ctx(),
+                false,
+            )?
+            .into_ntt(),
+        );
 
         // Sample error
         // TODO this should be exponential in ciphertext noise!
-        let e = Zeroizing::new(Poly::small(
-            ct.c[0].ctx(),
-            Representation::Ntt,
-            par.variance,
-            rng,
-        )?);
+        let e = Zeroizing::new(Poly::<Ntt>::small(ct[0].ctx(), par.variance, rng)?);
 
         // Create h_i share
         let mut h_share = s_in.as_ref() - s_out.as_ref();
         h_share.disallow_variable_time_computations();
-        h_share *= &ct.c[1];
+        h_share *= &ct[1];
         h_share += e.as_ref();
 
         Ok(Self { par, ct, h_share })
@@ -95,11 +94,12 @@ impl SecretKeySwitchShare {
         par: &Arc<BfvParameters>,
         ct: Arc<Ciphertext>,
     ) -> Result<Self> {
-        let test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
+        let ctx = par.context_at_level(0)?;
+        let h_share = Poly::<Ntt>::from_bytes(bytes, ctx)?;
         Ok(Self {
             par: par.clone(),
-            ct: ct.clone(),
-            h_share: test.unwrap(),
+            ct,
+            h_share,
         })
     }
 }
@@ -110,14 +110,17 @@ impl Aggregate<SecretKeySwitchShare> for Ciphertext {
         T: IntoIterator<Item = SecretKeySwitchShare>,
     {
         let mut shares = iter.into_iter();
-        let share = shares.next().ok_or(Error::TooFewValues(0, 1))?;
+        let share = shares.next().ok_or(Error::TooFewValues {
+            actual: 0,
+            minimum: 1,
+        })?;
         let mut h = share.h_share;
         for sh in shares {
             h += &sh.h_share;
         }
 
-        let c0 = &share.ct.c[0] + &h;
-        let c1 = share.ct.c[1].clone();
+        let c0 = &share.ct[0] + &h;
+        let c1 = share.ct[1].clone();
 
         Ciphertext::new(vec![c0, c1], &share.par)
     }
@@ -163,9 +166,8 @@ impl DecryptionShare {
         par: &Arc<BfvParameters>,
         ct: Arc<Ciphertext>,
     ) -> Result<Self> {
-        let _test = Poly::from_bytes(bytes, par.ctx_at_level(0).unwrap());
         Ok(Self {
-            sks_share: SecretKeySwitchShare::deserialize(bytes, par, ct).unwrap(),
+            sks_share: SecretKeySwitchShare::deserialize(bytes, par, ct)?,
         })
     }
 }
@@ -183,33 +185,45 @@ impl Aggregate<DecryptionShare> for Plaintext {
     {
         let sks_shares = iter.into_iter().map(|s| s.sks_share);
         let ct = Ciphertext::from_shares(sks_shares)?;
-        let par = ct.par;
 
         // Note: during SKS, c[1]*sk has already been added to c[0].
-        let mut c = Zeroizing::new(ct.c[0].clone());
+        let mut c = Zeroizing::new(ct[0].clone());
         c.disallow_variable_time_computations();
-        c.change_representation(Representation::PowerBasis);
+        let ctx = c.ctx().clone();
+        let c_inner = std::mem::replace(c.as_mut(), Poly::<Ntt>::zero(&ctx));
+        let c = c_inner.into_power_basis();
 
         // The true decryption part is done during SKS; all that is left is to scale
-        let d = Zeroizing::new(c.scale(&par.scalers[ct.level])?);
-        let v = Zeroizing::new(
-            Vec::<u64>::from(d.as_ref())
-                .iter_mut()
-                .map(|vi| *vi + par.plaintext.modulus())
-                .collect_vec(),
-        );
-        let mut w = v[..par.degree()].to_vec();
-        let q = Modulus::new(par.moduli[0]).map_err(Error::MathError)?;
-        q.reduce_vec(&mut w);
-        par.plaintext.reduce_vec(&mut w);
+        let ctx_lvl = ct.par.context_level_at(ct.level)?;
+        let d = Zeroizing::new(c.scale(&ctx_lvl.cipher_plain_context.scaler)?);
 
-        let mut poly =
-            Poly::try_convert_from(&w, ct.c[0].ctx(), false, Representation::PowerBasis)?;
-        poly.change_representation(Representation::Ntt);
+        let v: Vec<BigUint> = Vec::<BigUint>::from(d.as_ref())
+            .into_iter()
+            .map(|vi| vi + ct.par.plaintext_big())
+            .collect_vec();
+
+        let mut w = v[..ct.par.degree()].to_vec();
+        let q_poly = d.as_ref().ctx().modulus();
+        w.iter_mut().for_each(|wi| *wi %= q_poly);
+
+        ct.par.plaintext.reduce_vec(&mut w);
+
+        let poly =
+            Poly::<PowerBasis>::try_convert_from(w.as_slice(), ct[0].ctx(), false)?.into_ntt();
+
+        let value = match ct.par.plaintext {
+            crate::bfv::PlaintextModulus::Small { .. } => PlaintextValues::Small(
+                w.iter()
+                    .map(|x| x.to_u64().unwrap())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            crate::bfv::PlaintextModulus::Large(_) => PlaintextValues::Large(w.into_boxed_slice()),
+        };
 
         let pt = Plaintext {
-            par: par.clone(),
-            value: w.into_boxed_slice(),
+            par: ct.par.clone(),
+            value,
             encoding: None,
             poly_ntt: poly,
             level: ct.level,
@@ -224,14 +238,15 @@ mod tests {
     use std::sync::Arc;
 
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
-    use rand::thread_rng;
+    use rand::rng;
 
     use crate::{
         bfv::{BfvParameters, Encoding, Plaintext, PublicKey, SecretKey},
-        mbfv::{Aggregate, AggregateIter, CommonRandomPoly, PublicKeyShare},
+        mbfv::{
+            Aggregate, AggregateIter, CommonRandomPoly, DecryptionShare, PublicKeyShare,
+            SecretKeySwitchShare,
+        },
     };
-
-    use super::*;
 
     const NUM_PARTIES: usize = 11;
 
@@ -242,10 +257,10 @@ mod tests {
 
     #[test]
     fn encrypt_decrypt() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for par in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 32),
         ] {
             for level in 0..=par.max_level() {
                 for _ in 0..20 {
@@ -267,8 +282,9 @@ mod tests {
                         .unwrap();
 
                     // Use it to encrypt a random polynomial
+                    let q = fhe_math::zq::Modulus::new(par.plaintext()).unwrap();
                     let pt1 = Plaintext::try_encode(
-                        &par.plaintext.random_vec(par.degree(), &mut rng),
+                        &q.random_vec(par.degree(), &mut rng),
                         Encoding::poly_at_level(level),
                         &par,
                     )
@@ -289,10 +305,10 @@ mod tests {
 
     #[test]
     fn encrypt_keyswitch_decrypt() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for par in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 32),
         ] {
             for level in 0..=par.max_level() {
                 for _ in 0..20 {
@@ -311,8 +327,9 @@ mod tests {
                         PublicKey::from_shares(parties.iter().map(|p| p.pk_share.clone())).unwrap();
 
                     // Use it to encrypt a random polynomial ct1
+                    let q = fhe_math::zq::Modulus::new(par.plaintext()).unwrap();
                     let pt1 = Plaintext::try_encode(
-                        &par.plaintext.random_vec(par.degree(), &mut rng),
+                        &q.random_vec(par.degree(), &mut rng),
                         Encoding::poly_at_level(level),
                         &par,
                     )
@@ -357,10 +374,10 @@ mod tests {
 
     #[test]
     fn collective_keys_enable_homomorphic_addition() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for par in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 32),
         ] {
             for level in 0..=par.max_level() {
                 for _ in 0..20 {
@@ -382,10 +399,11 @@ mod tests {
                         .unwrap();
 
                     // Parties encrypt two plaintexts
-                    let a = par.plaintext.random_vec(par.degree(), &mut rng);
-                    let b = par.plaintext.random_vec(par.degree(), &mut rng);
+                    let q = fhe_math::zq::Modulus::new(par.plaintext()).unwrap();
+                    let a = q.random_vec(par.degree(), &mut rng);
+                    let b = q.random_vec(par.degree(), &mut rng);
                     let mut expected = a.clone();
-                    par.plaintext.add_vec(&mut expected, &b);
+                    q.add_vec(&mut expected, &b);
 
                     let pt_a =
                         Plaintext::try_encode(&a, Encoding::poly_at_level(level), &par).unwrap();

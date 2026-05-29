@@ -1,10 +1,15 @@
 #![warn(missing_docs, unused_imports)]
+// Expect indexing in this performance-critical RNS scaler implementation
+#![expect(
+    clippy::indexing_slicing,
+    reason = "performance or example code relies on validated indices"
+)]
 
 //! RNS scaler inspired from Remark 3.2 of <https://eprint.iacr.org/2021/204.pdf>.
 
 use super::RnsContext;
-use ethnum::{u256, U256};
-use itertools::{izip, Itertools};
+use ethnum::{U256, u256};
+use itertools::{Itertools, izip};
 use ndarray::{ArrayView1, ArrayViewMut1};
 use num_bigint::BigUint;
 use num_traits::{One, ToPrimitive, Zero};
@@ -32,6 +37,7 @@ pub struct ScalingFactorRaw {
 
 impl ScalingFactor {
     /// Create a new scaling factor. Aborts if the denominator is 0.
+    #[must_use]
     pub fn new(numerator: &BigUint, denominator: &BigUint) -> Self {
         assert_ne!(denominator, &BigUint::zero());
         Self {
@@ -42,6 +48,7 @@ impl ScalingFactor {
     }
 
     /// Returns the identity element of `Self`.
+    #[must_use]
     pub fn one() -> Self {
         Self {
             numerator: BigUint::one(),
@@ -53,6 +60,7 @@ impl ScalingFactor {
 
 impl ScalingFactor {
     /// Export this scaling factor into a raw representation.
+    #[must_use]
     pub fn to_raw(&self) -> ScalingFactorRaw {
         ScalingFactorRaw {
             numerator: self.numerator.to_bytes_be(),
@@ -64,6 +72,7 @@ impl ScalingFactor {
 
 impl ScalingFactorRaw {
     /// Import a scaling factor from raw bytes.
+    #[must_use]
     pub fn into_scaling_factor(self) -> ScalingFactor {
         let numerator = BigUint::from_bytes_be(&self.numerator);
         let denominator = BigUint::from_bytes_be(&self.denominator);
@@ -133,6 +142,7 @@ impl RnsScaler {
     /// Create a RNS scaler by numerator / denominator.
     ///
     /// Aborts if denominator is equal to 0.
+    #[must_use]
     pub fn new(
         from: &Arc<RnsContext>,
         to: &Arc<RnsContext>,
@@ -152,32 +162,34 @@ impl RnsScaler {
             .collect_vec();
 
         // Let's define omega_i = round(from.garner_i * numerator / denominator)
-        let mut omega = Vec::with_capacity(to.moduli.len());
-        let mut omega_shoup = Vec::with_capacity(to.moduli.len());
-        for _ in &to.moduli {
-            omega.push(vec![0u64; from.moduli.len()].into_boxed_slice());
-            omega_shoup.push(vec![0u64; from.moduli.len()].into_boxed_slice());
-        }
-        let mut theta_omega_lo = Vec::with_capacity(from.garner.len());
-        let mut theta_omega_hi = Vec::with_capacity(from.garner.len());
-        let mut theta_omega_sign = Vec::with_capacity(from.garner.len());
-        for i in 0..from.garner.len() {
-            let (omega_i, theta_omega_i_lo, theta_omega_i_hi, theta_omega_i_sign) =
+        let mut omega = vec![vec![0u64; from.moduli.len()].into_boxed_slice(); to.moduli.len()];
+        let mut omega_shoup =
+            vec![vec![0u64; from.moduli.len()].into_boxed_slice(); to.moduli.len()];
+        let (omegas_i, theta_omega_lo, theta_omega_hi, theta_omega_sign): (
+            Vec<Vec<u64>>,
+            Vec<u64>,
+            Vec<u64>,
+            Vec<bool>,
+        ) = from
+            .garner
+            .iter()
+            .map(|garner_i| {
                 Self::extract_projection_and_theta(
                     to,
-                    &from.garner[i],
+                    garner_i,
                     &scaling_factor.numerator,
                     &scaling_factor.denominator,
                     true,
-                );
+                )
+            })
+            .multiunzip();
+
+        for (i, omega_i) in omegas_i.iter().enumerate() {
             for j in 0..to.moduli.len() {
                 let qj = &to.moduli[j];
                 omega[j][i] = qj.reduce(omega_i[j]);
                 omega_shoup[j][i] = qj.shoup(omega[j][i]);
             }
-            theta_omega_lo.push(theta_omega_i_lo);
-            theta_omega_hi.push(theta_omega_i_hi);
-            theta_omega_sign.push(theta_omega_i_sign);
         }
 
         // Determine the shift so that the sum of the scaled theta_garner fit on an U192
@@ -197,16 +209,17 @@ impl RnsScaler {
         );
         // Finally, define theta_garner_i = from.garner_i / product, also scaled by
         // 2^127.
-        let mut theta_garner_lo = Vec::with_capacity(from.garner.len());
-        let mut theta_garner_hi = Vec::with_capacity(from.garner.len());
-        for garner_i in &from.garner {
-            let mut theta: BigUint =
-                ((garner_i << theta_garner_shift) + (&from.product >> 1)) / &from.product;
-            let theta_hi: BigUint = &theta >> 64;
-            theta -= &theta_hi << 64;
-            theta_garner_lo.push(theta.to_u64().unwrap());
-            theta_garner_hi.push(theta_hi.to_u64().unwrap());
-        }
+        let (theta_garner_lo, theta_garner_hi): (Vec<u64>, Vec<u64>) = from
+            .garner
+            .iter()
+            .map(|garner_i| {
+                let mut theta: BigUint =
+                    ((garner_i << theta_garner_shift) + (&from.product >> 1)) / &from.product;
+                let theta_hi: BigUint = &theta >> 64;
+                theta -= &theta_hi << 64;
+                (theta.to_u64().unwrap(), theta_hi.to_u64().unwrap())
+            })
+            .unzip();
 
         Self {
             from: from.clone(),
@@ -287,6 +300,7 @@ impl RnsScaler {
     ///
     /// Aborts if the number of rests is different than the number of moduli in
     /// debug mode, or if the size is not in [1, ..., rests.len()].
+    #[must_use]
     pub fn scale_new(&self, rests: ArrayView1<u64>, size: usize) -> Vec<u64> {
         let mut out = vec![0; size];
         self.scale(rests, (&mut out).into(), 0);
@@ -380,13 +394,13 @@ impl RnsScaler {
                 let gamma_i = self.gamma.get_unchecked(starting_index + i);
                 let gamma_shoup_i = self.gamma_shoup.get_unchecked(starting_index + i);
 
-                let mut yi = (qi.modulus() * 2
+                let mut yi = (**qi * 2
                     - qi.lazy_mul_shoup(qi.reduce_u128(v), *gamma_i, *gamma_shoup_i))
                     as u128;
 
                 if !self.scaling_factor.is_one {
                     let wi = qi.lazy_reduce_u128(w);
-                    yi += if w_sign { qi.modulus() * 2 - wi } else { wi } as u128;
+                    yi += if w_sign { **qi * 2 - wi } else { wi } as u128;
                 }
 
                 debug_assert!(rests.len() <= omega_i.len());
@@ -407,6 +421,7 @@ impl RnsScaler {
 
 impl RnsScaler {
     /// Export this scaler to a raw representation.
+    #[must_use]
     pub fn to_raw(&self) -> RnsScalerRaw {
         RnsScalerRaw {
             scaling_factor: self.scaling_factor.to_raw(),
@@ -429,6 +444,7 @@ impl RnsScaler {
 
 impl RnsScalerRaw {
     /// Import a scaler from its raw form.
+    #[must_use]
     pub fn into_scaler(self, from: &Arc<RnsContext>, to: &Arc<RnsContext>) -> RnsScaler {
         RnsScaler {
             from: from.clone(),
@@ -463,15 +479,14 @@ impl RnsScalerRaw {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, sync::Arc};
+    use std::{error::Error, panic::catch_unwind, sync::Arc};
 
     use super::RnsScaler;
-    use crate::rns::{scaler::ScalingFactor, RnsContext};
-    use fhe_util::catch_unwind;
+    use crate::rns::{RnsContext, scaler::ScalingFactor};
     use ndarray::ArrayView1;
     use num_bigint::BigUint;
     use num_traits::{ToPrimitive, Zero};
-    use rand::{thread_rng, RngCore};
+    use rand::{RngCore, rng};
 
     #[test]
     fn constructor() -> Result<(), Box<dyn Error>> {
@@ -490,7 +505,7 @@ mod tests {
     fn scale_same_context() -> Result<(), Box<dyn Error>> {
         let ntests = 1000;
         let q = Arc::new(RnsContext::new(&[4u64, 4611686018326724609, 1153])?);
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
         for numerator in &[1u64, 2, 3, 100, 1000, 4611686018326724610] {
             for denominator in &[1u64, 2, 3, 4, 100, 101, 1000, 1001, 4611686018326724610] {
@@ -544,7 +559,7 @@ mod tests {
             4611686018106523649,
             4611686018058289153,
         ])?);
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
         for numerator in &[1u64, 2, 3, 100, 1000, 4611686018326724610] {
             for denominator in &[1u64, 2, 3, 4, 100, 101, 1000, 1001, 4611686018326724610] {

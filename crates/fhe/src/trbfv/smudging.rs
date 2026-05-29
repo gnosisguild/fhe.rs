@@ -13,8 +13,8 @@ use crate::bfv::BfvParameters;
 //use crate::trbfv::normal::sample_bigint_normal_vec;
 use crate::Error;
 
-use num_bigint::{BigInt, BigUint, RandBigInt};
-use rand::{CryptoRng, Rng, RngCore};
+use num_bigint::{BigInt, BigUint};
+use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
 
 /// Configuration for calculating optimal smudging variance in threshold BFV.
@@ -45,9 +45,10 @@ impl SmudgingBoundCalculatorConfig {
     ///
     /// # Arguments
     /// * `params` - BFV parameters
-    /// * `n` - Number of parties in threshold scheme  
+    /// * `n` - Number of parties in threshold scheme
     /// * `m` - Number of ciphertexts to process
     /// * `lambda` - Statistical security parameter
+    #[must_use]
     pub fn new(params: Arc<BfvParameters>, n: usize, m: usize, lambda: usize) -> Self {
         let variance = params.variance();
         let error1_variance = params.get_error1_variance().clone();
@@ -77,6 +78,7 @@ pub struct SmudgingBoundCalculator {
 
 impl SmudgingBoundCalculator {
     /// Create a new bound calculator.
+    #[must_use]
     pub fn new(config: SmudgingBoundCalculatorConfig) -> Self {
         Self { config }
     }
@@ -123,7 +125,7 @@ impl SmudgingBoundCalculator {
             ));
         }
 
-        if self.config.lambda >= 60 {
+        if self.config.lambda >= 40 {
             // Calculate optimal B_sm: balance security (2^λ·B_c) and correctness ((Q/2t - B_c)/n)
             let lower_bound = BigUint::from(2u64).pow(self.config.lambda as u32) * &b_c;
             let upper_bound = (&q_over_2t - &b_c) / BigUint::from(self.config.n);
@@ -158,6 +160,7 @@ pub struct SmudgingNoiseGenerator {
 
 impl SmudgingNoiseGenerator {
     /// Create a new noise generator with calculated variance.
+    #[must_use]
     pub fn new(params: Arc<BfvParameters>, smudging_bound: BigUint) -> Self {
         Self {
             params,
@@ -196,42 +199,24 @@ impl SmudgingNoiseGenerator {
         Ok(samples)
     }
 
-    /// Sample uniform coefficients from [-bound, bound]
+    /// Sample uniform coefficients from `[-bound, bound]`.
     fn sample_uniform_coefficients<R: RngCore + CryptoRng>(
         &self,
         count: usize,
         rng: &mut R,
     ) -> Vec<BigInt> {
-        let mut samples = Vec::with_capacity(count);
-
-        // Pre-calculate bound + 1 for efficiency
-        let upper_bound = &self.smudging_bound + 1u32;
-        let zero = BigUint::from(0u32);
-
-        for _ in 0..count {
-            // Sample magnitude from [0, bound]
-            let magnitude = rng.gen_biguint_range(&zero, &upper_bound);
-            let abs_value = BigInt::from(magnitude);
-
-            // Randomly choose sign (50/50 chance)
-            let sample = if rng.gen_bool(0.5) {
-                abs_value
-            } else {
-                -abs_value
-            };
-
-            samples.push(sample);
-        }
-
-        samples
+        let bound = BigInt::from(self.smudging_bound.clone());
+        fhe_math::rq::sample_uniform_coefficients_bigint(&bound, count, rng)
     }
 
     /// Get the polynomial degree.
+    #[must_use]
     pub fn degree(&self) -> usize {
         self.params.degree()
     }
 
     /// Get the smudging variance.
+    #[must_use]
     pub fn smudging_bound(&self) -> &BigUint {
         &self.smudging_bound
     }
@@ -243,7 +228,7 @@ mod tests {
     use crate::bfv::BfvParametersBuilder;
     use num_traits::Signed;
     use num_traits::Zero;
-    use rand::thread_rng;
+    use rand::rng;
     use std::str::FromStr;
 
     fn test_params() -> Arc<BfvParameters> {
@@ -336,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_noise_generation_small_bound() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = test_params();
         let bound = BigUint::from(1000u64);
         let generator = SmudgingNoiseGenerator::new(params.clone(), bound);
@@ -355,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_noise_generation_zero_bound() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = test_params();
         let bound = BigUint::from(0u64);
         let generator = SmudgingNoiseGenerator::new(params.clone(), bound);
@@ -367,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_noise_generation_large_bound() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = test_params();
         let large_bound = BigUint::from_str("123456789012345678901234567890").unwrap();
         let generator = SmudgingNoiseGenerator::new(params.clone(), large_bound.clone());
@@ -387,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_realistic_parameters_workflow() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = test_params();
         let n = 3;
         let m = 1;

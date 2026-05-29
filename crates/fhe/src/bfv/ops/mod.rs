@@ -8,30 +8,61 @@ pub use mul::Multiplicator;
 
 use super::{Ciphertext, Plaintext};
 use crate::{Error, Result};
-use fhe_math::rq::{Poly, Representation};
-use itertools::{izip, Itertools};
+use fhe_math::rq::{Ntt, Poly};
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use std::sync::Arc;
 
 impl Add<&Ciphertext> for &Ciphertext {
     type Output = Ciphertext;
 
     fn add(self, rhs: &Ciphertext) -> Ciphertext {
-        let mut self_clone = self.clone();
-        self_clone += rhs;
-        self_clone
+        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+
+        if self.is_empty() {
+            return rhs.clone();
+        }
+        if rhs.is_empty() {
+            return self.clone();
+        }
+
+        assert_eq!(self.level, rhs.level);
+        assert_eq!(self.len(), rhs.len());
+
+        let c = self
+            .iter()
+            .zip(rhs.iter())
+            .map(|(c1i, c2i)| c1i + c2i)
+            .collect::<Vec<_>>();
+        Ciphertext {
+            par: self.par.clone(),
+            seed: None,
+            c,
+            level: self.level,
+        }
+    }
+}
+
+impl Add<&Ciphertext> for Ciphertext {
+    type Output = Ciphertext;
+
+    fn add(mut self, rhs: &Ciphertext) -> Ciphertext {
+        self += rhs;
+        self
     }
 }
 
 impl AddAssign<&Ciphertext> for Ciphertext {
     fn add_assign(&mut self, rhs: &Ciphertext) {
-        assert_eq!(self.par, rhs.par);
+        assert!(Arc::ptr_eq(&self.par, &rhs.par));
 
-        if self.c.is_empty() {
+        if self.is_empty() {
             *self = rhs.clone()
-        } else if !rhs.c.is_empty() {
+        } else if !rhs.is_empty() {
             assert_eq!(self.level, rhs.level);
-            assert_eq!(self.c.len(), rhs.c.len());
-            izip!(&mut self.c, &rhs.c).for_each(|(c1i, c2i)| *c1i += c2i);
+            assert_eq!(self.len(), rhs.len());
+            self.iter_mut()
+                .zip(rhs.iter())
+                .for_each(|(c1i, c2i)| *c1i += c2i);
             self.seed = None
         }
     }
@@ -57,13 +88,22 @@ impl Add<&Ciphertext> for &Plaintext {
 
 impl AddAssign<&Plaintext> for Ciphertext {
     fn add_assign(&mut self, rhs: &Plaintext) {
-        assert_eq!(self.par, rhs.par);
-        assert!(!self.c.is_empty());
+        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+        assert!(!self.is_empty());
         assert_eq!(self.level, rhs.level);
 
         let poly = rhs.to_poly();
-        self.c[0] += &poly;
+        self[0] += &poly;
         self.seed = None
+    }
+}
+
+impl Add<&Plaintext> for Ciphertext {
+    type Output = Ciphertext;
+
+    fn add(mut self, rhs: &Plaintext) -> Ciphertext {
+        self += rhs;
+        self
     }
 }
 
@@ -71,22 +111,53 @@ impl Sub<&Ciphertext> for &Ciphertext {
     type Output = Ciphertext;
 
     fn sub(self, rhs: &Ciphertext) -> Ciphertext {
-        let mut self_clone = self.clone();
-        self_clone -= rhs;
-        self_clone
+        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+
+        if self.is_empty() {
+            return -rhs.clone();
+        }
+        if rhs.is_empty() {
+            return self.clone();
+        }
+
+        assert_eq!(self.level, rhs.level);
+        assert_eq!(self.len(), rhs.len());
+
+        let c = self
+            .iter()
+            .zip(rhs.iter())
+            .map(|(c1i, c2i)| c1i - c2i)
+            .collect::<Vec<_>>();
+        Ciphertext {
+            par: self.par.clone(),
+            seed: None,
+            c,
+            level: self.level,
+        }
+    }
+}
+
+impl Sub<&Ciphertext> for Ciphertext {
+    type Output = Ciphertext;
+
+    fn sub(mut self, rhs: &Ciphertext) -> Ciphertext {
+        self -= rhs;
+        self
     }
 }
 
 impl SubAssign<&Ciphertext> for Ciphertext {
     fn sub_assign(&mut self, rhs: &Ciphertext) {
-        assert_eq!(self.par, rhs.par);
+        assert!(Arc::ptr_eq(&self.par, &rhs.par));
 
-        if self.c.is_empty() {
+        if self.is_empty() {
             *self = -rhs
-        } else if !rhs.c.is_empty() {
+        } else if !rhs.is_empty() {
             assert_eq!(self.level, rhs.level);
-            assert_eq!(self.c.len(), rhs.c.len());
-            izip!(&mut self.c, &rhs.c).for_each(|(c1i, c2i)| *c1i -= c2i);
+            assert_eq!(self.len(), rhs.len());
+            self.iter_mut()
+                .zip(rhs.iter())
+                .for_each(|(c1i, c2i)| *c1i -= c2i);
             self.seed = None
         }
     }
@@ -112,8 +183,8 @@ impl Sub<&Ciphertext> for &Plaintext {
 
 impl SubAssign<&Plaintext> for Ciphertext {
     fn sub_assign(&mut self, rhs: &Plaintext) {
-        assert_eq!(self.par, rhs.par);
-        assert!(!self.c.is_empty());
+        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+        assert!(!self.is_empty());
         assert_eq!(self.level, rhs.level);
 
         let poly = rhs.to_poly();
@@ -122,11 +193,20 @@ impl SubAssign<&Plaintext> for Ciphertext {
     }
 }
 
+impl Sub<&Plaintext> for Ciphertext {
+    type Output = Ciphertext;
+
+    fn sub(mut self, rhs: &Plaintext) -> Ciphertext {
+        self -= rhs;
+        self
+    }
+}
+
 impl Neg for &Ciphertext {
     type Output = Ciphertext;
 
     fn neg(self) -> Ciphertext {
-        let c = self.c.iter().map(|c1i| -c1i).collect_vec();
+        let c = self.iter().map(|c1i| -c1i).collect::<Vec<_>>();
         Ciphertext {
             par: self.par.clone(),
             seed: None,
@@ -140,7 +220,7 @@ impl Neg for Ciphertext {
     type Output = Ciphertext;
 
     fn neg(mut self) -> Ciphertext {
-        self.c.iter_mut().for_each(|c1i| *c1i = -&*c1i);
+        self.iter_mut().for_each(|c1i| *c1i = -&*c1i);
         self.seed = None;
         self
     }
@@ -148,10 +228,10 @@ impl Neg for Ciphertext {
 
 impl MulAssign<&Plaintext> for Ciphertext {
     fn mul_assign(&mut self, rhs: &Plaintext) {
-        assert_eq!(self.par, rhs.par);
-        if !self.c.is_empty() {
+        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+        if !self.is_empty() {
             assert_eq!(self.level, rhs.level);
-            self.c.iter_mut().for_each(|ci| *ci *= &rhs.poly_ntt);
+            self.iter_mut().for_each(|ci| *ci *= &rhs.poly_ntt);
         }
         self.seed = None
     }
@@ -167,51 +247,49 @@ impl Mul<&Plaintext> for &Ciphertext {
     }
 }
 
+impl Mul<&Plaintext> for Ciphertext {
+    type Output = Ciphertext;
+
+    fn mul(mut self, rhs: &Plaintext) -> Ciphertext {
+        self *= rhs;
+        self
+    }
+}
+
 impl Mul<&Ciphertext> for &Ciphertext {
     type Output = Ciphertext;
 
     fn mul(self, rhs: &Ciphertext) -> Ciphertext {
-        if self.c.is_empty() {
+        if self.is_empty() {
             return self.clone();
         }
 
         if rhs == self {
             // Squaring operation
-            let mp = &self.par.mul_params[self.level];
+            let ctx_lvl = self.par.context_level_at(self.level).unwrap();
+            let mp = ctx_lvl.mul_params();
 
             // Scale all ciphertexts
-            // let mut now = std::time::SystemTime::now();
             let self_c = self
-                .c
                 .iter()
                 .map(|ci| ci.scale(&mp.extender).map_err(Error::MathError))
-                .collect::<Result<Vec<Poly>>>()
+                .collect::<Result<Vec<Poly<Ntt>>>>()
                 .unwrap();
-            // println!("Extend: {:?}", now.elapsed().unwrap());
 
             // Multiply
-            // now = std::time::SystemTime::now();
-            let mut c = vec![Poly::zero(&mp.to, Representation::Ntt); 2 * self_c.len() - 1];
+            let mut c = vec![Poly::<Ntt>::zero(&mp.to); 2 * self_c.len() - 1];
             for i in 0..self_c.len() {
                 for j in 0..self_c.len() {
                     c[i + j] += &(&self_c[i] * &self_c[j])
                 }
             }
-            // println!("Multiply: {:?}", now.elapsed().unwrap());
 
             // Scale
-            // now = std::time::SystemTime::now();
             let c = c
                 .iter_mut()
-                .map(|ci| {
-                    ci.change_representation(Representation::PowerBasis);
-                    let mut ci = ci.scale(&mp.down_scaler).map_err(Error::MathError)?;
-                    ci.change_representation(Representation::Ntt);
-                    Ok(ci)
-                })
-                .collect::<Result<Vec<Poly>>>()
+                .map(|ci| ci.scale(&mp.down_scaler).map_err(Error::MathError))
+                .collect::<Result<Vec<Poly<Ntt>>>>()
                 .unwrap();
-            // println!("Scale: {:?}", now.elapsed().unwrap());
 
             Ciphertext {
                 par: self.par.clone(),
@@ -220,51 +298,38 @@ impl Mul<&Ciphertext> for &Ciphertext {
                 level: rhs.level,
             }
         } else {
-            assert_eq!(self.par, rhs.par);
+            assert!(Arc::ptr_eq(&self.par, &rhs.par));
             assert_eq!(self.level, rhs.level);
 
-            let mp = &self.par.mul_params[self.level];
+            let ctx_lvl = self.par.context_level_at(self.level).unwrap();
+            let mp = ctx_lvl.mul_params();
 
             // Scale all ciphertexts
-            // let mut now = std::time::SystemTime::now();
             let self_c = self
-                .c
                 .iter()
                 .map(|ci| ci.scale(&mp.extender).map_err(Error::MathError))
-                .collect::<Result<Vec<Poly>>>()
+                .collect::<Result<Vec<Poly<Ntt>>>>()
                 .unwrap();
             let other_c = rhs
-                .c
                 .iter()
                 .map(|ci| ci.scale(&mp.extender).map_err(Error::MathError))
-                .collect::<Result<Vec<Poly>>>()
+                .collect::<Result<Vec<Poly<Ntt>>>>()
                 .unwrap();
-            // println!("Extend: {:?}", now.elapsed().unwrap());
 
             // Multiply
-            // now = std::time::SystemTime::now();
-            let mut c =
-                vec![Poly::zero(&mp.to, Representation::Ntt); self_c.len() + other_c.len() - 1];
+            let mut c = vec![Poly::<Ntt>::zero(&mp.to); self_c.len() + other_c.len() - 1];
             for i in 0..self_c.len() {
                 for j in 0..other_c.len() {
                     c[i + j] += &(&self_c[i] * &other_c[j])
                 }
             }
-            // println!("Multiply: {:?}", now.elapsed().unwrap());
 
             // Scale
-            // now = std::time::SystemTime::now();
             let c = c
                 .iter_mut()
-                .map(|ci| {
-                    ci.change_representation(Representation::PowerBasis);
-                    let mut ci = ci.scale(&mp.down_scaler).map_err(Error::MathError)?;
-                    ci.change_representation(Representation::Ntt);
-                    Ok(ci)
-                })
-                .collect::<Result<Vec<Poly>>>()
+                .map(|ci| ci.scale(&mp.down_scaler).map_err(Error::MathError))
+                .collect::<Result<Vec<Poly<Ntt>>>>()
                 .unwrap();
-            // println!("Scale: {:?}", now.elapsed().unwrap());
 
             Ciphertext {
                 par: self.par.clone(),
@@ -279,26 +344,27 @@ impl Mul<&Ciphertext> for &Ciphertext {
 #[cfg(test)]
 mod tests {
     use crate::bfv::{
-        encoding::EncodingEnum, BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey,
+        BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, encoding::EncodingEnum,
     };
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-    use rand::{rngs::OsRng, thread_rng};
+    use rand::rng;
     use std::error::Error;
 
     #[test]
     fn add() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
         for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 16),
         ] {
             let zero = Ciphertext::zero(&params);
+            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
             for _ in 0..50 {
-                let a = params.plaintext.random_vec(params.degree(), &mut rng);
-                let b = params.plaintext.random_vec(params.degree(), &mut rng);
+                let a = q.random_vec(params.degree(), &mut rng);
+                let b = q.random_vec(params.degree(), &mut rng);
                 let mut c = a.clone();
-                params.plaintext.add_vec(&mut c, &b);
+                q.add_vec(&mut c, &b);
 
                 let sk = SecretKey::random(&params, &mut rng);
 
@@ -306,15 +372,17 @@ mod tests {
                     let pt_a = Plaintext::try_encode(&a, encoding.clone(), &params)?;
                     let pt_b = Plaintext::try_encode(&b, encoding.clone(), &params)?;
 
-                    let mut ct_a = sk.try_encrypt(&pt_a, &mut rng)?;
+                    let mut ct_a: Ciphertext = sk.try_encrypt(&pt_a, &mut rng)?;
                     assert_eq!(ct_a, &ct_a + &zero);
                     assert_eq!(ct_a, &zero + &ct_a);
                     let ct_b: Ciphertext = sk.try_encrypt(&pt_b, &mut rng)?;
                     let ct_c = &ct_a + &ct_b;
+                    let ct_c_owned = ct_a.clone() + &ct_b;
                     ct_a += &ct_b;
 
                     let pt_c = sk.try_decrypt(&ct_c)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
+                    assert_eq!(ct_c_owned, ct_c);
                     let pt_c = sk.try_decrypt(&ct_a)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
                 }
@@ -326,17 +394,18 @@ mod tests {
 
     #[test]
     fn add_scalar() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
         for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 16),
         ] {
+            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
             for _ in 0..50 {
-                let a = params.plaintext.random_vec(params.degree(), &mut rng);
-                let b = params.plaintext.random_vec(params.degree(), &mut rng);
+                let a = q.random_vec(params.degree(), &mut rng);
+                let b = q.random_vec(params.degree(), &mut rng);
                 let mut c = a.clone();
-                params.plaintext.add_vec(&mut c, &b);
+                q.add_vec(&mut c, &b);
 
                 let sk = SecretKey::random(&params, &mut rng);
 
@@ -345,7 +414,7 @@ mod tests {
                     let pt_a = Plaintext::try_encode(&a, encoding.clone(), &params)?;
                     let pt_b = Plaintext::try_encode(&b, encoding.clone(), &params)?;
 
-                    let mut ct_a = sk.try_encrypt(&pt_a, &mut rng)?;
+                    let mut ct_a: Ciphertext = sk.try_encrypt(&pt_a, &mut rng)?;
                     assert_eq!(
                         Vec::<u64>::try_decode(
                             &sk.try_decrypt(&(&ct_a + &zero))?,
@@ -361,10 +430,12 @@ mod tests {
                         a
                     );
                     let ct_c = &ct_a + &pt_b;
+                    let ct_c_owned = ct_a.clone() + &pt_b;
                     ct_a += &pt_b;
 
                     let pt_c = sk.try_decrypt(&ct_c)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
+                    assert_eq!(ct_c_owned, ct_c);
                     let pt_c = sk.try_decrypt(&ct_a)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
                 }
@@ -376,19 +447,20 @@ mod tests {
 
     #[test]
     fn sub() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 16),
         ] {
             let zero = Ciphertext::zero(&params);
+            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
             for _ in 0..50 {
-                let a = params.plaintext.random_vec(params.degree(), &mut rng);
+                let a = q.random_vec(params.degree(), &mut rng);
                 let mut a_neg = a.clone();
-                params.plaintext.neg_vec(&mut a_neg);
-                let b = params.plaintext.random_vec(params.degree(), &mut rng);
+                q.neg_vec(&mut a_neg);
+                let b = q.random_vec(params.degree(), &mut rng);
                 let mut c = a.clone();
-                params.plaintext.sub_vec(&mut c, &b);
+                q.sub_vec(&mut c, &b);
 
                 let sk = SecretKey::random(&params, &mut rng);
 
@@ -396,7 +468,7 @@ mod tests {
                     let pt_a = Plaintext::try_encode(&a, encoding.clone(), &params)?;
                     let pt_b = Plaintext::try_encode(&b, encoding.clone(), &params)?;
 
-                    let mut ct_a = sk.try_encrypt(&pt_a, &mut rng)?;
+                    let mut ct_a: Ciphertext = sk.try_encrypt(&pt_a, &mut rng)?;
                     assert_eq!(ct_a, &ct_a - &zero);
                     assert_eq!(
                         Vec::<u64>::try_decode(
@@ -407,10 +479,12 @@ mod tests {
                     );
                     let ct_b: Ciphertext = sk.try_encrypt(&pt_b, &mut rng)?;
                     let ct_c = &ct_a - &ct_b;
+                    let ct_c_owned = ct_a.clone() - &ct_b;
                     ct_a -= &ct_b;
 
                     let pt_c = sk.try_decrypt(&ct_c)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
+                    assert_eq!(ct_c_owned, ct_c);
                     let pt_c = sk.try_decrypt(&ct_a)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
                 }
@@ -422,18 +496,19 @@ mod tests {
 
     #[test]
     fn sub_scalar() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 16),
         ] {
+            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
             for _ in 0..50 {
-                let a = params.plaintext.random_vec(params.degree(), &mut rng);
+                let a = q.random_vec(params.degree(), &mut rng);
                 let mut a_neg = a.clone();
-                params.plaintext.neg_vec(&mut a_neg);
-                let b = params.plaintext.random_vec(params.degree(), &mut rng);
+                q.neg_vec(&mut a_neg);
+                let b = q.random_vec(params.degree(), &mut rng);
                 let mut c = a.clone();
-                params.plaintext.sub_vec(&mut c, &b);
+                q.sub_vec(&mut c, &b);
 
                 let sk = SecretKey::random(&params, &mut rng);
 
@@ -442,7 +517,7 @@ mod tests {
                     let pt_a = Plaintext::try_encode(&a, encoding.clone(), &params)?;
                     let pt_b = Plaintext::try_encode(&b, encoding.clone(), &params)?;
 
-                    let mut ct_a = sk.try_encrypt(&pt_a, &mut rng)?;
+                    let mut ct_a: Ciphertext = sk.try_encrypt(&pt_a, &mut rng)?;
                     assert_eq!(
                         Vec::<u64>::try_decode(
                             &sk.try_decrypt(&(&ct_a - &zero))?,
@@ -458,10 +533,12 @@ mod tests {
                         a_neg
                     );
                     let ct_c = &ct_a - &pt_b;
+                    let ct_c_owned = ct_a.clone() - &pt_b;
                     ct_a -= &pt_b;
 
                     let pt_c = sk.try_decrypt(&ct_c)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
+                    assert_eq!(ct_c_owned, ct_c);
                     let pt_c = sk.try_decrypt(&ct_a)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
                 }
@@ -473,15 +550,16 @@ mod tests {
 
     #[test]
     fn neg() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 16),
         ] {
+            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
             for _ in 0..50 {
-                let a = params.plaintext.random_vec(params.degree(), &mut rng);
+                let a = q.random_vec(params.degree(), &mut rng);
                 let mut c = a.clone();
-                params.plaintext.neg_vec(&mut c);
+                q.neg_vec(&mut c);
 
                 let sk = SecretKey::random(&params, &mut rng);
                 for encoding in [Encoding::poly(), Encoding::simd()] {
@@ -505,15 +583,16 @@ mod tests {
 
     #[test]
     fn mul_scalar() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
         for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(6, 16),
         ] {
+            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
             for _ in 0..50 {
-                let a = params.plaintext.random_vec(params.degree(), &mut rng);
-                let b = params.plaintext.random_vec(params.degree(), &mut rng);
+                let a = q.random_vec(params.degree(), &mut rng);
+                let b = q.random_vec(params.degree(), &mut rng);
 
                 let sk = SecretKey::random(&params, &mut rng);
                 for encoding in [Encoding::poly(), Encoding::simd()] {
@@ -523,33 +602,31 @@ mod tests {
                             for i in 0..params.degree() {
                                 for j in 0..params.degree() {
                                     if i + j >= params.degree() {
-                                        c[(i + j) % params.degree()] = params.plaintext.sub(
-                                            c[(i + j) % params.degree()],
-                                            params.plaintext.mul(a[i], b[j]),
-                                        );
+                                        c[(i + j) % params.degree()] =
+                                            q.sub(c[(i + j) % params.degree()], q.mul(a[i], b[j]));
                                     } else {
-                                        c[i + j] = params
-                                            .plaintext
-                                            .add(c[i + j], params.plaintext.mul(a[i], b[j]));
+                                        c[i + j] = q.add(c[i + j], q.mul(a[i], b[j]));
                                     }
                                 }
                             }
                         }
                         EncodingEnum::Simd => {
-                            c = a.clone();
-                            params.plaintext.mul_vec(&mut c, &b);
+                            c.clone_from(&a);
+                            q.mul_vec(&mut c, &b);
                         }
                     }
 
                     let pt_a = Plaintext::try_encode(&a, encoding.clone(), &params)?;
                     let pt_b = Plaintext::try_encode(&b, encoding.clone(), &params)?;
 
-                    let mut ct_a = sk.try_encrypt(&pt_a, &mut rng)?;
+                    let mut ct_a: Ciphertext = sk.try_encrypt(&pt_a, &mut rng)?;
                     let ct_c = &ct_a * &pt_b;
+                    let ct_c_owned = ct_a.clone() * &pt_b;
                     ct_a *= &pt_b;
 
                     let pt_c = sk.try_decrypt(&ct_c)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
+                    assert_eq!(ct_c_owned, ct_c);
                     let pt_c = sk.try_decrypt(&ct_a)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
                 }
@@ -561,20 +638,21 @@ mod tests {
 
     #[test]
     fn mul() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for par in [
-            BfvParameters::default_arc(2, 8),
-            BfvParameters::default_arc(8, 8),
+            BfvParameters::default_arc(2, 16),
+            BfvParameters::default_arc(8, 16),
         ] {
+            let q = fhe_math::zq::Modulus::new(par.plaintext()).unwrap();
             for _ in 0..1 {
                 // We will encode `values` in an Simd format, and check that the product is
                 // computed correctly.
-                let v1 = par.plaintext.random_vec(par.degree(), &mut rng);
-                let v2 = par.plaintext.random_vec(par.degree(), &mut rng);
+                let v1 = q.random_vec(par.degree(), &mut rng);
+                let v2 = q.random_vec(par.degree(), &mut rng);
                 let mut expected = v1.clone();
-                par.plaintext.mul_vec(&mut expected, &v2);
+                q.mul_vec(&mut expected, &v2);
 
-                let sk = SecretKey::random(&par, &mut OsRng);
+                let sk = SecretKey::random(&par, &mut rng);
                 let pt1 = Plaintext::try_encode(&v1, Encoding::simd(), &par)?;
                 let pt2 = Plaintext::try_encode(&v2, Encoding::simd(), &par)?;
 
@@ -588,7 +666,7 @@ mod tests {
                 assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
 
                 let e = expected.clone();
-                par.plaintext.mul_vec(&mut expected, &e);
+                q.mul_vec(&mut expected, &e);
                 println!("Noise: {}", unsafe { sk.measure_noise(&ct4)? });
                 let pt = sk.try_decrypt(&ct4)?;
                 assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
@@ -599,16 +677,17 @@ mod tests {
 
     #[test]
     fn square() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
-        let par = BfvParameters::default_arc(6, 8);
+        let mut rng = rng();
+        let par = BfvParameters::default_arc(6, 16);
+        let q = fhe_math::zq::Modulus::new(par.plaintext()).unwrap();
         for _ in 0..20 {
             // We will encode `values` in an Simd format, and check that the product is
             // computed correctly.
-            let v = par.plaintext.random_vec(par.degree(), &mut rng);
+            let v = q.random_vec(par.degree(), &mut rng);
             let mut expected = v.clone();
-            par.plaintext.mul_vec(&mut expected, &v);
+            q.mul_vec(&mut expected, &v);
 
-            let sk = SecretKey::random(&par, &mut OsRng);
+            let sk = SecretKey::random(&par, &mut rng);
             let pt = Plaintext::try_encode(&v, Encoding::simd(), &par)?;
 
             let ct1: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;

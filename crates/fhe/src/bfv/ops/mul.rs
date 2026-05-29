@@ -2,14 +2,13 @@ use std::sync::Arc;
 
 use fhe_math::{
     rns::ScalingFactor,
-    rq::{scaler::Scaler, Context, Representation},
+    rq::{Context, scaler::Scaler},
     zq::primes::generate_prime,
 };
-use num_bigint::BigUint;
 
 use crate::{
-    bfv::{traits::GenericRelinearizationKey, BfvParameters, Ciphertext},
     Error, Result,
+    bfv::{BfvParameters, Ciphertext, traits::GenericRelinearizationKey},
 };
 
 /// Multiplicator that implements a strategy for multiplying. In particular, the
@@ -80,7 +79,7 @@ impl Multiplicator {
         level: usize,
         par: &Arc<BfvParameters>,
     ) -> Result<Self> {
-        let base_ctx = par.ctx_at_level(level)?;
+        let base_ctx = par.context_at_level(level)?;
         let mul_ctx = Arc::new(Context::new(extended_basis, par.degree())?);
         let extender_lhs = Scaler::new(base_ctx, &mul_ctx, lhs_scaling_factor)?;
         let extender_rhs = Scaler::new(base_ctx, &mul_ctx, rhs_scaling_factor)?;
@@ -105,7 +104,7 @@ impl Multiplicator {
     {
         let rk: GenericRelinearizationKey = rk.into();
         let par = rk.parameters();
-        let ctx = par.ctx_at_level(rk.ciphertext_level())?;
+        let ctx = par.context_at_level(rk.ciphertext_level())?;
 
         let modulus_size = par.moduli_sizes()[..ctx.moduli().len()]
             .iter()
@@ -126,7 +125,7 @@ impl Multiplicator {
             ScalingFactor::one(),
             ScalingFactor::one(),
             &extended_basis,
-            ScalingFactor::new(&BigUint::from(par.plaintext.modulus()), ctx.modulus()),
+            ScalingFactor::new(par.plaintext_big(), ctx.modulus()),
             rk.ciphertext_level(),
             &par,
         )?;
@@ -146,7 +145,7 @@ impl Multiplicator {
 
     /// Takes ownership, no clone
     fn enable_relinearization_with_key(&mut self, rk: GenericRelinearizationKey) -> Result<()> {
-        let rk_ctx = self.par.ctx_at_level(rk.ciphertext_level())?;
+        let rk_ctx = self.par.context_at_level(rk.ciphertext_level())?;
         if rk_ctx != &self.base_ctx {
             return Err(Error::DefaultError(
                 "Invalid relinearization key context".to_string(),
@@ -159,7 +158,7 @@ impl Multiplicator {
     /// Enable modulus switching after multiplication (and relinearization, if
     /// applicable).
     pub fn enable_mod_switching(&mut self) -> Result<()> {
-        if self.par.ctx_at_level(self.par.max_level())? == &self.base_ctx {
+        if self.par.context_at_level(self.par.max_level())? == &self.base_ctx {
             Err(Error::DefaultError(
                 "Cannot modulo switch as this is already the last level".to_string(),
             ))
@@ -182,17 +181,17 @@ impl Multiplicator {
                 lhs.level, rhs.level, self.level
             )));
         }
-        if lhs.c.len() != 2 || rhs.c.len() != 2 {
+        if lhs.len() != 2 || rhs.len() != 2 {
             return Err(Error::DefaultError(
                 "Multiplication can only be performed on ciphertexts of size 2".to_string(),
             ));
         }
 
         // Extend
-        let c00 = lhs.c[0].scale(&self.extender_lhs)?;
-        let c01 = lhs.c[1].scale(&self.extender_lhs)?;
-        let c10 = rhs.c[0].scale(&self.extender_rhs)?;
-        let c11 = rhs.c[1].scale(&self.extender_rhs)?;
+        let c00 = lhs[0].scale(&self.extender_lhs)?;
+        let c01 = lhs[1].scale(&self.extender_lhs)?;
+        let c10 = rhs[0].scale(&self.extender_rhs)?;
+        let c11 = rhs[1].scale(&self.extender_rhs)?;
 
         // Multiply
         let c0 = &c00 * &c10;
@@ -200,12 +199,11 @@ impl Multiplicator {
         c1 += &(&c01 * &c10);
         let c2 = &c01 * &c11;
 
-        // Scale
+        // Scale down to the base context (power basis for scaling, then NTT)
         let mut c = vec![c0, c1, c2];
         for p in c.iter_mut() {
-            p.change_representation(Representation::PowerBasis);
-            *p = p.scale(&self.down_scaler)?;
-            p.change_representation(Representation::Ntt)
+            let pb = p.clone().into_power_basis();
+            *p = pb.scale(&self.down_scaler)?.into_ntt();
         }
 
         // Create a ciphertext
@@ -218,7 +216,7 @@ impl Multiplicator {
 
         // Reduce by one modulus to control noise growth
         if self.mod_switch {
-            ct.mod_switch_to_next_level()?;
+            ct.switch_down()?;
         }
 
         Ok(ct)
@@ -232,16 +230,16 @@ mod tests {
     use crate::bfv::{
         BfvParameters, Ciphertext, Encoding, Plaintext, RelinearizationKey, SecretKey,
     };
-    use crate::lbfv::keys::LBFVRelinearizationKey;
     use crate::lbfv::LBFVPublicKey;
+    use crate::lbfv::keys::LBFVRelinearizationKey;
     use fhe_math::{
         rns::{RnsContext, ScalingFactor},
         zq::primes::generate_prime,
     };
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use num_bigint::BigUint;
-    use rand::rngs::OsRng;
-    use rand::{thread_rng, CryptoRng, RngCore};
+    use rand::rng;
+    use rand::{CryptoRng, RngCore};
     use std::error::Error;
 
     use super::Multiplicator;
@@ -252,7 +250,7 @@ mod tests {
 
     #[test]
     fn mul() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let par = BfvParameters::default_arc(3, 8);
 
         // Standard BFV tests
@@ -277,9 +275,10 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         // We will encode `values` in an Simd format, and check that the product is
         // computed correctly.
-        let values = par.plaintext.random_vec(par.degree(), rng);
+        let q = fhe_math::zq::Modulus::new(par.plaintext())?;
+        let values = q.random_vec(par.degree(), rng);
         let mut expected = values.clone();
-        par.plaintext.mul_vec(&mut expected, &values);
+        q.mul_vec(&mut expected, &values);
 
         let sk = SecretKey::random(&par, rng);
         let pt = Plaintext::try_encode(&values, Encoding::simd(), &par)?;
@@ -320,7 +319,7 @@ mod tests {
 
     #[test]
     fn mul_at_level() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let num_moduli = 6;
         let par = BfvParameters::default_arc(num_moduli, 8);
 
@@ -349,9 +348,10 @@ mod tests {
         use_lbfv: bool,
         rng: &mut R,
     ) -> Result<(), Box<dyn Error>> {
-        let values: Vec<u64> = par.plaintext.random_vec(par.degree(), rng);
+        let q = fhe_math::zq::Modulus::new(par.plaintext())?;
+        let values = q.random_vec(par.degree(), rng);
         let mut expected = values.clone();
-        par.plaintext.mul_vec(&mut expected, &values);
+        q.mul_vec(&mut expected, &values);
 
         let sk = SecretKey::random(par, rng);
         let pt = Plaintext::try_encode(&values, Encoding::simd_at_level(level), par)?;
@@ -399,16 +399,17 @@ mod tests {
 
     #[test]
     fn mul_no_relin() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
-        let par = BfvParameters::default_arc(6, 8);
+        let mut rng = rng();
+        let par = BfvParameters::default_arc(6, 16);
+        let q = fhe_math::zq::Modulus::new(par.plaintext()).unwrap();
         for _ in 0..30 {
             // We will encode `values` in an Simd format, and check that the product is
             // computed correctly.
-            let values = par.plaintext.random_vec(par.degree(), &mut rng);
+            let values = q.random_vec(par.degree(), &mut rng);
             let mut expected = values.clone();
-            par.plaintext.mul_vec(&mut expected, &values);
+            q.mul_vec(&mut expected, &values);
 
-            let sk = SecretKey::random(&par, &mut OsRng);
+            let sk = SecretKey::random(&par, &mut rng);
             let rk = RelinearizationKey::new(&sk, &mut rng)?;
             let pt = Plaintext::try_encode(&values, Encoding::simd(), &par)?;
             let ct1 = sk.try_encrypt(&pt, &mut rng)?;
@@ -436,8 +437,9 @@ mod tests {
     fn different_mul_strategy() -> Result<(), Box<dyn Error>> {
         // Implement the second multiplication strategy from <https://eprint.iacr.org/2021/204>
 
-        let mut rng = thread_rng();
-        let par = BfvParameters::default_arc(3, 8);
+        let mut rng = rng();
+        let par = BfvParameters::default_arc(3, 16);
+        let q = fhe_math::zq::Modulus::new(par.plaintext()).unwrap();
         let mut extended_basis = par.moduli().to_vec();
         extended_basis
             .push(generate_prime(62, 2 * par.degree() as u64, extended_basis[2]).unwrap());
@@ -450,18 +452,18 @@ mod tests {
         for _ in 0..30 {
             // We will encode `values` in an Simd format, and check that the product is
             // computed correctly.
-            let values = par.plaintext.random_vec(par.degree(), &mut rng);
+            let values = q.random_vec(par.degree(), &mut rng);
             let mut expected = values.clone();
-            par.plaintext.mul_vec(&mut expected, &values);
+            q.mul_vec(&mut expected, &values);
 
-            let sk = SecretKey::random(&par, &mut OsRng);
+            let sk = SecretKey::random(&par, &mut rng);
             let pt = Plaintext::try_encode(&values, Encoding::simd(), &par)?;
             let ct1 = sk.try_encrypt(&pt, &mut rng)?;
             let ct2 = sk.try_encrypt(&pt, &mut rng)?;
 
             let mut multiplicator = Multiplicator::new(
                 ScalingFactor::one(),
-                ScalingFactor::new(rns.modulus(), par.ctx[0].modulus()),
+                ScalingFactor::new(rns.modulus(), par.context_at_level(0)?.modulus()),
                 &extended_basis,
                 ScalingFactor::new(&BigUint::from(par.plaintext()), rns.modulus()),
                 &par,
@@ -485,7 +487,7 @@ mod tests {
 
     #[test]
     fn multiply_three_times_with_level_changes() -> Result<(), Box<dyn Error>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
 
         // Run test for both standard BFV and LBFV
         run_multiply_three_times_test(false, &mut rng)?;

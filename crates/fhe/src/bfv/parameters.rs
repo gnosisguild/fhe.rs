@@ -1,73 +1,113 @@
 //! Create parameters for the BFV encryption scheme
 
-use crate::proto::bfv::Parameters;
-use crate::{Error, ParametersError, Result};
+use crate::bfv::{context::CipherPlainContext, context::ContextLevel};
+use crate::proto::bfv::{Parameters, parameters::PlaintextModulus as PlaintextModulusProto};
+use crate::{Error, ParametersError, Result, SerializationError};
 use fhe_math::{
-    ntt::{NttOperator, NttOperatorRaw},
-    rns::{RnsContext, RnsContextRaw, ScalingFactor},
-    rq::{
-        scaler::{Scaler, ScalerRaw},
-        traits::TryConvertFrom,
-        Context, Poly, PolyRaw, Representation,
-    },
-    zq::{primes::generate_prime, Modulus},
+    ntt::NttOperator,
+    rns::{RnsContext, ScalingFactor},
+    rq::{Context, Poly, PowerBasis, scaler::Scaler, traits::TryConvertFrom},
+    zq::{Modulus, primes::generate_prime},
 };
 use fhe_traits::{Deserialize, FheParameters, Serialize};
 use itertools::Itertools;
-use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use num_bigint::{BigInt, BigUint};
+use num_traits::{PrimInt as _, ToPrimitive};
 use prost::Message;
-use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+/// Enum to support both small (u64) and large (BigUint) plaintext moduli.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) enum PlaintextModulus {
+    Small {
+        modulus: Modulus,
+        modulus_big: BigUint,
+    },
+    Large(BigUint),
+}
+
+impl PlaintextModulus {
+    pub fn as_biguint(&self) -> &BigUint {
+        match self {
+            Self::Small { modulus_big, .. } => modulus_big,
+            Self::Large(m) => m,
+        }
+    }
+
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Self::Small { modulus, .. } => Some(**modulus),
+            Self::Large(_) => None,
+        }
+    }
+
+    pub fn reduce_vec(&self, v: &mut [BigUint]) {
+        match self {
+            Self::Small { modulus_big, .. } => {
+                v.iter_mut().for_each(|vi| *vi %= modulus_big);
+            }
+            Self::Large(m) => v.iter_mut().for_each(|vi| *vi %= m),
+        }
+    }
+
+    // Helper to reduce BigUint vector to i64 (centered), returning as Vec<BigUint>
+    // or similar? The previous implementation used center_vec_vt returning
+    // Vec<i64>. If modulus is large, we can't fit in i64.
+
+    // We need a scalar multiplication for Plaintext::to_poly
+    pub fn scalar_mul_vec(&self, a: &mut [BigUint], b: &BigUint) {
+        match self {
+            Self::Small { modulus_big, .. } => {
+                a.iter_mut()
+                    .for_each(|ai| *ai = (ai as &BigUint * b) % modulus_big);
+            }
+            Self::Large(m) => a.iter_mut().for_each(|ai| *ai = (ai as &BigUint * b) % m),
+        }
+    }
+
+    /// Center a coefficient modulo the plaintext modulus using threshold `(p + 1) / 2`.
+    pub fn center_biguint(&self, x: &BigUint, threshold: &BigUint) -> BigInt {
+        let modulus = self.as_biguint();
+        if x >= threshold {
+            BigInt::from(x.clone()) - BigInt::from(modulus.clone())
+        } else {
+            BigInt::from(x.clone())
+        }
+    }
+}
+
 /// Parameters for the BFV encryption scheme.
+///
+/// This struct consolidates all parameter-specific data and pre-computed values
+/// needed for BFV operations. It contains the raw parameters as well as
+/// operational contexts and pre-computed scaling factors.
 #[derive(PartialEq, Eq)]
 pub struct BfvParameters {
     /// Number of coefficients in a polynomial.
     polynomial_degree: usize,
 
-    /// Modulus of the plaintext.
-    plaintext_modulus: u64,
-
     /// Vector of coprime moduli q_i for the ciphertext.
-    /// One and only one of `ciphertext_moduli` or `ciphertext_moduli_sizes`
-    /// must be specified.
     pub(crate) moduli: Box<[u64]>,
 
     /// Vector of the sized of the coprime moduli q_i for the ciphertext.
-    /// One and only one of `ciphertext_moduli` or `ciphertext_moduli_sizes`
-    /// must be specified.
     moduli_sizes: Box<[usize]>,
 
     /// Error variance
     pub(crate) variance: usize,
 
-    /// Error variance for e2 in threshold BFV
-    /// Now supports up to 155-bit numbers using BigUint
+    /// Error variance for e1 in threshold BFV (supports large values via `BigUint`).
     pub(crate) error1_variance: BigUint,
 
-    /// Context for the underlying polynomials
-    pub ctx: Vec<Arc<Context>>,
+    /// Head of the context chain for modulus switching
+    pub(crate) context_chain: Arc<ContextLevel>,
 
-    /// Ntt operator for the SIMD plaintext, if possible.
-    pub(crate) op: Option<Arc<NttOperator>>,
+    /// NTT operator for SIMD plaintext operations, if possible
+    pub(crate) ntt_operator: Option<Arc<NttOperator>>,
 
-    /// Scaling polynomial for the plaintext
-    pub(crate) delta: Box<[Poly]>,
-
-    /// Q modulo the plaintext modulus
-    pub(crate) q_mod_t: Box<[u64]>,
-
-    /// Down scaler for the plaintext
-    pub(crate) scalers: Box<[Scaler]>,
-
-    /// Plaintext Modulus
-    pub(crate) plaintext: Modulus,
-
-    // Parameters for the multiplications
-    pub(crate) mul_params: Box<[MultiplicationParameters]>,
+    /// Plaintext Modulus as a Modulus type or BigUint
+    pub(crate) plaintext: PlaintextModulus,
 
     pub(crate) matrix_reps_index_map: Box<[usize]>,
 }
@@ -76,24 +116,11 @@ impl Debug for BfvParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BfvParameters")
             .field("polynomial_degree", &self.polynomial_degree)
-            .field("plaintext_modulus", &self.plaintext_modulus)
+            .field("plaintext_modulus", &self.plaintext.as_biguint())
             .field("moduli", &self.moduli)
-            // .field("moduli_sizes", &self.moduli_sizes)
-            // .field("variance", &self.variance)
-            // .field("error1_variance", &self.error1_variance)
-            // .field("ctx", &self.ctx)
-            // .field("op", &self.op)
-            // .field("delta", &self.delta)
-            // .field("q_mod_t", &self.q_mod_t)
-            // .field("scaler", &self.scaler)
-            // .field("plaintext", &self.plaintext)
-            // .field("mul_params", &self.mul_params)
-            // .field("matrix_reps_index_map", &self.matrix_reps_index_map)
             .finish()
     }
 }
-
-const RAW_SERIALIZATION_VERSION: u32 = 1;
 
 impl FheParameters for BfvParameters {}
 
@@ -101,65 +128,120 @@ unsafe impl Send for BfvParameters {}
 
 impl BfvParameters {
     /// Returns the underlying polynomial degree
+    #[must_use]
     pub const fn degree(&self) -> usize {
         self.polynomial_degree
     }
 
     /// Returns a reference to the ciphertext moduli
+    #[must_use]
     pub fn moduli(&self) -> &[u64] {
         &self.moduli
     }
 
     /// Returns a reference to the ciphertext moduli
+    #[must_use]
     pub fn moduli_sizes(&self) -> &[usize] {
         &self.moduli_sizes
     }
 
-    /// Returns the plaintext modulus
-    pub const fn plaintext(&self) -> u64 {
-        self.plaintext_modulus
+    /// Returns the plaintext modulus if it fits in u64.
+    /// Panics if the modulus is too large.
+    #[must_use]
+    pub fn plaintext(&self) -> u64 {
+        self.plaintext.as_u64().unwrap()
+    }
+
+    /// Returns the plaintext modulus as BigUint
+    #[must_use]
+    pub fn plaintext_big(&self) -> &BigUint {
+        self.plaintext.as_biguint()
     }
 
     /// Returns the variance
+    #[must_use]
     pub const fn variance(&self) -> usize {
         self.variance
     }
 
     /// Get the error1_variance
+    #[must_use]
     pub fn get_error1_variance(&self) -> &BigUint {
         &self.error1_variance
     }
 
-    /// Returns the ctx
-    pub fn ctx(&self) -> &[Arc<Context>] {
-        &self.ctx
-    }
-
     /// Returns the maximum level allowed by these parameters.
+    #[must_use]
     pub fn max_level(&self) -> usize {
         self.moduli.len() - 1
     }
 
     /// Returns the context corresponding to the level.
-    pub fn ctx_at_level(&self, level: usize) -> Result<&Arc<Context>> {
-        self.ctx
-            .get(level)
-            .ok_or_else(|| Error::DefaultError("No context".to_string()))
+    /// Returns the context corresponding to the level.
+    pub fn context_at_level(&self, level: usize) -> Result<&Arc<Context>> {
+        let mut current: &ContextLevel = &self.context_chain;
+        while current.level < level {
+            current = current
+                .next
+                .get()
+                .ok_or_else(|| Error::InvalidLevel {
+                    level,
+                    min_level: 0,
+                    max_level: self.max_level(),
+                })?
+                .as_ref();
+        }
+        if current.level == level {
+            Ok(&current.poly_context)
+        } else {
+            Err(Error::InvalidLevel {
+                level,
+                min_level: 0,
+                max_level: self.max_level(),
+            })
+        }
     }
 
     /// Returns the level of a given context
-    pub(crate) fn level_of_ctx(&self, ctx: &Arc<Context>) -> Result<usize> {
-        self.ctx[0].niterations_to(ctx).map_err(Error::MathError)
+    pub fn level_of_context(&self, ctx: &Arc<Context>) -> Result<usize> {
+        self.context_chain
+            .poly_context
+            .niterations_to(ctx)
+            .map_err(Error::MathError)
     }
 
-    /// Vector of default parameters providing about 128 bits of quantum
-    /// security according to the <https://eprint.iacr.org/2024/463> standard. The number
-    /// of bits represented by the moduli vector sum to the maximum logQ in
-    /// table 4.2 under the quantum, gaussian secret key distribution
-    /// column. Note this library uses a centered binomial distribution with
-    /// variance 10≈3.19² by default for its secret and error distributions
-    /// and checks that the bounds match 6σ.
-    pub fn default_parameters_128(plaintext_nbits: usize) -> Vec<Arc<BfvParameters>> {
+    /// Return head of context chain
+    #[must_use]
+    pub fn context_chain(&self) -> Arc<ContextLevel> {
+        self.context_chain.clone()
+    }
+
+    /// Get context level at a specific depth
+    pub fn context_level_at(&self, level: usize) -> Result<Arc<ContextLevel>> {
+        let mut current = self.context_chain.clone();
+        while current.level < level {
+            match current.next.get() {
+                Some(n) => current = n.clone(),
+                None => {
+                    return Err(Error::InvalidLevel {
+                        level,
+                        min_level: 0,
+                        max_level: self.max_level(),
+                    });
+                }
+            }
+        }
+        Ok(current)
+    }
+
+    /// Iterator over default parameters providing about 128 bits of security.
+    /// Filters out parameters where the modulus product bitlength is smaller
+    /// than the plaintext modulus bitlength.
+    ///
+    /// Returns an error if no parameters are available after filtering.
+    pub fn default_parameters_128(
+        plaintext_nbits: usize,
+    ) -> Result<impl Iterator<Item = Arc<BfvParameters>>> {
         debug_assert!(plaintext_nbits < 64);
 
         let mut n_and_qs = HashMap::new();
@@ -212,31 +294,55 @@ impl BfvParameters {
             ],
         );
 
-        let mut params = vec![];
-
-        for n in n_and_qs.keys().sorted() {
-            let moduli = n_and_qs.get(n).unwrap();
-            if let Some(plaintext_modulus) = generate_prime(
-                plaintext_nbits,
-                2 * *n as u64,
-                u64::MAX >> (64 - plaintext_nbits),
-            ) {
-                params.push(
-                    BfvParametersBuilder::new()
-                        .set_degree(*n as usize)
-                        .set_plaintext_modulus(plaintext_modulus)
-                        .set_moduli(moduli)
-                        .build_arc()
-                        .unwrap(),
+        let parameters: Vec<Arc<BfvParameters>> = n_and_qs
+            .into_iter()
+            .sorted_by_key(|(n, _)| *n)
+            .filter_map(move |(n, moduli)| {
+                generate_prime(
+                    plaintext_nbits,
+                    2 * n as u64,
+                    u64::MAX >> (64 - plaintext_nbits),
                 )
-            }
+                .and_then(|plaintext_modulus| {
+                    // Calculate the bitlength of the product of moduli
+                    let modulus_product_bitlength = moduli
+                        .iter()
+                        .map(|&m| 64 - m.leading_zeros() as usize)
+                        .sum::<usize>();
+
+                    // Filter out parameters where modulus product bitlength < plaintext bitlength
+                    if modulus_product_bitlength >= plaintext_nbits {
+                        BfvParametersBuilder::new()
+                            .set_degree(n as usize)
+                            .set_plaintext_modulus(plaintext_modulus)
+                            .set_moduli(&moduli)
+                            .build_arc()
+                            .ok()
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        // Check if we have any valid parameters after filtering
+        if parameters.is_empty() {
+            return Err(Error::ParametersError(
+                ParametersError::NoParametersAvailable {
+                    reason: format!(
+                        "No default parameters available for plaintext modulus of {plaintext_nbits} bits. All parameter sets have modulus product bitlength smaller than the plaintext modulus."
+                    ),
+                },
+            ));
         }
 
-        params
+        Ok(parameters.into_iter())
     }
 
     #[cfg(test)]
-    #[allow(missing_docs)]
+    /// Returns default parameters for tests.
+    #[must_use]
+    #[expect(clippy::panic, reason = "panic indicates violated internal invariant")]
     pub fn default_arc(num_moduli: usize, degree: usize) -> Arc<Self> {
         if !degree.is_power_of_two() || degree < 8 {
             panic!("Invalid degree");
@@ -250,168 +356,10 @@ impl BfvParameters {
     }
 
     /// Create a new BfvParameters with custom error1_variance for threshold BFV
+    #[must_use]
     pub fn with_error1_variance(mut self, error1_variance: BigUint) -> Self {
         self.error1_variance = error1_variance;
         self
-    }
-
-    /// Serialize the fully derived parameters into a raw representation.
-    ///
-    /// The resulting bytes capture every derived artifact (NTT tables, RNS
-    /// contexts, scalers, etc.) so that [`from_raw_bytes`] can reconstruct an
-    /// equivalent [`BfvParameters`] instance without recomputation. The format
-    /// is versioned and currently private to this crate.
-    pub fn to_raw_bytes(&self) -> Result<Vec<u8>> {
-        let mut registry = ContextRegistry::default();
-        let main_ctx_ids = self
-            .ctx
-            .iter()
-            .map(|ctx| registry.get_or_insert(ctx))
-            .collect::<Vec<_>>();
-
-        let scalers = self
-            .scalers
-            .iter()
-            .map(|scaler| RawScalerRef::from_scaler(scaler, &mut registry))
-            .collect::<Vec<_>>();
-
-        let delta = self
-            .delta
-            .iter()
-            .map(|poly| RawPolyEntry {
-                ctx_id: registry.get_or_insert(&poly.ctx),
-                poly: poly.to_raw(),
-            })
-            .collect::<Vec<_>>();
-
-        let mul_params = self
-            .mul_params
-            .iter()
-            .map(|mp| RawMultiplicationParameters::from_parameters(mp, &mut registry))
-            .collect::<Vec<_>>();
-
-        let moduli_sizes = self
-            .moduli_sizes
-            .iter()
-            .map(|value| usize_to_u32(*value, "moduli_sizes"))
-            .collect::<Result<Vec<_>>>()?;
-
-        let matrix_reps_index_map = self
-            .matrix_reps_index_map
-            .iter()
-            .map(|value| usize_to_u32(*value, "matrix_reps_index_map"))
-            .collect::<Result<Vec<_>>>()?;
-
-        let raw = RawBfvParameters {
-            version: RAW_SERIALIZATION_VERSION,
-            degree: usize_to_u32(self.polynomial_degree, "degree")?,
-            plaintext_modulus: self.plaintext_modulus,
-            moduli: self.moduli.to_vec(),
-            moduli_sizes,
-            variance: usize_to_u32(self.variance, "variance")?,
-            error1_variance: self.error1_variance.to_bytes_be(),
-            contexts: registry.into_contexts(),
-            main_ctx_ids,
-            op: self.op.as_ref().map(|op| op.to_raw()),
-            delta,
-            q_mod_t: self.q_mod_t.to_vec(),
-            scalers,
-            mul_params,
-            matrix_reps_index_map,
-        };
-
-        bincode::serialize(&raw).map_err(|_| Error::SerializationError)
-    }
-
-    /// Deserialize a raw representation without recomputing derived values.
-    ///
-    /// This expects bytes produced by [`to_raw_bytes`] using the same raw
-    /// serialization version. The function performs structural validation but
-    /// does not repeat the expensive mathematical checks enforced by
-    /// [`BfvParametersBuilder`].
-    pub fn from_raw_bytes(bytes: &[u8]) -> Result<Self> {
-        let raw: RawBfvParameters =
-            bincode::deserialize(bytes).map_err(|_| Error::SerializationError)?;
-        if raw.version != RAW_SERIALIZATION_VERSION {
-            return Err(Error::DefaultError(
-                "Unsupported raw BFV parameter version".to_string(),
-            ));
-        }
-
-        if raw.contexts.is_empty() {
-            return Err(Error::DefaultError(
-                "Raw BFV parameters contain no contexts".to_string(),
-            ));
-        }
-
-        let mut cache = vec![None; raw.contexts.len()];
-        for idx in 0..raw.contexts.len() {
-            build_context(idx, &raw.contexts, &mut cache)?;
-        }
-        let built_contexts = cache
-            .into_iter()
-            .map(|ctx| ctx.expect("context initialized"))
-            .collect::<Vec<_>>();
-
-        let ctx = raw
-            .main_ctx_ids
-            .iter()
-            .map(|id| ctx_by_id(&built_contexts, *id))
-            .collect::<Result<Vec<_>>>()?;
-
-        let op = if let Some(op_raw) = raw.op {
-            Some(Arc::new(op_raw.into_operator()?))
-        } else {
-            None
-        };
-
-        let delta = raw
-            .delta
-            .into_iter()
-            .map(|entry| entry.into_poly(&built_contexts))
-            .collect::<Result<Vec<_>>>()?
-            .into_boxed_slice();
-
-        let scalers = raw
-            .scalers
-            .into_iter()
-            .map(|entry| entry.into_scaler(&built_contexts))
-            .collect::<Result<Vec<_>>>()?
-            .into_boxed_slice();
-
-        let mul_params = raw
-            .mul_params
-            .into_iter()
-            .map(|entry| entry.into_parameters(&built_contexts))
-            .collect::<Result<Vec<_>>>()?
-            .into_boxed_slice();
-
-        Ok(BfvParameters {
-            polynomial_degree: raw.degree as usize,
-            plaintext_modulus: raw.plaintext_modulus,
-            moduli: raw.moduli.into_boxed_slice(),
-            moduli_sizes: raw
-                .moduli_sizes
-                .iter()
-                .map(|value| *value as usize)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            variance: raw.variance as usize,
-            error1_variance: BigUint::from_bytes_be(&raw.error1_variance),
-            ctx,
-            op,
-            delta,
-            q_mod_t: raw.q_mod_t.into_boxed_slice(),
-            scalers,
-            plaintext: Modulus::new(raw.plaintext_modulus)?,
-            mul_params,
-            matrix_reps_index_map: raw
-                .matrix_reps_index_map
-                .iter()
-                .map(|value| *value as usize)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        })
     }
 }
 
@@ -419,7 +367,7 @@ impl BfvParameters {
 #[derive(Debug)]
 pub struct BfvParametersBuilder {
     degree: usize,
-    plaintext: u64,
+    plaintext: BigUint,
     variance: usize,
     error1_variance: BigUint,
     // CHANGE 1: Added flag to track if error1_variance was explicitly set
@@ -432,7 +380,11 @@ pub struct BfvParametersBuilder {
 
 impl BfvParametersBuilder {
     /// Creates a new instance of the builder
-    #[allow(clippy::new_without_default)]
+    #[expect(
+        clippy::new_without_default,
+        reason = "builder requires explicit configuration"
+    )]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             degree: Default::default(),
@@ -455,9 +407,14 @@ impl BfvParametersBuilder {
         self
     }
 
-    /// Sets the plaintext modulus. Returns an error if the plaintext is not
-    /// between 2 and 2^62 - 1.
+    /// Sets the plaintext modulus.
     pub fn set_plaintext_modulus(&mut self, plaintext: u64) -> &mut Self {
+        self.plaintext = BigUint::from(plaintext);
+        self
+    }
+
+    /// Sets the plaintext modulus as BigUint.
+    pub fn set_plaintext_modulus_biguint(&mut self, plaintext: BigUint) -> &mut Self {
         self.plaintext = plaintext;
         self
     }
@@ -466,7 +423,7 @@ impl BfvParametersBuilder {
     /// Only one of `set_moduli_sizes` and `set_moduli`
     /// can be specified.
     pub fn set_moduli_sizes(&mut self, sizes: &[usize]) -> &mut Self {
-        self.ciphertext_moduli_sizes = sizes.to_owned();
+        sizes.clone_into(&mut self.ciphertext_moduli_sizes);
         self
     }
 
@@ -474,7 +431,7 @@ impl BfvParametersBuilder {
     /// Only one of `set_moduli_sizes` and `set_moduli`
     /// can be specified.
     pub fn set_moduli(&mut self, moduli: &[u64]) -> &mut Self {
-        self.ciphertext_moduli = moduli.to_owned();
+        moduli.clone_into(&mut self.ciphertext_moduli);
         self
     }
 
@@ -520,10 +477,9 @@ impl BfvParametersBuilder {
     /// CHANGE 6: Also marks the flag as true
     pub fn set_error1_variance_str(&mut self, error1_variance: &str) -> Result<&mut Self> {
         let big_uint = error1_variance.parse::<BigUint>().map_err(|_| {
-            Error::ParametersError(ParametersError::InvalidPlaintext(format!(
-                "Invalid BigUint string: {}",
-                error1_variance
-            )))
+            Error::DefaultError(format!(
+                "Invalid BigUint string for error1_variance: {error1_variance}"
+            ))
         })?;
         self.error1_variance = big_uint;
         self.error1_variance_explicitly_set = true;
@@ -533,11 +489,18 @@ impl BfvParametersBuilder {
     /// Generate ciphertext moduli with the specified sizes
     fn generate_moduli(moduli_sizes: &[usize], degree: usize) -> Result<Vec<u64>> {
         let mut moduli = vec![];
-        for size in moduli_sizes {
+        let required_counts = moduli_sizes.iter().copied().counts();
+        let mut generated_counts: HashMap<usize, usize> = HashMap::new();
+        for (i, size) in moduli_sizes.iter().enumerate() {
             if *size > 62 || *size < 10 {
-                return Err(Error::ParametersError(ParametersError::InvalidModulusSize(
-                    *size, 10, 62,
-                )));
+                return Err(Error::ParametersError(
+                    ParametersError::InvalidModulusSize {
+                        index: i,
+                        size: *size,
+                        min: 10,
+                        max: 62,
+                    },
+                ));
             }
 
             let mut upper_bound = 1 << size;
@@ -545,14 +508,20 @@ impl BfvParametersBuilder {
                 if let Some(prime) = generate_prime(*size, 2 * degree as u64, upper_bound) {
                     if !moduli.contains(&prime) {
                         moduli.push(prime);
+                        *generated_counts.entry(*size).or_insert(0) += 1;
                         break;
                     } else {
                         upper_bound = prime;
                     }
                 } else {
-                    return Err(Error::ParametersError(ParametersError::NotEnoughPrimes(
-                        *size, degree,
-                    )));
+                    let needed = *required_counts.get(size).unwrap_or(&0);
+                    let available = *generated_counts.get(size).unwrap_or(&0);
+                    return Err(Error::ParametersError(ParametersError::NotEnoughPrimes {
+                        size: *size,
+                        degree,
+                        needed,
+                        available,
+                    }));
                 }
             }
         }
@@ -569,29 +538,36 @@ impl BfvParametersBuilder {
     pub fn build(&self) -> Result<BfvParameters> {
         // Check that the degree is a power of 2 (and large enough).
         if self.degree < 8 || !self.degree.is_power_of_two() {
-            return Err(Error::ParametersError(ParametersError::InvalidDegree(
-                self.degree,
-            )));
+            return Err(Error::ParametersError(
+                ParametersError::invalid_degree_with_bounds(self.degree),
+            ));
         }
 
-        // This checks that the plaintext modulus is valid.
-        // TODO: Check bound on the plaintext modulus.
-        let plaintext_modulus = Modulus::new(self.plaintext).map_err(|e| {
-            Error::ParametersError(ParametersError::InvalidPlaintext(e.to_string()))
-        })?;
+        let plaintext_modulus_struct = if let Some(p) = self.plaintext.to_u64() {
+            PlaintextModulus::Small {
+                modulus: Modulus::new(p).map_err(|e| {
+                    Error::ParametersError(ParametersError::InvalidPlaintextModulus {
+                        modulus: p,
+                        reason: e.to_string(),
+                    })
+                })?,
+                modulus_big: BigUint::from(p),
+            }
+        } else {
+            PlaintextModulus::Large(self.plaintext.clone())
+        };
+        let plaintext_big = plaintext_modulus_struct.as_biguint();
 
         // Check that one of `ciphertext_moduli` and `ciphertext_moduli_sizes` is
         // specified.
         if !self.ciphertext_moduli.is_empty() && !self.ciphertext_moduli_sizes.is_empty() {
-            return Err(Error::ParametersError(ParametersError::TooManySpecified(
-                "Only one of `ciphertext_moduli` and `ciphertext_moduli_sizes` can be specified"
-                    .to_string(),
-            )));
+            return Err(Error::ParametersError(ParametersError::ConflictingParameters {
+                conflict: "Only one of `ciphertext_moduli` and `ciphertext_moduli_sizes` can be specified".into(),
+            }));
         } else if self.ciphertext_moduli.is_empty() && self.ciphertext_moduli_sizes.is_empty() {
-            return Err(Error::ParametersError(ParametersError::TooFewSpecified(
-                "One of `ciphertext_moduli` and `ciphertext_moduli_sizes` must be specified"
-                    .to_string(),
-            )));
+            return Err(Error::ParametersError(ParametersError::MissingParameter {
+                parameter: "ciphertext_moduli or ciphertext_moduli_sizes".into(),
+            }));
         }
 
         // Get or generate the moduli
@@ -606,6 +582,113 @@ impl BfvParametersBuilder {
             .map(|m| 64 - m.leading_zeros() as usize)
             .collect_vec();
 
+        // Determine how many moduli needed for plaintext context
+        // We need product of moduli > plaintext modulus.
+        let t_bits = plaintext_big.bits();
+        let mut accumulated_bits = 0;
+        let mut plaintext_moduli_count = 0;
+        for size in &moduli_sizes {
+            accumulated_bits += size;
+            plaintext_moduli_count += 1;
+            if accumulated_bits as u64 >= t_bits + 60 {
+                break;
+            }
+        }
+        plaintext_moduli_count = std::cmp::max(plaintext_moduli_count, 1);
+        plaintext_moduli_count = std::cmp::min(plaintext_moduli_count, moduli.len());
+
+        // Create plaintext context using sufficient moduli
+        let plaintext_context = Context::new_arc(&moduli[..plaintext_moduli_count], self.degree)?;
+
+        // Create NTT operator for SIMD operations if possible
+        // Only if plaintext modulus fits in u64 for now
+        let ntt_operator = match &plaintext_modulus_struct {
+            PlaintextModulus::Small { modulus, .. } => {
+                NttOperator::new(modulus, self.degree).map(Arc::new)
+            }
+            PlaintextModulus::Large(_) => None,
+        };
+
+        // Create cipher-plain bridge contexts
+        let mut cipher_plain_contexts = Vec::with_capacity(moduli.len());
+
+        // Build contexts in reverse order to establish the chain
+        for i in (0..moduli.len()).rev() {
+            let level_moduli = &moduli[..moduli.len() - i];
+            let cipher_ctx = Context::new_arc(level_moduli, self.degree)?;
+            // Compute delta (scaling polynomial)
+            let mut delta_rests = vec![];
+            for m in level_moduli {
+                let q = Modulus::new(*m)?;
+                let t_mod_q = (plaintext_big % *m).to_u64().unwrap();
+                let neg_t_mod_q = q.neg(t_mod_q);
+                if let Some(inv) = q.inv(neg_t_mod_q) {
+                    delta_rests.push(inv);
+                } else {
+                    Err(Error::MathError(fhe_math::Error::Default(
+                        "Inverse failed".to_string(),
+                    )))?;
+                }
+            }
+
+            // Use RnsContext to lift the delta values and create the scaling polynomial
+            let rns = RnsContext::new(level_moduli)?;
+            let delta = Poly::<PowerBasis>::try_convert_from(
+                &[rns.lift((&delta_rests).into())],
+                &cipher_ctx,
+                true,
+            )?
+            .into_ntt_shoup();
+
+            // Compute q_mod_t
+            let q_mod_t = rns.modulus() % plaintext_big;
+
+            // Compute plain_threshold
+            let plain_threshold = match &plaintext_modulus_struct {
+                PlaintextModulus::Small { modulus, .. } => BigUint::from((**modulus + 1) >> 1),
+                PlaintextModulus::Large(m) => (m + 1u32) >> 1,
+            };
+
+            // Scaler from ciphertext to plaintext context
+            let scaler = Scaler::new(
+                &cipher_ctx,
+                &plaintext_context,
+                ScalingFactor::new(plaintext_big, rns.modulus()),
+            )?;
+
+            let cipher_plain_ctx = CipherPlainContext::new_arc(
+                &plaintext_context,
+                &cipher_ctx,
+                delta,
+                q_mod_t,
+                plain_threshold,
+                scaler,
+            );
+
+            cipher_plain_contexts.push(cipher_plain_ctx.clone());
+        }
+
+        // Reverse to get correct order (level 0 first)
+        cipher_plain_contexts.reverse();
+
+        // Build linked context chain
+        let nodes: Vec<Arc<ContextLevel>> = cipher_plain_contexts
+            .iter()
+            .enumerate()
+            .map(|(lvl, cp_ctx)| {
+                Arc::new(ContextLevel::new(
+                    cp_ctx.ciphertext_context.clone(),
+                    cp_ctx.clone(),
+                    lvl,
+                ))
+            })
+            .collect();
+        for i in 0..nodes.len() - 1 {
+            let (prev, rest) = nodes.split_at(i + 1);
+            ContextLevel::chain(&prev[i], &rest[0]);
+        }
+        let context_chain = nodes.first().unwrap().clone();
+
         // Create n+1 moduli of 62 bits for multiplication.
         let mut extended_basis = Vec::with_capacity(moduli.len() + 1);
         let mut upper_bound = 1 << 62;
@@ -616,45 +699,8 @@ impl BfvParametersBuilder {
             }
         }
 
-        let op = NttOperator::new(&plaintext_modulus, self.degree);
-
-        let plaintext_ctx = Context::new_arc(&moduli[..1], self.degree)?;
-
-        let mut delta_rests = vec![];
-        for m in &moduli {
-            let q = Modulus::new(*m)?;
-            delta_rests.push(q.inv(q.neg(plaintext_modulus.modulus())).unwrap())
-        }
-
-        let mut ctx = Vec::with_capacity(moduli.len());
-        let mut delta = Vec::with_capacity(moduli.len());
-        let mut q_mod_t = Vec::with_capacity(moduli.len());
-        let mut scalers = Vec::with_capacity(moduli.len());
-        let mut mul_params = Vec::with_capacity(moduli.len());
-        for i in 0..moduli.len() {
-            let rns = RnsContext::new(&moduli[..moduli.len() - i])?;
-            let ctx_i = Context::new_arc(&moduli[..moduli.len() - i], self.degree)?;
-            let mut p = Poly::try_convert_from(
-                &[rns.lift((&delta_rests).into())],
-                &ctx_i,
-                true,
-                Representation::PowerBasis,
-            )?;
-            p.change_representation(Representation::NttShoup);
-            delta.push(p);
-
-            q_mod_t.push(
-                (rns.modulus() % plaintext_modulus.modulus())
-                    .to_u64()
-                    .unwrap(),
-            );
-
-            scalers.push(Scaler::new(
-                &ctx_i,
-                &plaintext_ctx,
-                ScalingFactor::new(&BigUint::from(plaintext_modulus.modulus()), rns.modulus()),
-            )?);
-
+        // Compute multiplication parameters for each level
+        for (i, node) in nodes.iter().enumerate() {
             // For the first multiplication, we want to extend to a context that
             // is ~60 bits larger.
             let modulus_size = moduli_sizes[..moduli_sizes.len() - i].iter().sum::<usize>();
@@ -663,21 +709,20 @@ impl BfvParametersBuilder {
             mul_1_moduli.append(&mut moduli[..moduli_sizes.len() - i].to_vec());
             mul_1_moduli.append(&mut extended_basis[..n_moduli].to_vec());
             let mul_1_ctx = Context::new_arc(&mul_1_moduli, self.degree)?;
-            mul_params.push(MultiplicationParameters::new(
-                &ctx_i,
+            let mp = MultiplicationParameters::new(
+                &node.poly_context,
                 &mul_1_ctx,
                 ScalingFactor::one(),
-                ScalingFactor::new(&BigUint::from(plaintext_modulus.modulus()), ctx_i.modulus()),
-            )?);
-
-            ctx.push(ctx_i);
+                ScalingFactor::new(plaintext_big, node.poly_context.modulus()),
+            )?;
+            node.mul_params.set(mp).unwrap();
         }
 
         // We use the same code as SEAL
         // https://github.com/microsoft/SEAL/blob/82b07db635132e297282649e2ab5908999089ad2/native/src/seal/batchencoder.cpp
         let row_size = self.degree >> 1;
         let m = self.degree << 1;
-        let gen = 3;
+        let generator = 3;
         let mut pos = 1;
         let mut matrix_reps_index_map = vec![0usize; self.degree];
         for i in 0..row_size {
@@ -686,36 +731,39 @@ impl BfvParametersBuilder {
             matrix_reps_index_map[i] = index1.reverse_bits() >> (self.degree.leading_zeros() + 1);
             matrix_reps_index_map[row_size | i] =
                 index2.reverse_bits() >> (self.degree.leading_zeros() + 1);
-            pos *= gen;
+            pos *= generator;
             pos &= m - 1;
         }
 
         Ok(BfvParameters {
             polynomial_degree: self.degree,
-            plaintext_modulus: self.plaintext,
-            moduli: moduli.into_boxed_slice(),
-            moduli_sizes: moduli_sizes.into_boxed_slice(),
+            moduli: moduli.into(),
+            moduli_sizes: moduli_sizes.into(),
             variance: self.variance,
             error1_variance: self.error1_variance.clone(),
-            ctx,
-            op: op.map(Arc::new),
-            delta: delta.into_boxed_slice(),
-            q_mod_t: q_mod_t.into_boxed_slice(),
-            scalers: scalers.into_boxed_slice(),
-            plaintext: plaintext_modulus,
-            mul_params: mul_params.into_boxed_slice(),
-            matrix_reps_index_map: matrix_reps_index_map.into_boxed_slice(),
+            context_chain,
+            ntt_operator,
+            plaintext: plaintext_modulus_struct,
+            matrix_reps_index_map: matrix_reps_index_map.into(),
         })
     }
 }
 
 impl Serialize for BfvParameters {
     fn to_bytes(&self) -> Vec<u8> {
+        let plaintext_modulus = if let Some(plaintext_u64) = self.plaintext.as_u64() {
+            Some(PlaintextModulusProto::Plaintext(plaintext_u64))
+        } else {
+            Some(PlaintextModulusProto::PlaintextBig(
+                self.plaintext.as_biguint().to_bytes_le(),
+            ))
+        };
+
         Parameters {
             degree: self.polynomial_degree as u32,
-            plaintext: self.plaintext_modulus,
             moduli: self.moduli.to_vec(),
             variance: self.variance as u32,
+            plaintext_modulus,
         }
         .encode_to_vec()
     }
@@ -723,10 +771,27 @@ impl Serialize for BfvParameters {
 
 impl Deserialize for BfvParameters {
     fn try_deserialize(bytes: &[u8]) -> Result<Self> {
-        let params: Parameters = Message::decode(bytes).map_err(|_| Error::SerializationError)?;
+        let params: Parameters = Message::decode(bytes).map_err(|_| {
+            Error::SerializationError(SerializationError::ProtobufError {
+                message: "Parameters decode".into(),
+            })
+        })?;
+
+        let plaintext_modulus = match params.plaintext_modulus {
+            Some(PlaintextModulusProto::Plaintext(value)) => BigUint::from(value),
+            Some(PlaintextModulusProto::PlaintextBig(bytes)) => BigUint::from_bytes_le(&bytes),
+            None => {
+                return Err(Error::SerializationError(
+                    SerializationError::MissingField {
+                        field_name: "Parameters.plaintext_modulus".into(),
+                    },
+                ));
+            }
+        };
+
         BfvParametersBuilder::new()
             .set_degree(params.degree as usize)
-            .set_plaintext_modulus(params.plaintext)
+            .set_plaintext_modulus_biguint(plaintext_modulus)
             .set_moduli(&params.moduli)
             .set_variance(params.variance as usize)
             .build()
@@ -735,7 +800,7 @@ impl Deserialize for BfvParameters {
 }
 
 /// Multiplication parameters
-#[derive(Debug, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct MultiplicationParameters {
     pub(crate) extender: Scaler,
     pub(crate) down_scaler: Scaler,
@@ -759,236 +824,20 @@ impl MultiplicationParameters {
     }
 }
 
-#[derive(Clone, SerdeSerialize, SerdeDeserialize)]
-struct RawBfvParameters {
-    version: u32,
-    degree: u32,
-    plaintext_modulus: u64,
-    moduli: Vec<u64>,
-    moduli_sizes: Vec<u32>,
-    variance: u32,
-    error1_variance: Vec<u8>,
-    contexts: Vec<RawContext>,
-    main_ctx_ids: Vec<u32>,
-    op: Option<NttOperatorRaw>,
-    delta: Vec<RawPolyEntry>,
-    q_mod_t: Vec<u64>,
-    scalers: Vec<RawScalerRef>,
-    mul_params: Vec<RawMultiplicationParameters>,
-    matrix_reps_index_map: Vec<u32>,
-}
-
-#[derive(Clone, SerdeSerialize, SerdeDeserialize)]
-struct RawContext {
-    moduli: Vec<u64>,
-    degree: u32,
-    bitrev: Vec<u32>,
-    inv_last_qi_mod_qj: Vec<u64>,
-    inv_last_qi_mod_qj_shoup: Vec<u64>,
-    rns: RnsContextRaw,
-    ops: Vec<NttOperatorRaw>,
-    next_context: Option<u32>,
-}
-
-#[derive(Clone, SerdeSerialize, SerdeDeserialize)]
-struct RawPolyEntry {
-    ctx_id: u32,
-    poly: PolyRaw,
-}
-
-impl RawPolyEntry {
-    fn into_poly(self, contexts: &[Arc<Context>]) -> Result<Poly> {
-        let ctx = ctx_by_id(contexts, self.ctx_id)?;
-        self.poly.into_poly(&ctx).map_err(Error::MathError)
-    }
-}
-
-#[derive(Clone, SerdeSerialize, SerdeDeserialize)]
-struct RawScalerRef {
-    scaler: ScalerRaw,
-    from_ctx: u32,
-    to_ctx: u32,
-}
-
-#[derive(Clone, SerdeSerialize, SerdeDeserialize)]
-struct RawMultiplicationParameters {
-    extender: RawScalerRef,
-    down_scaler: RawScalerRef,
-    from_ctx: u32,
-    to_ctx: u32,
-}
-
-#[derive(Default)]
-struct ContextRegistry {
-    contexts: Vec<RawContext>,
-    ids: HashMap<usize, u32>,
-}
-
-impl ContextRegistry {
-    fn get_or_insert(&mut self, ctx: &Arc<Context>) -> u32 {
-        let key = Arc::as_ptr(ctx) as usize;
-        if let Some(id) = self.ids.get(&key) {
-            return *id;
-        }
-
-        let next_context = ctx
-            .next_context
-            .as_ref()
-            .map(|next| self.get_or_insert(next));
-
-        let id = self.contexts.len() as u32;
-        self.ids.insert(key, id);
-        self.contexts
-            .push(RawContext::from_context(ctx, next_context));
-        id
-    }
-
-    fn into_contexts(self) -> Vec<RawContext> {
-        self.contexts
-    }
-}
-
-impl RawContext {
-    fn from_context(ctx: &Arc<Context>, next_context: Option<u32>) -> Self {
-        RawContext {
-            moduli: ctx.moduli.to_vec(),
-            degree: ctx.degree as u32,
-            bitrev: ctx.bitrev.iter().map(|v| *v as u32).collect(),
-            inv_last_qi_mod_qj: ctx.inv_last_qi_mod_qj.to_vec(),
-            inv_last_qi_mod_qj_shoup: ctx.inv_last_qi_mod_qj_shoup.to_vec(),
-            rns: ctx.rns.as_ref().to_raw(),
-            ops: ctx.ops.iter().map(|op| op.to_raw()).collect(),
-            next_context,
-        }
-    }
-}
-
-impl RawScalerRef {
-    fn from_scaler(scaler: &Scaler, registry: &mut ContextRegistry) -> Self {
-        Self {
-            scaler: scaler.to_raw(),
-            from_ctx: registry.get_or_insert(scaler.from_context()),
-            to_ctx: registry.get_or_insert(scaler.to_context()),
-        }
-    }
-
-    fn into_scaler(self, contexts: &[Arc<Context>]) -> Result<Scaler> {
-        let from = ctx_by_id(contexts, self.from_ctx)?;
-        let to = ctx_by_id(contexts, self.to_ctx)?;
-        self.scaler
-            .into_scaler(&from, &to)
-            .map_err(Error::MathError)
-    }
-}
-
-impl RawMultiplicationParameters {
-    fn from_parameters(mp: &MultiplicationParameters, registry: &mut ContextRegistry) -> Self {
-        Self {
-            extender: RawScalerRef::from_scaler(&mp.extender, registry),
-            down_scaler: RawScalerRef::from_scaler(&mp.down_scaler, registry),
-            from_ctx: registry.get_or_insert(&mp.from),
-            to_ctx: registry.get_or_insert(&mp.to),
-        }
-    }
-
-    fn into_parameters(self, contexts: &[Arc<Context>]) -> Result<MultiplicationParameters> {
-        Ok(MultiplicationParameters {
-            extender: self.extender.into_scaler(contexts)?,
-            down_scaler: self.down_scaler.into_scaler(contexts)?,
-            from: ctx_by_id(contexts, self.from_ctx)?,
-            to: ctx_by_id(contexts, self.to_ctx)?,
-        })
-    }
-}
-
-fn build_context(
-    idx: usize,
-    contexts: &[RawContext],
-    cache: &mut [Option<Arc<Context>>],
-) -> Result<Arc<Context>> {
-    if let Some(ctx) = &cache[idx] {
-        return Ok(ctx.clone());
-    }
-
-    let raw = contexts[idx].clone();
-    let next_context = match raw.next_context {
-        Some(next_id) => Some(build_context(next_id as usize, contexts, cache)?),
-        None => None,
-    };
-
-    let RawContext {
-        moduli,
-        degree,
-        bitrev,
-        inv_last_qi_mod_qj,
-        inv_last_qi_mod_qj_shoup,
-        rns,
-        ops,
-        next_context: _,
-    } = raw;
-
-    let q = moduli
-        .iter()
-        .copied()
-        .map(Modulus::new)
-        .collect::<std::result::Result<Vec<_>, fhe_math::Error>>()
-        .map_err(Error::MathError)?
-        .into_boxed_slice();
-
-    let moduli = moduli.into_boxed_slice();
-
-    let ops = ops
-        .into_iter()
-        .map(|op| op.into_operator())
-        .collect::<std::result::Result<Vec<_>, fhe_math::Error>>()
-        .map_err(Error::MathError)?
-        .into_boxed_slice();
-
-    let ctx = Arc::new(Context {
-        moduli,
-        q,
-        rns: Arc::new(rns.into_context().map_err(Error::MathError)?),
-        ops,
-        degree: degree as usize,
-        bitrev: bitrev
-            .into_iter()
-            .map(|v| v as usize)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-        inv_last_qi_mod_qj: inv_last_qi_mod_qj.into_boxed_slice(),
-        inv_last_qi_mod_qj_shoup: inv_last_qi_mod_qj_shoup.into_boxed_slice(),
-        next_context,
-    });
-
-    cache[idx] = Some(ctx.clone());
-    Ok(ctx)
-}
-
-fn ctx_by_id(contexts: &[Arc<Context>], id: u32) -> Result<Arc<Context>> {
-    contexts
-        .get(id as usize)
-        .cloned()
-        .ok_or_else(|| Error::DefaultError(format!("Invalid context id {id}")))
-}
-
-fn usize_to_u32(value: usize, field: &str) -> Result<u32> {
-    value.try_into().map_err(|_| {
-        Error::DefaultError(format!("{field} value {value} does not fit into 32 bits"))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::{BfvParameters, BfvParametersBuilder};
+    use crate::proto::bfv::{Parameters, parameters::PlaintextModulus as PlaintextModulusProto};
     use fhe_traits::{Deserialize, Serialize};
     use num_bigint::BigUint;
+    use prost::Message;
     use std::error::Error;
 
     #[test]
     fn default() {
-        let params = BfvParameters::default_arc(1, 8);
+        let params = BfvParameters::default_arc(1, 16);
         assert_eq!(params.moduli.len(), 1);
-        assert_eq!(params.degree(), 8);
+        assert_eq!(params.degree(), 16);
 
         let params = BfvParameters::default_arc(2, 16);
         assert_eq!(params.moduli.len(), 2);
@@ -998,31 +847,31 @@ mod tests {
     #[test]
     fn ciphertext_moduli() -> Result<(), Box<dyn Error>> {
         let params = BfvParametersBuilder::new()
-            .set_degree(8)
+            .set_degree(16)
             .set_plaintext_modulus(2)
             .set_moduli_sizes(&[62, 62, 62, 61, 60, 11])
             .build()?;
         assert_eq!(
             params.moduli.to_vec(),
             &[
-                4611686018427387761,
                 4611686018427387617,
-                4611686018427387409,
+                4611686018427387329,
+                4611686018427387073,
                 2305843009213693921,
-                1152921504606846577,
+                1152921504606845473,
                 2017
             ]
         );
 
         let params = BfvParametersBuilder::new()
-            .set_degree(8)
+            .set_degree(16)
             .set_plaintext_modulus(2)
             .set_moduli(&[
-                4611686018427387761,
                 4611686018427387617,
-                4611686018427387409,
+                4611686018427387329,
+                4611686018427387073,
                 2305843009213693921,
-                1152921504606846577,
+                1152921504606845473,
                 2017,
             ])
             .build()?;
@@ -1032,36 +881,91 @@ mod tests {
     }
 
     #[test]
+    fn big_plaintext_modulus() -> Result<(), Box<dyn Error>> {
+        let p = BigUint::parse_bytes(b"340282366920938463463374607431768211507", 10).unwrap();
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus_biguint(p.clone())
+            .set_moduli_sizes(&[62, 62, 62, 62, 62])
+            .build()?;
+
+        assert_eq!(params.plaintext_big(), &p);
+        Ok(())
+    }
+
+    #[test]
     fn serialize() -> Result<(), Box<dyn Error>> {
         let params = BfvParametersBuilder::new()
-            .set_degree(8)
+            .set_degree(16)
             .set_plaintext_modulus(2)
             .set_moduli_sizes(&[62, 62, 62, 61, 60, 11])
             .set_variance(4)
             .build()?;
         let bytes = params.to_bytes();
+        let proto = Parameters::decode(bytes.as_slice())?;
+        assert!(matches!(
+            proto.plaintext_modulus,
+            Some(PlaintextModulusProto::Plaintext(2))
+        ));
         assert_eq!(BfvParameters::try_deserialize(&bytes)?, params);
+
+        let p = BigUint::parse_bytes(b"340282366920938463463374607431768211507", 10).unwrap();
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus_biguint(p)
+            .set_moduli_sizes(&[62, 62, 62, 62, 62])
+            .set_variance(4)
+            .build()?;
+        let bytes = params.to_bytes();
+        let proto = Parameters::decode(bytes.as_slice())?;
+        let proto_plaintext_bytes = match &proto.plaintext_modulus {
+            Some(PlaintextModulusProto::PlaintextBig(bytes)) => bytes.as_slice(),
+            _ => return Err("expected plaintext_big variant".into()),
+        };
+        assert_eq!(
+            proto_plaintext_bytes,
+            params.plaintext_big().to_bytes_le().as_slice()
+        );
+        let decoded = BfvParameters::try_deserialize(&bytes)?;
+        assert_eq!(decoded, params);
+        assert_eq!(decoded.plaintext_big(), params.plaintext_big());
+
         Ok(())
     }
 
     #[test]
-    fn raw_roundtrip() -> Result<(), Box<dyn Error>> {
+    fn deserialize_missing_plaintext_modulus() {
+        let proto = Parameters {
+            degree: 16,
+            moduli: vec![4611686018427387617, 4611686018427387329],
+            variance: 4,
+            plaintext_modulus: None,
+        };
+        let bytes = proto.encode_to_vec();
+        let err = BfvParameters::try_deserialize(&bytes).unwrap_err();
+        assert!(format!("{err}").contains("Missing required field"));
+    }
+
+    #[test]
+    fn matrix_reps_index_map_is_permutation() -> Result<(), Box<dyn Error>> {
         let params = BfvParametersBuilder::new()
-            .set_degree(8)
-            .set_plaintext_modulus(1153)
+            .set_degree(16)
+            .set_plaintext_modulus(2)
             .set_moduli_sizes(&[62, 62])
-            .set_variance(6)
             .build()?;
 
-        let raw = params.to_raw_bytes()?;
-        let restored = BfvParameters::from_raw_bytes(&raw)?;
-        assert_eq!(params, restored);
+        let mut map = params.matrix_reps_index_map.to_vec();
+        assert_eq!(map.len(), params.degree());
+
+        map.sort_unstable();
+        map.dedup();
+        assert_eq!(map.len(), params.degree());
+
         Ok(())
     }
 
     #[test]
     fn error1_variance_functionality() -> Result<(), Box<dyn Error>> {
-        // Test default behavior (error1_variance defaults to variance)
         let params = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
@@ -1070,7 +974,6 @@ mod tests {
             .build()?;
         assert_eq!(params.get_error1_variance(), &BigUint::from(10u32));
 
-        // Test custom error1_variance with BigUint
         let error2_big = BigUint::from(20u32);
         let params = BfvParametersBuilder::new()
             .set_degree(8)
@@ -1082,7 +985,6 @@ mod tests {
         assert_eq!(params.get_error1_variance(), &error2_big);
         assert_eq!(params.variance(), 10);
 
-        // Test with_error1_variance method using 155-bit number
         let large_error2 = BigUint::parse_bytes(
             b"57896044618658097711785492504343953926634992332820282019728792003956564819967",
             10,
@@ -1099,9 +1001,7 @@ mod tests {
             params_with_large_error2.get_error1_variance(),
             &large_error2
         );
-        assert_eq!(params_with_large_error2.variance(), 10); // Original variance unchanged
 
-        // Test convenience method for usize
         let params_usize = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
@@ -1111,7 +1011,6 @@ mod tests {
             .build()?;
         assert_eq!(params_usize.get_error1_variance(), &BigUint::from(15u32));
 
-        // Test string method for very large numbers
         let mut builder = BfvParametersBuilder::new();
         builder
             .set_degree(8)
@@ -1135,7 +1034,6 @@ mod tests {
 
     #[test]
     fn test_155_bit_error1_variance() -> Result<(), Box<dyn Error>> {
-        // Test with a 155-bit number (close to 2^155)
         let bit_155_number = BigUint::from(2u32).pow(155) - BigUint::from(1u32);
 
         let params = BfvParametersBuilder::new()
@@ -1151,10 +1049,8 @@ mod tests {
         Ok(())
     }
 
-    // NEW TEST: Test that error1_variance tracks variance when not explicitly set
     #[test]
     fn test_error1_variance_tracks_variance() -> Result<(), Box<dyn Error>> {
-        // When only variance is set, error1_variance should match
         let params = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
@@ -1168,10 +1064,8 @@ mod tests {
         Ok(())
     }
 
-    // NEW TEST: Test that explicitly set error1_variance is not overwritten
     #[test]
     fn test_error1_variance_independent_when_set() -> Result<(), Box<dyn Error>> {
-        // Set error1_variance first, then variance - error1_variance should stay
         let params = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
@@ -1183,7 +1077,6 @@ mod tests {
         assert_eq!(params.variance(), 15);
         assert_eq!(params.get_error1_variance(), &BigUint::from(20u32));
 
-        // Set variance first, then error1_variance - error1_variance should be 20
         let params2 = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
@@ -1198,7 +1091,6 @@ mod tests {
         Ok(())
     }
 
-    // NEW TEST: Test multiple variance changes without explicit error1_variance
     #[test]
     fn test_error1_variance_follows_multiple_variance_changes() -> Result<(), Box<dyn Error>> {
         let mut builder = BfvParametersBuilder::new();
@@ -1212,10 +1104,38 @@ mod tests {
 
         let params = builder.build()?;
 
-        // error1_variance should match the final variance value
         assert_eq!(params.variance(), 15);
         assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
 
         Ok(())
+    }
+
+    #[test]
+    fn default_parameters_iterator() {
+        let mut it = BfvParameters::default_parameters_128(20).unwrap();
+        assert!(it.next().is_some());
+    }
+
+    #[test]
+    fn default_parameters_filtering() {
+        let params: Vec<_> = BfvParameters::default_parameters_128(20).unwrap().collect();
+
+        for param in &params {
+            let modulus_product_bitlength = param.moduli_sizes.iter().sum::<usize>();
+            assert!(modulus_product_bitlength >= 20);
+        }
+
+        let result = BfvParameters::default_parameters_128(10);
+        assert!(result.is_err());
+
+        #[expect(clippy::panic, reason = "panic indicates violated internal invariant")]
+        match result {
+            Err(e) => {
+                let error_string = format!("{e}");
+                assert!(error_string.contains("No parameters available"));
+                assert!(error_string.contains("10 bits"));
+            }
+            Ok(_) => panic!("Expected error"),
+        }
     }
 }

@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use std::env;
 use std::fs;
 use std::io::Result;
@@ -5,19 +7,16 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() -> Result<()> {
-    // Check if protoc is available
     if !is_protoc_available() {
         println!("cargo:warning=protoc not found, skipping proto compilation");
         return Ok(());
     }
 
     let proto_dir = PathBuf::from("src/proto");
-
-    // Create a temporary directory for prost output
     let temp_dir = PathBuf::from(env::var("OUT_DIR").unwrap()).join("proto_temp");
     fs::create_dir_all(&temp_dir)?;
 
-    // Compile BFV proto file first (since TRBFV depends on it)
+    // BFV first: TRBFV imports from it.
     compile_proto_file(
         "src/proto/bfv/bfv.proto",
         &["src/proto"],
@@ -25,7 +24,6 @@ fn main() -> Result<()> {
         &temp_dir,
     )?;
 
-    // Compile TRBFV proto file (which imports from BFV)
     compile_proto_file(
         "src/proto/trbfv/trbfv.proto",
         &["src/proto"],
@@ -48,34 +46,26 @@ fn compile_proto_file(
     target_path: &PathBuf,
     temp_dir: &PathBuf,
 ) -> Result<()> {
-    // Clear temp directory
     if temp_dir.exists() {
         fs::remove_dir_all(temp_dir)?;
     }
     fs::create_dir_all(temp_dir)?;
 
-    // Compile the .proto file
     prost_build::Config::new()
         .out_dir(temp_dir)
         .compile_protos(&[proto_file], include_paths)?;
 
-    // Copy the generated file to the desired location with the desired name
-    let generated_files = fs::read_dir(temp_dir)?;
-    for entry in generated_files {
+    for entry in fs::read_dir(temp_dir)? {
         let entry = entry?;
-        if entry.path().extension().unwrap_or_default() == "rs" {
-            // Ensure target directory exists
+        if entry.path().extension().is_some_and(|ext| ext == "rs") {
             if let Some(parent) = target_path.parent() {
                 fs::create_dir_all(parent)?;
             }
 
-            // Copy the file
             fs::copy(entry.path(), target_path)?;
 
-            // Prepend #![allow(missing_docs)]
             let contents = fs::read_to_string(target_path)?;
-            let new_contents = format!("#![allow(missing_docs)]\n{contents}");
-            fs::write(target_path, new_contents)?;
+            fs::write(target_path, format!("#![allow(missing_docs)]\n{contents}"))?;
 
             break;
         }
