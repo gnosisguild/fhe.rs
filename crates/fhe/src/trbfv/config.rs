@@ -12,6 +12,7 @@ pub fn validate_threshold_config(n: usize, threshold: usize) -> Result<(), Error
     if n == 0 {
         return Err(Error::invalid_party_count(n, 1));
     }
+    // TODO: make stronger assumptions on minimum requirement (and / or) exact requirements.
     if threshold > (n - 1) / 2 {
         return Err(Error::threshold_too_large(threshold, n));
     }
