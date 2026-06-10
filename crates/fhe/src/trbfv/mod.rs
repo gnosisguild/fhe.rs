@@ -17,5 +17,7 @@ pub mod threshold;
 // Re-export main types for convenience
 pub use shamir::ShamirSecretSharing;
 pub use shares::ShareManager;
-pub use smudging::{SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
+pub use smudging::{
+    MIN_SECURE_LAMBDA, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingSecurity,
+};
 pub use threshold::TRBFV;

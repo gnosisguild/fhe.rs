@@ -28,6 +28,7 @@ use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::shares::ShareManager;
 use crate::trbfv::smudging::{
     SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
+    SmudgingSecurity,
 };
 use fhe_math::rq::{Ntt, Poly, PowerBasis};
 use fhe_traits::FheParametrized;
@@ -111,7 +112,8 @@ impl TRBFV {
     ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed (e.g., votes to count, numbers to sum)
-    /// * `lambda` - Statistical security parameter
+    /// * `security` - Statistical security level (use `SmudgingSecurity::secure(lambda)`
+    ///   in production; `SmudgingSecurity::insecure_test_only(lambda)` for fast tests)
     /// * `rng` - Cryptographically secure random number generator
     ///
     /// # Returns
@@ -119,14 +121,14 @@ impl TRBFV {
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         num_ciphertexts: usize,
-        lambda: usize,
+        security: SmudgingSecurity,
         rng: &mut R,
     ) -> Result<Vec<BigInt>, Error> {
         let config = SmudgingBoundCalculatorConfig::new(
             self.params.clone(),
             self.n,
             num_ciphertexts,
-            lambda,
+            security,
         );
         let calculator = SmudgingBoundCalculator::new(config);
         let generator = SmudgingNoiseGenerator::from_bound_calculator(calculator)?;
@@ -269,7 +271,7 @@ mod tests {
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         let mut rng = rng();
-        let result = trbfv.generate_smudging_error(1, 80, &mut rng);
+        let result = trbfv.generate_smudging_error(1, SmudgingSecurity::secure(80).unwrap(), &mut rng);
         //Checking if all the coefficients of the smudging noise are different than 0,
         //having one equal to zero is hardly likely to happen if the smudging noise was generated.
         //TODO: add a test that calculates the empirical variance from the coefficients, so as to
@@ -293,7 +295,7 @@ mod tests {
 
         // Test with multiple ciphertexts (this should increase the bound requirements)
         let mut rng = rng();
-        let result = trbfv.generate_smudging_error(10, 80, &mut rng);
+        let result = trbfv.generate_smudging_error(10, SmudgingSecurity::secure(80).unwrap(), &mut rng);
 
         for (poly_idx, poly) in result.iter().enumerate() {
             for (coeff_idx, coeff) in poly.iter().enumerate() {

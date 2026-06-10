@@ -15,7 +15,7 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
-    trbfv::{ShareManager, TRBFV},
+    trbfv::{ShareManager, SmudgingSecurity, TRBFV},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -135,6 +135,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // The parameters are within bound, let's go! Let's first display some
     // information about the threshold sum.
+    // Secure example: rejects lambda below the secure minimum. See
+    // trbfv_add_bfv_share_insecure.rs for the explicit insecure test mode.
+    let security = SmudgingSecurity::secure(lambda)?;
+
     println!("# Addition with trBFV");
     println!("\tnum_summed = {num_summed}");
     println!("\tnum_parties = {num_parties}");
@@ -193,7 +197,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
 
                 let esi_coeffs = temp_trbfv
-                    .generate_smudging_error(num_summed, lambda, &mut rng)
+                    .generate_smudging_error(num_summed, security, &mut rng)
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager
