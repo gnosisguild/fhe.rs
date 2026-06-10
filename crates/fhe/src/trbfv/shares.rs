@@ -261,8 +261,10 @@ impl ShareManager {
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
-        // Validate we have enough shares
-        if d_share_polys.len() < (self.threshold + 1) {
+        // Reconstruction consumes exactly threshold + 1 shares; requiring
+        // exactness (rather than truncating extras) avoids silently depending
+        // on the order of the provided shares.
+        if d_share_polys.len() != self.threshold + 1 {
             return Err(Error::insufficient_shares(
                 d_share_polys.len(),
                 self.threshold + 1,
@@ -274,9 +276,22 @@ impl ShareManager {
                 "reconstructing_parties length must match d_share_polys length".to_string(),
             ));
         }
-        let m_data: Vec<u64> = (0..self.params.moduli().len())
+        // Shamir x-coordinates are 1-based, bounded by n, and must be distinct:
+        // index 0 would evaluate the sharing polynomial at the secret itself,
+        // and duplicates make the Lagrange denominators non-invertible.
+        let mut seen = vec![false; self.n + 1];
+        for &idx in &reconstructing_parties {
+            if idx == 0 || idx > self.n {
+                return Err(Error::invalid_party_id(idx, self.n));
+            }
+            if seen[idx] {
+                return Err(Error::duplicate_party_id(idx));
+            }
+            seen[idx] = true;
+        }
+        let recovered: Result<Vec<Vec<u64>>, Error> = (0..self.params.moduli().len())
             .into_par_iter()
-            .flat_map(|m| {
+            .map(|m| {
                 let shamir_ss = ShamirSecretSharing::new(
                     self.threshold,
                     self.n,
@@ -286,13 +301,11 @@ impl ShareManager {
                 // Parallelize coefficient recovery within each modulus
                 (0..self.params.degree())
                     .into_par_iter()
-                    .map(|i| {
+                    .map(|i| -> Result<u64, Error> {
                         let mut shamir_open_vec_mod: Vec<(usize, BigInt)> =
-                            Vec::with_capacity(self.params.degree());
-                        for (party_idx, d_share_poly) in reconstructing_parties
-                            .iter()
-                            .zip(d_share_polys.iter())
-                            .take(self.threshold + 1)
+                            Vec::with_capacity(self.threshold + 1);
+                        for (party_idx, d_share_poly) in
+                            reconstructing_parties.iter().zip(d_share_polys.iter())
                         {
                             let coeffs = d_share_poly.coefficients();
                             let coeff_arr = coeffs.row(m);
@@ -301,13 +314,17 @@ impl ShareManager {
                             let coeff_formatted = (*party_idx, coeff.to_bigint().unwrap());
                             shamir_open_vec_mod.push(coeff_formatted);
                         }
-                        let shamir_result =
-                            shamir_ss.recover(&shamir_open_vec_mod[0..self.threshold + 1]);
-                        shamir_result.to_u64().unwrap()
+                        let shamir_result = shamir_ss.recover(&shamir_open_vec_mod)?;
+                        shamir_result.to_u64().ok_or_else(|| {
+                            Error::DefaultError(
+                                "recovered Shamir coefficient does not fit in u64".to_string(),
+                            )
+                        })
                     })
-                    .collect::<Vec<u64>>()
+                    .collect::<Result<Vec<u64>, Error>>()
             })
             .collect();
+        let m_data: Vec<u64> = recovered?.into_iter().flatten().collect();
 
         // scale result poly
         let arr_matrix =
@@ -848,6 +865,45 @@ mod tests {
             decoded_bad, plaintext_data,
             "Decryption should not match with wrong indices"
         );
+    }
+
+    #[test]
+    fn test_decrypt_from_shares_rejects_invalid_party_indices() {
+        let mut rng = rng();
+        let params = test_params();
+        let n = 5;
+        let threshold = 2; // needs exactly 3 shares
+        let manager = ShareManager::new(n, threshold, params.clone());
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params).unwrap();
+        let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
+
+        let ctx = params.context_at_level(0).unwrap();
+        let shares: Vec<Poly<PowerBasis>> = (0..3).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+
+        // Duplicate index
+        let result = manager.decrypt_from_shares(shares.clone(), vec![1, 2, 2], ct.clone());
+        assert!(result.is_err());
+
+        // Index 0 (would evaluate the sharing polynomial at the secret)
+        let result = manager.decrypt_from_shares(shares.clone(), vec![0, 1, 2], ct.clone());
+        assert!(result.is_err());
+
+        // Index > n
+        let result = manager.decrypt_from_shares(shares.clone(), vec![1, 2, 6], ct.clone());
+        assert!(result.is_err());
+
+        // Wrong share count: more than threshold + 1 is rejected
+        let four: Vec<Poly<PowerBasis>> = (0..4).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let result = manager.decrypt_from_shares(four, vec![1, 2, 3, 4], ct.clone());
+        assert!(result.is_err());
+
+        // Fewer than threshold + 1 is rejected
+        let two: Vec<Poly<PowerBasis>> = (0..2).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let result = manager.decrypt_from_shares(two, vec![1, 2], ct);
+        assert!(result.is_err());
     }
 
     #[test]
