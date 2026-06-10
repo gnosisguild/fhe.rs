@@ -382,7 +382,7 @@ fn bench_timing_operations(c: &mut Criterion) {
     );
 
     let num_parties = 3;
-    let threshold = 2;
+    let threshold = 1; // must be exactly (n - 1) / 2
 
     // Benchmark: Generate BFV key pair for share encryption
     group.bench_function("generate_bfv_keypair", |b| {
