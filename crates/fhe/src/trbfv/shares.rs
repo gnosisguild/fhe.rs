@@ -881,8 +881,7 @@ mod tests {
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
         let ctx = params.context_at_level(0).unwrap();
-        let shares: Vec<Poly<PowerBasis>> =
-            (0..3).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let shares: Vec<Poly<PowerBasis>> = (0..3).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
 
         // Duplicate index
         let result = manager.decrypt_from_shares(shares.clone(), vec![1, 2, 2], ct.clone());
@@ -897,14 +896,12 @@ mod tests {
         assert!(result.is_err());
 
         // Wrong share count: more than threshold + 1 is rejected
-        let four: Vec<Poly<PowerBasis>> =
-            (0..4).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let four: Vec<Poly<PowerBasis>> = (0..4).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
         let result = manager.decrypt_from_shares(four, vec![1, 2, 3, 4], ct.clone());
         assert!(result.is_err());
 
         // Fewer than threshold + 1 is rejected
-        let two: Vec<Poly<PowerBasis>> =
-            (0..2).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let two: Vec<Poly<PowerBasis>> = (0..2).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
         let result = manager.decrypt_from_shares(two, vec![1, 2], ct);
         assert!(result.is_err());
     }

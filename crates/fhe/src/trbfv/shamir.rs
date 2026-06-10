@@ -233,9 +233,7 @@ impl ShamirSecretSharing {
 
         Ok(terms?
             .into_iter()
-            .fold(Zero::zero(), |sum: BigInt, term| {
-                (sum + term) % &self.prime
-            }))
+            .fold(Zero::zero(), |sum: BigInt, term| (sum + term) % &self.prime))
     }
 
     fn mod_reverse(&self, num: BigInt) -> Result<BigInt, Error> {
@@ -369,9 +367,6 @@ mod tests {
         };
         let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
         let shares = sss.split(secret.clone(), &mut rand::rng());
-        assert_eq!(
-            secret,
-            sss.recover(&shares[0..sss.threshold + 1]).unwrap()
-        );
+        assert_eq!(secret, sss.recover(&shares[0..sss.threshold + 1]).unwrap());
     }
 }
