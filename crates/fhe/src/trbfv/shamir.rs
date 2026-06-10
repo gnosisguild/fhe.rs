@@ -5,7 +5,7 @@ use fhe_util::rng08;
 /// with the BFV parameter system.
 use num_bigint::{BigInt, RandBigInt};
 use num_traits::{One, Zero};
-use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 
@@ -43,7 +43,18 @@ use rayon::prelude::*;
 /// assert_eq!(secret, sss.recover(&shares[0..sss.threshold +1]));
 /// }
 ///
+/// Fork a full-entropy ChaCha20 seed from the caller's RNG.
+///
+/// Used to derive independent per-task RNGs for parallel sampling without
+/// sharing the caller's RNG across threads.
+pub(crate) fn fork_seed<R: RngCore + CryptoRng>(rng: &mut R) -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    rng.fill_bytes(&mut seed);
+    seed
+}
+
 #[derive(Debug)]
+/// Shamir Secret Sharing
 pub struct ShamirSecretSharing {
     /// Threshold for reconstruction (minimum number of shares needed is threshold + 1)
     pub threshold: usize,
@@ -126,13 +137,13 @@ impl ShamirSecretSharing {
 
         // Generate seeds deterministically from the input RNG
         // This is done so clients can test using deterministic rngs
-        let seeds: Vec<u64> = (0..self.threshold).map(|_| rng.random()).collect();
+        let seeds: Vec<[u8; 32]> = (0..self.threshold).map(|_| fork_seed(rng)).collect();
 
         // Use the seeds
         let random_coefficients: Vec<BigInt> = seeds
             .into_par_iter()
             .map(|seed| {
-                let mut rng = ChaCha20Rng::seed_from_u64(seed);
+                let mut rng = ChaCha20Rng::from_seed(seed);
                 rng08::adapt(&mut rng).gen_bigint_range(&low, &high)
             })
             .collect();

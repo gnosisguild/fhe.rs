@@ -16,7 +16,7 @@ use ndarray::Array2;
 use num_bigint::BigUint;
 use num_bigint::{BigInt, ToBigInt};
 use num_traits::ToPrimitive;
-use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use std::convert::TryFrom;
@@ -135,7 +135,9 @@ impl ShareManager {
         let coeff_rows: Vec<_> = coefficients.outer_iter().collect();
 
         // Generate seeds deterministically from the input RNG
-        let seeds: Vec<u64> = (0..moduli.len()).map(|_| rng.random()).collect();
+        let seeds: Vec<[u8; 32]> = (0..moduli.len())
+            .map(|_| crate::trbfv::shamir::fork_seed(rng))
+            .collect();
 
         let return_vec: Result<Vec<Array2<u64>>, Error> = moduli
             .par_iter()
@@ -143,7 +145,7 @@ impl ShareManager {
             .enumerate()
             .map(|(i, (m, p))| -> Result<Array2<u64>, Error> {
                 // Get rng from seed
-                let mut rng = ChaCha20Rng::seed_from_u64(seeds[i]);
+                let mut rng = ChaCha20Rng::from_seed(seeds[i]);
 
                 // Create shamir object
                 let shamir = ShamirSecretSharing {
