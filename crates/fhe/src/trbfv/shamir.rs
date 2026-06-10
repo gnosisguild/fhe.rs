@@ -1,3 +1,4 @@
+use crate::Error;
 use fhe_util::rng08;
 /// Shamir Secret Sharing implementation for threshold BFV.
 ///
@@ -40,7 +41,7 @@ use rayon::prelude::*;
 /// let shares = sss.split(secret.clone());
 ///
 /// println!("shares: {:?}", shares);
-/// assert_eq!(secret, sss.recover(&shares[0..sss.threshold +1]));
+/// assert_eq!(secret, sss.recover(&shares[0..sss.threshold +1]).unwrap());
 /// }
 ///
 /// Fork a full-entropy ChaCha20 seed from the caller's RNG.
@@ -175,28 +176,40 @@ impl ShamirSecretSharing {
     ///
     /// The reconstructed secret value.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the number of shares provided is not equal to the threshold + one.
-    #[must_use]
-    pub fn recover(&self, shares: &[(usize, BigInt)]) -> BigInt {
-        assert!(shares.len() == (self.threshold + 1), "wrong shares number");
+    /// Returns an error if the number of shares provided is not equal to
+    /// threshold + 1, or if a Lagrange denominator is not invertible
+    /// (e.g., duplicate share indices).
+    pub fn recover(&self, shares: &[(usize, BigInt)]) -> Result<BigInt, Error> {
+        if shares.len() != self.threshold + 1 {
+            return Err(Error::secret_sharing(format!(
+                "wrong shares number: expected {}, got {}",
+                self.threshold + 1,
+                shares.len()
+            )));
+        }
         let (xs, ys): (Vec<usize>, Vec<BigInt>) = shares.iter().cloned().unzip();
-        let result = self.lagrange_interpolation(Zero::zero(), xs, ys);
+        let result = self.lagrange_interpolation(Zero::zero(), xs, ys)?;
         if result < Zero::zero() {
-            result + &self.prime
+            Ok(result + &self.prime)
         } else {
-            result
+            Ok(result)
         }
     }
 
     // indices i and item iterate 0..len, same as xs_bigint.len() and ys.len()
     #[allow(clippy::indexing_slicing)]
-    fn lagrange_interpolation(&self, x: BigInt, xs: Vec<usize>, ys: Vec<BigInt>) -> BigInt {
+    fn lagrange_interpolation(
+        &self,
+        x: BigInt,
+        xs: Vec<usize>,
+        ys: Vec<BigInt>,
+    ) -> Result<BigInt, Error> {
         let len = xs.len();
         let xs_bigint: Vec<BigInt> = xs.iter().map(|x| BigInt::from(*x as i64)).collect();
 
-        (0..len)
+        let terms: Result<Vec<BigInt>, Error> = (0..len)
             .into_par_iter()
             .map(|item| {
                 let numerator = (0..len).fold(One::one(), |product: BigInt, i| {
@@ -214,20 +227,30 @@ impl ShamirSecretSharing {
                     }
                 });
                 // Calculate this Lagrange term
-                (numerator * self.mod_reverse(denominator) * &ys[item]) % &self.prime
+                Ok((numerator * self.mod_reverse(denominator)? * &ys[item]) % &self.prime)
             })
-            .reduce(Zero::zero, |sum, term| (sum + term) % &self.prime)
+            .collect();
+
+        Ok(terms?
+            .into_iter()
+            .fold(Zero::zero(), |sum: BigInt, term| {
+                (sum + term) % &self.prime
+            }))
     }
 
-    fn mod_reverse(&self, num: BigInt) -> BigInt {
+    fn mod_reverse(&self, num: BigInt) -> Result<BigInt, Error> {
         let num1 = if num < Zero::zero() {
             num + &self.prime
         } else {
             num
         };
-        let (_gcd, _, inv) = self.extend_euclid_algo(num1);
-        // println!("inv:{}", inv);
-        inv
+        let (gcd, _, inv) = self.extend_euclid_algo(num1);
+        if !gcd.is_one() {
+            return Err(Error::secret_sharing(
+                "non-invertible Lagrange denominator (duplicate or invalid share indices)",
+            ));
+        }
+        Ok(inv)
     }
 
     /**
@@ -304,10 +327,34 @@ mod tests {
                 (1, BigInt::from(1494)),
                 (2, BigInt::from(329)),
                 (3, BigInt::from(965))
-            ]),
+            ])
+            .unwrap(),
             BigInt::from(1234)
         );
     }
+    #[test]
+    fn test_recover_rejects_bad_shares() {
+        let sss = ShamirSecretSharing {
+            threshold: 2,
+            share_amount: 6,
+            prime: BigInt::from(1613),
+        };
+        // Wrong share count
+        assert!(
+            sss.recover(&[(1, BigInt::from(1494)), (2, BigInt::from(329))])
+                .is_err()
+        );
+        // Duplicate share indices -> non-invertible Lagrange denominator
+        assert!(
+            sss.recover(&[
+                (1, BigInt::from(1494)),
+                (1, BigInt::from(1494)),
+                (3, BigInt::from(965))
+            ])
+            .is_err()
+        );
+    }
+
     #[test]
     fn test_large_prime() {
         let sss = ShamirSecretSharing {
@@ -322,6 +369,9 @@ mod tests {
         };
         let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
         let shares = sss.split(secret.clone(), &mut rand::rng());
-        assert_eq!(secret, sss.recover(&shares[0..sss.threshold + 1]));
+        assert_eq!(
+            secret,
+            sss.recover(&shares[0..sss.threshold + 1]).unwrap()
+        );
     }
 }

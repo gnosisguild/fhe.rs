@@ -34,7 +34,15 @@ impl Error {
     #[must_use]
     pub fn invalid_party_id(party_id: usize, max_party_id: usize) -> Self {
         Error::UnspecifiedInput(format!(
-            "Invalid party ID: {party_id}, must be between 0 and {max_party_id}"
+            "Invalid party ID: {party_id}, must be between 1 and {max_party_id}"
+        ))
+    }
+
+    /// Create a duplicate party ID error.
+    #[must_use]
+    pub fn duplicate_party_id(party_id: usize) -> Self {
+        Error::UnspecifiedInput(format!(
+            "Duplicate party ID {party_id} in reconstructing parties"
         ))
     }
 
@@ -133,7 +141,13 @@ mod tests {
         let error = Error::invalid_party_id(5, 3);
         assert_eq!(
             error.to_string(),
-            "Invalid party ID: 5, must be between 0 and 3"
+            "Invalid party ID: 5, must be between 1 and 3"
+        );
+
+        let error = Error::duplicate_party_id(2);
+        assert_eq!(
+            error.to_string(),
+            "Duplicate party ID 2 in reconstructing parties"
         );
 
         let error = Error::secret_sharing("Test secret sharing error");
