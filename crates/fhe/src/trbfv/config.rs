@@ -93,9 +93,10 @@ mod tests {
             );
             // T is the maximal tolerance for this n...
             assert_eq!(t, (n - 1) / 2, "n={n}");
-            // ...and the honest majority can reconstruct on its own.
+            // ...and the honest majority can reconstruct on its own
+            // (h >= t + 1, i.e. h > t).
             assert_eq!(h, n - t, "n={n}");
-            assert!(h >= t + 1, "n={n}");
+            assert!(h > t, "n={n}");
         }
     }
 
