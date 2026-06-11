@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.0"
+version = "0.2.1"
 
 [lints]
 workspace = true
@@ -19,9 +19,9 @@ tfhe-ntt = ["fhe-math/tfhe-ntt"]
 
 [dependencies]
 num-bigint = { workspace = true, features = ["rand"] }
-fhe-math = { version = "=0.2.0", path = "../fhe-math" }
-fhe-traits = { version = "=0.1.1", path = "../fhe-traits" }
-fhe-util = { version = "=0.1.1", path = "../fhe-util" }
+fhe-math = { version = "=0.2.1", path = "../fhe-math" }
+fhe-traits = { version = "=0.2.1", path = "../fhe-traits" }
+fhe-util = { version = "=0.2.1", path = "../fhe-util" }
 
 bincode.workspace = true
 serde.workspace = true
