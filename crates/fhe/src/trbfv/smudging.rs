@@ -1,3 +1,4 @@
+use crate::Error;
 /// Threshold BFV Smudging Noise Generation
 ///
 /// This module provides variance calculation and smudging noise generation for threshold BFV.
@@ -10,8 +11,6 @@
 /// - Statistical Security parameter λ = 80 with configurable circuit depth
 /// - No precision loss in calculations while maintaining performance
 use crate::bfv::BfvParameters;
-//use crate::trbfv::normal::sample_bigint_normal_vec;
-use crate::Error;
 
 use num_bigint::{BigInt, BigUint};
 use rand::{CryptoRng, RngCore};
@@ -177,26 +176,17 @@ impl SmudgingNoiseGenerator {
 
     /// Generate smudging error coefficients using the calculated bound.
     ///
+    /// The coefficients are sampled uniformly from `[-B_sm, B_sm]`, as
+    /// specified for the smudging noise in the trBFV paper.
+    ///
     /// # Returns
-    /// A vector of BigInt coefficients sampled from the normal distribution
+    /// A vector of uniformly sampled BigInt coefficients
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
     ) -> Result<Vec<BigInt>, Error> {
         let degree = self.params.degree();
-
-        // To sample the smudging noise from a normal distribution uncomment the following lines
-
-        // Convert B_sm (stored in `smudging_variance`) to BigInt for sampling
-        // let bound = BigInt::from(self.smudging_bound.clone());
-
-        // Sample degree many noise coefficients from D_{Z,σ} ∩ [-bound, bound]
-        // let samples = sample_bigint_normal_vec(&bound, degree);
-
-        // Sample degree many noise coefficients uniformly from [-bound, bound]
-        let samples = self.sample_uniform_coefficients(degree, rng);
-
-        Ok(samples)
+        Ok(self.sample_uniform_coefficients(degree, rng))
     }
 
     /// Sample uniform coefficients from `[-bound, bound]`.

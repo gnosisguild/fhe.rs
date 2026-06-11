@@ -124,12 +124,14 @@ impl ShareManager {
             .min()
             .ok_or_else(|| Error::DefaultError("moduli vector is empty".to_string()))?;
 
-        assert!(
-            self.n < (*min_modulus).try_into().unwrap(),
-            "n {} is not smaller than the smallest modulus {}, the MPC protocol implemented assumes that n is smaller than the smallest moduli defining the ciphertext space",
-            self.n,
-            min_modulus
-        );
+        if self.n >= usize::try_from(*min_modulus).unwrap_or(usize::MAX) {
+            return Err(Error::DefaultError(format!(
+                "n {} is not smaller than the smallest modulus {min_modulus}; the MPC \
+                 protocol assumes n is smaller than the smallest modulus defining the \
+                 ciphertext space",
+                self.n
+            )));
+        }
 
         let coefficients = poly.coefficients();
         let coeff_rows: Vec<_> = coefficients.outer_iter().collect();

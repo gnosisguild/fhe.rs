@@ -17,7 +17,6 @@ The module follows a modular design with clear separation of concerns:
 - `threshold.rs` - Main TRBFV coordinator struct
 - `config.rs` - Parameter validation
 - `errors.rs` - Threshold-specific error types
-- `normal.rs` - Truncated Gaussian sampling for large variance noise
 
 ## Usage
 
@@ -62,3 +61,9 @@ The security of the threshold scheme relies on:
 - Secure distribution of shares among parties
 - Protection of individual secret key shares
 - Appropriate smudging noise generation
+
+Note that the Shamir secret sharing operations use arbitrary-precision integer
+arithmetic that is not constant-time. These computations are local to each
+party (shares and secrets never traverse a timing-observable boundary during
+them), so this is a low-severity caveat, but co-located attacker models should
+take it into account.
