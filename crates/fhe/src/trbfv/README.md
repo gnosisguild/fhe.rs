@@ -5,7 +5,7 @@ The current implemenation is a passively secure version of the protocol (and so 
 
 
 
-This module enables distributed decryption between `n` parties without necessarily involving all of them. Any number of parties between `threshold` and `n` is able to decrypt a ciphertext. The maximum thershold supported is `(n-1)/2`. 
+This module enables distributed decryption between `n` parties without necessarily involving all of them: any `threshold + 1` of the `n` parties can decrypt a ciphertext, while any coalition of at most `threshold` parties learns nothing. The threshold must be exactly `(n-1)/2` (integer division), the maximal corruption tolerance under an honest majority — see `config.rs` for the derivation.
 
 ## Architecture
 
@@ -19,20 +19,13 @@ The module follows a modular design with clear separation of concerns:
 - `errors.rs` - Threshold-specific error types
 - `normal.rs` - Truncated Gaussian sampling for large variance noise
 
-The module provides complete serialization support for distributed deployments:
-
-- `serialize_secret_share()` / `deserialize_secret_share()` - For secret share matrices
-- `serialize_smudging_data()` / `deserialize_smudging_data()` - For smudging polynomials  
-- `serialize_decryption_share()` / `deserialize_decryption_share()` - For decryption shares
-- `TRBFV::to_bytes()` / `TRBFV::from_bytes()` - For TRBFV configuration
-
 ## Usage
 
-For a complete working example demonstrating multi-party setup, share distribution, and threshold decryption, see [`examples/trbfv_add.rs`](../../examples/trbfv_add.rs).
+For a complete working example demonstrating multi-party setup, share distribution, and threshold decryption, see [`examples/trbfv_add.rs`](../../examples/trbfv_add.rs). A variant that transports the Shamir shares encrypted under per-party BFV keys is in [`examples/trbfv_add_bfv_share.rs`](../../examples/trbfv_add_bfv_share.rs).
 
-The example can be run with configurable parameters:
+The example can be run with configurable parameters (threshold must equal `(num_parties - 1) / 2`):
 ```bash
-cargo run --example trbfv_add --num_parties=10 --threshold=4
+cargo run --release --example trbfv_add -- --num_parties=10 --threshold=4
 ```
 
 Basic usage pattern:
@@ -41,19 +34,23 @@ Basic usage pattern:
 use fhe::trbfv::TRBFV;
 
 // Setup threshold scheme
-let trbfv = TRBFV::new(n_parties, threshold, params)?;
+let trbfv = TRBFV::new(n_parties, threshold, params.clone())?;
 
-// Generate and distribute secret shares
-let sk_shares = trbfv.generate_secret_shares_from_poly(sk_poly)?;
+// Each party: deal secret shares of its key and smudging noise contributions
+let sk_shares = trbfv.generate_secret_shares_from_poly(sk_poly, &mut rng)?;
+let es_coeffs = trbfv.generate_smudging_error(num_ciphertexts, lambda, &mut rng)?;
 
-// Aggregate shares for decryption  
-let sk_poly_sum = trbfv.aggregate_collected_shares(&collected_shares)?;
+// Each party: aggregate the share matrices received from the other parties
+// into its share of the joint secret key (and likewise for the noise)
+let sk_poly_sum = trbfv.aggregate_collected_shares(&collected_sk_shares)?;
+let es_poly_sum = trbfv.aggregate_collected_shares(&collected_es_shares)?;
 
-// Generate decryption shares
-let decryption_share = trbfv.decryption_share(ciphertext, sk_poly_sum, es_poly)?;
+// Each decrypting party: compute a decryption share from its aggregated shares
+let d_share = trbfv.decryption_share(ciphertext.clone(), sk_poly_sum.into_ntt(), es_poly_sum)?;
 
-// Threshold decryption
-let plaintext = trbfv.decrypt(decryption_shares, ciphertext)?;
+// Combine exactly threshold + 1 decryption shares; reconstructing_parties
+// holds the 1-based indices of the parties the shares came from
+let plaintext = trbfv.decrypt(d_share_polys, reconstructing_parties, ciphertext)?;
 ```
 
 ## Security Considerations

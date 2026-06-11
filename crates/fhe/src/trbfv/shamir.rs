@@ -100,7 +100,7 @@ impl ShamirSecretSharing {
     ///
     /// # Panics
     ///
-    /// Panics if `threshold` is greater than or equal to `share_amount`.
+    /// Panics if `threshold` is greater than `(share_amount - 1) / 2`.
     pub fn split<R: RngCore + CryptoRng>(
         &self,
         secret: BigInt,

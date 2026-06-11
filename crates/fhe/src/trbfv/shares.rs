@@ -188,23 +188,50 @@ impl ShareManager {
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
     ///
     /// This function takes shares collected from other parties and aggregates them
-    /// to reconstruct the sum of secret key polynomials (SK_i) needed for decryption.
+    /// to compute this party's share of the joint secret (the sum of the dealt
+    /// secrets) needed for decryption.
     ///
     /// # Arguments
-    /// - `sk_sss_collected`: Vector of secret shares collected from other parties
-    ///   Each Array2<u64> contains shares for all moduli and polynomial coefficients
+    /// - `sk_sss_collected`: One share matrix per contributing party (at most `n`;
+    ///   fewer is allowed, e.g. when some parties aborted during dealing).
+    ///   Each Array2<u64> has one row per modulus and one column per coefficient.
     ///
     /// # Returns
     /// A polynomial representing the aggregated secret key material
+    ///
+    /// # Errors
+    /// Returns an error if no shares are provided, if more than `n` matrices are
+    /// provided, or if any matrix does not have shape `[moduli, degree]`.
     pub fn aggregate_collected_shares(
         &self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
     ) -> Result<Poly<PowerBasis>, Error> {
+        if sk_sss_collected.is_empty() {
+            return Err(Error::insufficient_shares(0, 1));
+        }
+        if sk_sss_collected.len() > self.n {
+            return Err(Error::DefaultError(format!(
+                "collected {} share matrices but there are only {} parties",
+                sk_sss_collected.len(),
+                self.n
+            )));
+        }
+        let expected_shape = (self.params.moduli().len(), self.params.degree());
+        for (party_idx, item) in sk_sss_collected.iter().enumerate() {
+            if item.dim() != expected_shape {
+                return Err(Error::malformed_shares(
+                    party_idx,
+                    format!(
+                        "share matrix has shape {:?}, expected {expected_shape:?}",
+                        item.dim()
+                    ),
+                ));
+            }
+        }
         let ctx = self.params.context_at_level(0)?;
 
         let sum_poly = sk_sss_collected
             .par_iter()
-            .take(self.n)
             .map(|item| {
                 let mut poly_j = Poly::<PowerBasis>::zero(ctx);
                 poly_j.set_coefficients(item.clone());
@@ -218,12 +245,14 @@ impl ShareManager {
     /// Compute decryption share from ciphertext and secret/smudging polynomials.
     ///
     /// This function computes a party's contribution to the threshold decryption process.
-    /// Each party uses their secret key share and smudging noise to compute a decryption share.
+    /// Each party uses their aggregated key and noise shares to compute a decryption share.
     ///
     /// # Arguments
     /// - `ciphertext`: The ciphertext to decrypt (contains c0, c1 polynomials)
-    /// - `sk_i`: This party's secret key polynomial
-    /// - `es_i`: This party's smudging error polynomial
+    /// - `sk_i`: This party's aggregated share of the joint secret key (output of
+    ///   [`ShareManager::aggregate_collected_shares`]), not a party's own secret key
+    /// - `es_i`: This party's aggregated share of the joint smudging noise,
+    ///   aggregated the same way from the dealt noise shares
     ///
     /// # Returns
     /// A decryption share polynomial that contributes to the final decryption
@@ -242,13 +271,15 @@ impl ShareManager {
         Ok(d_share_poly)
     }
 
-    /// Decrypt ciphertext from collected decryption shares (threshold number required).
+    /// Decrypt ciphertext from collected decryption shares.
     ///
     /// This function performs the final step of threshold decryption by combining
-    /// decryption shares from at least `threshold` parties to reconstruct the plaintext.
+    /// decryption shares from exactly `threshold + 1` parties to reconstruct the plaintext.
     ///
     /// # Arguments
-    /// - `d_share_polys`: Vector of decryption shares from different parties
+    /// - `d_share_polys`: Exactly `threshold + 1` decryption shares
+    /// - `reconstructing_parties`: The 1-based party indices the shares came from, in
+    ///   the same order as `d_share_polys`; indices must be distinct and in `1..=n`
     /// - `ciphertext`: The original ciphertext being decrypted
     ///
     /// # Returns
@@ -865,6 +896,28 @@ mod tests {
             decoded_bad, plaintext_data,
             "Decryption should not match with wrong indices"
         );
+    }
+
+    #[test]
+    fn test_aggregate_collected_shares_rejects_bad_input() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone());
+        let shape = (params.moduli().len(), params.degree());
+
+        // Empty input
+        assert!(manager.aggregate_collected_shares(&[]).is_err());
+
+        // More matrices than parties
+        let matrices: Vec<Array2<u64>> = (0..6).map(|_| Array2::zeros(shape)).collect();
+        assert!(manager.aggregate_collected_shares(&matrices).is_err());
+
+        // Wrong shape (rows and columns swapped)
+        let bad = vec![Array2::zeros((params.degree(), params.moduli().len()))];
+        assert!(manager.aggregate_collected_shares(&bad).is_err());
+
+        // Valid: between 1 and n well-formed matrices
+        let ok: Vec<Array2<u64>> = (0..3).map(|_| Array2::zeros(shape)).collect();
+        assert!(manager.aggregate_collected_shares(&ok).is_ok());
     }
 
     #[test]
