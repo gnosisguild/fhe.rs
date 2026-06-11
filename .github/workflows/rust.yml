@@ -21,9 +21,6 @@ jobs:
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-
       - name: Check code format
         run: cargo fmt --all -- --check
 
