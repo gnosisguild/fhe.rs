@@ -43,7 +43,7 @@ use zeroize::Zeroizing;
 pub struct TRBFV {
     /// Number of parties in the threshold scheme
     pub n: usize,
-    /// Threshold for reconstruction (must be <= (n-1)/2)
+    /// Threshold for reconstruction (must be exactly (n - 1) / 2; reconstruction needs threshold + 1 shares)
     pub threshold: usize,
     /// BFV parameters (contains degree, plaintext_modulus, moduli, etc.)
     pub params: Arc<BfvParameters>,
@@ -53,8 +53,8 @@ impl TRBFV {
     /// Creates a new threshold BFV configuration.
     ///
     /// # Arguments
-    /// * `n` - Number of parties (must be > 0)
-    /// * `threshold` - Threshold for reconstruction (must be <= (n-1)/2)
+    /// * `n` - Number of parties (must be >= 3)
+    /// * `threshold` - Threshold for reconstruction (must be exactly (n - 1) / 2)
     /// * `params` - BFV parameters
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
         // Validate all parameters
@@ -140,8 +140,13 @@ impl TRBFV {
     ///
     /// # Arguments
     /// * `ciphertext` - The ciphertext to decrypt
-    /// * `sk_i` - This party's secret key polynomial
-    /// * `es_i` - This party's smudging error polynomial
+    /// * `sk_i` - This party's *aggregated share of the joint secret key*, i.e. the
+    ///   output of [`TRBFV::aggregate_collected_shares`] over the key share matrices
+    ///   received from all parties — not a party's own secret key
+    /// * `es_i` - This party's *aggregated share of the joint smudging noise*,
+    ///   aggregated the same way from the dealt noise shares. Do not pass raw
+    ///   [`TRBFV::generate_smudging_error`] output here: unshared noise is blown up
+    ///   by the Lagrange coefficients during reconstruction and breaks correctness
     ///
     /// # Returns
     /// Decryption share polynomial
@@ -155,13 +160,15 @@ impl TRBFV {
         share_manager.decryption_share(ciphertext, sk_i, es_i)
     }
 
-    /// Decrypt ciphertext from collected decryption shares (threshold number required).
+    /// Decrypt ciphertext from collected decryption shares.
     ///
     /// This method performs the final step of threshold decryption by combining
-    /// decryption shares from at least `threshold` parties.
+    /// decryption shares from exactly `threshold + 1` parties.
     ///
     /// # Arguments
-    /// * `d_share_polys` - Decryption shares from different parties
+    /// * `d_share_polys` - Exactly `threshold + 1` decryption shares
+    /// * `reconstructing_parties` - The 1-based party indices the shares came from,
+    ///   in the same order as `d_share_polys`; indices must be distinct and in `1..=n`
     /// * `ciphertext` - The original ciphertext being decrypted
     ///
     /// # Returns

@@ -585,17 +585,24 @@ mod tests {
         let params = BfvParameters::default_arc(1, 16);
         let a = params.plaintext();
         let q = fhe_math::zq::Modulus::new(a).unwrap();
-        let a_vec = q.random_vec(params.degree(), &mut rng);
+        let mut a_vec = q.random_vec(params.degree(), &mut rng);
+        // Always exercise the centering boundary values, which previously made
+        // this test flaky when hit by chance.
+        a_vec[0] = a / 2;
+        a_vec[1] = a.div_ceil(2);
 
         let plaintext = Plaintext::try_encode(&a_vec, Encoding::simd(), &params);
         assert!(plaintext.is_ok());
         let b = Vec::<u64>::try_decode(&plaintext?, Encoding::simd())?;
         assert_eq!(b, a_vec);
 
-        // center_vec replacement logic for test
+        // center_vec replacement logic for test: the centered range is
+        // [-(t-1)/2, t/2] for even t and [-(t-1)/2, (t-1)/2] for odd t,
+        // so only values >= ceil(t/2) wrap to negative (for odd t, t/2
+        // itself stays positive, matching the decoder).
         let mut a_signed = vec![];
         for x in &a_vec {
-            if *x >= a / 2 {
+            if *x >= a.div_ceil(2) {
                 a_signed.push((*x as i64) - (a as i64));
             } else {
                 a_signed.push(*x as i64);

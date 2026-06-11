@@ -100,7 +100,7 @@ impl ShamirSecretSharing {
     ///
     /// # Panics
     ///
-    /// Panics if `threshold` is greater than or equal to `share_amount`.
+    /// Panics if `threshold` is greater than `(share_amount - 1) / 2`.
     pub fn split<R: RngCore + CryptoRng>(
         &self,
         secret: BigInt,
@@ -134,7 +134,8 @@ impl ShamirSecretSharing {
     ) -> Vec<BigInt> {
         let mut coefficients: Vec<BigInt> = vec![secret];
         let low = BigInt::from(0);
-        let high = &self.prime - BigInt::from(1);
+        // gen_bigint_range samples from [low, high), so this covers all of Z_p.
+        let high = self.prime.clone();
 
         // Generate seeds deterministically from the input RNG
         // This is done so clients can test using deterministic rngs
