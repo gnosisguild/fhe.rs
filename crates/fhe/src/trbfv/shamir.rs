@@ -266,30 +266,21 @@ impl ShamirSecretSharing {
     fn extend_euclid_algo(&self, num: BigInt) -> (BigInt, BigInt, BigInt) {
         let (mut r, mut next_r, mut s, mut next_s, mut t, mut next_t) = (
             self.prime.clone(),
-            num.clone(),
+            num,
             BigInt::from(1),
             BigInt::from(0),
             BigInt::from(0),
             BigInt::from(1),
         );
-        let mut quotient;
-        let mut tmp;
         while next_r > Zero::zero() {
-            quotient = r.clone() / next_r.clone();
-            tmp = next_r.clone();
-            next_r = r.clone() - next_r.clone() * quotient.clone();
-            r = tmp.clone();
-            tmp = next_s.clone();
-            next_s = s - next_s.clone() * quotient.clone();
-            s = tmp;
-            tmp = next_t.clone();
-            next_t = t - next_t * quotient;
-            t = tmp;
+            let quotient = &r / &next_r;
+            r -= &quotient * &next_r;
+            std::mem::swap(&mut r, &mut next_r);
+            s -= &quotient * &next_s;
+            std::mem::swap(&mut s, &mut next_s);
+            t -= &quotient * &next_t;
+            std::mem::swap(&mut t, &mut next_t);
         }
-        // println!(
-        // "{} * {} + {} * {} = {} mod {}",
-        // num, t, &self.prime, s, r, &self.prime
-        // );
         (r, s, t)
     }
 }

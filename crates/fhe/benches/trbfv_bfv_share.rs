@@ -97,7 +97,8 @@ fn bench_data_sizes(c: &mut Criterion) {
         let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut make_rng()).unwrap();
 
         // Generate Shamir shares of the secret key
-        let mut share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone());
+        let mut share_manager =
+            ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
             .unwrap();
@@ -402,7 +403,8 @@ fn bench_timing_operations(c: &mut Criterion) {
     let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
 
     group.bench_function("generate_shamir_shares", |b| {
-        let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone());
+        let share_manager =
+            ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
             .unwrap();
