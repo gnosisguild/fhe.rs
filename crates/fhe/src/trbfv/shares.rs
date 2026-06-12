@@ -68,9 +68,7 @@ impl ShareManager {
             .min()
             .ok_or_else(|| Error::DefaultError("parameters have no moduli".to_string()))?;
         if n >= usize::try_from(*min_modulus).unwrap_or(usize::MAX) {
-            return Err(Error::DefaultError(format!(
-                "n {n} is not smaller than the smallest modulus {min_modulus}"
-            )));
+            return Err(Error::party_count_exceeds_modulus(n, *min_modulus));
         }
 
         Ok(Self {
@@ -134,12 +132,7 @@ impl ShareManager {
             .ok_or_else(|| Error::DefaultError("moduli vector is empty".to_string()))?;
 
         if self.n >= usize::try_from(*min_modulus).unwrap_or(usize::MAX) {
-            return Err(Error::DefaultError(format!(
-                "n {} is not smaller than the smallest modulus {min_modulus}; the MPC \
-                 protocol assumes n is smaller than the smallest modulus defining the \
-                 ciphertext space",
-                self.n
-            )));
+            return Err(Error::party_count_exceeds_modulus(self.n, *min_modulus));
         }
 
         let coefficients = poly.coefficients();
@@ -172,7 +165,7 @@ impl ShareManager {
                     // Split the coeff into n shares (u64 -> BigInt is infallible)
                     let secret = BigInt::from(*c);
 
-                    let c_shares = shamir.split(secret, &mut rng);
+                    let c_shares = shamir.split(secret, &mut rng)?;
 
                     // For each share convert to u64; shares are reduced modulo
                     // the (u64) prime, so this only fails on malformed input
@@ -224,11 +217,7 @@ impl ShareManager {
             return Err(Error::insufficient_shares(0, 1));
         }
         if sk_sss_collected.len() > self.n {
-            return Err(Error::DefaultError(format!(
-                "collected {} share matrices but there are only {} parties",
-                sk_sss_collected.len(),
-                self.n
-            )));
+            return Err(Error::insufficient_shares(sk_sss_collected.len(), self.n));
         }
         let expected_shape = (self.params.moduli().len(), self.params.degree());
         for (party_idx, item) in sk_sss_collected.iter().enumerate() {
@@ -293,11 +282,30 @@ impl ShareManager {
         sk_i: Poly<Ntt>,
         es_i: Poly<PowerBasis>,
     ) -> Result<Poly<PowerBasis>, Error> {
+        if ciphertext.par != self.params {
+            return Err(Error::invalid_ciphertext(
+                "ciphertext parameters do not match this ShareManager's parameters",
+            ));
+        }
+        // A degree-2 (unrelinearized) ciphertext has 3 components; silently
+        // ignoring c[2] would produce a wrong plaintext.
+        if ciphertext.c.len() != 2 {
+            return Err(Error::invalid_ciphertext(format!(
+                "expected 2 ciphertext components, got {}; relinearize before threshold \
+                 decryption",
+                ciphertext.c.len()
+            )));
+        }
         let c0 = ciphertext.c[0].clone().into_power_basis();
         let c1 = ciphertext.c[1].clone();
+        if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
+            return Err(Error::context_mismatch(
+                &"share polynomial context",
+                &"ciphertext context",
+            ));
+        }
         let c1sk = (&c1 * &sk_i).into_power_basis();
         let d_share_poly = c0 + c1sk + es_i;
-        //let d_share_poly = &c0 + &c1sk;
         Ok(d_share_poly)
     }
 
@@ -322,6 +330,11 @@ impl ShareManager {
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
+        if ciphertext.par != self.params {
+            return Err(Error::invalid_ciphertext(
+                "ciphertext parameters do not match this ShareManager's parameters",
+            ));
+        }
         // Reconstruction consumes exactly threshold + 1 shares; requiring
         // exactness (rather than truncating extras) avoids silently depending
         // on the order of the provided shares.
@@ -333,8 +346,9 @@ impl ShareManager {
         }
         // The number of reconstructing parties must match the provided shares
         if reconstructing_parties.len() != d_share_polys.len() {
-            return Err(Error::DefaultError(
-                "reconstructing_parties length must match d_share_polys length".to_string(),
+            return Err(Error::insufficient_shares(
+                reconstructing_parties.len(),
+                d_share_polys.len(),
             ));
         }
         // Shamir x-coordinates are 1-based, bounded by n, and must be distinct:

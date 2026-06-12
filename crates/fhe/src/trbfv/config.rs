@@ -42,11 +42,7 @@ pub fn validate_threshold_config(n: usize, threshold: usize) -> Result<(), Error
     }
     let max_corruption = (n - 1) / 2;
     if threshold != max_corruption {
-        return Err(Error::UnspecifiedInput(format!(
-            "Threshold must be exactly (n - 1) / 2 = {max_corruption} for n = {n} parties \
-             (got {threshold}): smaller thresholds let a maximal corrupted minority \
-             reconstruct on its own, larger ones break honest-party reconstruction"
-        )));
+        return Err(Error::invalid_threshold(threshold, n));
     }
     Ok(())
 }

@@ -9,7 +9,7 @@ pub mod lbfv;
 pub mod mbfv;
 pub mod proto;
 pub mod trbfv;
-pub use errors::{Error, ParametersError, Result, SerializationError};
+pub use errors::{Error, ParametersError, Result, SerializationError, ThresholdError};
 
 // Test the source code included in the README.
 #[macro_use]

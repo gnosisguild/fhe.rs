@@ -38,7 +38,7 @@ use rayon::prelude::*;
 ///
 /// let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
 ///
-/// let shares = sss.split(secret.clone());
+/// let shares = sss.split(secret.clone(), &mut rand::rng()).unwrap();
 ///
 /// println!("shares: {:?}", shares);
 /// assert_eq!(secret, sss.recover(&shares[0..sss.threshold +1]).unwrap());
@@ -98,17 +98,19 @@ impl ShamirSecretSharing {
     /// A vector of tuples containing (share_index, share_value) pairs.
     /// The share_index starts from 1 and goes up to `share_amount`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `threshold` is greater than `(share_amount - 1) / 2`.
+    /// Returns an error if `threshold` is greater than `(share_amount - 1) / 2`.
     pub fn split<R: RngCore + CryptoRng>(
         &self,
         secret: BigInt,
         rng: &mut R,
-    ) -> Vec<(usize, BigInt)> {
-        assert!(self.threshold <= (self.share_amount - 1) / 2);
+    ) -> Result<Vec<(usize, BigInt)>, Error> {
+        if self.threshold > (self.share_amount.max(1) - 1) / 2 {
+            return Err(Error::invalid_threshold(self.threshold, self.share_amount));
+        }
         let polynomial = self.sample_polynomial(secret, rng);
-        self.evaluate_polynomial(polynomial)
+        Ok(self.evaluate_polynomial(polynomial))
     }
 
     /// Samples a Shamir sharing polynomial over `Z_q` with a fixed constant term.
@@ -184,11 +186,7 @@ impl ShamirSecretSharing {
     /// (e.g., duplicate share indices).
     pub fn recover(&self, shares: &[(usize, BigInt)]) -> Result<BigInt, Error> {
         if shares.len() != self.threshold + 1 {
-            return Err(Error::secret_sharing(format!(
-                "wrong shares number: expected {}, got {}",
-                self.threshold + 1,
-                shares.len()
-            )));
+            return Err(Error::insufficient_shares(shares.len(), self.threshold + 1));
         }
         let (xs, ys): (Vec<usize>, Vec<BigInt>) = shares.iter().cloned().unzip();
         let result = self.lagrange_interpolation(Zero::zero(), xs, ys)?;
@@ -245,9 +243,7 @@ impl ShamirSecretSharing {
         };
         let (gcd, _, inv) = self.extend_euclid_algo(num1);
         if !gcd.is_one() {
-            return Err(Error::secret_sharing(
-                "non-invertible Lagrange denominator (duplicate or invalid share indices)",
-            ));
+            return Err(Error::non_invertible_shares());
         }
         Ok(inv)
     }
@@ -358,7 +354,7 @@ mod tests {
             .unwrap(),
         };
         let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
-        let shares = sss.split(secret.clone(), &mut rand::rng());
+        let shares = sss.split(secret.clone(), &mut rand::rng()).unwrap();
         assert_eq!(secret, sss.recover(&shares[0..sss.threshold + 1]).unwrap());
     }
 }
