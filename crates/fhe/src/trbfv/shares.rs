@@ -13,8 +13,8 @@ use fhe_math::{
 };
 use itertools::Itertools;
 use ndarray::Array2;
+use num_bigint::BigInt;
 use num_bigint::BigUint;
-use num_bigint::{BigInt, ToBigInt};
 use num_traits::ToPrimitive;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -51,24 +51,31 @@ impl ShareManager {
     /// - `n`: Total number of parties
     /// - `threshold`: Minimum number of shares required for reconstruction
     /// - `params`: BFV parameters
-    #[must_use]
-    pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error if the parameters have no moduli, or if `n` is not
+    /// smaller than the smallest modulus (the MPC protocol assumes the Shamir
+    /// evaluation points `1..=n` are distinct units modulo every modulus).
+    pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
         //Note that in case we consider in the future using qi's that are not prime numbers (so
         //they would be only satisfying the condition of being coprime to each other which is
         //sufficient for Greco etc), we can use the utility get_smallest_prime_factor implemented
         //in crates/fhe-util/src/lib.rs
 
-        let min_modulus = params.moduli().iter().min().unwrap();
-        assert!(
-            n < *min_modulus as usize,
-            "n must be smaller than the smallest moduli"
-        );
+        let min_modulus = params
+            .moduli()
+            .iter()
+            .min()
+            .ok_or_else(|| Error::DefaultError("parameters have no moduli".to_string()))?;
+        if n >= usize::try_from(*min_modulus).unwrap_or(usize::MAX) {
+            return Err(Error::party_count_exceeds_modulus(n, *min_modulus));
+        }
 
-        Self {
+        Ok(Self {
             n,
             threshold,
             params,
-        }
+        })
     }
 
     /// Utility to create a Zeroizing<Poly> from coefficients.
@@ -125,12 +132,7 @@ impl ShareManager {
             .ok_or_else(|| Error::DefaultError("moduli vector is empty".to_string()))?;
 
         if self.n >= usize::try_from(*min_modulus).unwrap_or(usize::MAX) {
-            return Err(Error::DefaultError(format!(
-                "n {} is not smaller than the smallest modulus {min_modulus}; the MPC \
-                 protocol assumes n is smaller than the smallest modulus defining the \
-                 ciphertext space",
-                self.n
-            )));
+            return Err(Error::party_count_exceeds_modulus(self.n, *min_modulus));
         }
 
         let coefficients = poly.coefficients();
@@ -160,15 +162,18 @@ impl ShareManager {
 
                 // For each coeff in the polynomial p under the current modulus m
                 for c in p.iter() {
-                    // Split the coeff into n shares
-                    let secret = c.to_bigint().unwrap();
+                    // Split the coeff into n shares (u64 -> BigInt is infallible)
+                    let secret = BigInt::from(*c);
 
-                    let c_shares = shamir.split(secret.clone(), &mut rng);
+                    let c_shares = shamir.split(secret, &mut rng)?;
 
-                    // For each share convert to u64
+                    // For each share convert to u64; shares are reduced modulo
+                    // the (u64) prime, so this only fails on malformed input
                     let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
                     for (_, c_share) in c_shares.iter() {
-                        c_vec.push(c_share.to_u64().unwrap());
+                        c_vec.push(c_share.to_u64().ok_or_else(|| {
+                            Error::DefaultError("Shamir share does not fit in u64".to_string())
+                        })?);
                     }
                     m_data.extend_from_slice(&c_vec);
                 }
@@ -212,11 +217,7 @@ impl ShareManager {
             return Err(Error::insufficient_shares(0, 1));
         }
         if sk_sss_collected.len() > self.n {
-            return Err(Error::DefaultError(format!(
-                "collected {} share matrices but there are only {} parties",
-                sk_sss_collected.len(),
-                self.n
-            )));
+            return Err(Error::insufficient_shares(sk_sss_collected.len(), self.n));
         }
         let expected_shape = (self.params.moduli().len(), self.params.degree());
         for (party_idx, item) in sk_sss_collected.iter().enumerate() {
@@ -232,15 +233,31 @@ impl ShareManager {
         }
         let ctx = self.params.context_at_level(0)?;
 
-        let sum_poly = sk_sss_collected
-            .par_iter()
-            .map(|item| {
-                let mut poly_j = Poly::<PowerBasis>::zero(ctx);
-                poly_j.set_coefficients(item.clone());
-                poly_j
-            })
-            .reduce(|| Poly::<PowerBasis>::zero(ctx), |acc, poly| &acc + &poly);
+        // Sum the share matrices row-wise modulo each RNS modulus, copying
+        // only once into the result polynomial (instead of cloning each
+        // contribution into its own Poly and adding those).
+        let mut sum = Array2::<u64>::zeros(expected_shape);
+        for (row, mut acc_row) in sum.outer_iter_mut().enumerate() {
+            let &modulus = self
+                .params
+                .moduli()
+                .get(row)
+                .ok_or_else(|| Error::DefaultError("modulus index out of range".to_string()))?;
+            let q = Modulus::new(modulus).map_err(Error::MathError)?;
+            let acc = acc_row
+                .as_slice_mut()
+                .ok_or_else(|| Error::DefaultError("non-contiguous row".to_string()))?;
+            for item in sk_sss_collected {
+                let item_row = item.row(row);
+                let share = item_row
+                    .as_slice()
+                    .ok_or_else(|| Error::DefaultError("non-contiguous row".to_string()))?;
+                q.add_vec(acc, share);
+            }
+        }
 
+        let mut sum_poly = Poly::<PowerBasis>::zero(ctx);
+        sum_poly.set_coefficients(sum);
         Ok(sum_poly)
     }
 
@@ -265,11 +282,30 @@ impl ShareManager {
         sk_i: Poly<Ntt>,
         es_i: Poly<PowerBasis>,
     ) -> Result<Poly<PowerBasis>, Error> {
+        if ciphertext.par != self.params {
+            return Err(Error::invalid_ciphertext(
+                "ciphertext parameters do not match this ShareManager's parameters",
+            ));
+        }
+        // A degree-2 (unrelinearized) ciphertext has 3 components; silently
+        // ignoring c[2] would produce a wrong plaintext.
+        if ciphertext.c.len() != 2 {
+            return Err(Error::invalid_ciphertext(format!(
+                "expected 2 ciphertext components, got {}; relinearize before threshold \
+                 decryption",
+                ciphertext.c.len()
+            )));
+        }
         let c0 = ciphertext.c[0].clone().into_power_basis();
         let c1 = ciphertext.c[1].clone();
+        if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
+            return Err(Error::context_mismatch(
+                &"share polynomial context",
+                &"ciphertext context",
+            ));
+        }
         let c1sk = (&c1 * &sk_i).into_power_basis();
         let d_share_poly = c0 + c1sk + es_i;
-        //let d_share_poly = &c0 + &c1sk;
         Ok(d_share_poly)
     }
 
@@ -294,6 +330,11 @@ impl ShareManager {
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
+        if ciphertext.par != self.params {
+            return Err(Error::invalid_ciphertext(
+                "ciphertext parameters do not match this ShareManager's parameters",
+            ));
+        }
         // Reconstruction consumes exactly threshold + 1 shares; requiring
         // exactness (rather than truncating extras) avoids silently depending
         // on the order of the provided shares.
@@ -305,8 +346,9 @@ impl ShareManager {
         }
         // The number of reconstructing parties must match the provided shares
         if reconstructing_parties.len() != d_share_polys.len() {
-            return Err(Error::DefaultError(
-                "reconstructing_parties length must match d_share_polys length".to_string(),
+            return Err(Error::insufficient_shares(
+                reconstructing_parties.len(),
+                d_share_polys.len(),
             ));
         }
         // Shamir x-coordinates are 1-based, bounded by n, and must be distinct:
@@ -321,6 +363,20 @@ impl ShareManager {
                 return Err(Error::duplicate_party_id(idx));
             }
             seen[idx] = true;
+        }
+        // Validate share polynomial shapes before indexing into them: each
+        // share must carry all RNS rows and all coefficient columns.
+        let expected_shape = (self.params.moduli().len(), self.params.degree());
+        for (i, d_share_poly) in d_share_polys.iter().enumerate() {
+            if d_share_poly.coefficients().dim() != expected_shape {
+                return Err(Error::malformed_shares(
+                    reconstructing_parties[i],
+                    format!(
+                        "decryption share has shape {:?}, expected {expected_shape:?}",
+                        d_share_poly.coefficients().dim()
+                    ),
+                ));
+            }
         }
         let recovered: Result<Vec<Vec<u64>>, Error> = (0..self.params.moduli().len())
             .into_par_iter()
@@ -344,7 +400,7 @@ impl ShareManager {
                             let coeff_arr = coeffs.row(m);
                             let coeff = coeff_arr[i];
                             // Use provided party indices directly as the Shamir x-coordinates
-                            let coeff_formatted = (*party_idx, coeff.to_bigint().unwrap());
+                            let coeff_formatted = (*party_idx, BigInt::from(coeff));
                             shamir_open_vec_mod.push(coeff_formatted);
                         }
                         let shamir_result = shamir_ss.recover(&shamir_open_vec_mod)?;
@@ -362,7 +418,9 @@ impl ShareManager {
         // scale result poly
         let arr_matrix =
             Array2::from_shape_vec((self.params.moduli().len(), self.params.degree()), m_data)
-                .unwrap();
+                .map_err(|_| {
+                    Error::DefaultError("Failed to assemble recovered coefficients".to_string())
+                })?;
         let ctx = self.params.context_at_level(0)?;
         let mut result_poly = Poly::<PowerBasis>::zero(ctx);
         result_poly.set_coefficients(arr_matrix);
@@ -380,12 +438,12 @@ impl ShareManager {
                     self.params.degree(),
                 )
                 .map_err(Error::MathError)?;
-                Ok(Scaler::new(
+                Scaler::new(
                     &ctx_i,
                     &plaintext_ctx,
                     ScalingFactor::new(&BigUint::from(self.params.plaintext()), rns.modulus()),
                 )
-                .unwrap())
+                .map_err(Error::MathError)
             })
             .collect();
         let scalers = scalers?;
@@ -455,7 +513,7 @@ mod tests {
     #[test]
     fn test_share_manager_creation() {
         let params = test_params();
-        let manager = ShareManager::new(5, 2, params.clone());
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         assert_eq!(manager.n, 5);
         assert_eq!(manager.threshold, 2);
         assert_eq!(manager.params, params);
@@ -464,7 +522,7 @@ mod tests {
     #[test]
     fn test_coeffs_to_poly_utility() {
         let params = test_params();
-        let manager = ShareManager::new(5, 2, params.clone());
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
 
         // Test with i64 coefficients
         let coeffs = vec![1i64, 2, 3, 4].into_boxed_slice();
@@ -481,7 +539,7 @@ mod tests {
     #[test]
     fn test_bigints_to_poly() {
         let params = test_params();
-        let manager = ShareManager::new(5, 3, params.clone());
+        let manager = ShareManager::new(5, 3, params.clone()).unwrap();
 
         // Create BigInt coefficients (full degree)
         let degree = params.degree();
@@ -495,7 +553,7 @@ mod tests {
     #[test]
     fn test_bigints_to_poly_wrong_size() {
         let params = test_params();
-        let manager = ShareManager::new(5, 2, params.clone());
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
 
         // Wrong number of coefficients
         let bigints = vec![BigInt::from(1), BigInt::from(2)]; // Too few
@@ -511,7 +569,7 @@ mod tests {
         //Fix threshold to be 0 for the purpose of this test so that any single party can decrypt.
         //I.e., the secret key is given to all parties and not secret shared
         let threshold = 0;
-        let manager = ShareManager::new(n.try_into().unwrap(), threshold, params.clone());
+        let manager = ShareManager::new(n.try_into().unwrap(), threshold, params.clone()).unwrap();
 
         // Setup: Generate keys and encrypt a plaintext
         let sk = SecretKey::random(&params, &mut rng);
@@ -558,7 +616,7 @@ mod tests {
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
-            .map(|_| ShareManager::new(n, threshold, params.clone()))
+            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
             .collect();
 
         // One party generates the secret key and secret shares it among the other parties
@@ -641,7 +699,7 @@ mod tests {
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
-            .map(|_| ShareManager::new(n, threshold, params.clone()))
+            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
             .collect();
 
         // One party generates the secret key and secret shares it among the other parties
@@ -723,7 +781,7 @@ mod tests {
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
-            .map(|_| ShareManager::new(n, threshold, params.clone()))
+            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
             .collect();
 
         // One party generates the secret key and secret shares it among the other parties
@@ -806,7 +864,7 @@ mod tests {
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
-            .map(|_| ShareManager::new(n, threshold, params.clone()))
+            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
             .collect();
 
         // One party generates the secret key and secret shares it among the other parties
@@ -903,7 +961,7 @@ mod tests {
     #[test]
     fn test_aggregate_collected_shares_rejects_bad_input() {
         let params = test_params();
-        let manager = ShareManager::new(5, 2, params.clone());
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let shape = (params.moduli().len(), params.degree());
 
         // Empty input
@@ -928,7 +986,7 @@ mod tests {
         let params = test_params();
         let n = 5;
         let threshold = 2; // needs exactly 3 shares
-        let manager = ShareManager::new(n, threshold, params.clone());
+        let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
 
         let sk = SecretKey::random(&params, &mut rng);
         let pk = PublicKey::new(&sk, &mut rng);
@@ -972,7 +1030,7 @@ mod tests {
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
-            .map(|_| ShareManager::new(n, threshold, params.clone()))
+            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
             .collect();
 
         // One party generates the secret key and secret shares it among the other parties

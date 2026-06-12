@@ -82,7 +82,7 @@ impl TRBFV {
         poly: Zeroizing<Poly<PowerBasis>>,
         rng: &mut R,
     ) -> Result<Vec<Array2<u64>>, Error> {
-        let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.generate_secret_shares_from_poly(poly, rng)
     }
 
@@ -100,7 +100,7 @@ impl TRBFV {
         &self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
     ) -> Result<Poly<PowerBasis>, Error> {
-        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.aggregate_collected_shares(sk_sss_collected)
     }
 
@@ -157,7 +157,7 @@ impl TRBFV {
         sk_i: Poly<Ntt>,
         es_i: Poly<PowerBasis>,
     ) -> Result<Poly<PowerBasis>, Error> {
-        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.decryption_share(ciphertext, sk_i, es_i)
     }
 
@@ -180,7 +180,7 @@ impl TRBFV {
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
-        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.decrypt_from_shares(d_share_polys, reconstructing_parties, ciphertext)
     }
 }
@@ -246,7 +246,7 @@ mod tests {
 
         // Generate a secret key for testing
         let sk = SecretKey::random(&params, &mut rng);
-        let share_manager = ShareManager::new(n, threshold, params.clone());
+        let share_manager = ShareManager::new(n, threshold, params.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.clone().as_ref())
             .unwrap();
@@ -324,7 +324,7 @@ mod tests {
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
         // Generate polynomials for decryption share
-        let share_manager = ShareManager::new(n, threshold, params.clone());
+        let share_manager = ShareManager::new(n, threshold, params.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();
@@ -368,7 +368,7 @@ mod tests {
         // Each party generates decryption shares
         let mut decryption_shares = Vec::new();
         for i in 0..(threshold + 1) {
-            let share_manager = ShareManager::new(n, threshold, params.clone());
+            let share_manager = ShareManager::new(n, threshold, params.clone()).unwrap();
             let sk_poly = share_manager
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
                 .unwrap();
@@ -427,7 +427,7 @@ mod tests {
         // Test that basic operations work
         let mut rng = rng();
         let sk = SecretKey::random(&params, &mut rng);
-        let share_manager = ShareManager::new(3, 1, params.clone());
+        let share_manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();

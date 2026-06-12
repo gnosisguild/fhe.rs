@@ -41,10 +41,7 @@ impl Lambda {
     /// Create a secure level. Fails if `lambda < MIN_SECURE_LAMBDA`.
     pub fn secure(lambda: usize) -> Result<Self, Error> {
         if lambda < MIN_SECURE_LAMBDA {
-            return Err(Error::UnspecifiedInput(format!(
-                "lambda {lambda} is below the secure minimum {MIN_SECURE_LAMBDA}; \
-                 for testing, opt in explicitly with Lambda::insecure"
-            )));
+            return Err(Error::insecure_lambda(lambda, MIN_SECURE_LAMBDA));
         }
         Ok(Self::Secure(lambda))
     }
@@ -176,8 +173,8 @@ impl SmudgingBoundCalculator {
         // Correctness check: B_c < Q/(2t)
         let q_over_2t = &q_full / (BigUint::from(2u64) * &t);
         if b_c >= q_over_2t {
-            return Err(Error::UnspecifiedInput(
-                "Circuit too deep or parameters too small: B_c exceeds Q/(2t), violating correctness bound".to_string(),
+            return Err(Error::smudging_bound_infeasible(
+                "circuit too deep or parameters too small: B_C exceeds Q/(2t), violating the correctness bound",
             ));
         }
 
@@ -188,8 +185,8 @@ impl SmudgingBoundCalculator {
         let lower_bound = BigUint::from(2u64).pow(lambda as u32) * &b_c;
         let upper_bound = (&q_over_2t - &b_c) / BigUint::from(self.config.n);
         if upper_bound < lower_bound {
-            return Err(Error::UnspecifiedInput(
-                "Upper bound is less than lower bound, cannot calculate B_sm".to_string(),
+            return Err(Error::smudging_bound_infeasible(
+                "security lower bound 2^lambda * B_C exceeds the correctness upper bound (Q/(2t) - B_C)/n",
             ));
         }
         Ok(lower_bound)

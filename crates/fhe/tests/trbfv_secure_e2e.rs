@@ -109,18 +109,17 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
             let sk_share = SecretKey::random(&params_trbfv, &mut rng);
             let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
-            let mut share_manager = ShareManager::new(NUM_PARTIES, THRESHOLD, params_trbfv.clone());
+            let mut share_manager =
+                ShareManager::new(NUM_PARTIES, THRESHOLD, params_trbfv.clone()).unwrap();
             let sk_poly = share_manager
                 .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
                 .unwrap();
             let sk_sss = trbfv
-                .clone()
                 .generate_secret_shares_from_poly(sk_poly, &mut rng)
                 .unwrap();
 
             let esi_coeffs: Vec<BigInt> = match &smudging_bound {
                 None => trbfv
-                    .clone()
                     .generate_smudging_error(NUM_SUMMED, Lambda::secure(LAMBDA).unwrap(), &mut rng)
                     .unwrap(),
                 Some(bound) => vec![bound.clone(); DEGREE],
@@ -209,11 +208,9 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
 
     parties.par_iter_mut().for_each(|party| {
         party.sk_poly_sum = trbfv
-            .clone()
             .aggregate_collected_shares(&party.sk_sss_collected)
             .unwrap();
         party.es_poly_sum = trbfv
-            .clone()
             .aggregate_collected_shares(&party.es_sss_collected)
             .unwrap();
     });
@@ -250,7 +247,6 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
         .map(|&party_id| {
             let party = &parties[party_id - 1];
             trbfv
-                .clone()
                 .decryption_share(
                     tally.clone(),
                     party.sk_poly_sum.clone().into_ntt(),
