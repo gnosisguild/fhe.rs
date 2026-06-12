@@ -14,7 +14,7 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
-    trbfv::{ShareManager, SmudgingSecurity, TRBFV},
+    trbfv::{Lambda, ShareManager, TRBFV},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -151,7 +151,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Insecure test mode: small lambda for speed; the smudging noise does NOT
     // hide the decryption noise. Never use this in production.
-    let security = SmudgingSecurity::insecure_test_only(lambda);
+    let security = Lambda::insecure(lambda);
 
     println!("# Addition with trBFV (with encrypted share transmission)");
     println!("\tnum_summed = {num_summed}");

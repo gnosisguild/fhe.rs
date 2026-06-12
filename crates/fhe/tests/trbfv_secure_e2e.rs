@@ -8,7 +8,7 @@ use fhe::bfv::{self, BfvParameters, Ciphertext, Encoding, Plaintext, PublicKey, 
 use fhe::mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare};
 use fhe::trbfv::smudging::SmudgingNoiseGenerator;
 use fhe::trbfv::{
-    ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingSecurity, TRBFV,
+    Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, TRBFV,
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -76,7 +76,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                 params_trbfv.clone(),
                 NUM_PARTIES,
                 NUM_SUMMED,
-                SmudgingSecurity::secure(LAMBDA).unwrap(),
+                Lambda::secure(LAMBDA).unwrap(),
             );
             let bound = SmudgingBoundCalculator::new(config)
                 .calculate_sm_bound()
@@ -121,7 +121,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
             let esi_coeffs: Vec<BigInt> = match &smudging_bound {
                 None => trbfv
                     .clone()
-                    .generate_smudging_error(NUM_SUMMED, SmudgingSecurity::secure(LAMBDA).unwrap(), &mut rng)
+                    .generate_smudging_error(NUM_SUMMED, Lambda::secure(LAMBDA).unwrap(), &mut rng)
                     .unwrap(),
                 Some(bound) => vec![bound.clone(); DEGREE],
             };
@@ -301,8 +301,12 @@ fn trbfv_smudging_bound_matches_paper_formula() {
     use num_bigint::BigUint;
 
     let params = trbfv_params();
-    let config =
-        SmudgingBoundCalculatorConfig::new(params.clone(), NUM_PARTIES, NUM_SUMMED, SmudgingSecurity::secure(LAMBDA).unwrap());
+    let config = SmudgingBoundCalculatorConfig::new(
+        params.clone(),
+        NUM_PARTIES,
+        NUM_SUMMED,
+        Lambda::secure(LAMBDA).unwrap(),
+    );
     let calculator = SmudgingBoundCalculator::new(config.clone());
     let bound = calculator.calculate_sm_bound().unwrap();
 

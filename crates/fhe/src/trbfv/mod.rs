@@ -18,6 +18,6 @@ pub mod threshold;
 pub use shamir::ShamirSecretSharing;
 pub use shares::ShareManager;
 pub use smudging::{
-    MIN_SECURE_LAMBDA, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingSecurity,
+    Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
 };
 pub use threshold::TRBFV;

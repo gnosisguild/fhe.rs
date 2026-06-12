@@ -2,7 +2,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use fhe::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::{CommonRandomPoly, PublicKeyShare};
-use fhe::trbfv::{ShareManager, SmudgingSecurity, TRBFV};
+use fhe::trbfv::{Lambda, ShareManager, TRBFV};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
 use std::sync::Arc;
@@ -107,7 +107,9 @@ fn bench_data_sizes(c: &mut Criterion) {
             .unwrap();
 
         // Generate smudging error shares
-        let esi_coeffs = trbfv.generate_smudging_error(100, SmudgingSecurity::secure(80).unwrap(), &mut rng).unwrap();
+        let esi_coeffs = trbfv
+            .generate_smudging_error(100, Lambda::secure(80).unwrap(), &mut rng)
+            .unwrap();
         let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
         let esi_sss = share_manager
             .generate_secret_shares_from_poly(esi_poly, &mut rng)

@@ -14,7 +14,7 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
-    trbfv::{ShareManager, SmudgingSecurity, TRBFV},
+    trbfv::{Lambda, ShareManager, TRBFV},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -153,7 +153,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Secure example: rejects lambda below the secure minimum. See
     // trbfv_add_bfv_share_insecure.rs for the explicit insecure test mode.
-    let security = SmudgingSecurity::secure(lambda)?;
+    let security = Lambda::secure(lambda)?;
 
     println!("# Addition with trBFV (with encrypted share transmission)");
     println!("\tnum_summed = {num_summed}");
