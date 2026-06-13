@@ -114,7 +114,7 @@ impl SmudgingBoundCalculatorConfig {
             m,
             b_enc,
             b_e: (2 * variance) as u64,
-            public_key_error: (2 * variance) as u64,
+            public_key_error: (n as u64) * (2 * variance) as u64,
             secret_key_bound: n as u64,
             lambda,
         }
@@ -293,7 +293,10 @@ mod tests {
         );
         // b_e is u64
         assert_eq!(config.b_e, (params.variance() * 2) as u64);
-        assert_eq!(config.public_key_error, 2 * params.variance() as u64);
+        assert_eq!(
+            config.public_key_error,
+            (config.n as u64) * (2 * params.variance()) as u64
+        );
         assert_eq!(config.secret_key_bound, 5);
         assert_eq!(config.lambda.value(), 80);
     }
