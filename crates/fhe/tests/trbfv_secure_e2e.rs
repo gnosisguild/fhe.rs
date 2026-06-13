@@ -7,7 +7,9 @@ use std::sync::Arc;
 use fhe::bfv::{self, BfvParameters, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare};
 use fhe::trbfv::smudging::SmudgingNoiseGenerator;
-use fhe::trbfv::{ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, TRBFV};
+use fhe::trbfv::{
+    Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, TRBFV,
+};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
@@ -74,7 +76,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                 params_trbfv.clone(),
                 NUM_PARTIES,
                 NUM_SUMMED,
-                LAMBDA,
+                Lambda::secure(LAMBDA).unwrap(),
             );
             let bound = SmudgingBoundCalculator::new(config)
                 .calculate_sm_bound()
@@ -107,19 +109,18 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
             let sk_share = SecretKey::random(&params_trbfv, &mut rng);
             let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
-            let mut share_manager = ShareManager::new(NUM_PARTIES, THRESHOLD, params_trbfv.clone());
+            let mut share_manager =
+                ShareManager::new(NUM_PARTIES, THRESHOLD, params_trbfv.clone()).unwrap();
             let sk_poly = share_manager
                 .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
                 .unwrap();
             let sk_sss = trbfv
-                .clone()
                 .generate_secret_shares_from_poly(sk_poly, &mut rng)
                 .unwrap();
 
             let esi_coeffs: Vec<BigInt> = match &smudging_bound {
                 None => trbfv
-                    .clone()
-                    .generate_smudging_error(NUM_SUMMED, LAMBDA, &mut rng)
+                    .generate_smudging_error(NUM_SUMMED, Lambda::secure(LAMBDA).unwrap(), &mut rng)
                     .unwrap(),
                 Some(bound) => vec![bound.clone(); DEGREE],
             };
@@ -207,11 +208,9 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
 
     parties.par_iter_mut().for_each(|party| {
         party.sk_poly_sum = trbfv
-            .clone()
             .aggregate_collected_shares(&party.sk_sss_collected)
             .unwrap();
         party.es_poly_sum = trbfv
-            .clone()
             .aggregate_collected_shares(&party.es_sss_collected)
             .unwrap();
     });
@@ -248,7 +247,6 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
         .map(|&party_id| {
             let party = &parties[party_id - 1];
             trbfv
-                .clone()
                 .decryption_share(
                     tally.clone(),
                     party.sk_poly_sum.clone().into_ntt(),
@@ -299,8 +297,12 @@ fn trbfv_smudging_bound_matches_paper_formula() {
     use num_bigint::BigUint;
 
     let params = trbfv_params();
-    let config =
-        SmudgingBoundCalculatorConfig::new(params.clone(), NUM_PARTIES, NUM_SUMMED, LAMBDA);
+    let config = SmudgingBoundCalculatorConfig::new(
+        params.clone(),
+        NUM_PARTIES,
+        NUM_SUMMED,
+        Lambda::secure(LAMBDA).unwrap(),
+    );
     let calculator = SmudgingBoundCalculator::new(config.clone());
     let bound = calculator.calculate_sm_bound().unwrap();
 

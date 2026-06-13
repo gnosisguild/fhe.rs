@@ -27,7 +27,7 @@ use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::shares::ShareManager;
 use crate::trbfv::smudging::{
-    SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
+    Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
 };
 use fhe_math::rq::{Ntt, Poly, PowerBasis};
 use fhe_traits::FheParametrized;
@@ -82,7 +82,7 @@ impl TRBFV {
         poly: Zeroizing<Poly<PowerBasis>>,
         rng: &mut R,
     ) -> Result<Vec<Array2<u64>>, Error> {
-        let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.generate_secret_shares_from_poly(poly, rng)
     }
 
@@ -100,7 +100,7 @@ impl TRBFV {
         &self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
     ) -> Result<Poly<PowerBasis>, Error> {
-        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.aggregate_collected_shares(sk_sss_collected)
     }
 
@@ -111,7 +111,8 @@ impl TRBFV {
     ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed (e.g., votes to count, numbers to sum)
-    /// * `lambda` - Statistical security parameter
+    /// * `lambda` - Statistical security level (use `Lambda::secure(lambda)`
+    ///   in production; `Lambda::insecure(lambda)` for fast tests)
     /// * `rng` - Cryptographically secure random number generator
     ///
     /// # Returns
@@ -119,7 +120,7 @@ impl TRBFV {
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         num_ciphertexts: usize,
-        lambda: usize,
+        lambda: Lambda,
         rng: &mut R,
     ) -> Result<Vec<BigInt>, Error> {
         let config = SmudgingBoundCalculatorConfig::new(
@@ -156,7 +157,7 @@ impl TRBFV {
         sk_i: Poly<Ntt>,
         es_i: Poly<PowerBasis>,
     ) -> Result<Poly<PowerBasis>, Error> {
-        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.decryption_share(ciphertext, sk_i, es_i)
     }
 
@@ -179,7 +180,7 @@ impl TRBFV {
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
-        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone());
+        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.decrypt_from_shares(d_share_polys, reconstructing_parties, ciphertext)
     }
 }
@@ -245,7 +246,7 @@ mod tests {
 
         // Generate a secret key for testing
         let sk = SecretKey::random(&params, &mut rng);
-        let share_manager = ShareManager::new(n, threshold, params.clone());
+        let share_manager = ShareManager::new(n, threshold, params.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.clone().as_ref())
             .unwrap();
@@ -269,7 +270,7 @@ mod tests {
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         let mut rng = rng();
-        let result = trbfv.generate_smudging_error(1, 80, &mut rng);
+        let result = trbfv.generate_smudging_error(1, Lambda::secure(80).unwrap(), &mut rng);
         //Checking if all the coefficients of the smudging noise are different than 0,
         //having one equal to zero is hardly likely to happen if the smudging noise was generated.
         //TODO: add a test that calculates the empirical variance from the coefficients, so as to
@@ -293,7 +294,7 @@ mod tests {
 
         // Test with multiple ciphertexts (this should increase the bound requirements)
         let mut rng = rng();
-        let result = trbfv.generate_smudging_error(10, 80, &mut rng);
+        let result = trbfv.generate_smudging_error(10, Lambda::secure(80).unwrap(), &mut rng);
 
         for (poly_idx, poly) in result.iter().enumerate() {
             for (coeff_idx, coeff) in poly.iter().enumerate() {
@@ -323,7 +324,7 @@ mod tests {
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
         // Generate polynomials for decryption share
-        let share_manager = ShareManager::new(n, threshold, params.clone());
+        let share_manager = ShareManager::new(n, threshold, params.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();
@@ -367,7 +368,7 @@ mod tests {
         // Each party generates decryption shares
         let mut decryption_shares = Vec::new();
         for i in 0..(threshold + 1) {
-            let share_manager = ShareManager::new(n, threshold, params.clone());
+            let share_manager = ShareManager::new(n, threshold, params.clone()).unwrap();
             let sk_poly = share_manager
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
                 .unwrap();
@@ -426,7 +427,7 @@ mod tests {
         // Test that basic operations work
         let mut rng = rng();
         let sk = SecretKey::random(&params, &mut rng);
-        let share_manager = ShareManager::new(3, 1, params.clone());
+        let share_manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();

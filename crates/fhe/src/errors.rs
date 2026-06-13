@@ -120,6 +120,10 @@ pub enum Error {
     #[error("Security validation failed: {reason}")]
     SecurityValidationError { reason: String },
 
+    /// Indicates a threshold BFV (trbfv) error
+    #[error("Threshold error: {0}")]
+    Threshold(#[from] ThresholdError),
+
     /// Catch-all for unexpected errors (should be minimized)
     #[error("Unexpected error: {message}")]
     UnexpectedError { message: String },
@@ -137,6 +141,97 @@ impl From<fhe_math::Error> for Error {
     fn from(e: fhe_math::Error) -> Self {
         Error::MathError(e)
     }
+}
+
+/// Errors specific to threshold BFV (trbfv) operations.
+///
+/// These are matchable variants so implementors can react to specific failure
+/// modes (e.g. identify the misbehaving party) instead of parsing strings.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ThresholdError {
+    /// A party index is outside the valid range `1..=n`.
+    #[error("invalid party ID {party_id}: must be between 1 and {n}")]
+    InvalidPartyId {
+        /// The offending party index
+        party_id: usize,
+        /// Number of parties in the scheme
+        n: usize,
+    },
+
+    /// The same party index was provided more than once.
+    #[error("duplicate party ID {party_id} in reconstructing parties")]
+    DuplicatePartyId {
+        /// The duplicated party index
+        party_id: usize,
+    },
+
+    /// The threshold does not satisfy the honest-majority requirement.
+    #[error(
+        "threshold must be exactly (n - 1) / 2 = {expected} for n = {n} parties (got \
+         {threshold}): smaller thresholds let a maximal corrupted minority reconstruct on \
+         its own, larger ones break honest-party reconstruction"
+    )]
+    InvalidThreshold {
+        /// The provided threshold
+        threshold: usize,
+        /// Number of parties in the scheme
+        n: usize,
+        /// The required threshold for this n
+        expected: usize,
+    },
+
+    /// A wrong number of shares or contributions was provided.
+    #[error("wrong share count: expected {expected}, got {actual}")]
+    ShareCountMismatch {
+        /// Number of shares provided
+        actual: usize,
+        /// Number of shares required
+        expected: usize,
+    },
+
+    /// A share from a specific party is malformed (wrong shape or values).
+    #[error("malformed shares from party {party_id}: {reason}")]
+    MalformedShares {
+        /// 0-based index of the contribution (or 1-based party id where known)
+        party_id: usize,
+        /// Description of the problem
+        reason: String,
+    },
+
+    /// Lagrange reconstruction hit a non-invertible denominator.
+    #[error("non-invertible Lagrange denominator (duplicate or invalid share indices)")]
+    NonInvertibleShares,
+
+    /// The statistical security parameter is below the secure minimum.
+    #[error(
+        "lambda {lambda} is below the secure minimum {min}; for testing, opt in explicitly \
+         with Lambda::insecure"
+    )]
+    InsecureLambda {
+        /// The provided lambda
+        lambda: usize,
+        /// The minimum secure lambda
+        min: usize,
+    },
+
+    /// The smudging bound cannot satisfy both security and correctness.
+    #[error("smudging bound infeasible: {reason}")]
+    SmudgingBoundInfeasible {
+        /// Description of the violated constraint
+        reason: String,
+    },
+
+    /// The number of parties is too large for the modulus chain.
+    #[error(
+        "n {n} is not smaller than the smallest modulus {min_modulus}; the MPC protocol \
+         assumes n is smaller than the smallest modulus defining the ciphertext space"
+    )]
+    PartyCountExceedsModulus {
+        /// Number of parties
+        n: usize,
+        /// The smallest modulus
+        min_modulus: u64,
+    },
 }
 
 impl Error {

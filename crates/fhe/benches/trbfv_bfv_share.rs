@@ -2,7 +2,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use fhe::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::{CommonRandomPoly, PublicKeyShare};
-use fhe::trbfv::{ShareManager, TRBFV};
+use fhe::trbfv::{Lambda, ShareManager, TRBFV};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
 use std::sync::Arc;
@@ -97,7 +97,8 @@ fn bench_data_sizes(c: &mut Criterion) {
         let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut make_rng()).unwrap();
 
         // Generate Shamir shares of the secret key
-        let mut share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone());
+        let mut share_manager =
+            ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
             .unwrap();
@@ -107,7 +108,9 @@ fn bench_data_sizes(c: &mut Criterion) {
             .unwrap();
 
         // Generate smudging error shares
-        let esi_coeffs = trbfv.generate_smudging_error(100, 80, &mut rng).unwrap();
+        let esi_coeffs = trbfv
+            .generate_smudging_error(100, Lambda::secure(80).unwrap(), &mut rng)
+            .unwrap();
         let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
         let esi_sss = share_manager
             .generate_secret_shares_from_poly(esi_poly, &mut rng)
@@ -400,7 +403,8 @@ fn bench_timing_operations(c: &mut Criterion) {
     let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
 
     group.bench_function("generate_shamir_shares", |b| {
-        let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone());
+        let share_manager =
+            ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
             .unwrap();

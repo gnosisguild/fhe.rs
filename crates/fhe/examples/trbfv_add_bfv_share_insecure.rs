@@ -14,7 +14,7 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
-    trbfv::{ShareManager, TRBFV},
+    trbfv::{Lambda, ShareManager, TRBFV},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -149,6 +149,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
     }
 
+    // Insecure test mode: small lambda for speed; the smudging noise does NOT
+    // hide the decryption noise. Never use this in production.
+    let security = Lambda::insecure(lambda);
+
     println!("# Addition with trBFV (with encrypted share transmission)");
     println!("\tnum_summed = {num_summed}");
     println!("\tnum_parties = {num_parties}");
@@ -184,13 +188,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
                 let mut share_manager =
-                    ShareManager::new(num_parties, threshold, params_trbfv.clone());
+                    ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
                 let sk_poly = share_manager
                     .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
                     .unwrap();
 
-                let temp_trbfv = trbfv.clone();
-                let sk_sss = temp_trbfv
+                let sk_sss = trbfv
                     .generate_secret_shares_from_poly(sk_poly, &mut rng)
                     .unwrap();
 
@@ -201,8 +204,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let es_poly_sum = Poly::<PowerBasis>::zero(ctx);
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
 
-                let esi_coeffs = temp_trbfv
-                    .generate_smudging_error(num_summed, lambda, &mut rng)
+                let esi_coeffs = trbfv
+                    .generate_smudging_error(num_summed, security, &mut rng)
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager
@@ -314,11 +317,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
-            let temp_trbfv = trbfv.clone();
-            party.sk_poly_sum = temp_trbfv
+            party.sk_poly_sum = trbfv
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
-            party.es_poly_sum = temp_trbfv
+            party.es_poly_sum = trbfv
                 .aggregate_collected_shares(&party.es_sss_collected)
                 .unwrap();
         });
@@ -355,7 +357,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     parties.par_iter_mut().for_each(|party| {
         party.d_share_poly = trbfv
-            .clone()
             .decryption_share(
                 tally.clone(),
                 party.sk_poly_sum.clone().into_ntt(),
