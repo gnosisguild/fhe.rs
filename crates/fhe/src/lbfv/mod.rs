@@ -19,4 +19,5 @@
 pub mod keys;
 
 pub use keys::LBFVPublicKey;
+pub use keys::LBFVRelinKeyShare;
 pub use keys::LBFVRelinearizationKey;
