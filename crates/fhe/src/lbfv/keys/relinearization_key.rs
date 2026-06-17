@@ -51,6 +51,207 @@ pub struct LBFVRelinearizationKey {
     b_vec: Vec<Poly<NttShoup>>,
 }
 
+/// One ciphernode's additive contribution to a distributed l-BFV
+/// relinearization key, following Eq. (4) of §5.2 of
+/// [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
+///
+/// A contribution is computed from a single party's secret-key contribution
+/// `sk_i` and a locally sampled ephemeral `r_i`, using the common shared
+/// strings `d1` (URS) and `a` (CRS). It holds the per-node key-switching
+/// material `(d0_i, d1)` and `(d2_i, a)`; the `b_vec` is not part of a
+/// contribution. Please, note that it comes from the aggregated threshold
+/// public key when the contributions are combined in [`LBFVRelinearizationKey::aggregate`].
+///
+/// Because l-BFV's relinearization-key generation is linear in the secret key,
+/// the sum of the contributions over a set `S` of parties is exactly a valid
+/// relinearization key for `sk = Σ_{i∈S} sk_i`, with `r = Σ_{i∈S} r_i`.
+///
+/// # Assumptions and current limitations
+///
+/// - Caller-enforced consistency: correctness requires every party to use
+///   the *same* `d1` (URS) and `a` (CRS) seeds, and `a` must be the very seed
+///   used to build the threshold public key whose `b_vec` is passed to
+///   [`LBFVRelinearizationKey::aggregate`]. The `-a_j·sk` term in `b_vec` and
+///   the `+r·a_j·sk` term in `d2` must cancel during relinearization.
+///   `aggregate` checks that the seeds/levels *match across shares*, but it
+///   cannot check they match the public key's `b_vec`; that binding is the
+///   caller's responsibility.
+/// - Contributions, not Shamir shares: `contribution` consumes a secret-key
+///   *contribution* `sk_i` (a summand of `sk = Σ sk_i`), not a Shamir share of
+///   `sk`. The rlk aggregates additively over contributions, exactly like the
+///   public key; it is unrelated to the `t`-of-`n` Shamir sharing used for
+///   threshold decryption.
+/// - Noise growth: each contribution injects its own error `(e0_i, e2_i)`,
+///   so the aggregated key carries `Σ e_i` (variance ~`|S|·σ²`). The smudging /
+///   noise analysis must account for this `|S|` factor).
+/// - Level 0 only: only `ciphertext_level = key_level = 0` is
+///   exercised/tested. The leveled path is inherited from the single-key code
+///   and is currently untested for distributed keys.
+///
+/// # Not yet implemented (needed to remove the last assembled-`sk` dependency)
+///
+/// - A matching distributed/`from_parts` constructor for [`LBFVPublicKey`]
+///   so the threshold public key (and hence `b_vec`) can be built from
+///   aggregated contributions instead of a full `sk`. Until then, callers must
+///   supply a `b_vec` from a public key built elsewhere (e.g. by the DKG/
+///   aggregator), and the only place `sk` is assembled is that public-key
+///   construction, not here.
+/// - Serialization of a single `LBFVRelinKeyShare` for transport/broadcast
+///   (only the aggregated [`LBFVRelinearizationKey`] is currently serializable).
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct LBFVRelinKeyShare {
+    /// Per-node key-switching key from r to s: `(d0_i, d1)` where
+    /// `d0_i = -sk_i·d1 + e0_i + r_i·g`.
+    ksk_r_to_s: KeySwitchingKey,
+    /// Per-node key-switching key from s to r: `(d2_i, a)` where
+    /// `d2_i = r_i·a + e2_i + sk_i·g` (built by encrypting `sk_i` under
+    /// `-r_i`, mirroring the single-key construction).
+    ksk_s_to_r: KeySwitchingKey,
+}
+
+impl LBFVRelinKeyShare {
+    /// Compute this party's contribution to the distributed relinearization
+    /// key from its secret-key contribution `sk_i`.
+    ///
+    /// # Arguments
+    /// * `sk_i` - This party's secret-key contribution (one summand of the
+    ///   joint `sk = Σ sk_i`), *not* a Shamir share.
+    /// * `d1_seed` - Seed for the common URS `d1` (must be identical across all
+    ///   parties, otherwise the contributions cannot be summed).
+    /// * `a_seed` - Seed for the common CRS `a` (the same `a` used by the
+    ///   threshold public key's `b_vec`; must be identical across all parties).
+    /// * `ciphertext_level` / `key_level` - Levels of the ciphertext to
+    ///   relinearize and of the key, as in [`LBFVRelinearizationKey::new_leveled`].
+    /// * `rng` - RNG used to sample the local ephemeral `r_i` and the errors.
+    pub fn contribution<R: RngCore + CryptoRng>(
+        sk_i: &SecretKey,
+        d1_seed: <ChaCha8Rng as SeedableRng>::Seed,
+        a_seed: <ChaCha8Rng as SeedableRng>::Seed,
+        ciphertext_level: usize,
+        key_level: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let ctx_relin_key = sk_i.par.context_at_level(key_level)?;
+        let ctx_ciphertext = sk_i.par.context_at_level(ciphertext_level)?;
+        let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
+
+        if ciphertext_level < key_level {
+            return Err(Error::DefaultError(
+                "Ciphertext level must be greater than or equal to key level".to_string(),
+            ));
+        }
+        if ctx_relin_key.moduli().len() == 1 || ctx_ciphertext.moduli().len() == 1 {
+            return Err(Error::DefaultError(
+                "These parameters do not support key switching".to_string(),
+            ));
+        }
+
+        // Sample this node's ephemeral r_i from the key distribution. It is a
+        // second secret key (like sk_i), used only as scratch to build this
+        // contribution, and is toxic waste: never shared, never reused, dropped
+        // (and zeroized) here. The joint ephemeral r = Σ r_i is what the
+        // aggregated key effectively uses, but r is never materialized anywhere:
+        // it only exists implicitly as the sum, mirroring sk = Σ sk_i.
+        let r: SecretKey = SecretKey::random(&sk_i.par, rng);
+        let r_poly =
+            Poly::<PowerBasis>::try_convert_from(r.coeffs.as_ref(), ctx_ciphertext, false)?;
+        let r_switched_up = r_poly.switch(&switcher_up)?;
+
+        let sk_poly =
+            Poly::<PowerBasis>::try_convert_from(sk_i.coeffs.as_ref(), ctx_ciphertext, false)?;
+        let sk_switched_up = sk_poly.switch(&switcher_up)?;
+
+        // (d0_i, d1) = (-sk_i·d1 + e0_i + r_i·g, d1)
+        let ksk_r_to_s = KeySwitchingKey::new_with_seed(
+            sk_i,
+            &r_switched_up,
+            d1_seed,
+            ciphertext_level,
+            key_level,
+            rng,
+        )?;
+
+        // (d2_i, a) = (r_i·a + e2_i + sk_i·g, a), obtained by encrypting sk_i
+        // under -r_i (see the note on the single-key construction).
+        let mut neg_r = r.clone();
+        neg_r.coeffs.iter_mut().for_each(|x| *x = x.wrapping_neg());
+        let ksk_s_to_r = KeySwitchingKey::new_with_seed(
+            &neg_r,
+            &sk_switched_up,
+            a_seed,
+            ciphertext_level,
+            key_level,
+            rng,
+        )?;
+
+        Ok(Self {
+            ksk_r_to_s,
+            ksk_s_to_r,
+        })
+    }
+}
+
+/// Sum the `c0` components of a set of key-switching keys, coordinate-wise over
+/// the gadget dimension.
+///
+/// This is the additive aggregation `Σ d0_i` / `Σ d2_i` of Eq. (4): each share's
+/// secret-dependent part (`d0_i` for `ksk_r_to_s`, `d2_i` for `ksk_s_to_r`) is
+/// stored as that key-switching key's `c0` component, so summing the `c0`s is
+/// exactly summing the `d0_i` / `d2_i`. The shared `c1` (= `d1` / `a`) is not
+/// summed — it is identical across shares and carried over by the caller.
+///
+/// The `c0` polynomials are stored in `NttShoup` representation. `NttShoup` is
+/// the same NTT (evaluation) form as `Ntt`, but additionally carries, per
+/// coefficient, a precomputed Shoup constant `floor(b·2^k / q)` that turns a
+/// modular multiply by that (fixed) coefficient into a multiply-high plus a
+/// conditional subtraction with no general reduction. Key material is stored this
+/// way because at *use* time (`KeySwitchingKey::key_switch`) it is always the
+/// fixed right-hand multiplicand, so the Shoup table is computed once at key
+/// generation and amortized over every relinearization.
+///
+/// The flip side is that `NttShoup` intentionally has no `AddAssign`: the Shoup
+/// constants are derived from the coefficient values, so summing two `NttShoup`
+/// polynomials would invalidate every precomputed factor. Aggregation is a rare
+/// generation-time operation, so we pay the cost here: convert each operand to
+/// `Ntt` (which supports addition), sum, and rebuild the Shoup table once via
+/// `into_ntt_shoup` for the cheap-multiply property to hold on the hot path.
+fn sum_ksk_c0<'a>(
+    ksks: impl Iterator<Item = &'a KeySwitchingKey>,
+) -> Result<Box<[Poly<NttShoup>]>> {
+    let mut acc: Vec<Option<Poly<Ntt>>> = Vec::new();
+    for ksk in ksks {
+        if acc.is_empty() {
+            acc.resize_with(ksk.c0.len(), || None);
+        } else if acc.len() != ksk.c0.len() {
+            return Err(Error::DefaultError(
+                "Relinearization key shares have mismatched gadget dimension".to_string(),
+            ));
+        }
+        // Convert and sum in NTT.
+        for (slot, c0_j) in acc.iter_mut().zip(ksk.c0.iter()) {
+            let c0_j_ntt = c0_j.clone().into_ntt();
+            match slot {
+                Some(sum) => *sum += &c0_j_ntt,
+                None => *slot = Some(c0_j_ntt),
+            }
+        }
+    }
+    if acc.is_empty() {
+        return Err(Error::DefaultError(
+            "Cannot sum an empty set of key-switching keys".to_string(),
+        ));
+    }
+    // Convert again in NTTShoup.
+    let out = acc
+        .into_iter()
+        .map(|p| {
+            p.ok_or_else(|| Error::DefaultError("missing c0 component".to_string()))
+                .map(Poly::<Ntt>::into_ntt_shoup)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(out.into_boxed_slice())
+}
+
 impl LBFVRelinearizationKey {
     /// Generate a new relinearization key. This relinearization key is
     /// generated using the key switching keys from r to s and s to r, following
@@ -80,69 +281,21 @@ impl LBFVRelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx_relin_key = sk.par.context_at_level(key_level)?;
-        let ctx_ciphertext = sk.par.context_at_level(ciphertext_level)?;
-        let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
-
-        if ciphertext_level < key_level {
-            return Err(Error::DefaultError(
-                "Ciphertext level must be greater than or equal to key level".to_string(),
-            ));
-        }
-
-        if ctx_relin_key.moduli().len() == 1 {
-            return Err(Error::DefaultError(
-                "These parameters do not support key switching".to_string(),
-            ));
-        }
-
-        if ctx_ciphertext.moduli().len() == 1 {
-            return Err(Error::DefaultError(
-                "These parameters do not support key switching".to_string(),
-            ));
-        }
-
-        // Generate random polynomial 'r' from the key distribution
-        let r: SecretKey = SecretKey::random(&sk.par, rng);
-        let r_poly =
-            Poly::<PowerBasis>::try_convert_from(r.coeffs.as_ref(), ctx_ciphertext, false)?;
-        let r_switched_up = r_poly.switch(&switcher_up)?;
-
-        let sk_poly =
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx_ciphertext, false)?;
-        let sk_switched_up = sk_poly.switch(&switcher_up)?;
-
-        // Create key switching key from r to s using d1_seed if provided, otherwise
-        // generate new seed (-sk*d1 + e + r*g, d1) = (d0, d1)
+        // The single-key key is the aggregate of a single contribution. The CRS
+        // `a` is the public key's seed (shared with its `b_vec`), and `d1` is the
+        // provided URS seed, or a fresh one if none was given.
         let d1_seed = d1_seed.unwrap_or_else(|| {
             let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
             rng.fill(&mut seed);
             seed
         });
-        let ksk_r_to_s = KeySwitchingKey::new_with_seed(
-            sk,
-            &r_switched_up,
-            d1_seed,
-            ciphertext_level,
-            key_level,
-            rng,
-        )?;
+        // The CRS (a) seed must always be given (since is the same of the sk generation).
+        let a_seed = pk
+            .seed
+            .ok_or_else(|| Error::DefaultError("Public key is missing its seed".to_string()))?;
 
-        // Create key switching key from s to r using -a_seed. Note, we negate 'r' to
-        // counteract the effects of a positive 'a' since we do not want to go into the
-        // code and negate 'a' itself. We are using c0 of this key switching key
-        // anyways so a positive 'a' is not a big deal. We get (r*a + e + sk*g, a).
-        let mut neg_r = r.clone();
-        neg_r.coeffs.iter_mut().for_each(|x| *x = x.wrapping_neg());
-        let ksk_s_to_r = KeySwitchingKey::new_with_seed(
-            &neg_r,
-            &sk_switched_up,
-            pk.seed
-                .ok_or_else(|| Error::DefaultError("Public key is missing its seed".to_string()))?,
-            ciphertext_level,
-            key_level,
-            rng,
-        )?;
+        let share =
+            LBFVRelinKeyShare::contribution(sk, d1_seed, a_seed, ciphertext_level, key_level, rng)?;
 
         // Extract b_vec from pk.c[i][0] at the ciphertext level
         // TODO: we are not switching to the key level here, but since the ciphertext
@@ -150,6 +303,62 @@ impl LBFVRelinearizationKey {
         // We should probably think about this more carefully.
         let b_vec =
             pk.extract_b_polynomials(ciphertext_level, key_level, Representation::NttShoup)?;
+
+        Self::aggregate(&[share], b_vec)
+    }
+
+    /// Aggregate per-node contributions into a distributed relinearization key,
+    /// following Eq. (4) of §5.2 of
+    /// [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
+    ///
+    /// The contributions are summed coordinate-wise:
+    /// `rlk = (Σ d0_i, d1, Σ d2_i)`. Because l-BFV relinearization-key
+    /// generation is linear in the secret key, the result is a valid
+    /// relinearization key for `sk = Σ sk_i` (with `r = Σ r_i`).
+    ///
+    /// # Arguments
+    /// * `shares` - The contributions from the participating parties. They must
+    ///   all share the same `d1`/`a` seeds and levels, otherwise their `d1`/`a`
+    ///   components do not line up and aggregation is rejected.
+    /// * `b_vec` - The `b`-polynomials of the aggregated threshold public key,
+    ///   in `NttShoup` representation (e.g. from
+    ///   [`LBFVPublicKey::extract_b_polynomials`](super::LBFVPublicKey::extract_b_polynomials)).
+    pub fn aggregate(shares: &[LBFVRelinKeyShare], b_vec: Vec<Poly<NttShoup>>) -> Result<Self> {
+        let (first, rest) = shares.split_first().ok_or_else(|| {
+            Error::DefaultError("Cannot aggregate zero relinearization key shares".to_string())
+        })?;
+
+        // All shares must agree on the common strings (seeds) and levels so that
+        // their d1 / a components are identical and the c0 sums are meaningful.
+        for s in rest {
+            if s.ksk_r_to_s.seed != first.ksk_r_to_s.seed
+                || s.ksk_s_to_r.seed != first.ksk_s_to_r.seed
+                || s.ksk_r_to_s.ciphertext_level != first.ksk_r_to_s.ciphertext_level
+                || s.ksk_r_to_s.ksk_level != first.ksk_r_to_s.ksk_level
+            {
+                return Err(Error::DefaultError(
+                    "Relinearization key shares are inconsistent (differing seeds or levels)"
+                        .to_string(),
+                ));
+            }
+        }
+
+        // Clone a share as the template (carrying the shared c1 = d1 / a and all
+        // context/level metadata), then overwrite its c0 with the summed d0 / d2.
+        //
+        // Summing the c0 components adds up the per-node secrets together: both
+        // the real key sk_i and the ephemeral r_i are additive across nodes, so
+        //   Σ d0_i = -(Σ sk_i)·d1 + Σ e0_i + (Σ r_i)·g = -sk·d1 + e0 + r·g
+        //   Σ d2_i =  (Σ r_i)·a   + Σ e2_i + (Σ sk_i)·g =  r·a   + e2 + sk·g
+        // with sk = Σ sk_i and r = Σ r_i. The shared c1 (= d1 / a) is identical
+        // in every share, so it is carried over unchanged from the template. The
+        // result is exactly a single-key rlk for the joint sk, with neither sk
+        // nor r ever assembled in one place.
+        let mut ksk_r_to_s = first.ksk_r_to_s.clone();
+        ksk_r_to_s.c0 = sum_ksk_c0(shares.iter().map(|s| &s.ksk_r_to_s))?;
+
+        let mut ksk_s_to_r = first.ksk_s_to_r.clone();
+        ksk_s_to_r.c0 = sum_ksk_c0(shares.iter().map(|s| &s.ksk_s_to_r))?;
 
         Ok(Self {
             ksk_r_to_s,
@@ -498,6 +707,77 @@ mod tests {
 
         let result = Vec::<u64>::try_decode(&pt_deserialized, Encoding::poly())?;
         assert_eq!(result[0], 4);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_distributed_relinearization() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+
+        // n parties, each with its own secret-key contribution sk_i.
+        let n = 3;
+        let sk_shares: Vec<SecretKey> = (0..n)
+            .map(|_| SecretKey::random(&params, &mut rng))
+            .collect();
+
+        // The joint secret key sk = Σ sk_i, held by nobody in the real protocol
+        // but assembled here to build the public key and to decrypt.
+        let mut sum_coeffs = vec![0i64; params.degree()];
+        for sk in &sk_shares {
+            for (acc, c) in sum_coeffs.iter_mut().zip(sk.coeffs.iter()) {
+                *acc = acc.wrapping_add(*c);
+            }
+        }
+        let sk_joint = SecretKey::new(sum_coeffs, &params);
+
+        // Threshold public key under the joint key. Its seed is the shared CRS a
+        // that the contributions must reuse for d2.
+        let pk = LBFVPublicKey::new(&sk_joint, &mut rng);
+        let a_seed = pk.seed.expect("public key seed");
+
+        // Common URS d1 for all contributions.
+        let mut d1_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut d1_seed);
+
+        // Each party computes its contribution from its own sk_i and local r_i.
+        let shares: Vec<LBFVRelinKeyShare> = sk_shares
+            .iter()
+            .map(|sk_i| {
+                LBFVRelinKeyShare::contribution(sk_i, d1_seed, a_seed, 0, 0, &mut rng).unwrap()
+            })
+            .collect();
+
+        // Aggregate into a single relinearization key for the joint sk.
+        let b_vec = pk.extract_b_polynomials(0, 0, Representation::NttShoup)?;
+        let relin_key = LBFVRelinearizationKey::aggregate(&shares, b_vec)?;
+
+        // Aggregating with inconsistent seeds must be rejected.
+        let mut bad_d1 = d1_seed;
+        bad_d1[0] ^= 0xff;
+        let bad_share =
+            LBFVRelinKeyShare::contribution(&sk_shares[0], bad_d1, a_seed, 0, 0, &mut rng)?;
+        let b_vec2 = pk.extract_b_polynomials(0, 0, Representation::NttShoup)?;
+        assert!(
+            LBFVRelinearizationKey::aggregate(&[shares[0].clone(), bad_share], b_vec2).is_err()
+        );
+
+        // The aggregated key must relinearize a product that decrypts under the
+        // joint sk, for both encodings.
+        for encoding in [Encoding::poly(), Encoding::simd()] {
+            let pt1 = Plaintext::try_encode(&[3u64], encoding.clone(), &params)?;
+            let pt2 = Plaintext::try_encode(&[5u64], encoding.clone(), &params)?;
+            let ct1 = pk.try_encrypt(&pt1, &mut rng)?;
+            let ct2 = pk.try_encrypt(&pt2, &mut rng)?;
+
+            let mut ct_product = &ct1 * &ct2;
+            relin_key.relinearizes(&mut ct_product)?;
+
+            let pt_result = sk_joint.try_decrypt(&ct_product)?;
+            let result = Vec::<u64>::try_decode(&pt_result, encoding.clone())?;
+            assert_eq!(result[0], 15);
+        }
 
         Ok(())
     }
