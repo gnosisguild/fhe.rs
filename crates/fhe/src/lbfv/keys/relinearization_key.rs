@@ -71,14 +71,13 @@ pub struct LBFVRelinearizationKey {
 ///
 /// # Assumptions and current limitations
 ///
-/// - Caller-enforced consistency: correctness requires every party to use
-///   the *same* `d1` (URS) and `a` (CRS) seeds, and `a` must be the very seed
-///   used to build the threshold public key whose `b_vec` is passed to
-///   [`LBFVRelinearizationKey::aggregate`]. The `-a_j·sk` term in `b_vec` and
-///   the `+r·a_j·sk` term in `d2` must cancel during relinearization.
-///   `aggregate` checks that the seeds/levels *match across shares*, but it
-///   cannot check they match the public key's `b_vec`; that binding is the
-///   caller's responsibility.
+/// - Consistency is checked at aggregation: correctness requires every party to
+///   use the *same* `d1` (URS) and `a` (CRS) seeds, and `a` must be the very
+///   seed used to build the threshold public key whose `b_vec` relinearization
+///   consumes. The `-a_j·sk` term in `b_vec` and the `+r·a_j·sk` term in `d2`
+///   must cancel during relinearization. [`LBFVRelinearizationKey::aggregate`]
+///   checks both: that the seeds/levels match across shares, and that the
+///   shares' CRS `a` matches the public key's seed.
 /// - Contributions, not Shamir shares: `contribution` consumes a secret-key
 ///   *contribution* `sk_i` (a summand of `sk = Σ sk_i`), not a Shamir share of
 ///   `sk`. The rlk aggregates additively over contributions, exactly like the
@@ -91,14 +90,13 @@ pub struct LBFVRelinearizationKey {
 ///   exercised/tested. The leveled path is inherited from the single-key code
 ///   and is currently untested for distributed keys.
 ///
-/// # Not yet implemented (needed to remove the last assembled-`sk` dependency)
+/// The threshold public key whose `b_vec` is consumed here is itself built from
+/// aggregated contributions via [`LBFVPublicKey::aggregate`](super::LBFVPublicKey::aggregate),
+/// so end to end no party ever assembles `sk`: it exists only as the implicit
+/// sum of the per-node `sk_i`.
 ///
-/// - A matching distributed/`from_parts` constructor for [`LBFVPublicKey`]
-///   so the threshold public key (and hence `b_vec`) can be built from
-///   aggregated contributions instead of a full `sk`. Until then, callers must
-///   supply a `b_vec` from a public key built elsewhere (e.g. by the DKG/
-///   aggregator), and the only place `sk` is assembled is that public-key
-///   construction, not here.
+/// # Not yet implemented
+///
 /// - Serialization of a single `LBFVRelinKeyShare` for transport/broadcast
 ///   (only the aggregated [`LBFVRelinearizationKey`] is currently serializable).
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -300,14 +298,7 @@ impl LBFVRelinearizationKey {
         let share =
             LBFVRelinKeyShare::contribution(sk, d1_seed, a_seed, ciphertext_level, key_level, rng)?;
 
-        // Extract b_vec from pk.c[i][0] at the ciphertext level
-        // TODO: we are not switching to the key level here, but since the ciphertext
-        // level defines l (the number of ciphertexts in the public key), this may be fine.
-        // We should probably think about this more carefully.
-        let b_vec =
-            pk.extract_b_polynomials(ciphertext_level, key_level, Representation::NttShoup)?;
-
-        Self::aggregate(&[share], b_vec)
+        Self::aggregate(&[share], pk)
     }
 
     /// Aggregate per-node contributions into a distributed relinearization key,
@@ -319,14 +310,27 @@ impl LBFVRelinearizationKey {
     /// generation is linear in the secret key, the result is a valid
     /// relinearization key for `sk = Σ sk_i` (with `r = Σ r_i`).
     ///
+    /// The `b_vec` is taken from `pk` (the aggregated threshold public key), and
+    /// the CRS `a` it was built under — `pk.seed` — is checked against the `a`
+    /// the contributions used for their `d2` (`ksk_s_to_r`'s seed). This closes
+    /// the consistency loop: the `-a_j·sk` term in `b_vec` and the `+r·a_j·sk`
+    /// term in `d2` only cancel during relinearization if both use the same `a`.
+    /// The ciphertext/key levels are taken from the shares themselves.
+    ///
     /// # Arguments
     /// * `shares` - The contributions from the participating parties. They must
     ///   all share the same `d1`/`a` seeds and levels, otherwise their `d1`/`a`
     ///   components do not line up and aggregation is rejected.
-    /// * `b_vec` - The `b`-polynomials of the aggregated threshold public key,
-    ///   in `NttShoup` representation (e.g. from
-    ///   [`LBFVPublicKey::extract_b_polynomials`](super::LBFVPublicKey::extract_b_polynomials)).
-    pub fn aggregate(shares: &[LBFVRelinKeyShare], b_vec: Vec<Poly<NttShoup>>) -> Result<Self> {
+    /// * `pk` - The aggregated threshold public key (e.g. from
+    ///   [`LBFVPublicKey::aggregate`](super::LBFVPublicKey::aggregate)). It must
+    ///   have been built under the same CRS seed `a` as the contributions, and
+    ///   it supplies the `b_vec` used in relinearization.
+    ///
+    /// # Errors
+    /// Returns an error if `shares` is empty, if the shares disagree on their
+    /// seeds/levels, or if `pk.seed` does not match the CRS seed the
+    /// contributions used (a mismatched CRS `a` between `b_vec` and `d2`).
+    pub fn aggregate(shares: &[LBFVRelinKeyShare], pk: &LBFVPublicKey) -> Result<Self> {
         let (first, rest) = shares.split_first().ok_or_else(|| {
             Error::DefaultError("Cannot aggregate zero relinearization key shares".to_string())
         })?;
@@ -345,6 +349,23 @@ impl LBFVRelinearizationKey {
                 ));
             }
         }
+
+        // CRS binding: the `a` used to build d2 (ksk_s_to_r's seed) must be the
+        // same CRS `a` the public key's b_vec was built under (pk.seed). Without
+        // this, the -a_j·sk and +r·a_j·sk terms would not cancel during relin.
+        if first.ksk_s_to_r.seed != pk.seed {
+            return Err(Error::DefaultError(
+                "Relinearization key shares use a different CRS 'a' than the public key"
+                    .to_string(),
+            ));
+        }
+
+        // Levels are defined by the shares; b_vec is extracted from the public
+        // key at those levels.
+        let ciphertext_level = first.ksk_r_to_s.ciphertext_level;
+        let key_level = first.ksk_r_to_s.ksk_level;
+        let b_vec =
+            pk.extract_b_polynomials(ciphertext_level, key_level, Representation::NttShoup)?;
 
         // Clone a share as the template (carrying the shared c1 = d1 / a and all
         // context/level metadata), then overwrite its c0 with the summed d0 / d2.
@@ -753,10 +774,16 @@ mod tests {
         }
         let sk_joint = SecretKey::new(sum_coeffs, &params);
 
-        // Threshold public key under the joint key. Its seed is the shared CRS a
-        // that the contributions must reuse for d2.
-        let pk = LBFVPublicKey::new(&sk_joint, &mut rng);
-        let a_seed = pk.seed.expect("public key seed");
+        // Threshold public key built by aggregating per-node contributions
+        // (F2) — sk_joint is NOT used to construct it. All contributions share
+        // the CRS seed `a_seed`, which the rlk's d2 must reuse.
+        let mut a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut a_seed);
+        let pk_contributions: Vec<LBFVPublicKey> = sk_shares
+            .iter()
+            .map(|sk_i| LBFVPublicKey::new_with_seed(sk_i, a_seed, &mut rng))
+            .collect();
+        let pk = LBFVPublicKey::aggregate(&pk_contributions)?;
 
         // Common URS d1 for all contributions.
         let mut d1_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
@@ -770,19 +797,28 @@ mod tests {
             })
             .collect();
 
-        // Aggregate into a single relinearization key for the joint sk.
-        let b_vec = pk.extract_b_polynomials(0, 0, Representation::NttShoup)?;
-        let relin_key = LBFVRelinearizationKey::aggregate(&shares, b_vec)?;
+        // Aggregate into a single relinearization key for the joint sk. The
+        // public key supplies b_vec and is checked to share the CRS `a`.
+        let relin_key = LBFVRelinearizationKey::aggregate(&shares, &pk)?;
 
-        // Aggregating with inconsistent seeds must be rejected.
+        // Aggregating with inconsistent d1 seeds across shares must be rejected.
         let mut bad_d1 = d1_seed;
         bad_d1[0] ^= 0xff;
         let bad_share =
             LBFVRelinKeyShare::contribution(&sk_shares[0], bad_d1, a_seed, 0, 0, &mut rng)?;
-        let b_vec2 = pk.extract_b_polynomials(0, 0, Representation::NttShoup)?;
-        assert!(
-            LBFVRelinearizationKey::aggregate(&[shares[0].clone(), bad_share], b_vec2).is_err()
-        );
+        assert!(LBFVRelinearizationKey::aggregate(&[shares[0].clone(), bad_share], &pk).is_err());
+
+        // A public key built under a different CRS `a` than the shares must be
+        // rejected (the b_vec / d2 cancellation would otherwise be broken).
+        let mut other_a = a_seed;
+        other_a[0] ^= 0xff;
+        let pk_other = LBFVPublicKey::aggregate(
+            &sk_shares
+                .iter()
+                .map(|sk_i| LBFVPublicKey::new_with_seed(sk_i, other_a, &mut rng))
+                .collect::<Vec<_>>(),
+        )?;
+        assert!(LBFVRelinearizationKey::aggregate(&shares, &pk_other).is_err());
 
         // The aggregated key must relinearize a product that decrypts under the
         // joint sk, for both encodings.
