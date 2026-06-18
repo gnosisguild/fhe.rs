@@ -77,6 +77,98 @@ impl LBFVPublicKey {
         Self::new_with_seed(sk, seed, rng)
     }
 
+    /// Aggregate per-node public-key contributions into the threshold public key
+    /// (DKG aggregation, Eq. (3) of §5.1 of
+    /// [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf)).
+    ///
+    /// Each contribution is itself an [`LBFVPublicKey`] built by a single node
+    /// from its secret-key contribution `sk_i` and the common CRS seed, i.e.
+    /// `LBFVPublicKey::new_with_seed(sk_i, shared_seed, rng)`. A contribution is
+    /// therefore `l` encryptions of zero `(b_{i,j}, a_j) = (-a_j·sk_i + e_{i,j},
+    /// a_j)`, all sharing the CRS `a_j` derived from `shared_seed`.
+    ///
+    /// Aggregation sums the `b` components coordinate-wise and keeps the shared
+    /// `a`:
+    /// ```text
+    ///   b_j = Σ_i b_{i,j} = -a_j·(Σ_i sk_i) + Σ_i e_{i,j} = -a_j·sk + e_j
+    /// ```
+    /// so the result is `l` encryptions of zero under the joint key
+    /// `sk = Σ_i sk_i`, sharing the same CRS `a`. Component `[0]` doubles as the
+    /// encryption key `(b_0, a_0)`, while the `b`-polynomials of all `l`
+    /// components form the relinearization `b_vec` (via
+    /// [`extract_b_polynomials`](Self::extract_b_polynomials)). Crucially, `sk`
+    /// is never assembled: each node only ever holds its own `sk_i`.
+    ///
+    /// The shared seed is carried over to the result, so the same CRS `a` is
+    /// reused when building the relinearization key's `d2` (it must match! see
+    /// [`LBFVRelinKeyShare`](super::LBFVRelinKeyShare)).
+    ///
+    /// # Errors
+    /// Returns an error if `contributions` is empty, or if the contributions are
+    /// inconsistent (differing seed, `l`, parameters, or number of ciphertexts),
+    /// which would mean they do not share a common CRS `a` and cannot be summed.
+    #[allow(clippy::indexing_slicing)] // each ct.c has exactly 2 components (BFV invariant)
+    pub fn aggregate(contributions: &[LBFVPublicKey]) -> Result<Self> {
+        // Split the per-node contributions into the first one and the rest.
+        // `first` is the reference every other contribution is validated against
+        // (same CRS seed / l / params) and the starting point for the b-sum; `rest`
+        // are the remaining nodes' contributions that get added in.
+        let (first, rest) = contributions.split_first().ok_or_else(|| {
+            Error::DefaultError("Cannot aggregate zero public-key contributions".to_string())
+        })?;
+
+        for pk in rest {
+            if pk.seed != first.seed
+                || pk.l != first.l
+                || pk.par != first.par
+                || pk.c.len() != first.c.len()
+            {
+                return Err(Error::DefaultError(
+                    "Public-key contributions are inconsistent (differing seed, l, or parameters)"
+                        .to_string(),
+                ));
+            }
+        }
+
+        // Each c[j] is an encryption of zero: (b_{i,j}, a_j) with
+        // b_{i,j} = -a_j·sk_i + e_{i,j}, so b_{i,j} + a_j·sk_i = e_{i,j} ≈ 0.
+        // For each of the l zero-encryptions we sum the b components (c[0])
+        // across contributions and keep the shared a (c[1]).
+        // first.c are the public key ciphertexts, one per modulus.
+        let mut c: Vec<Ciphertext> = Vec::with_capacity(first.c.len());
+        for (j, first_ct) in first.c.iter().enumerate() {
+            // Sum the b component (c[0]) over all contributions:
+            //   b_j = Σ_i b_{i,j} = -a_j·(Σ_i sk_i) + Σ_i e_{i,j} = -a_j·sk + e_j.
+            // The result is still an encryption of zero, now under the joint
+            // sk = Σ_i sk_i (since b_j + a_j·sk = Σ_i e_{i,j} ≈ 0).
+            let mut b = first_ct.c[0].clone();
+            for pk in rest {
+                b += &pk.c[j].c[0];
+            }
+
+            // c[1] is the shared CRS a_j: identical across all contributions
+            // (same seed), so it is taken as-is rather than summed.
+            let a = first_ct.c[1].clone();
+            let mut ct = Ciphertext {
+                par: first.par.clone(),
+                seed: None,
+                c: vec![b, a],
+                level: first_ct.level,
+            };
+            // Public-key polynomials must not allow variable-time computation.
+            ct.c.iter_mut()
+                .for_each(|p| p.disallow_variable_time_computations());
+            c.push(ct);
+        }
+
+        Ok(Self {
+            par: first.par.clone(),
+            c,
+            l: first.l,
+            seed: first.seed,
+        })
+    }
+
     /// Encrypt a plaintext with the public key.
     /// The encryption is done in the same level as the plaintext.
     /// Returns the ciphertext and the noise polynomials.
@@ -333,9 +425,71 @@ mod tests {
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
     use fhe_math::zq::Modulus;
     use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
-    use rand::{SeedableRng, rng};
+    use rand::{Rng, SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::error::Error;
+
+    #[test]
+    fn test_aggregate_public_key() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let n = 3;
+
+        // Common CRS seed shared by all nodes.
+        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut seed);
+
+        // Per-node secret-key contributions, and the matching public-key
+        // contributions (l zero-encryptions under sk_i with the shared seed).
+        let sk_shares: Vec<SecretKey> = (0..n)
+            .map(|_| SecretKey::random(&params, &mut rng))
+            .collect();
+        let contributions: Vec<LBFVPublicKey> = sk_shares
+            .iter()
+            .map(|sk_i| LBFVPublicKey::new_with_seed(sk_i, seed, &mut rng))
+            .collect();
+
+        // Joint secret key, assembled only to check decryption in this test.
+        let mut sum_coeffs = vec![0i64; params.degree()];
+        for sk in &sk_shares {
+            for (acc, c) in sum_coeffs.iter_mut().zip(sk.coeffs.iter()) {
+                *acc = acc.wrapping_add(*c);
+            }
+        }
+        let sk_joint = SecretKey::new(sum_coeffs, &params);
+
+        let pk = LBFVPublicKey::aggregate(&contributions)?;
+
+        // The aggregated key carries the shared CRS seed and the right l.
+        assert_eq!(pk.seed, Some(seed));
+        assert_eq!(pk.l, params.moduli().len());
+        assert_eq!(pk.c.len(), params.moduli().len());
+
+        // All l zero-encryptions decrypt to zero under the joint key.
+        for ct in pk.c.iter() {
+            assert_eq!(
+                sk_joint.try_decrypt(ct)?,
+                Plaintext::zero(Encoding::poly(), &params)?
+            );
+        }
+
+        // Encrypt/decrypt roundtrip under the aggregated public key.
+        let pt = Plaintext::try_encode(
+            &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+        let ct = pk.try_encrypt(&pt, &mut rng)?;
+        assert_eq!(sk_joint.try_decrypt(&ct)?, pt);
+
+        // A contribution under a different CRS seed must be rejected.
+        let mut other_seed = seed;
+        other_seed[0] ^= 0xff;
+        let bad = LBFVPublicKey::new_with_seed(&sk_shares[0], other_seed, &mut rng);
+        assert!(LBFVPublicKey::aggregate(&[contributions[0].clone(), bad]).is_err());
+
+        Ok(())
+    }
 
     #[test]
     fn keygen() -> Result<(), Box<dyn Error>> {
