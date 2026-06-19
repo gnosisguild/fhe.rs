@@ -40,42 +40,46 @@ impl FheEncoderVariableTime<&[u64]> for PlaintextVec {
     unsafe fn try_encode_vt(
         value: &[u64],
         encoding: Encoding,
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
     ) -> Result<Self> {
         if value.is_empty() {
-            return Ok(PlaintextVec(vec![Plaintext::zero(encoding, par)?]));
+            return Ok(PlaintextVec(vec![Plaintext::zero(encoding, params)?]));
         }
-        if encoding.encoding == EncodingEnum::Simd && par.ntt_operator.is_none() {
+        if encoding.encoding == EncodingEnum::Simd && params.ntt_operator.is_none() {
             return Err(Error::EncodingNotSupported {
                 encoding: EncodingEnum::Simd.to_string(),
                 reason: "NTT operator not available".into(),
             });
         }
-        let ctx = par.context_at_level(encoding.level)?;
-        let num_plaintexts = value.len().div_ceil(par.degree());
+        let ctx = params.context_at_level(encoding.level)?;
+        let num_plaintexts = value.len().div_ceil(params.degree());
 
         Ok(PlaintextVec(
             (0..num_plaintexts)
                 .map(|i| {
-                    let slice = &value[i * par.degree()..min(value.len(), (i + 1) * par.degree())];
-                    let mut v = vec![0u64; par.degree()];
+                    let slice =
+                        &value[i * params.degree()..min(value.len(), (i + 1) * params.degree())];
+                    let mut v = vec![0u64; params.degree()];
                     match encoding.encoding {
                         EncodingEnum::Poly => v[..slice.len()].copy_from_slice(slice),
                         EncodingEnum::Simd => {
                             for i in 0..slice.len() {
-                                v[par.matrix_reps_index_map[i]] = slice[i];
+                                v[params.matrix_reps_index_map[i]] = slice[i];
                             }
                             let ntt_operator =
-                                par.ntt_operator.as_ref().ok_or(Error::InvalidPlaintext {
-                                    reason: "No Ntt operator".into(),
-                                })?;
+                                params
+                                    .ntt_operator
+                                    .as_ref()
+                                    .ok_or(Error::InvalidPlaintext {
+                                        reason: "No Ntt operator".into(),
+                                    })?;
                             unsafe { ntt_operator.backward_vt(v.as_mut_ptr()) };
                         }
                     };
 
                     let poly = Poly::<PowerBasis>::try_convert_from(&v, ctx, true)?.into_ntt();
 
-                    let value_enum = match par.plaintext {
+                    let value_enum = match params.plaintext {
                         crate::bfv::PlaintextModulus::Small { .. } => {
                             PlaintextValues::Small(v.into_boxed_slice())
                         }
@@ -88,7 +92,7 @@ impl FheEncoderVariableTime<&[u64]> for PlaintextVec {
                     };
 
                     Ok(Plaintext {
-                        par: par.clone(),
+                        params: params.clone(),
                         value: value_enum,
                         encoding: Some(encoding.clone()),
                         poly_ntt: poly,
@@ -102,35 +106,41 @@ impl FheEncoderVariableTime<&[u64]> for PlaintextVec {
 
 impl FheEncoder<&[BigUint]> for PlaintextVec {
     type Error = Error;
-    fn try_encode(value: &[BigUint], encoding: Encoding, par: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_encode(
+        value: &[BigUint],
+        encoding: Encoding,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
         if value.is_empty() {
-            return Ok(PlaintextVec(vec![Plaintext::zero(encoding, par)?]));
+            return Ok(PlaintextVec(vec![Plaintext::zero(encoding, params)?]));
         }
-        if encoding.encoding == EncodingEnum::Simd && par.ntt_operator.is_none() {
+        if encoding.encoding == EncodingEnum::Simd && params.ntt_operator.is_none() {
             return Err(Error::EncodingNotSupported {
                 encoding: EncodingEnum::Simd.to_string(),
                 reason: "NTT operator not available".into(),
             });
         }
-        let ctx = par.context_at_level(encoding.level)?;
-        let num_plaintexts = value.len().div_ceil(par.degree());
+        let ctx = params.context_at_level(encoding.level)?;
+        let num_plaintexts = value.len().div_ceil(params.degree());
 
         Ok(PlaintextVec(
             (0..num_plaintexts)
                 .map(|i| {
-                    let slice = &value[i * par.degree()..min(value.len(), (i + 1) * par.degree())];
-                    let mut v = vec![BigUint::zero(); par.degree()];
+                    let slice =
+                        &value[i * params.degree()..min(value.len(), (i + 1) * params.degree())];
+                    let mut v = vec![BigUint::zero(); params.degree()];
                     match encoding.encoding {
                         EncodingEnum::Poly => v[..slice.len()].clone_from_slice(slice),
                         EncodingEnum::Simd => {
-                            let mut v_u64 = vec![0u64; par.degree()];
+                            let mut v_u64 = vec![0u64; params.degree()];
                             for i in 0..slice.len() {
-                                v_u64[par.matrix_reps_index_map[i]] =
+                                v_u64[params.matrix_reps_index_map[i]] =
                                     slice[i].to_u64().ok_or(Error::DefaultError(
                                         "Value too large for SIMD encoding".to_string(),
                                     ))?;
                             }
-                            par.ntt_operator
+                            params
+                                .ntt_operator
                                 .as_ref()
                                 .ok_or(Error::InvalidPlaintext {
                                     reason: "No Ntt operator".into(),
@@ -144,7 +154,7 @@ impl FheEncoder<&[BigUint]> for PlaintextVec {
                     let poly =
                         Poly::<PowerBasis>::try_convert_from(v.as_slice(), ctx, false)?.into_ntt();
 
-                    let value_enum = match &par.plaintext {
+                    let value_enum = match &params.plaintext {
                         crate::bfv::PlaintextModulus::Small { modulus_big, .. } => {
                             PlaintextValues::Small(
                                 v.iter()
@@ -159,7 +169,7 @@ impl FheEncoder<&[BigUint]> for PlaintextVec {
                     };
 
                     Ok(Plaintext {
-                        par: par.clone(),
+                        params: params.clone(),
                         value: value_enum,
                         encoding: Some(encoding.clone()),
                         poly_ntt: poly,
@@ -173,31 +183,33 @@ impl FheEncoder<&[BigUint]> for PlaintextVec {
 
 impl FheEncoder<&[u64]> for PlaintextVec {
     type Error = Error;
-    fn try_encode(value: &[u64], encoding: Encoding, par: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_encode(value: &[u64], encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
         if value.is_empty() {
-            return Ok(PlaintextVec(vec![Plaintext::zero(encoding, par)?]));
+            return Ok(PlaintextVec(vec![Plaintext::zero(encoding, params)?]));
         }
-        if encoding.encoding == EncodingEnum::Simd && par.ntt_operator.is_none() {
+        if encoding.encoding == EncodingEnum::Simd && params.ntt_operator.is_none() {
             return Err(Error::EncodingNotSupported {
                 encoding: EncodingEnum::Simd.to_string(),
                 reason: "NTT operator not available".into(),
             });
         }
-        let ctx = par.context_at_level(encoding.level)?;
-        let num_plaintexts = value.len().div_ceil(par.degree());
+        let ctx = params.context_at_level(encoding.level)?;
+        let num_plaintexts = value.len().div_ceil(params.degree());
 
         Ok(PlaintextVec(
             (0..num_plaintexts)
                 .map(|i| {
-                    let slice = &value[i * par.degree()..min(value.len(), (i + 1) * par.degree())];
-                    let mut v = vec![0u64; par.degree()];
+                    let slice =
+                        &value[i * params.degree()..min(value.len(), (i + 1) * params.degree())];
+                    let mut v = vec![0u64; params.degree()];
                     match encoding.encoding {
                         EncodingEnum::Poly => v[..slice.len()].copy_from_slice(slice),
                         EncodingEnum::Simd => {
                             for i in 0..slice.len() {
-                                v[par.matrix_reps_index_map[i]] = slice[i];
+                                v[params.matrix_reps_index_map[i]] = slice[i];
                             }
-                            par.ntt_operator
+                            params
+                                .ntt_operator
                                 .as_ref()
                                 .ok_or(Error::InvalidPlaintext {
                                     reason: "No Ntt operator".into(),
@@ -208,7 +220,7 @@ impl FheEncoder<&[u64]> for PlaintextVec {
 
                     let poly = Poly::<PowerBasis>::try_convert_from(&v, ctx, false)?.into_ntt();
 
-                    let value_enum = match par.plaintext {
+                    let value_enum = match params.plaintext {
                         crate::bfv::PlaintextModulus::Small { .. } => {
                             PlaintextValues::Small(v.into_boxed_slice())
                         }
@@ -221,7 +233,7 @@ impl FheEncoder<&[u64]> for PlaintextVec {
                     };
 
                     Ok(Plaintext {
-                        par: par.clone(),
+                        params: params.clone(),
                         value: value_enum,
                         encoding: Some(encoding.clone()),
                         poly_ntt: poly,

@@ -21,7 +21,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// - inner sum
 #[derive(Debug, PartialEq, Eq)]
 pub struct EvaluationKey {
-    par: Arc<BfvParameters>,
+    params: Arc<BfvParameters>,
 
     ciphertext_level: usize,
     evaluation_key_level: usize,
@@ -41,9 +41,9 @@ impl EvaluationKey {
     /// inner sums.
     #[must_use]
     pub fn supports_inner_sum(&self) -> bool {
-        let mut ret = self.gk.contains_key(&(self.par.degree() * 2 - 1));
+        let mut ret = self.gk.contains_key(&(self.params.degree() * 2 - 1));
         let mut i = 1;
-        while i < self.par.degree() / 2 {
+        while i < self.params.degree() / 2 {
             ret &= self
                 .gk
                 .contains_key(self.rot_to_gk_exponent.get(&i).unwrap());
@@ -60,10 +60,10 @@ impl EvaluationKey {
             ))
         } else {
             let mut out = ct.clone();
-            let mut tmp = Ciphertext::zero(&ct.par);
+            let mut tmp = Ciphertext::zero(&ct.params);
 
             let mut i = 1;
-            while i < ct.par.degree() / 2 {
+            while i < ct.params.degree() / 2 {
                 let gk = self
                     .gk
                     .get(self.rot_to_gk_exponent.get(&i).unwrap())
@@ -73,7 +73,7 @@ impl EvaluationKey {
                 i *= 2
             }
 
-            let gk = self.gk.get(&(self.par.degree() * 2 - 1)).unwrap();
+            let gk = self.gk.get(&(self.params.degree() * 2 - 1)).unwrap();
             gk.relinearize_into(&out, &mut tmp)?;
             out += &tmp;
 
@@ -85,7 +85,7 @@ impl EvaluationKey {
     /// plaintext.
     #[must_use]
     pub fn supports_row_rotation(&self) -> bool {
-        self.gk.contains_key(&(self.par.degree() * 2 - 1))
+        self.gk.contains_key(&(self.params.degree() * 2 - 1))
     }
 
     /// Homomorphically rotate the rows of the plaintext
@@ -95,8 +95,8 @@ impl EvaluationKey {
                 "This key does not support the row rotation functionality".to_string(),
             ))
         } else {
-            let gk = self.gk.get(&(self.par.degree() * 2 - 1)).unwrap();
-            let mut out = Ciphertext::zero(&ct.par);
+            let gk = self.gk.get(&(self.params.degree() * 2 - 1)).unwrap();
+            let mut out = Ciphertext::zero(&ct.params);
             gk.relinearize_into(ct, &mut out)?;
             Ok(out)
         }
@@ -124,7 +124,7 @@ impl EvaluationKey {
                 .gk
                 .get(self.rot_to_gk_exponent.get(&i).unwrap())
                 .unwrap();
-            let mut out = Ciphertext::zero(&ct.par);
+            let mut out = Ciphertext::zero(&ct.params);
             gk.relinearize_into(ct, &mut out)?;
             Ok(out)
         }
@@ -135,12 +135,12 @@ impl EvaluationKey {
     pub fn supports_expansion(&self, level: usize) -> bool {
         if level == 0 {
             true
-        } else if self.evaluation_key_level == self.par.moduli().len() {
+        } else if self.evaluation_key_level == self.params.moduli().len() {
             false
         } else {
-            let mut ret = level < self.par.degree().leading_zeros() as usize;
+            let mut ret = level < self.params.degree().leading_zeros() as usize;
             for l in 0..level {
-                ret &= self.gk.contains_key(&((self.par.degree() >> l) + 1));
+                ret &= self.gk.contains_key(&((self.params.degree() >> l) + 1));
             }
             ret
         }
@@ -159,15 +159,15 @@ impl EvaluationKey {
         } else if level == 0 {
             Ok(vec![ct.clone()])
         } else if self.supports_expansion(level) {
-            let mut out = vec![Ciphertext::zero(&ct.par); 1 << level];
+            let mut out = vec![Ciphertext::zero(&ct.params); 1 << level];
             out[0] = ct.clone();
-            let mut sub = Ciphertext::zero(&ct.par);
+            let mut sub = Ciphertext::zero(&ct.params);
 
             // We use the Oblivious expansion algorithm of
             // https://eprint.iacr.org/2019/1483.pdf
             for l in 0..level {
                 let monomial = &self.monomials[l];
-                let gk = self.gk.get(&((self.par.degree() >> l) + 1)).unwrap();
+                let gk = self.gk.get(&((self.params.degree() >> l) + 1)).unwrap();
                 let step = 1 << l;
                 let (low, high) = out.split_at_mut(step);
                 for i in 0..step {
@@ -192,10 +192,10 @@ impl EvaluationKey {
         }
     }
 
-    fn construct_rot_to_gk_exponent(par: &Arc<BfvParameters>) -> HashMap<usize, usize> {
+    fn construct_rot_to_gk_exponent(params: &Arc<BfvParameters>) -> HashMap<usize, usize> {
         let mut m = HashMap::new();
-        let q = Modulus::new(2 * par.degree() as u64).unwrap();
-        for i in 1..par.degree() / 2 {
+        let q = Modulus::new(2 * params.degree() as u64).unwrap();
+        for i in 1..params.degree() / 2 {
             let exp = q.pow(3, i as u64) as usize;
             m.insert(i, exp);
         }
@@ -216,10 +216,10 @@ impl Serialize for EvaluationKey {
 impl DeserializeParametrized for EvaluationKey {
     type Error = Error;
 
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+    fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
         let gkp = Message::decode(bytes);
         if let Ok(gkp) = gkp {
-            EvaluationKey::try_convert_from(&gkp, par)
+            EvaluationKey::try_convert_from(&gkp, params)
         } else {
             Err(Error::DefaultError("Invalid serialization".to_string()))
         }
@@ -258,7 +258,7 @@ impl EvaluationKeyBuilder {
             row_rotation: false,
             expansion_level: 0,
             column_rotation: HashSet::new(),
-            rot_to_gk_exponent: EvaluationKey::construct_rot_to_gk_exponent(&sk.par),
+            rot_to_gk_exponent: EvaluationKey::construct_rot_to_gk_exponent(&sk.params),
         })
     }
 
@@ -272,7 +272,7 @@ impl EvaluationKeyBuilder {
         ciphertext_level: usize,
         evaluation_key_level: usize,
     ) -> Result<Self> {
-        if ciphertext_level < evaluation_key_level || ciphertext_level > sk.par.max_level() {
+        if ciphertext_level < evaluation_key_level || ciphertext_level > sk.params.max_level() {
             return Err(Error::DefaultError("Unexpected levels".to_string()));
         }
 
@@ -284,13 +284,13 @@ impl EvaluationKeyBuilder {
             row_rotation: false,
             expansion_level: 0,
             column_rotation: HashSet::new(),
-            rot_to_gk_exponent: EvaluationKey::construct_rot_to_gk_exponent(&sk.par),
+            rot_to_gk_exponent: EvaluationKey::construct_rot_to_gk_exponent(&sk.params),
         })
     }
 
     /// Allow expansion by this evaluation key.
     pub fn enable_expansion(&mut self, level: usize) -> Result<&mut Self> {
-        if level >= 64 - self.sk.par.degree().leading_zeros() as usize {
+        if level >= 64 - self.sk.params.degree().leading_zeros() as usize {
             Err(Error::DefaultError("Invalid level 2".to_string()))
         } else {
             self.expansion_level = level;
@@ -325,9 +325,9 @@ impl EvaluationKeyBuilder {
     pub fn build<R: RngCore + CryptoRng>(&mut self, rng: &mut R) -> Result<EvaluationKey> {
         let mut ek = EvaluationKey {
             gk: HashMap::default(),
-            par: self.sk.par.clone(),
+            params: self.sk.params.clone(),
             rot_to_gk_exponent: self.rot_to_gk_exponent.clone(),
-            monomials: Vec::with_capacity(self.sk.par.degree().ilog2() as usize),
+            monomials: Vec::with_capacity(self.sk.params.degree().ilog2() as usize),
             ciphertext_level: self.ciphertext_level,
             evaluation_key_level: self.evaluation_key_level,
         };
@@ -335,27 +335,27 @@ impl EvaluationKeyBuilder {
         let mut indices = self.column_rotation.clone();
 
         if self.row_rotation {
-            indices.insert(self.sk.par.degree() * 2 - 1);
+            indices.insert(self.sk.params.degree() * 2 - 1);
         }
 
         if self.inner_sum {
             // Add the required indices to the set of indices
-            indices.insert(self.sk.par.degree() * 2 - 1);
+            indices.insert(self.sk.params.degree() * 2 - 1);
             let mut i = 1;
-            while i < self.sk.par.degree() / 2 {
+            while i < self.sk.params.degree() / 2 {
                 indices.insert(*ek.rot_to_gk_exponent.get(&i).unwrap());
                 i *= 2
             }
         }
 
         for l in 0..self.expansion_level {
-            indices.insert((self.sk.par.degree() >> l) + 1);
+            indices.insert((self.sk.params.degree() >> l) + 1);
         }
 
-        let ciphertext_ctx = self.sk.par.context_at_level(self.ciphertext_level)?;
-        for l in 0..self.sk.par.degree().ilog2() {
-            let mut monomial = vec![0i64; self.sk.par.degree()];
-            monomial[self.sk.par.degree() - (1 << l)] = -1;
+        let ciphertext_ctx = self.sk.params.context_at_level(self.ciphertext_level)?;
+        for l in 0..self.sk.params.degree().ilog2() {
+            let mut monomial = vec![0i64; self.sk.params.degree()];
+            monomial[self.sk.params.degree() - (1 << l)] = -1;
             let mut monomial =
                 Poly::<PowerBasis>::try_convert_from(&monomial, ciphertext_ctx, true)?;
             unsafe { monomial.allow_variable_time_computations() }
@@ -392,10 +392,10 @@ impl From<&EvaluationKey> for EvaluationKeyProto {
 }
 
 impl TryConvertFrom<&EvaluationKeyProto> for EvaluationKey {
-    fn try_convert_from(value: &EvaluationKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_convert_from(value: &EvaluationKeyProto, params: &Arc<BfvParameters>) -> Result<Self> {
         let mut gk = HashMap::new();
         for gkp in &value.gk {
-            let key = GaloisKey::try_convert_from(gkp, par)?;
+            let key = GaloisKey::try_convert_from(gkp, params)?;
             if key.ksk.ciphertext_level != value.ciphertext_level as usize {
                 return Err(Error::DefaultError(
                     "Galois key has incorrect ciphertext level".to_string(),
@@ -409,11 +409,11 @@ impl TryConvertFrom<&EvaluationKeyProto> for EvaluationKey {
             gk.insert(key.element.exponent, key);
         }
 
-        let ciphertext_ctx = par.context_at_level(value.ciphertext_level as usize)?;
-        let mut monomials = Vec::with_capacity(par.degree().ilog2() as usize);
-        for l in 0..par.degree().ilog2() {
-            let mut monomial = vec![0i64; par.degree()];
-            monomial[par.degree() - (1 << l)] = -1;
+        let ciphertext_ctx = params.context_at_level(value.ciphertext_level as usize)?;
+        let mut monomials = Vec::with_capacity(params.degree().ilog2() as usize);
+        for l in 0..params.degree().ilog2() {
+            let mut monomial = vec![0i64; params.degree()];
+            monomial[params.degree() - (1 << l)] = -1;
             let mut monomial =
                 Poly::<PowerBasis>::try_convert_from(&monomial, ciphertext_ctx, true)?;
             unsafe { monomial.allow_variable_time_computations() }
@@ -422,8 +422,8 @@ impl TryConvertFrom<&EvaluationKeyProto> for EvaluationKey {
 
         Ok(EvaluationKey {
             gk,
-            par: par.clone(),
-            rot_to_gk_exponent: EvaluationKey::construct_rot_to_gk_exponent(par),
+            params: params.clone(),
+            rot_to_gk_exponent: EvaluationKey::construct_rot_to_gk_exponent(params),
             monomials,
             ciphertext_level: value.ciphertext_level as usize,
             evaluation_key_level: value.evaluation_key_level as usize,

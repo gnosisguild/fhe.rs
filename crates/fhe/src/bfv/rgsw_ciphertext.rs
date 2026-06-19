@@ -39,7 +39,7 @@ impl From<&RGSWCiphertext> for RGSWCiphertextProto {
 impl TryConvertFrom<&RGSWCiphertextProto> for RGSWCiphertext {
     fn try_convert_from(
         value: &RGSWCiphertextProto,
-        par: &std::sync::Arc<BfvParameters>,
+        params: &std::sync::Arc<BfvParameters>,
     ) -> Result<Self> {
         let ksk0 = KeySwitchingKey::try_convert_from(
             value.ksk0.as_ref().ok_or(Error::SerializationError(
@@ -47,7 +47,7 @@ impl TryConvertFrom<&RGSWCiphertextProto> for RGSWCiphertext {
                     field_name: "ksk0".into(),
                 },
             ))?,
-            par,
+            params,
         )?;
         let ksk1 = KeySwitchingKey::try_convert_from(
             value.ksk1.as_ref().ok_or(Error::SerializationError(
@@ -55,7 +55,7 @@ impl TryConvertFrom<&RGSWCiphertextProto> for RGSWCiphertext {
                     field_name: "ksk1".into(),
                 },
             ))?,
-            par,
+            params,
         )?;
         if ksk0.ksk_level != ksk0.ciphertext_level
             || ksk0.ciphertext_level != ksk1.ciphertext_level
@@ -75,13 +75,13 @@ impl TryConvertFrom<&RGSWCiphertextProto> for RGSWCiphertext {
 impl DeserializeParametrized for RGSWCiphertext {
     type Error = Error;
 
-    fn from_bytes(bytes: &[u8], par: &std::sync::Arc<Self::Parameters>) -> Result<Self> {
+    fn from_bytes(bytes: &[u8], params: &std::sync::Arc<Self::Parameters>) -> Result<Self> {
         let proto = Message::decode(bytes).map_err(|_| {
             Error::SerializationError(SerializationError::ProtobufError {
                 message: "RGSW ciphertext decode".into(),
             })
         })?;
-        RGSWCiphertext::try_convert_from(&proto, par)
+        RGSWCiphertext::try_convert_from(&proto, params)
     }
 }
 
@@ -102,7 +102,7 @@ impl FheEncrypter<Plaintext, RGSWCiphertext> for SecretKey {
         rng: &mut R,
     ) -> Result<RGSWCiphertext> {
         let level = pt.level;
-        let ctx = self.par.context_at_level(level)?;
+        let ctx = self.params.context_at_level(level)?;
 
         let m = Zeroizing::new(pt.poly_ntt.clone().into_power_basis());
         let mut m_s = Zeroizing::new(
@@ -125,7 +125,7 @@ impl Mul<&RGSWCiphertext> for &Ciphertext {
 
     fn mul(self, rhs: &RGSWCiphertext) -> Self::Output {
         assert_eq!(
-            self.par, rhs.ksk0.par,
+            self.params, rhs.ksk0.params,
             "Ciphertext and RGSWCiphertext must have the same parameters"
         );
         assert_eq!(
@@ -148,7 +148,7 @@ impl Mul<&RGSWCiphertext> for &Ciphertext {
             .unwrap();
 
         Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: None,
             c: vec![&c0 + &c0p, &c1 + &c1p],
             level: self.level,

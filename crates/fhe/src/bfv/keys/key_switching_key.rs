@@ -23,7 +23,7 @@ use zeroize::{Zeroize, Zeroizing};
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct KeySwitchingKey {
     /// BFV encryption scheme parameters.
-    pub par: Arc<BfvParameters>,
+    pub params: Arc<BfvParameters>,
 
     /// Seed used to generate c1 polynomials.
     pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
@@ -79,9 +79,9 @@ impl KeySwitchingKey {
         ksk_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let par = sk.par.clone();
-        let ctx_ksk = par.context_at_level(ksk_level)?.clone();
-        let ctx_ciphertext = par.context_at_level(ciphertext_level)?.clone();
+        let params = sk.params.clone();
+        let ctx_ksk = params.context_at_level(ksk_level)?.clone();
+        let ctx_ciphertext = params.context_at_level(ciphertext_level)?.clone();
 
         if from.ctx() != &ctx_ksk {
             return Err(Error::DefaultError(
@@ -98,7 +98,7 @@ impl KeySwitchingKey {
             let c0 = Self::generate_c0_decomposition(sk, from, &c1, rng, log_base)?;
 
             Ok(Self {
-                par,
+                params,
                 seed: Some(seed),
                 c0: c0.into_boxed_slice(),
                 c1: c1.into_boxed_slice(),
@@ -113,7 +113,7 @@ impl KeySwitchingKey {
             let c0 = Self::generate_c0(sk, from, &c1, rng)?;
 
             Ok(Self {
-                par,
+                params,
                 seed: Some(seed),
                 c0: c0.into_boxed_slice(),
                 c1: c1.into_boxed_slice(),
@@ -167,7 +167,7 @@ impl KeySwitchingKey {
                 .into_ntt(),
         );
 
-        let rns = RnsContext::new(&sk.par.moduli[..c1.len()])?;
+        let rns = RnsContext::new(&sk.params.moduli[..c1.len()])?;
 
         let c0 = c1
             .iter()
@@ -180,7 +180,7 @@ impl KeySwitchingKey {
                 let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
                 let a_s_pb = a_s_inner.into_power_basis();
 
-                let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.par.variance, rng)?;
+                let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
                 b -= &a_s_pb;
 
                 let gi = rns.get_garner(i).unwrap();
@@ -224,7 +224,7 @@ impl KeySwitchingKey {
                 let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
                 let a_s_pb = a_s_inner.into_power_basis();
 
-                let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.par.variance, rng)?;
+                let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
                 b -= &a_s_pb;
 
                 let power = BigUint::from(1u64 << (i * log_base));
@@ -381,22 +381,22 @@ impl From<&KeySwitchingKey> for KeySwitchingKeyProto {
 }
 
 impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
-    fn try_convert_from(value: &KeySwitchingKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_convert_from(value: &KeySwitchingKeyProto, params: &Arc<BfvParameters>) -> Result<Self> {
         let ciphertext_level = value.ciphertext_level as usize;
         let ksk_level = value.ksk_level as usize;
-        let ctx_ksk = par.context_at_level(ksk_level)?.clone();
-        let ctx_ciphertext = par.context_at_level(ciphertext_level)?.clone();
+        let ctx_ksk = params.context_at_level(ksk_level)?.clone();
+        let ctx_ciphertext = params.context_at_level(ciphertext_level)?.clone();
 
         let c0_size: usize;
         let log_base = value.log_base as usize;
         if log_base != 0 {
-            if ksk_level != par.max_level() || ciphertext_level != par.max_level() {
+            if ksk_level != params.max_level() || ciphertext_level != params.max_level() {
                 return Err(Error::DefaultError(
                     "A decomposition size is specified but the levels are not maximal".to_string(),
                 ));
             } else {
                 let log_modulus: usize =
-                    par.moduli().first().unwrap().next_power_of_two().ilog2() as usize;
+                    params.moduli().first().unwrap().next_power_of_two().ilog2() as usize;
                 c0_size = log_modulus.div_ceil(log_base);
             }
         } else {
@@ -441,7 +441,7 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
             .collect::<Result<Vec<Poly<NttShoup>>>>()?;
 
         Ok(Self {
-            par: par.clone(),
+            params: params.clone(),
             seed,
             c0: c0.into_boxed_slice(),
             c1: c1.into_boxed_slice(),

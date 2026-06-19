@@ -87,8 +87,8 @@ impl RelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx_relin_key = sk.par.context_at_level(key_level)?;
-        let ctx_ciphertext = sk.par.context_at_level(ciphertext_level)?;
+        let ctx_relin_key = sk.params.context_at_level(key_level)?;
+        let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
 
         if ctx_relin_key.moduli().len() == 1 {
             return Err(Error::DefaultError(
@@ -145,7 +145,7 @@ impl RelinearizationKey {
     /// Get the parameters of the relinearization key
     #[must_use]
     pub fn parameters(&self) -> Arc<BfvParameters> {
-        self.ksk.par.clone()
+        self.ksk.params.clone()
     }
 
     /// Get the ciphertext level of the relinearization key
@@ -176,10 +176,13 @@ impl From<&RelinearizationKey> for RelinearizationKeyProto {
 }
 
 impl TryConvertFrom<&RelinearizationKeyProto> for RelinearizationKey {
-    fn try_convert_from(value: &RelinearizationKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_convert_from(
+        value: &RelinearizationKeyProto,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
         if let Some(ksk) = &value.ksk {
             Ok(RelinearizationKey {
-                ksk: KeySwitchingKey::try_convert_from(ksk, par)?,
+                ksk: KeySwitchingKey::try_convert_from(ksk, params)?,
             })
         } else {
             Err(Error::DefaultError("Invalid serialization".to_string()))
@@ -200,10 +203,10 @@ impl FheParametrized for RelinearizationKey {
 impl DeserializeParametrized for RelinearizationKey {
     type Error = Error;
 
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+    fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
         let rk = Message::decode(bytes);
         if let Ok(rk) = rk {
-            RelinearizationKey::try_convert_from(&rk, par)
+            RelinearizationKey::try_convert_from(&rk, params)
         } else {
             Err(Error::DefaultError("Invalid serialization".to_string()))
         }
