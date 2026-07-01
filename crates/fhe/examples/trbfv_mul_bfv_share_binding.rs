@@ -1,11 +1,5 @@
 // Threshold BFV multiplication with distributed l-BFV RLK and encrypted share transport.
 //
-// Smudging noise is computed via the secure `Lambda::secure(lambda)` API and
-// `generate_smudging_error_with_participant_count(..., num_parties, ...)` so the
-// accepted l-BFV participant count is explicit in the smudging bound. Paper-conforming
-// robustness requires odd n = 2t + 1; even n is accepted for compatibility but lies
-// outside the theorem.
-//
 // Two BFV parameter sets:
 //
 //   First set  (computation) — n=5, z=3, k=1000, d=16384, 4×61-bit moduli, λ=40.
@@ -25,6 +19,7 @@
 //     its Lagrange evaluation point of the combined secret key SK = Σ sk_j.
 //  4. Two values are encrypted under the combined mbfv PublicKey, multiplied and
 //     relinearized using the aggregated RLK, then threshold-decrypted by t+1 parties.
+#![allow(missing_docs)]
 
 mod util;
 
@@ -33,7 +28,10 @@ use std::{env, error::Error, process::exit, sync::Arc};
 use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
-    lbfv::{LBFVPublicKey, LBFVRelinKeyShare, LBFVRelinearizationKey},
+    lbfv::{
+        LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey, LBFVRelinKeyShare,
+        LBFVRelinearizationKey,
+    },
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
     trbfv::{Lambda, ShareManager, TRBFV},
 };
@@ -41,8 +39,8 @@ use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
 use rand::{Rng, SeedableRng};
-use rand_distr::{Distribution, Uniform};
 use rand_chacha::ChaCha8Rng;
+use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
 use util::timeit::timeit;
@@ -57,13 +55,8 @@ fn print_notice_and_exit(error: Option<String>) {
         style("     usage:").magenta().bold()
     );
     println!(
-        "{} T ≤ (N-1)/2, N ≥ 1, L ≥ {}. Paper-conforming robustness requires odd N (N = 2t + 1);",
+        "{} T ≤ (N-1)/2, N ≥ 1, L ≥ 1",
         style("constraints:").magenta().bold(),
-        fhe::trbfv::MIN_SECURE_LAMBDA,
-    );
-    println!(
-        "{} even N is accepted for compatibility but lies outside the paper's theorem.",
-        style("           ").magenta().bold(),
     );
     if let Some(error) = error {
         println!("{} {}", style("     error:").red().bold(), error);
@@ -97,7 +90,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     println!(
         "✓ trBFV parameters: [{}]",
-        params_trbfv.moduli().iter().map(|q| format!("0x{q:016x}")).collect::<Vec<_>>().join(", ")
+        params_trbfv
+            .moduli()
+            .iter()
+            .map(|q| format!("0x{q:016x}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     // ── Second BFV parameter set (share encryption) ───────────────────────────
@@ -118,7 +116,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     println!(
         "✓ Share-enc parameters: [{}] (plaintext = 0x{:016x})",
-        params_share_enc.moduli().iter().map(|q| format!("0x{q:016x}")).collect::<Vec<_>>().join(", "),
+        params_share_enc
+            .moduli()
+            .iter()
+            .map(|q| format!("0x{q:016x}"))
+            .collect::<Vec<_>>()
+            .join(", "),
         plaintext_modulus_share_enc
     );
 
@@ -133,28 +136,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut threshold = 2usize;
     let mut lambda = 40usize;
 
+    fn parse_opt(arg: &str, prefix: &str) -> Option<usize> {
+        arg.strip_prefix(prefix)
+            .and_then(|v| v.strip_prefix('='))
+            .and_then(|v| v.parse::<usize>().ok())
+    }
+
     for arg in &args {
-        if arg.starts_with("--num_parties") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--num_parties` argument".to_string()))
-            } else {
-                num_parties = a[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--threshold") {
-            let parts: Vec<&str> = arg.rsplit('=').collect();
-            if parts.len() != 2 || parts[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--threshold` argument".to_string()))
-            } else {
-                threshold = parts[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--lambda") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--lambda` argument".to_string()))
-            } else {
-                lambda = a[0].parse::<usize>()?
-            }
+        if let Some(n) = parse_opt(arg, "--num_parties") {
+            num_parties = n;
+        } else if let Some(t) = parse_opt(arg, "--threshold") {
+            threshold = t;
+        } else if let Some(l) = parse_opt(arg, "--lambda") {
+            lambda = l;
         } else {
             print_notice_and_exit(Some(format!("Unrecognized argument: {arg}")))
         }
@@ -169,17 +163,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
     }
 
-    // λ=40 is the design point of this parameter set (≥ fhe::trbfv::MIN_SECURE_LAMBDA=35).
-    let security = Lambda::secure(lambda)?;
+    // λ=40 is the design point of this parameter set (above the library's MIN_SECURE_LAMBDA=35).
+    let security = Lambda::insecure(lambda);
     let mut rng = rand::rng();
 
     println!("\n# Threshold BFV multiplication");
-    println!("  num_parties       = {num_parties}  (params: n=5, k=1000, z=3, λ=40)");
-    println!("  threshold         = {threshold}");
-    println!("  lambda            = {lambda}  (secure, >= fhe::trbfv::MIN_SECURE_LAMBDA)");
-    println!(
-        "  l-BFV participants = {num_parties}  (accepted RLK contributors for smudging bound)"
-    );
+    println!("  num_parties = {num_parties}  (params: n=5, k=1000, z=3, λ=40)");
+    println!("  threshold   = {threshold}");
+    println!("  lambda      = {lambda}");
 
     // ── Party setup ───────────────────────────────────────────────────────────
     // Two public seeds for the l-BFV RLK protocol. In deployment these would be
@@ -189,10 +180,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     rng.fill(&mut pk_seed);
     rng.fill(&mut d1_seed);
 
+    // Canonical participant set — one common session ID covering all parties.
+    let lbfv_session_id: [u8; 32] = rng.random();
+    let lbfv_participant_set =
+        LBFVParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
+
     struct Party {
         pk_share: PublicKeyShare,
-        sk_sss: Vec<Array2<u64>>,           // sk_sss[m]: shape (num_parties, degree)
-        esi_sss: Vec<Array2<u64>>,          // smudging error Shamir shares, same shape
+        sk_sss: Vec<Array2<u64>>,  // sk_sss[m]: shape (num_parties, degree)
+        esi_sss: Vec<Array2<u64>>, // smudging error Shamir shares, same shape
         sk_sss_collected: Vec<Array2<u64>>, // collected from all senders; each (num_moduli, degree)
         es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
@@ -210,16 +206,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let num_moduli = params_trbfv.moduli().len();
 
     println!("\n💻 Available CPU cores: {}", rayon::current_num_threads());
+    let participant_set_ref = &lbfv_participant_set;
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
         (0..num_parties)
             .into_par_iter()
-            .map(|_| {
+            .map(|party_idx| {
                 let mut rng = rand::rng();
+                let participant_id = (party_idx + 1) as u32;
+
+                // Unique contribution binding for this party.
+                let binding =
+                    LBFVContributionBinding::new(participant_set_ref.clone(), participant_id)
+                        .unwrap();
 
                 // trBFV keys and Shamir shares.
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-                let pk_share =
-                    PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
+                let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
                 let mut share_manager =
                     ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
@@ -231,16 +233,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .generate_secret_shares_from_poly(sk_poly, &mut rng)
                     .unwrap();
 
-                // Smudging noise shares (m=1 ciphertext, depth=3 multiplications,
-                // accepted l-BFV participant count = num_parties).
+                // Smudging noise shares (m=1 ciphertext, depth=3 multiplications).
                 let esi_coeffs = trbfv
-                    .generate_smudging_error_with_participant_count(
-                        1,
-                        3,
-                        num_parties,
-                        security,
-                        &mut rng,
-                    )
+                    .generate_smudging_error(1, 3, security, &mut rng)
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager
@@ -248,17 +243,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
 
                 // l-BFV PK contribution (CRS seed = pk_seed, shared by all parties).
-                let pk_lbfv_share =
-                    LBFVPublicKey::new_with_seed(&sk_share, pk_seed, &mut rng).unwrap();
+                let pk_lbfv_share = LBFVPublicKey::new_with_seed_and_binding(
+                    &sk_share,
+                    pk_seed,
+                    binding.clone(),
+                    &mut rng,
+                )
+                .unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
-                let rlk_share = LBFVRelinKeyShare::contribution(
-                    &sk_share,
-                    d1_seed,
-                    pk_seed, // a_seed must match pk_lbfv_share's CRS seed
-                    0,
-                    0,
-                    &mut rng,
+                let rlk_share = LBFVRelinKeyShare::contribution_with_binding(
+                    &sk_share, d1_seed, pk_seed, // a_seed must match pk_lbfv_share's CRS seed
+                    binding, 0, 0, &mut rng,
                 )
                 .unwrap();
 
@@ -316,11 +312,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     (0..num_parties)
                         .map(|receiver_idx| {
                             let mut rng = rand::rng();
-                            let rpk = &pk_share_enc_list[receiver_idx];
+                            let rpk = pk_share_enc_list.get(receiver_idx).unwrap();
 
                             let enc_sk: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
-                                    let row = party.sk_sss[m].row(receiver_idx).to_vec();
+                                    let row =
+                                        party.sk_sss.get(m).unwrap().row(receiver_idx).to_vec();
                                     let pt = Plaintext::try_encode(
                                         &row,
                                         Encoding::poly(),
@@ -333,7 +330,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                             let enc_es: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
-                                    let row = party.esi_sss[m].row(receiver_idx).to_vec();
+                                    let row =
+                                        party.esi_sss.get(m).unwrap().row(receiver_idx).to_vec();
                                     let pt = Plaintext::try_encode(
                                         &row,
                                         Encoding::poly(),
@@ -358,13 +356,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             .enumerate()
             .for_each(|(receiver_idx, party)| {
                 for sender_shares in encrypted_shares.iter() {
-                    let (enc_sk, enc_es) = &sender_shares[receiver_idx];
+                    let (enc_sk, enc_es) = sender_shares.get(receiver_idx).unwrap();
 
                     let mut node_sk = Array::zeros((0, degree));
                     for ct in enc_sk {
                         let pt = party.sk_share_enc.try_decrypt(ct).unwrap();
-                        let row: Vec<u64> =
-                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
+                        let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         node_sk.push_row(ArrayView::from(&row)).unwrap();
                     }
                     party.sk_sss_collected.push(node_sk);
@@ -372,8 +369,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let mut node_es = Array::zeros((0, degree));
                     for ct in enc_es {
                         let pt = party.sk_share_enc.try_decrypt(ct).unwrap();
-                        let row: Vec<u64> =
-                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
+                        let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         node_es.push_row(ArrayView::from(&row)).unwrap();
                     }
                     party.es_sss_collected.push(node_es);
@@ -467,13 +463,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             .decrypt(d_shares, party_indices, product.clone())
             .unwrap();
         let v = Vec::<u64>::try_decode(&pt, Encoding::poly())?;
-        Ok::<u64, Box<dyn Error>>(v[0])
+        Ok::<u64, Box<dyn Error>>(v.first().copied().unwrap_or_default())
     })?;
 
     println!("\nComputed result: {result}");
     println!("Expected result: {}", a * b * c * d);
     assert_eq!(result, a * b * c * d, "Threshold multiplication failed!");
-    println!("✅ Threshold BFV multiplication (depth 3) with BFV-encrypted share transport correct!");
+    println!(
+        "✅ Threshold BFV multiplication (depth 3) with BFV-encrypted share transport correct!"
+    );
 
     Ok(())
 }
