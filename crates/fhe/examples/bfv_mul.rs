@@ -8,7 +8,6 @@
 //   d (ring dim)     = 16384    |q|            ≈ 2^244 (4 × 61-bit primes)
 //
 // Correctness: log₂(B_C after 1 mult) = 193.5 < log₂(Δ) = 234.0  ✓
-#![allow(missing_docs)]
 
 mod util;
 
@@ -16,7 +15,7 @@ use std::{error::Error, sync::Arc};
 
 use fhe::{
     bfv::{self, Encoding, Plaintext, SecretKey},
-    lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
+    lbfv::{LBFVPublicKey, LBFVRelinKeyShare, LBFVRelinearizationKey},
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::{Rng, SeedableRng};
@@ -70,13 +69,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     rng.fill(&mut d1_seed);
     let pk_lbfv = timeit!(
         "l-BFV public key",
-        LBFVPublicKey::new_with_seed(&sk, pk_seed, &mut rng)?
+        LBFVPublicKey::new_with_seed(&sk, pk_seed, &mut rng)
     );
 
-    let rlk = timeit!(
-        "Relinearization key generation",
-        LBFVRelinearizationKey::new(&sk, &pk_lbfv, Some(d1_seed), &mut rng)?
-    );
+    let rlk: LBFVRelinearizationKey = timeit!("Relinearization key generation", {
+        let share = LBFVRelinKeyShare::contribution(&sk, d1_seed, pk_seed, 0, 0, &mut rng)?;
+        LBFVRelinearizationKey::aggregate(&[share], &pk_lbfv)?
+    });
     println!("l = {}", rlk.l()?);
 
     // Both factors and their product must be < k = 1000.
@@ -100,10 +99,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pt_result = timeit!("Decrypt", sk.try_decrypt(&ct_product)?);
     let result = Vec::<u64>::try_decode(&pt_result, Encoding::poly())?;
 
-    let val = result.first().copied().unwrap_or_default();
-    println!("\nResult:   {val}");
+    println!("\nResult:   {}", result[0]);
     println!("Expected: {}", a * b);
-    assert_eq!(val, a * b, "BFV multiplication gave wrong answer!");
+    assert_eq!(result[0], a * b, "BFV multiplication gave wrong answer!");
     println!("Correct — first parameter set supports BFV multiplication.");
 
     Ok(())
