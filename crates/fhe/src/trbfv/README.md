@@ -37,7 +37,7 @@ let trbfv = TRBFV::new(n_parties, threshold, params.clone())?;
 
 // Each party: deal secret shares of its key and smudging noise contributions
 let sk_shares = trbfv.generate_secret_shares_from_poly(sk_poly, &mut rng)?;
-let es_coeffs = trbfv.generate_smudging_error(num_ciphertexts, lambda, &mut rng)?;
+let es_coeffs = trbfv.generate_smudging_error(num_ciphertexts, mult_depth, lambda, &mut rng)?;
 
 // Each party: aggregate the share matrices received from the other parties
 // into its share of the joint secret key (and likewise for the noise)
