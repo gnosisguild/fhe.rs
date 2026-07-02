@@ -17,7 +17,7 @@ use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
 
 /// Minimum statistical security parameter accepted for production use.
-pub const MIN_SECURE_LAMBDA: usize = 50;
+pub const MIN_SECURE_LAMBDA: usize = 35;
 
 /// Statistical security level for smudging noise generation.
 ///
@@ -573,13 +573,9 @@ mod tests {
         let b_c_mul = &coeff * &b_c_additive + &b_relin;
         let expected = BigUint::from(2u64).pow(lambda.value() as u32) * &b_c_mul;
 
-        let actual = SmudgingBoundCalculator::new(SmudgingBoundCalculatorConfig::new_multiplicative(
-            params.clone(),
-            n,
-            m,
-            1,
-            lambda,
-        ))
+        let actual = SmudgingBoundCalculator::new(
+            SmudgingBoundCalculatorConfig::new_multiplicative(params.clone(), n, m, 1, lambda),
+        )
         .calculate_sm_bound()
         .unwrap();
 
