@@ -120,7 +120,12 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
 
             let esi_coeffs: Vec<BigInt> = match &smudging_bound {
                 None => trbfv
-                    .generate_smudging_error(NUM_SUMMED, 0, Lambda::secure(LAMBDA).unwrap(), &mut rng)
+                    .generate_smudging_error(
+                        NUM_SUMMED,
+                        0,
+                        Lambda::secure(LAMBDA).unwrap(),
+                        &mut rng,
+                    )
                     .unwrap(),
                 Some(bound) => vec![bound.clone(); DEGREE],
             };

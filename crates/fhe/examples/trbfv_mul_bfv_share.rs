@@ -35,8 +35,8 @@ use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
 use rand::{Rng, SeedableRng};
-use rand_distr::{Distribution, Uniform};
 use rand_chacha::ChaCha8Rng;
+use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
 use util::timeit::timeit;
@@ -86,7 +86,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     println!(
         "✓ trBFV parameters: [{}]",
-        params_trbfv.moduli().iter().map(|q| format!("0x{q:016x}")).collect::<Vec<_>>().join(", ")
+        params_trbfv
+            .moduli()
+            .iter()
+            .map(|q| format!("0x{q:016x}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     // ── Second BFV parameter set (share encryption) ───────────────────────────
@@ -107,7 +112,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     println!(
         "✓ Share-enc parameters: [{}] (plaintext = 0x{:016x})",
-        params_share_enc.moduli().iter().map(|q| format!("0x{q:016x}")).collect::<Vec<_>>().join(", "),
+        params_share_enc
+            .moduli()
+            .iter()
+            .map(|q| format!("0x{q:016x}"))
+            .collect::<Vec<_>>()
+            .join(", "),
         plaintext_modulus_share_enc
     );
 
@@ -177,8 +187,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     struct Party {
         pk_share: PublicKeyShare,
-        sk_sss: Vec<Array2<u64>>,           // sk_sss[m]: shape (num_parties, degree)
-        esi_sss: Vec<Array2<u64>>,          // smudging error Shamir shares, same shape
+        sk_sss: Vec<Array2<u64>>,  // sk_sss[m]: shape (num_parties, degree)
+        esi_sss: Vec<Array2<u64>>, // smudging error Shamir shares, same shape
         sk_sss_collected: Vec<Array2<u64>>, // collected from all senders; each (num_moduli, degree)
         es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
@@ -204,8 +214,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // trBFV keys and Shamir shares.
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-                let pk_share =
-                    PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
+                let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
                 let mut share_manager =
                     ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
@@ -227,17 +236,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
 
                 // l-BFV PK contribution (CRS seed = pk_seed, shared by all parties).
-                let pk_lbfv_share =
-                    LBFVPublicKey::new_with_seed(&sk_share, pk_seed, &mut rng);
+                let pk_lbfv_share = LBFVPublicKey::new_with_seed(&sk_share, pk_seed, &mut rng);
 
                 // l-BFV RLK share for SK = Σ sk_j.
                 let rlk_share = LBFVRelinKeyShare::contribution(
-                    &sk_share,
-                    d1_seed,
-                    pk_seed, // a_seed must match pk_lbfv_share's CRS seed
-                    0,
-                    0,
-                    &mut rng,
+                    &sk_share, d1_seed, pk_seed, // a_seed must match pk_lbfv_share's CRS seed
+                    0, 0, &mut rng,
                 )
                 .unwrap();
 
@@ -342,8 +346,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let mut node_sk = Array::zeros((0, degree));
                     for ct in enc_sk {
                         let pt = party.sk_share_enc.try_decrypt(ct).unwrap();
-                        let row: Vec<u64> =
-                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
+                        let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         node_sk.push_row(ArrayView::from(&row)).unwrap();
                     }
                     party.sk_sss_collected.push(node_sk);
@@ -351,8 +354,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let mut node_es = Array::zeros((0, degree));
                     for ct in enc_es {
                         let pt = party.sk_share_enc.try_decrypt(ct).unwrap();
-                        let row: Vec<u64> =
-                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
+                        let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         node_es.push_row(ArrayView::from(&row)).unwrap();
                     }
                     party.es_sss_collected.push(node_es);
@@ -452,7 +454,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("\nComputed result: {result}");
     println!("Expected result: {}", a * b * c * d);
     assert_eq!(result, a * b * c * d, "Threshold multiplication failed!");
-    println!("✅ Threshold BFV multiplication (depth 3) with BFV-encrypted share transport correct!");
+    println!(
+        "✅ Threshold BFV multiplication (depth 3) with BFV-encrypted share transport correct!"
+    );
 
     Ok(())
 }
