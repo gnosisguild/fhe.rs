@@ -8,7 +8,7 @@ permission:
     "cargo build *": allow
     "cargo run *": allow
     "cargo clippy *": allow
-    "cargo +nightly fmt *": allow
+    "cargo fmt *": allow
     "cargo bench *": allow
     "cargo check *": allow
     "pre-commit *": allow
@@ -43,7 +43,7 @@ Before declaring done, run:
 ```bash
 cargo test --release --all-features
 cargo clippy --all-targets --all-features -- -D warnings
-cargo +nightly fmt --all
+cargo fmt --all
 ```
 
 If any check fails, fix it before reporting completion.

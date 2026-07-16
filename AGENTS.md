@@ -6,7 +6,7 @@ Ring-LWE-based fully homomorphic encryption library in Rust. Workspace with 4 cr
 
 ## Prerequisites
 
-- Rust stable + nightly toolchains (nightly required for formatting)
+- Rust stable toolchain
 - `protoc` (protobuf compiler) — only required when building with `--features protobuf`
 
 ## Commands
@@ -14,7 +14,7 @@ Ring-LWE-based fully homomorphic encryption library in Rust. Workspace with 4 cr
 ```bash
 cargo test --release --all-features    # tests (release mode critical for trbfv speed)
 cargo clippy --all-targets --all-features -- -D warnings
-cargo +nightly fmt --all               # formatting (must use nightly)
+cargo fmt --all                        # formatting
 pre-commit run --all-files             # runs fmt, clippy, typos
 ```
 
@@ -90,4 +90,4 @@ Workspace lints are strict — code that violates them won't pass CI:
 ## PR conventions
 
 - Title: `[agent] <Title>`
-- Run `cargo test --release --all-features`, `cargo +nightly fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings` before committing
+- Run `cargo test --release --all-features`, `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings` before committing

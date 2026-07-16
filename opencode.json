@@ -13,7 +13,7 @@
       "cargo build *": "allow",
       "cargo run *": "allow",
       "cargo clippy *": "allow",
-      "cargo +nightly fmt *": "allow",
+      "cargo fmt *": "allow",
       "cargo bench *": "allow",
       "cargo check *": "allow",
       "pre-commit *": "allow",

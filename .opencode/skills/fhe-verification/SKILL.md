@@ -39,7 +39,7 @@ Run all three before declaring work complete:
 ```bash
 cargo test --release --all-features
 cargo clippy --all-targets --all-features -- -D warnings
-cargo +nightly fmt --all
+cargo fmt --all
 ```
 
 Optionally run pre-commit (which executes fmt check, clippy, and typos):
@@ -56,5 +56,5 @@ Always use `--release`. The trbfv secure-preset e2e tests (`crates/fhe/tests/trb
 
 - **Clippy: `expect_used` / `panic` / `indexing_slicing`** — library code must use `?` and `Result`, not `unwrap()`/`expect()`/`panic!`. Use `get()` instead of direct indexing.
 - **Missing docs** — `missing_docs` is warned. Public items need doc comments.
-- **Format check** — must use nightly: `cargo +nightly fmt --all`. Stable fmt may produce different output.
+- **Format check** — `cargo fmt --all`.
 - **Protoc missing** — `protoc` is only required with `--features protobuf`. Without the feature, serialization is unavailable but core crypto operations work. Install `protoc` or use `--no-default-features` for core-only builds.
