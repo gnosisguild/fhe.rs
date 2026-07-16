@@ -1,14 +1,21 @@
 //! Public keys for the BFV encryption scheme
 
+#[cfg(feature = "protobuf")]
+use crate::SerializationError;
+#[cfg(feature = "protobuf")]
 use crate::bfv::traits::TryConvertFrom;
 use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext};
+#[cfg(feature = "protobuf")]
 use crate::proto::bfv::{Ciphertext as CiphertextProto, PublicKey as PublicKeyProto};
-use crate::{Error, Result, SerializationError};
+use crate::{Error, Result};
 use fhe_math::rq::{
     Ntt, Poly, PowerBasis, Representation, traits::TryConvertFrom as PolyTryConvertFrom,
 };
-use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
+#[cfg(feature = "protobuf")]
+use fhe_traits::{DeserializeParametrized, Serialize};
+use fhe_traits::{FheEncrypter, FheParametrized};
 use fhe_util::sample_vec_cbd_f32;
+#[cfg(feature = "protobuf")]
 use prost::Message;
 use rand::{CryptoRng, RngCore};
 use std::borrow::Cow;
@@ -202,6 +209,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl From<&PublicKey> for PublicKeyProto {
     fn from(pk: &PublicKey) -> Self {
         PublicKeyProto {
@@ -210,12 +218,14 @@ impl From<&PublicKey> for PublicKeyProto {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for PublicKey {
     fn to_bytes(&self) -> Vec<u8> {
         PublicKeyProto::from(self).encode_to_vec()
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl DeserializeParametrized for PublicKey {
     type Error = Error;
 
@@ -259,7 +269,9 @@ mod tests {
         parameters::{BfvParameters, BfvParametersBuilder},
     };
     use fhe_math::rq::{Poly, PowerBasis, traits::TryConvertFrom};
-    use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
+    #[cfg(feature = "protobuf")]
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use num_bigint::BigUint;
     use rand::rng;
     use std::error::Error;
@@ -309,6 +321,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn test_serialize() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();

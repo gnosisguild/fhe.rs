@@ -27,16 +27,15 @@ pre-commit run --all-files             # runs fmt, clippy, typos
 
 ## Code generation
 
-Proto files compile to Rust via `prost` at build time — see [`.rules/codegen.md`](.rules/codegen.md).
+Proto files compile to Rust via `prost` at build time — see [`.rules/codegen.md`](.rules/codegen.md). This is feature-gated behind `protobuf` (disabled by default).
 
-- `fhe-math/src/proto/rq.proto` → pre-generated fallback at `src/proto/fhers.rq.rs`
-- `fhe/src/proto/bfv/bfv.proto` → `src/proto/bfv/generated.rs`
-- `fhe/src/proto/trbfv/trbfv.proto` → `src/proto/trbfv/generated.rs`
+- `fhe-math/src/proto/rq.proto` → generated into `OUT_DIR` (requires `--features protobuf`)
+- `fhe/src/proto/bfv/bfv.proto` → generated into `OUT_DIR` (requires `--features protobuf`)
+- `fhe/src/proto/trbfv/trbfv.proto` → generated into `OUT_DIR` (requires `--features protobuf`)
 
-If `protoc` is unavailable, `fhe-math` falls back to the committed file; `fhe` skips generation with a warning.
+Without `--features protobuf`, no `protoc` is needed and serialization is unavailable. Core crypto operations work without the feature.
 
 ## Development workflow
-
 For non-trivial work, OpenCode provides agents under [`.opencode/agents/`](.opencode/agents):
 
 1. `fhe-architect` — brainstorm designs and tradeoffs (primary, read-only).
@@ -57,7 +56,7 @@ Canonical detailed guidance in `.rules/` — read the full file when relevant:
 - [`.rules/testing.md`](.rules/testing.md) — release mode, focused and full verification, proptest, criterion
 - [`.rules/crypto.md`](.rules/crypto.md) — security-sensitive areas, claims policy, invariant tests
 - [`.rules/math.md`](.rules/math.md) — RNS/NTT/modular/polynomial invariants, property tests
-- [`.rules/codegen.md`](.rules/codegen.md) — protoc/prost build flow, generated files
+- [`.rules/codegen.md`](.rules/codegen.md) — protoc/prost feature-gated build flow
 - [`.rules/harness.md`](.rules/harness.md) — this scaffolding's invariants
 
 ## Keeping rules up to date

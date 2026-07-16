@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::Result;
 use crate::bfv::BfvParameters;
 use fhe_math::rq::{Ntt, Poly};
+#[cfg(feature = "protobuf")]
 use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -64,6 +65,7 @@ impl CommonRandomPoly {
     }
 
     /// Deserialize a CRP from bytes.
+    #[cfg(feature = "protobuf")]
     pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
         let ctx = par.context_at_level(0)?;
         let poly = Poly::<Ntt>::from_bytes(bytes, ctx)?;
@@ -83,6 +85,7 @@ impl CommonRandomPoly {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for CommonRandomPoly {
     fn to_bytes(&self) -> Vec<u8> {
         self.poly.to_bytes()

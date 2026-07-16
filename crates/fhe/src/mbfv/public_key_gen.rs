@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
 use crate::{Error, Result};
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
+#[cfg(feature = "protobuf")]
 use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
@@ -90,6 +91,7 @@ impl PublicKeyShare {
 
     /// Deserialize a PublicKeyShare from bytes with the given parameters and
     /// CRP
+    #[cfg(feature = "protobuf")]
     pub fn deserialize(
         bytes: &[u8],
         par: &Arc<BfvParameters>,
@@ -173,6 +175,7 @@ impl Aggregate<PublicKeyShare> for PublicKey {
 //     }
 // }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for PublicKeyShare {
     fn to_bytes(&self) -> Vec<u8> {
         //PublicKeyShareProto::from(self).encode_to_vec()

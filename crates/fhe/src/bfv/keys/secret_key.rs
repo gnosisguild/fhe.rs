@@ -1,18 +1,24 @@
 //! Secret keys for the BFV encryption scheme
 
+#[cfg(feature = "protobuf")]
+use crate::SerializationError;
 use crate::bfv::{
     BfvParameters, Ciphertext, Plaintext, parameters::PlaintextModulus, plaintext::PlaintextValues,
 };
+#[cfg(feature = "protobuf")]
 use crate::proto::bfv::SecretKey as SecretKeyProto;
-use crate::{Error, Result, SerializationError};
+use crate::{Error, Result};
 use fhe_math::{
     rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom},
     zq::Modulus,
 };
-use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncrypter, FheParametrized, Serialize};
+#[cfg(feature = "protobuf")]
+use fhe_traits::{DeserializeParametrized, Serialize};
+use fhe_traits::{FheDecrypter, FheEncrypter, FheParametrized};
 use fhe_util::sample_vec_cbd_f32;
 use itertools::Itertools;
 use num_bigint::BigUint;
+#[cfg(feature = "protobuf")]
 use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -223,6 +229,7 @@ impl SecretKey {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl From<&SecretKey> for SecretKeyProto {
     fn from(sk: &SecretKey) -> Self {
         Self {
@@ -231,12 +238,14 @@ impl From<&SecretKey> for SecretKeyProto {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for SecretKey {
     fn to_bytes(&self) -> Vec<u8> {
         SecretKeyProto::from(self).encode_to_vec()
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl DeserializeParametrized for SecretKey {
     type Error = Error;
 
@@ -369,8 +378,12 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
 mod tests {
     use super::SecretKey;
     use crate::bfv::{Encoding, Plaintext, parameters::BfvParameters};
+    #[cfg(feature = "protobuf")]
     use crate::proto::bfv::SecretKey as SecretKeyProto;
-    use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
+    #[cfg(feature = "protobuf")]
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
+    #[cfg(feature = "protobuf")]
     use prost::Message;
     use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
@@ -468,6 +481,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn serialize_roundtrip() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
@@ -481,6 +495,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn deserialize_invalid_length() {
         let params = BfvParameters::default_arc(1, 16);

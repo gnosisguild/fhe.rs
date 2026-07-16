@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
+#[cfg(feature = "protobuf")]
 use fhe_traits::{DeserializeWithContext, Serialize};
 use itertools::Itertools;
 use num_bigint::BigUint;
@@ -89,6 +90,7 @@ impl SecretKeySwitchShare {
 
     /// Deserialize a SecretKeySwitchShare from bytes with the given parameters
     /// and ciphertext
+    #[cfg(feature = "protobuf")]
     pub fn deserialize(
         bytes: &[u8],
         par: &Arc<BfvParameters>,
@@ -126,6 +128,7 @@ impl Aggregate<SecretKeySwitchShare> for Ciphertext {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for SecretKeySwitchShare {
     fn to_bytes(&self) -> Vec<u8> {
         self.h_share.to_bytes()
@@ -161,6 +164,7 @@ impl DecryptionShare {
 
     /// Deserialize a DecryptionShare from bytes with the given parameters and
     /// ciphertext
+    #[cfg(feature = "protobuf")]
     pub fn deserialize(
         bytes: &[u8],
         par: &Arc<BfvParameters>,
@@ -172,6 +176,7 @@ impl DecryptionShare {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for DecryptionShare {
     fn to_bytes(&self) -> Vec<u8> {
         self.sks_share.to_bytes()

@@ -2,20 +2,26 @@
  * This module contains the public key for the l-BFV encryption scheme.
  */
 
-use crate::{Error, Result, SerializationError};
+#[cfg(feature = "protobuf")]
+use crate::SerializationError;
+use crate::{Error, Result};
 use std::sync::Arc;
 
+#[cfg(feature = "protobuf")]
 use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
-use crate::bfv::{
-    BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
-};
+#[cfg(feature = "protobuf")]
+use crate::bfv::traits::TryConvertFrom;
+use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
+#[cfg(feature = "protobuf")]
 use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
 use fhe_math::rq::{Ntt, NttShoup, Poly, Representation, switcher::Switcher};
-use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
+#[cfg(feature = "protobuf")]
+use fhe_traits::{DeserializeParametrized, Serialize};
+use fhe_traits::{FheEncrypter, FheParametrized};
 
 /// Public key for the L-BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -250,6 +256,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
     fn from(pk: &LBFVPublicKey) -> Self {
         LBFVPublicKeyProto {
@@ -260,12 +267,14 @@ impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for LBFVPublicKey {
     fn to_bytes(&self) -> Vec<u8> {
         LBFVPublicKeyProto::from(self).encode_to_vec()
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl DeserializeParametrized for LBFVPublicKey {
     type Error = Error;
 
@@ -332,7 +341,9 @@ mod tests {
     use super::LBFVPublicKey;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
     use fhe_math::zq::Modulus;
-    use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
+    #[cfg(feature = "protobuf")]
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::error::Error;
@@ -385,6 +396,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn test_serialize() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();

@@ -1,18 +1,25 @@
 //! Create parameters for the BFV encryption scheme
 
+#[cfg(feature = "protobuf")]
+use crate::SerializationError;
 use crate::bfv::{context::CipherPlainContext, context::ContextLevel};
+#[cfg(feature = "protobuf")]
 use crate::proto::bfv::{Parameters, parameters::PlaintextModulus as PlaintextModulusProto};
-use crate::{Error, ParametersError, Result, SerializationError};
+use crate::{Error, ParametersError, Result};
 use fhe_math::{
     ntt::NttOperator,
     rns::{RnsContext, ScalingFactor},
     rq::{Context, Poly, PowerBasis, scaler::Scaler, traits::TryConvertFrom},
     zq::{Modulus, primes::generate_prime},
 };
+#[cfg(not(feature = "protobuf"))]
+use fhe_traits::FheParameters;
+#[cfg(feature = "protobuf")]
 use fhe_traits::{Deserialize, FheParameters, Serialize};
 use itertools::Itertools;
 use num_bigint::{BigInt, BigUint};
 use num_traits::{PrimInt as _, ToPrimitive};
+#[cfg(feature = "protobuf")]
 use prost::Message;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -749,6 +756,7 @@ impl BfvParametersBuilder {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for BfvParameters {
     fn to_bytes(&self) -> Vec<u8> {
         let plaintext_modulus = if let Some(plaintext_u64) = self.plaintext.as_u64() {
@@ -769,6 +777,7 @@ impl Serialize for BfvParameters {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl Deserialize for BfvParameters {
     fn try_deserialize(bytes: &[u8]) -> Result<Self> {
         let params: Parameters = Message::decode(bytes).map_err(|_| {
@@ -827,9 +836,12 @@ impl MultiplicationParameters {
 #[cfg(test)]
 mod tests {
     use super::{BfvParameters, BfvParametersBuilder};
+    #[cfg(feature = "protobuf")]
     use crate::proto::bfv::{Parameters, parameters::PlaintextModulus as PlaintextModulusProto};
+    #[cfg(feature = "protobuf")]
     use fhe_traits::{Deserialize, Serialize};
     use num_bigint::BigUint;
+    #[cfg(feature = "protobuf")]
     use prost::Message;
     use std::error::Error;
 
@@ -893,6 +905,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn serialize() -> Result<(), Box<dyn Error>> {
         let params = BfvParametersBuilder::new()
@@ -933,6 +946,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn deserialize_missing_plaintext_modulus() {
         let proto = Parameters {
