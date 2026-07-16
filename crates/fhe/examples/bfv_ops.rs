@@ -27,7 +27,7 @@ fn weighted_sum_plain(
     let mut acc = Ciphertext::zero(params);
     for (ct, w) in cts.iter().zip(weights.iter()) {
         let pt_w = Plaintext::try_encode(&[*w], Encoding::poly(), params)?;
-        acc += &(ct * &pt_w);
+        acc.try_add_assign(&(ct * &pt_w))?;
     }
     let pt = sk.try_decrypt(&acc)?;
     let v = Vec::<u64>::try_decode(&pt, Encoding::poly())?;
@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for (a, b) in ct_v1.iter().zip(ct_v2.iter()) {
         let mut prod = a * b;
         rk.relinearizes(&mut prod)?;
-        acc += &prod;
+        acc.try_add_assign(&prod)?;
     }
     let pt = sk.try_decrypt(&acc)?;
     let ip_plain = Vec::<u64>::try_decode(&pt, Encoding::poly())?[0];
@@ -133,7 +133,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pt_two = Plaintext::try_encode(&[2u64], Encoding::poly(), &params)?;
     let pt_one = Plaintext::try_encode(&[1u64], Encoding::poly(), &params)?;
     let mut ct_res = &ct_x2 * &pt_three;
-    ct_res += &(&ct_x * &pt_two);
+    ct_res.try_add_assign(&(&ct_x * &pt_two))?;
     ct_res += &pt_one;
     let pt = sk.try_decrypt(&ct_res)?;
     let poly_plain = Vec::<u64>::try_decode(&pt, Encoding::poly())?[0];
@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pt_two_v = Plaintext::try_encode(&vec![2u64; x_vec.len()], Encoding::simd(), &params)?;
     let pt_one_v = Plaintext::try_encode(&vec![1u64; x_vec.len()], Encoding::simd(), &params)?;
     let mut ct_res_v = &ct_xv2 * &pt_three_v;
-    ct_res_v += &(&ct_xv * &pt_two_v);
+    ct_res_v.try_add_assign(&(&ct_xv * &pt_two_v))?;
     ct_res_v += &pt_one_v;
     let pt = sk.try_decrypt(&ct_res_v)?;
     let poly_simd = Vec::<u64>::try_decode(&pt, Encoding::simd())?;

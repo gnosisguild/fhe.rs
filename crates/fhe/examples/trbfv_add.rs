@@ -278,7 +278,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tally = timeit!("Number tallying", {
         let mut sum = Ciphertext::zero(&params);
         for ct in &numbers_encrypted {
-            sum += ct;
+            sum.try_add_assign(ct)?;
         }
         Arc::new(sum)
     });

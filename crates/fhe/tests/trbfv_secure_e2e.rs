@@ -233,7 +233,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
         .collect();
     let mut sum = Ciphertext::zero(&params_trbfv);
     for ct in &numbers_encrypted {
-        sum += ct;
+        sum.try_add_assign(ct).unwrap();
     }
     let tally = Arc::new(sum);
 

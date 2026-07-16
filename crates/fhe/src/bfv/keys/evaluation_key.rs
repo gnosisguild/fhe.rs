@@ -75,13 +75,13 @@ impl EvaluationKey {
                     .get(self.rot_to_gk_exponent.get(&i).unwrap())
                     .unwrap();
                 gk.relinearize_into(&out, &mut tmp)?;
-                out += &tmp;
+                out.try_add_assign(&tmp)?;
                 i *= 2
             }
 
             let gk = self.gk.get(&(self.par.degree() * 2 - 1)).unwrap();
             gk.relinearize_into(&out, &mut tmp)?;
-            out += &tmp;
+            out.try_add_assign(&tmp)?;
 
             Ok(out)
         }
@@ -182,11 +182,11 @@ impl EvaluationKey {
                     if j < size {
                         let target = &mut high[i];
                         target.clone_from(&low[i]);
-                        *target -= &sub;
+                        target.try_sub_assign(&sub)?;
                         target[0] *= monomial;
                         target[1] *= monomial;
                     }
-                    low[i] += &sub;
+                    low[i].try_add_assign(&sub)?;
                 }
             }
             out.truncate(size);

@@ -73,7 +73,7 @@ fn test_biguint_homomorphic_addition() -> Result<(), Box<dyn Error>> {
     let ct1: Ciphertext = sk.try_encrypt(&pt1, &mut rng)?;
     let ct2: Ciphertext = sk.try_encrypt(&pt2, &mut rng)?;
 
-    let ct_res = &ct1 + &ct2;
+    let ct_res = (&ct1 + &ct2)?;
 
     let decrypted_pt = sk.try_decrypt(&ct_res)?;
     let decrypted_values: Vec<BigUint> =

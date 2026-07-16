@@ -13,58 +13,62 @@ use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::sync::Arc;
 
 impl Add<&Ciphertext> for &Ciphertext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
-    fn add(self, rhs: &Ciphertext) -> Ciphertext {
-        assert!(Arc::ptr_eq(&self.par, &rhs.par));
-
-        if self.is_empty() {
-            return rhs.clone();
-        }
-        if rhs.is_empty() {
-            return self.clone();
-        }
-
-        assert_eq!(self.level, rhs.level);
-        assert_eq!(self.len(), rhs.len());
-
-        let c = self
-            .iter()
-            .zip(rhs.iter())
-            .map(|(c1i, c2i)| c1i + c2i)
-            .collect::<Vec<_>>();
-        Ciphertext {
-            par: self.par.clone(),
-            seed: None,
-            c,
-            level: self.level,
-        }
+    fn add(self, rhs: &Ciphertext) -> Self::Output {
+        self.try_add(rhs)
     }
 }
 
 impl Add<&Ciphertext> for Ciphertext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
-    fn add(mut self, rhs: &Ciphertext) -> Ciphertext {
-        self += rhs;
-        self
+    fn add(mut self, rhs: &Ciphertext) -> Self::Output {
+        self.try_add_assign(rhs)?;
+        Ok(self)
     }
 }
 
-impl AddAssign<&Ciphertext> for Ciphertext {
-    fn add_assign(&mut self, rhs: &Ciphertext) {
-        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+impl Ciphertext {
+    /// Add another ciphertext, treating missing higher-degree components as
+    /// zero. The result has the larger input length. Returns an error if the
+    /// parameters or levels are incompatible.
+    pub fn try_add(&self, rhs: &Self) -> Result<Self> {
+        let mut result = self.clone();
+        result.try_add_assign(rhs)?;
+        Ok(result)
+    }
 
-        if self.is_empty() {
-            *self = rhs.clone()
-        } else if !rhs.is_empty() {
-            assert_eq!(self.level, rhs.level);
-            assert_eq!(self.len(), rhs.len());
-            self.iter_mut()
-                .zip(rhs.iter())
-                .for_each(|(c1i, c2i)| *c1i += c2i);
-            self.seed = None
+    /// Add another ciphertext in place, treating missing higher-degree
+    /// components as zero. Returns an error without changing `self` if the
+    /// parameters or levels are incompatible.
+    pub fn try_add_assign(&mut self, rhs: &Self) -> Result<()> {
+        if !Arc::ptr_eq(&self.par, &rhs.par) {
+            return Err(Error::context_mismatch(&rhs.par, &self.par));
         }
+        if self.is_empty() {
+            *self = rhs.clone();
+            return Ok(());
+        }
+        if rhs.is_empty() {
+            return Ok(());
+        }
+        if self.level != rhs.level {
+            return Err(Error::InvalidLevel {
+                level: rhs.level,
+                min_level: self.level,
+                max_level: self.level,
+            });
+        }
+
+        self.iter_mut()
+            .zip(rhs.iter())
+            .for_each(|(lhs, rhs)| *lhs += rhs);
+        if rhs.len() > self.len() {
+            self.c.extend(rhs.iter().skip(self.len()).cloned());
+        }
+        self.seed = None;
+        Ok(())
     }
 }
 
@@ -108,58 +112,62 @@ impl Add<&Plaintext> for Ciphertext {
 }
 
 impl Sub<&Ciphertext> for &Ciphertext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
-    fn sub(self, rhs: &Ciphertext) -> Ciphertext {
-        assert!(Arc::ptr_eq(&self.par, &rhs.par));
-
-        if self.is_empty() {
-            return -rhs.clone();
-        }
-        if rhs.is_empty() {
-            return self.clone();
-        }
-
-        assert_eq!(self.level, rhs.level);
-        assert_eq!(self.len(), rhs.len());
-
-        let c = self
-            .iter()
-            .zip(rhs.iter())
-            .map(|(c1i, c2i)| c1i - c2i)
-            .collect::<Vec<_>>();
-        Ciphertext {
-            par: self.par.clone(),
-            seed: None,
-            c,
-            level: self.level,
-        }
+    fn sub(self, rhs: &Ciphertext) -> Self::Output {
+        self.try_sub(rhs)
     }
 }
 
 impl Sub<&Ciphertext> for Ciphertext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
-    fn sub(mut self, rhs: &Ciphertext) -> Ciphertext {
-        self -= rhs;
-        self
+    fn sub(mut self, rhs: &Ciphertext) -> Self::Output {
+        self.try_sub_assign(rhs)?;
+        Ok(self)
     }
 }
 
-impl SubAssign<&Ciphertext> for Ciphertext {
-    fn sub_assign(&mut self, rhs: &Ciphertext) {
-        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+impl Ciphertext {
+    /// Subtract another ciphertext, treating missing higher-degree components
+    /// as zero. The result has the larger input length. Returns an error if the
+    /// parameters or levels are incompatible.
+    pub fn try_sub(&self, rhs: &Self) -> Result<Self> {
+        let mut result = self.clone();
+        result.try_sub_assign(rhs)?;
+        Ok(result)
+    }
 
-        if self.is_empty() {
-            *self = -rhs
-        } else if !rhs.is_empty() {
-            assert_eq!(self.level, rhs.level);
-            assert_eq!(self.len(), rhs.len());
-            self.iter_mut()
-                .zip(rhs.iter())
-                .for_each(|(c1i, c2i)| *c1i -= c2i);
-            self.seed = None
+    /// Subtract another ciphertext in place, treating missing higher-degree
+    /// components as zero. Returns an error without changing `self` if the
+    /// parameters or levels are incompatible.
+    pub fn try_sub_assign(&mut self, rhs: &Self) -> Result<()> {
+        if !Arc::ptr_eq(&self.par, &rhs.par) {
+            return Err(Error::context_mismatch(&rhs.par, &self.par));
         }
+        if self.is_empty() {
+            *self = -rhs;
+            return Ok(());
+        }
+        if rhs.is_empty() {
+            return Ok(());
+        }
+        if self.level != rhs.level {
+            return Err(Error::InvalidLevel {
+                level: rhs.level,
+                min_level: self.level,
+                max_level: self.level,
+            });
+        }
+
+        self.iter_mut()
+            .zip(rhs.iter())
+            .for_each(|(lhs, rhs)| *lhs -= rhs);
+        if rhs.len() > self.len() {
+            self.c.extend(rhs.iter().skip(self.len()).map(Neg::neg));
+        }
+        self.seed = None;
+        Ok(())
     }
 }
 
@@ -373,12 +381,12 @@ mod tests {
                     let pt_b = Plaintext::try_encode(&b, encoding.clone(), &params)?;
 
                     let mut ct_a: Ciphertext = sk.try_encrypt(&pt_a, &mut rng)?;
-                    assert_eq!(ct_a, &ct_a + &zero);
-                    assert_eq!(ct_a, &zero + &ct_a);
+                    assert_eq!(ct_a, (&ct_a + &zero)?);
+                    assert_eq!(ct_a, (&zero + &ct_a)?);
                     let ct_b: Ciphertext = sk.try_encrypt(&pt_b, &mut rng)?;
-                    let ct_c = &ct_a + &ct_b;
-                    let ct_c_owned = ct_a.clone() + &ct_b;
-                    ct_a += &ct_b;
+                    let ct_c = (&ct_a + &ct_b)?;
+                    let ct_c_owned = (ct_a.clone() + &ct_b)?;
+                    ct_a.try_add_assign(&ct_b)?;
 
                     let pt_c = sk.try_decrypt(&ct_c)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
@@ -388,6 +396,65 @@ mod tests {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn checked_add_sub_support_mixed_sizes_and_reject_incompatible_inputs()
+    -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pt = Plaintext::try_encode(&[3_u64], Encoding::poly(), &params)?;
+        let ct: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
+        let product = &ct * &ct;
+
+        let sum = ct.try_add(&product)?;
+        assert_eq!(sum.len(), product.len());
+        let recovered_ct = sum.try_sub(&product)?;
+        assert_eq!(sk.try_decrypt(&recovered_ct)?, sk.try_decrypt(&ct)?);
+        let recovered_product = product.try_sub(&ct)?.try_add(&ct)?;
+        assert_eq!(
+            sk.try_decrypt(&recovered_product)?,
+            sk.try_decrypt(&product)?
+        );
+        let short_minus_long = (&ct - &product)?;
+        assert_eq!(short_minus_long.len(), product.len());
+        assert_eq!(
+            sk.try_decrypt(&short_minus_long.try_add(&product)?)?,
+            sk.try_decrypt(&ct)?
+        );
+
+        let mut switched = ct.clone();
+        switched.switch_down()?;
+        let original = ct.clone();
+        let mut accumulator = ct.clone();
+        assert!(matches!(
+            accumulator.try_add_assign(&switched),
+            Err(crate::Error::InvalidLevel { .. })
+        ));
+        assert_eq!(accumulator, original);
+        assert!(matches!(
+            accumulator.try_sub_assign(&switched),
+            Err(crate::Error::InvalidLevel { .. })
+        ));
+        assert_eq!(accumulator, original);
+
+        let other_params = BfvParameters::default_arc(6, 16);
+        let other_sk = SecretKey::random(&other_params, &mut rng);
+        let other_pt = Plaintext::try_encode(&[3_u64], Encoding::poly(), &other_params)?;
+        let other_ct: Ciphertext = other_sk.try_encrypt(&other_pt, &mut rng)?;
+        assert!(matches!(
+            accumulator.try_add_assign(&other_ct),
+            Err(crate::Error::ContextMismatch { .. })
+        ));
+        assert_eq!(accumulator, original);
+        assert!(matches!(
+            accumulator.try_sub_assign(&other_ct),
+            Err(crate::Error::ContextMismatch { .. })
+        ));
+        assert_eq!(accumulator, original);
 
         Ok(())
     }
@@ -469,18 +536,18 @@ mod tests {
                     let pt_b = Plaintext::try_encode(&b, encoding.clone(), &params)?;
 
                     let mut ct_a: Ciphertext = sk.try_encrypt(&pt_a, &mut rng)?;
-                    assert_eq!(ct_a, &ct_a - &zero);
+                    assert_eq!(ct_a, (&ct_a - &zero)?);
                     assert_eq!(
                         Vec::<u64>::try_decode(
-                            &sk.try_decrypt(&(&zero - &ct_a))?,
+                            &sk.try_decrypt(&(&zero - &ct_a)?)?,
                             encoding.clone()
                         )?,
                         a_neg
                     );
                     let ct_b: Ciphertext = sk.try_encrypt(&pt_b, &mut rng)?;
-                    let ct_c = &ct_a - &ct_b;
-                    let ct_c_owned = ct_a.clone() - &ct_b;
-                    ct_a -= &ct_b;
+                    let ct_c = (&ct_a - &ct_b)?;
+                    let ct_c_owned = (ct_a.clone() - &ct_b)?;
+                    ct_a.try_sub_assign(&ct_b)?;
 
                     let pt_c = sk.try_decrypt(&ct_c)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);

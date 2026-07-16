@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn collective_keys_enable_homomorphic_addition() {
+    fn collective_keys_enable_homomorphic_addition() -> crate::Result<()> {
         let mut rng = rng();
         for par in [
             BfvParameters::default_arc(1, 16),
@@ -439,7 +439,7 @@ mod tests {
                     let ct_b = public_key.try_encrypt(&pt_b, &mut rng).unwrap();
 
                     // and add them together
-                    let ct = Arc::new(&ct_a + &ct_b);
+                    let ct = Arc::new((&ct_a + &ct_b)?);
 
                     // Parties perform a collective decryption
                     let pt = parties
@@ -455,5 +455,6 @@ mod tests {
                 }
             }
         }
+        Ok(())
     }
 }

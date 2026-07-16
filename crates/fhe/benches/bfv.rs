@@ -104,14 +104,14 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("add_ct", format!("n={}/log(q)={}", par.degree(), q)),
             |b| {
-                b.iter(|| c1 = &c1 + &c2);
+                b.iter(|| c1 = (&c1 + &c2).unwrap());
             },
         );
 
         group.bench_function(
             BenchmarkId::new("add_assign_ct", format!("n={}/log(q)={}", par.degree(), q)),
             |b| {
-                b.iter(|| c1 += &c2);
+                b.iter(|| c1.try_add_assign(&c2).unwrap());
             },
         );
 
@@ -132,14 +132,14 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("sub_ct", format!("n={}/log(q)={}", par.degree(), q)),
             |b| {
-                b.iter(|| c1 = &c1 - &c2);
+                b.iter(|| c1 = (&c1 - &c2).unwrap());
             },
         );
 
         group.bench_function(
             BenchmarkId::new("sub_assign_ct", format!("n={}/log(q)={}", par.degree(), q)),
             |b| {
-                b.iter(|| c1 -= &c2);
+                b.iter(|| c1.try_sub_assign(&c2).unwrap());
             },
         );
 

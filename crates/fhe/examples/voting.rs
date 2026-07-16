@@ -142,7 +142,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tally = timeit!("Vote tallying", {
         let mut sum = Ciphertext::zero(&params);
         for ct in &votes_encrypted {
-            sum += ct;
+            sum.try_add_assign(ct)?;
         }
         Arc::new(sum)
     });

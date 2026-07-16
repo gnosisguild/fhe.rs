@@ -175,7 +175,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let mut out = bfv::Ciphertext::zero(&params);
         for (i, ci) in expanded_query[dim1..].iter().enumerate() {
-            out += &(&dot_product_mod_switch(i, &preprocessed_database)? * ci)
+            out.try_add_assign(&(&dot_product_mod_switch(i, &preprocessed_database)? * ci))?;
         }
         rk.relinearizes(&mut out)?;
         out.switch_to_level(out.max_switchable_level())?;

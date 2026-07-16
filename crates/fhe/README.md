@@ -67,6 +67,35 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 Note that operations actually happen modulo the `plaintext_modulus`, here set to `1024 (= 1 << 10)`; for example, we would have had that the homomorphic multiplication of `805` and `-7` is `509 = (805 * (-7)) mod 1024`. Additionally, the `poly()` encoding means that the vector being encoded corresponds to the coefficients of a polynomial in `(ZZ / (1024))[x] / (x^2048+1)` (and homomorphic multiplication happens in that ring); here since only one coefficient is provided, the value is placed in the constant coefficient. The library also contains a `simd()` encoding, which enables component-wise operation on the values of the vector, provided the technical limitation that the plaintext modulus is congruent to `1` modulo twice the polynomial degree.
 
+### Fallible ciphertext addition and subtraction
+
+Ciphertext-to-ciphertext addition and subtraction require compatible BFV parameters and ciphertext levels. The `+` and `-` operators return a `Result` so malformed or incompatible inputs produce an error instead of panicking:
+
+```rust
+# use fhe::bfv::{BfvParametersBuilder, Ciphertext, Encoding, Plaintext, SecretKey};
+# use fhe_traits::{FheEncoder, FheEncrypter};
+# use rand::rng;
+# fn example() -> fhe::Result<()> {
+# let parameters = BfvParametersBuilder::new()
+#     .set_degree(2048)
+#     .set_moduli(&[0x3fffffff000001])
+#     .set_plaintext_modulus(1 << 10)
+#     .build_arc()?;
+# let secret_key = SecretKey::random(&parameters, &mut rng());
+# let plaintext = Plaintext::try_encode(&[1_u64], Encoding::poly(), &parameters)?;
+# let ciphertext_1: Ciphertext = secret_key.try_encrypt(&plaintext, &mut rng())?;
+# let ciphertext_2: Ciphertext = secret_key.try_encrypt(&plaintext, &mut rng())?;
+let sum = (&ciphertext_1 + &ciphertext_2)?;
+
+let mut aggregate = Ciphertext::zero(&parameters);
+aggregate.try_add_assign(&ciphertext_1)?;
+aggregate.try_add_assign(&ciphertext_2)?;
+# Ok(())
+# }
+```
+
+Ciphertext `+=` and `-=` are not implemented because those Rust operator traits cannot return errors. Use `try_add_assign` and `try_sub_assign` for in-place operations. Ciphertexts with different component counts remain compatible: missing higher-degree components are treated as zero, which supports adding fresh ciphertexts to unrelinearized multiplication results.
+
 ## Examples
 
 More examples exercizing multiple functions from the API are provided in the repository [`examples/`](./examples/). For example, this library implements [SealPIR](https://eprint.iacr.org/2017/1142) and [MulPIR](https://eprint.iacr.org/2019/1483), which can be run as follows:

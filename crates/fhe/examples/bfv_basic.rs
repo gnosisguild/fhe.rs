@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pt_b = Plaintext::try_encode(&[5u64], Encoding::poly(), &params)?;
     let ct_a = pk.try_encrypt(&pt_a, &mut rng)?;
     let ct_b = pk.try_encrypt(&pt_b, &mut rng)?;
-    let ct_sum = &ct_a + &ct_b;
+    let ct_sum = (&ct_a + &ct_b)?;
     let pt_sum = sk.try_decrypt(&ct_sum)?;
     let res = Vec::<u64>::try_decode(&pt_sum, Encoding::poly())?;
     println!("3 + 5 = {}", res[0]);
@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pt_v2 = Plaintext::try_encode(&v2, Encoding::simd(), &params)?;
     let ct_v1 = pk.try_encrypt(&pt_v1, &mut rng)?;
     let ct_v2 = pk.try_encrypt(&pt_v2, &mut rng)?;
-    let ct_vsum = &ct_v1 + &ct_v2;
+    let ct_vsum = (&ct_v1 + &ct_v2)?;
     let pt_vsum = sk.try_decrypt(&ct_vsum)?;
     let res_v = Vec::<u64>::try_decode(&pt_vsum, Encoding::simd())?;
     println!("{:?} + {:?} = {:?}", v1, v2, &res_v[..v1.len()]);
