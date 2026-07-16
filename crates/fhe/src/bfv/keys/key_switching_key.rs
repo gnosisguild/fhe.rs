@@ -2,7 +2,10 @@
 //! Brakerski-Vaikuntanathan key switching through decomposition technique
 //! adapted to RNS as described in the HPS optimization paper (https://eprint.iacr.org/2018/117)
 
-use crate::bfv::{BfvParameters, SecretKey, traits::TryConvertFrom as BfvTryConvertFrom};
+#[cfg(feature = "protobuf")]
+use crate::bfv::traits::TryConvertFrom as BfvTryConvertFrom;
+use crate::bfv::{BfvParameters, SecretKey};
+#[cfg(feature = "protobuf")]
 use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
 use crate::{Error, Result};
 use fhe_math::rq::Context;
@@ -11,6 +14,7 @@ use fhe_math::{
     rns::RnsContext,
     rq::{Ntt, NttShoup, Poly, PowerBasis},
 };
+#[cfg(feature = "protobuf")]
 use fhe_traits::{DeserializeWithContext, Serialize};
 use itertools::{Itertools, izip};
 use num_bigint::BigUint;
@@ -358,6 +362,7 @@ impl KeySwitchingKey {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl From<&KeySwitchingKey> for KeySwitchingKeyProto {
     fn from(value: &KeySwitchingKey) -> Self {
         let mut ksk = KeySwitchingKeyProto::default();
@@ -380,6 +385,7 @@ impl From<&KeySwitchingKey> for KeySwitchingKeyProto {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
     fn try_convert_from(value: &KeySwitchingKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
         let ciphertext_level = value.ciphertext_level as usize;
@@ -457,9 +463,10 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
-    use crate::bfv::{
-        BfvParameters, SecretKey, keys::key_switching_key::KeySwitchingKey, traits::TryConvertFrom,
-    };
+    #[cfg(feature = "protobuf")]
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::bfv::{BfvParameters, SecretKey, keys::key_switching_key::KeySwitchingKey};
+    #[cfg(feature = "protobuf")]
     use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
     use fhe_math::{
         rns::RnsContext,
@@ -590,6 +597,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn proto_conversion() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();

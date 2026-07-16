@@ -7,8 +7,10 @@
  * relinearization algorithm.
  */
 
+#[cfg(feature = "protobuf")]
 use crate::bfv::traits::TryConvertFrom;
 use crate::bfv::{BfvParameters, Ciphertext, KeySwitchingKey, SecretKey};
+#[cfg(feature = "protobuf")]
 use crate::proto::bfv::{
     KeySwitchingKey as KeySwitchingKeyProto, LbfvRelinearizationKey as LBFVRelinearizationKeyProto,
 };
@@ -17,8 +19,11 @@ use fhe_math::rq::{
     Context, Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher,
     traits::TryConvertFrom as TryConvertFromPoly,
 };
-use fhe_traits::{DeserializeParametrized, DeserializeWithContext, FheParametrized, Serialize};
+use fhe_traits::FheParametrized;
+#[cfg(feature = "protobuf")]
+use fhe_traits::{DeserializeParametrized, DeserializeWithContext, Serialize};
 use itertools::izip;
+#[cfg(feature = "protobuf")]
 use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -367,6 +372,7 @@ impl LBFVRelinearizationKey {
 }
 
 /// Converts a [`LBFVRelinearizationKey`] into its protobuf representation
+#[cfg(feature = "protobuf")]
 impl From<&LBFVRelinearizationKey> for LBFVRelinearizationKeyProto {
     fn from(value: &LBFVRelinearizationKey) -> Self {
         LBFVRelinearizationKeyProto {
@@ -387,6 +393,7 @@ impl From<&LBFVRelinearizationKey> for LBFVRelinearizationKeyProto {
 /// # Returns
 /// * `Ok(LBFVRelinearizationKey)` if conversion succeeds
 /// * `Err` if the protobuf is invalid or conversion fails
+#[cfg(feature = "protobuf")]
 impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
     fn try_convert_from(
         value: &LBFVRelinearizationKeyProto,
@@ -420,6 +427,7 @@ impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
 }
 
 /// Serializes the [`LBFVRelinearizationKey`] into a byte vector
+#[cfg(feature = "protobuf")]
 impl Serialize for LBFVRelinearizationKey {
     fn to_bytes(&self) -> Vec<u8> {
         LBFVRelinearizationKeyProto::from(self).encode_to_vec()
@@ -441,6 +449,7 @@ impl FheParametrized for LBFVRelinearizationKey {
 /// # Returns
 /// * `Ok(LBFVRelinearizationKey)` if deserialization succeeds
 /// * `Err` if the bytes are invalid or deserialization fails
+#[cfg(feature = "protobuf")]
 impl DeserializeParametrized for LBFVRelinearizationKey {
     type Error = Error;
 
@@ -464,6 +473,7 @@ mod tests {
     use std::error::Error;
     use std::result::Result;
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn test_serialize_deserialize() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();

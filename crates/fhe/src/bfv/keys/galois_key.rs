@@ -1,7 +1,12 @@
 //! Galois keys for the BFV encryption scheme
 
 use super::key_switching_key::KeySwitchingKey;
-use crate::bfv::{BfvParameters, Ciphertext, SecretKey, traits::TryConvertFrom};
+#[cfg(feature = "protobuf")]
+use crate::bfv::BfvParameters;
+#[cfg(feature = "protobuf")]
+use crate::bfv::traits::TryConvertFrom;
+use crate::bfv::{Ciphertext, SecretKey};
+#[cfg(feature = "protobuf")]
 use crate::proto::bfv::{GaloisKey as GaloisKeyProto, KeySwitchingKey as KeySwitchingKeyProto};
 use crate::{Error, Result};
 use fhe_math::rq::{
@@ -9,6 +14,7 @@ use fhe_math::rq::{
     traits::TryConvertFrom as TryConvertFromPoly,
 };
 use rand::{CryptoRng, RngCore};
+#[cfg(feature = "protobuf")]
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -60,6 +66,7 @@ impl GaloisKey {
     }
 
     /// Relinearize a [`Ciphertext`] using the [`GaloisKey`]
+    #[allow(dead_code)]
     pub fn relinearize(&self, ct: &Ciphertext) -> Result<Ciphertext> {
         // assert_eq!(ct.par, self.ksk.par);
         assert_eq!(ct.len(), 2);
@@ -124,6 +131,7 @@ impl GaloisKey {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl From<&GaloisKey> for GaloisKeyProto {
     fn from(value: &GaloisKey) -> Self {
         GaloisKeyProto {
@@ -133,6 +141,7 @@ impl From<&GaloisKey> for GaloisKeyProto {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl TryConvertFrom<&GaloisKeyProto> for GaloisKey {
     fn try_convert_from(value: &GaloisKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
         if let Some(ksk) = &value.ksk {
@@ -152,9 +161,10 @@ impl TryConvertFrom<&GaloisKeyProto> for GaloisKey {
 #[cfg(test)]
 mod tests {
     use super::GaloisKey;
-    use crate::bfv::{
-        BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
-    };
+    #[cfg(feature = "protobuf")]
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
+    #[cfg(feature = "protobuf")]
     use crate::proto::bfv::GaloisKey as GaloisKeyProto;
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use rand::rng;
@@ -234,6 +244,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn proto_conversion() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();

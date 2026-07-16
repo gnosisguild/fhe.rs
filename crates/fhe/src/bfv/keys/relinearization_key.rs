@@ -22,7 +22,10 @@
 use std::sync::Arc;
 
 use super::key_switching_key::KeySwitchingKey;
-use crate::bfv::{BfvParameters, Ciphertext, SecretKey, traits::TryConvertFrom};
+#[cfg(feature = "protobuf")]
+use crate::bfv::traits::TryConvertFrom;
+use crate::bfv::{BfvParameters, Ciphertext, SecretKey};
+#[cfg(feature = "protobuf")]
 use crate::proto::bfv::{
     KeySwitchingKey as KeySwitchingKeyProto, RelinearizationKey as RelinearizationKeyProto,
 };
@@ -30,7 +33,10 @@ use crate::{Error, Result};
 use fhe_math::rq::{
     Ntt, Poly, PowerBasis, switcher::Switcher, traits::TryConvertFrom as TryConvertFromPoly,
 };
-use fhe_traits::{DeserializeParametrized, FheParametrized, Serialize};
+use fhe_traits::FheParametrized;
+#[cfg(feature = "protobuf")]
+use fhe_traits::{DeserializeParametrized, Serialize};
+#[cfg(feature = "protobuf")]
 use prost::Message;
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
@@ -167,6 +173,7 @@ impl RelinearizationKey {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl From<&RelinearizationKey> for RelinearizationKeyProto {
     fn from(value: &RelinearizationKey) -> Self {
         RelinearizationKeyProto {
@@ -175,6 +182,7 @@ impl From<&RelinearizationKey> for RelinearizationKeyProto {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl TryConvertFrom<&RelinearizationKeyProto> for RelinearizationKey {
     fn try_convert_from(value: &RelinearizationKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
         if let Some(ksk) = &value.ksk {
@@ -187,6 +195,7 @@ impl TryConvertFrom<&RelinearizationKeyProto> for RelinearizationKey {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for RelinearizationKey {
     fn to_bytes(&self) -> Vec<u8> {
         RelinearizationKeyProto::from(self).encode_to_vec()
@@ -197,6 +206,7 @@ impl FheParametrized for RelinearizationKey {
     type Parameters = BfvParameters;
 }
 
+#[cfg(feature = "protobuf")]
 impl DeserializeParametrized for RelinearizationKey {
     type Error = Error;
 
@@ -213,7 +223,10 @@ impl DeserializeParametrized for RelinearizationKey {
 #[cfg(test)]
 mod tests {
     use super::RelinearizationKey;
-    use crate::bfv::{BfvParameters, Ciphertext, Encoding, SecretKey, traits::TryConvertFrom};
+    #[cfg(feature = "protobuf")]
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::bfv::{BfvParameters, Ciphertext, Encoding, SecretKey};
+    #[cfg(feature = "protobuf")]
     use crate::proto::bfv::RelinearizationKey as RelinearizationKeyProto;
     use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom as TryConvertFromPoly};
     use fhe_traits::{FheDecoder, FheDecrypter};
@@ -316,6 +329,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn proto_conversion() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();

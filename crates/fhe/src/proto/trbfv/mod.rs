@@ -1,6 +1,6 @@
 //! Protobuf for the Threshold BFV encryption scheme.
 
-#[allow(clippy::all)]
-mod generated;
+#![allow(missing_docs)]
+#![allow(clippy::all)]
 
-pub use generated::*;
+include!(concat!(env!("OUT_DIR"), "/fhers.trbfv.rs"));

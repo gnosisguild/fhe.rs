@@ -1,20 +1,24 @@
 use std::ops::Mul;
 
+#[cfg(feature = "protobuf")]
+use crate::SerializationError;
+#[cfg(feature = "protobuf")]
 use crate::proto::bfv::{
     KeySwitchingKey as KeySwitchingKeyProto, RgswCiphertext as RGSWCiphertextProto,
 };
-use crate::{Error, Result, SerializationError};
+use crate::{Error, Result};
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom as TryConvertFromPoly};
-use fhe_traits::{
-    DeserializeParametrized, FheCiphertext, FheEncrypter, FheParametrized, Serialize,
-};
+#[cfg(feature = "protobuf")]
+use fhe_traits::{DeserializeParametrized, Serialize};
+use fhe_traits::{FheCiphertext, FheEncrypter, FheParametrized};
+#[cfg(feature = "protobuf")]
 use prost::Message;
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
-use super::{
-    BfvParameters, Ciphertext, Plaintext, SecretKey, keys::KeySwitchingKey, traits::TryConvertFrom,
-};
+#[cfg(feature = "protobuf")]
+use super::traits::TryConvertFrom;
+use super::{BfvParameters, Ciphertext, Plaintext, SecretKey, keys::KeySwitchingKey};
 
 /// A RGSW ciphertext encrypting a plaintext.
 #[derive(Debug, PartialEq, Eq)]
@@ -27,6 +31,7 @@ impl FheParametrized for RGSWCiphertext {
     type Parameters = BfvParameters;
 }
 
+#[cfg(feature = "protobuf")]
 impl From<&RGSWCiphertext> for RGSWCiphertextProto {
     fn from(ct: &RGSWCiphertext) -> Self {
         RGSWCiphertextProto {
@@ -36,6 +41,7 @@ impl From<&RGSWCiphertext> for RGSWCiphertextProto {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl TryConvertFrom<&RGSWCiphertextProto> for RGSWCiphertext {
     fn try_convert_from(
         value: &RGSWCiphertextProto,
@@ -72,6 +78,7 @@ impl TryConvertFrom<&RGSWCiphertextProto> for RGSWCiphertext {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl DeserializeParametrized for RGSWCiphertext {
     type Error = Error;
 
@@ -85,6 +92,7 @@ impl DeserializeParametrized for RGSWCiphertext {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for RGSWCiphertext {
     fn to_bytes(&self) -> Vec<u8> {
         RGSWCiphertextProto::from(self).encode_to_vec()
@@ -169,7 +177,9 @@ mod tests {
     use std::error::Error;
 
     use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
-    use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
+    #[cfg(feature = "protobuf")]
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::rng;
 
     use super::RGSWCiphertext;
@@ -210,6 +220,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn serialize() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();

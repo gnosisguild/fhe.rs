@@ -57,4 +57,4 @@ Always use `--release`. The trbfv secure-preset e2e tests (`crates/fhe/tests/trb
 - **Clippy: `expect_used` / `panic` / `indexing_slicing`** — library code must use `?` and `Result`, not `unwrap()`/`expect()`/`panic!`. Use `get()` instead of direct indexing.
 - **Missing docs** — `missing_docs` is warned. Public items need doc comments.
 - **Format check** — must use nightly: `cargo +nightly fmt --all`. Stable fmt may produce different output.
-- **Protoc missing** — if `protoc` is not installed, `fhe` skips proto generation with a warning. Install it or use the `fhe-math` fallback.
+- **Protoc missing** — `protoc` is only required with `--features protobuf`. Without the feature, serialization is unavailable but core crypto operations work. Install `protoc` or use `--no-default-features` for core-only builds.

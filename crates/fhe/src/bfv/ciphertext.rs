@@ -1,12 +1,18 @@
 //! Ciphertext type in the BFV encryption scheme.
 
-use crate::bfv::{parameters::BfvParameters, traits::TryConvertFrom};
+#[cfg(feature = "protobuf")]
+use crate::SerializationError;
+use crate::bfv::parameters::BfvParameters;
+#[cfg(feature = "protobuf")]
+use crate::bfv::traits::TryConvertFrom;
+#[cfg(feature = "protobuf")]
 use crate::proto::bfv::Ciphertext as CiphertextProto;
-use crate::{Error, Result, SerializationError};
+use crate::{Error, Result};
 use fhe_math::rq::{Ntt, Poly};
-use fhe_traits::{
-    DeserializeParametrized, DeserializeWithContext, FheCiphertext, FheParametrized, Serialize,
-};
+#[cfg(feature = "protobuf")]
+use fhe_traits::{DeserializeParametrized, DeserializeWithContext, Serialize};
+use fhe_traits::{FheCiphertext, FheParametrized};
+#[cfg(feature = "protobuf")]
 use prost::Message;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -131,12 +137,14 @@ impl FheParametrized for Ciphertext {
     type Parameters = BfvParameters;
 }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for Ciphertext {
     fn to_bytes(&self) -> Vec<u8> {
         CiphertextProto::from(self).encode_to_vec()
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl DeserializeParametrized for Ciphertext {
     fn from_bytes(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
         let ctp = Message::decode(bytes).map_err(|_| {
@@ -164,6 +172,7 @@ impl Ciphertext {
 }
 
 /// Conversions from and to protobuf.
+#[cfg(feature = "protobuf")]
 impl From<&Ciphertext> for CiphertextProto {
     fn from(ct: &Ciphertext) -> Self {
         let mut proto = CiphertextProto::default();
@@ -194,6 +203,7 @@ impl From<&Ciphertext> for CiphertextProto {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl TryConvertFrom<&CiphertextProto> for Ciphertext {
     fn try_convert_from(value: &CiphertextProto, par: &Arc<BfvParameters>) -> Result<Self> {
         if value.c.is_empty() || (value.c.len() == 1 && value.seed.is_empty()) {
@@ -244,15 +254,20 @@ impl TryConvertFrom<&CiphertextProto> for Ciphertext {
 #[cfg(test)]
 mod tests {
     use crate::Error as FheError;
-    use crate::bfv::{
-        BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
-    };
+    #[cfg(feature = "protobuf")]
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
+    #[cfg(feature = "protobuf")]
     use crate::proto::bfv::Ciphertext as CiphertextProto;
     use fhe_traits::FheDecrypter;
+    #[cfg(feature = "protobuf")]
     use fhe_traits::{DeserializeParametrized, FheEncoder, FheEncrypter, Serialize};
+    #[cfg(not(feature = "protobuf"))]
+    use fhe_traits::{FheEncoder, FheEncrypter};
     use rand::rng;
     use std::error::Error as StdError;
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn proto_conversion() -> Result<(), Box<dyn StdError>> {
         let mut rng = rng();
@@ -276,6 +291,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn serialize() -> Result<(), Box<dyn StdError>> {
         let mut rng = rng();

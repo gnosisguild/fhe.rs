@@ -24,10 +24,28 @@ jobs:
       - name: Check code format
         run: cargo fmt --all -- --check
 
-      - name: Run clippy
+      - name: Run clippy (all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Run tests
+      - name: Run tests (all features)
         # Release profile: one compile pass, and the trBFV secure-preset e2e
         # tests (tests/trbfv_secure_e2e.rs) run in seconds instead of minutes.
         run: cargo test --release --all-features
+
+  ci-no-protobuf:
+    # Verify the crate builds and tests pass without the protobuf feature
+    # (no protoc required).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.85.0
+
+      - name: Run clippy (no default features)
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+
+      - name: Run tests (no default features)
+        run: cargo test --release --no-default-features

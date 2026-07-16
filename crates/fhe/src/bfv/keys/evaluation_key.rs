@@ -1,11 +1,17 @@
 //! Leveled evaluation keys for the BFV encryption scheme.
 
-use crate::bfv::{BfvParameters, Ciphertext, SecretKey, keys::GaloisKey, traits::TryConvertFrom};
+#[cfg(feature = "protobuf")]
+use crate::bfv::traits::TryConvertFrom;
+use crate::bfv::{BfvParameters, Ciphertext, SecretKey, keys::GaloisKey};
+#[cfg(feature = "protobuf")]
 use crate::proto::bfv::{EvaluationKey as EvaluationKeyProto, GaloisKey as GaloisKeyProto};
 use crate::{Error, Result};
 use fhe_math::rq::{NttShoup, Poly, PowerBasis, traits::TryConvertFrom as TryConvertFromPoly};
 use fhe_math::zq::Modulus;
-use fhe_traits::{DeserializeParametrized, FheParametrized, Serialize};
+use fhe_traits::FheParametrized;
+#[cfg(feature = "protobuf")]
+use fhe_traits::{DeserializeParametrized, Serialize};
+#[cfg(feature = "protobuf")]
 use prost::Message;
 use rand::{CryptoRng, RngCore};
 use std::collections::{HashMap, HashSet};
@@ -207,12 +213,14 @@ impl FheParametrized for EvaluationKey {
     type Parameters = BfvParameters;
 }
 
+#[cfg(feature = "protobuf")]
 impl Serialize for EvaluationKey {
     fn to_bytes(&self) -> Vec<u8> {
         EvaluationKeyProto::from(self).encode_to_vec()
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl DeserializeParametrized for EvaluationKey {
     type Error = Error;
 
@@ -379,6 +387,7 @@ impl EvaluationKeyBuilder {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl From<&EvaluationKey> for EvaluationKeyProto {
     fn from(ek: &EvaluationKey) -> Self {
         let mut proto = EvaluationKeyProto::default();
@@ -391,6 +400,7 @@ impl From<&EvaluationKey> for EvaluationKeyProto {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl TryConvertFrom<&EvaluationKeyProto> for EvaluationKey {
     fn try_convert_from(value: &EvaluationKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
         let mut gk = HashMap::new();
@@ -433,12 +443,17 @@ impl TryConvertFrom<&EvaluationKeyProto> for EvaluationKey {
 
 #[cfg(test)]
 mod tests {
-    use super::{EvaluationKey, EvaluationKeyBuilder};
-    use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey, traits::TryConvertFrom};
+    #[cfg(feature = "protobuf")]
+    use super::EvaluationKey;
+    use super::EvaluationKeyBuilder;
+    #[cfg(feature = "protobuf")]
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
+    #[cfg(feature = "protobuf")]
     use crate::proto::bfv::EvaluationKey as LeveledEvaluationKeyProto;
-    use fhe_traits::{
-        DeserializeParametrized, FheDecoder, FheDecrypter, FheEncoder, FheEncrypter, Serialize,
-    };
+    #[cfg(feature = "protobuf")]
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use itertools::izip;
     use rand::rng;
     use std::{cmp::min, error::Error};
@@ -730,6 +745,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn proto_conversion() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
@@ -774,6 +790,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn serialize() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();

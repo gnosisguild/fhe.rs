@@ -18,6 +18,15 @@ Add the following to your `Cargo.toml`:
 fhe = "0.2.0"
 ```
 
+### Features
+
+- **`protobuf`** *(disabled by default)* — Enables protobuf-based serialization via `prost`. Requires `protoc` to be installed at build time. Without this feature, core BFV encryption and homomorphic operations work, but `to_bytes`/`from_bytes` serialization is unavailable.
+
+```toml
+[dependencies]
+fhe = { version = "0.2.0", features = ["protobuf"] }
+```
+
 ## Example
 
 Below is a simple example using BFV of an homomorphic multiplication.

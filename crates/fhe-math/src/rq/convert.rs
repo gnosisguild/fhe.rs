@@ -1,19 +1,18 @@
 //! Implementation of conversions from and to polynomials.
 
-use super::{
-    Context, Ntt, NttShoup, Poly, PowerBasis, Representation, RepresentationTag,
-    traits::TryConvertFrom,
-};
-use crate::{
-    Error, Result,
-    proto::rq::{Representation as RepresentationProto, Rq},
-};
+use super::{Context, Ntt, NttShoup, Poly, PowerBasis, traits::TryConvertFrom};
+#[cfg(feature = "protobuf")]
+use super::{Representation, RepresentationTag};
+#[cfg(feature = "protobuf")]
+use crate::proto::rq::{Representation as RepresentationProto, Rq};
+use crate::{Error, Result};
 use itertools::{Itertools, izip};
 use ndarray::{Array2, ArrayView, Axis};
 use num_bigint::BigUint;
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(feature = "protobuf")]
 impl<R: RepresentationTag> From<&Poly<R>> for Rq {
     fn from(p: &Poly<R>) -> Self {
         assert!(!p.has_lazy_coefficients);
@@ -41,6 +40,7 @@ impl<R: RepresentationTag> From<&Poly<R>> for Rq {
     }
 }
 
+#[cfg(feature = "protobuf")]
 fn parse_proto(
     value: &Rq,
     ctx: &Arc<Context>,
@@ -93,6 +93,7 @@ fn parse_proto(
     ))
 }
 
+#[cfg(feature = "protobuf")]
 impl TryConvertFrom<&Rq> for Poly<PowerBasis> {
     fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         let (representation_from_proto, coefficients, variable_time) =
@@ -106,6 +107,7 @@ impl TryConvertFrom<&Rq> for Poly<PowerBasis> {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl TryConvertFrom<&Rq> for Poly<Ntt> {
     fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         let (representation_from_proto, coefficients, variable_time) =
@@ -120,6 +122,7 @@ impl TryConvertFrom<&Rq> for Poly<Ntt> {
     }
 }
 
+#[cfg(feature = "protobuf")]
 impl TryConvertFrom<&Rq> for Poly<NttShoup> {
     fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         let (representation_from_proto, coefficients, variable_time) =
@@ -500,17 +503,20 @@ impl From<&Poly<NttShoup>> for Vec<BigUint> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        Error as CrateError,
-        proto::rq::Rq,
-        rq::{Context, Ntt, NttShoup, Poly, PowerBasis, traits::TryConvertFrom},
-    };
+    #[cfg(feature = "protobuf")]
+    use crate::Error as CrateError;
+    #[cfg(feature = "protobuf")]
+    use crate::proto::rq::Rq;
+    #[cfg(feature = "protobuf")]
+    use crate::rq::NttShoup;
+    use crate::rq::{Context, Ntt, Poly, PowerBasis, traits::TryConvertFrom};
     use num_bigint::BigUint;
     use rand::rng;
     use std::{error::Error, sync::Arc};
 
     static MODULI: &[u64; 3] = &[1153, 4611686018326724609, 4611686018309947393];
 
+    #[cfg(feature = "protobuf")]
     #[test]
     fn proto() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
