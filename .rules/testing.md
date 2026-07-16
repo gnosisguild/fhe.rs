@@ -19,7 +19,7 @@ cargo test --release -p fhe -- test_name
 # Full CI-equivalent
 cargo test --release --all-features
 cargo clippy --all-targets --all-features -- -D warnings
-cargo +nightly fmt --all
+cargo fmt --all
 pre-commit run --all-files
 ```
 

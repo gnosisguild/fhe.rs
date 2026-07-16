@@ -39,7 +39,7 @@ Review changes that touch:
 - **Polynomial degree** — multiplication must not silently exceed expected degree.
 - **Modular reduction** — results must be canonical or centered representatives as documented.
 - **Scalar-polynomial conversions** — value must be preserved across form changes.
-- **Property test coverage** — do proptest strategies cover edge values (zero, one, `-1` mod p, modulus minus one), random values across the full residue range, and values near modulus boundaries?
+- **Property test coverage** — do proptest strategies cover edge values (zero, one, `-1` mod p, modulus minus one), random values across the full residue range, values near modulus boundaries, positive and negative values around rounding half-points, polynomials of varying degrees including empty and full-degree, multiple RNS limb counts with valid reordered-basis conversion, and exact oracle equality for `RnsScaler`?
 
 ## How to report
 

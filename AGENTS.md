@@ -6,7 +6,7 @@ Ring-LWE-based fully homomorphic encryption library in Rust. Workspace with 4 cr
 
 ## Prerequisites
 
-- Rust stable + nightly toolchains (nightly required for formatting)
+- Rust stable toolchain
 - `protoc` (protobuf compiler) — build fails without it
 
 ## Commands
@@ -14,7 +14,7 @@ Ring-LWE-based fully homomorphic encryption library in Rust. Workspace with 4 cr
 ```bash
 cargo test --release --all-features    # tests (release mode critical for trbfv speed)
 cargo clippy --all-targets --all-features -- -D warnings
-cargo +nightly fmt --all               # formatting (must use nightly)
+cargo fmt --all               # formatting
 pre-commit run --all-files             # runs fmt, clippy, typos
 ```
 
@@ -39,11 +39,11 @@ If `protoc` is unavailable, `fhe-math` falls back to the committed file; `fhe` s
 
 For non-trivial work, OpenCode provides agents under [`.opencode/agents/`](.opencode/agents):
 
-1. `fhe-architect` — brainstorm designs and tradeoffs (read-only).
-2. `fhe-implementer` — implement the approved plan (can edit).
-3. `fhe-reviewer` — general correctness, conventions, and test review (read-only).
-4. `fhe-crypto-reviewer` — specialist review for scheme/key/noise/parameter/threshold changes (read-only).
-5. `fhe-math-reviewer` — specialist review for RNS/NTT/modular/polynomial arithmetic (read-only).
+1. `fhe-architect` — brainstorm designs and tradeoffs (primary, read-only).
+2. `fhe-implementer` — implement the approved plan (primary, can edit). Dispatches reviewer subagents below.
+3. `fhe-reviewer` — general correctness, conventions, and test review (subagent, read-only).
+4. `fhe-crypto-reviewer` — specialist review for scheme/key/noise/parameter/threshold changes (subagent, read-only).
+5. `fhe-math-reviewer` — specialist review for RNS/NTT/modular/polynomial arithmetic (subagent, read-only).
 
 Reusable procedures live as skills under [`.opencode/skills/`](.opencode/skills): `fhe-verification`, `crypto-change-review`, `protobuf-codegen`, `benchmarking`.
 
@@ -67,7 +67,7 @@ Update the canonical `.rules/*.md` in the same change when your edit makes a rul
 **Touch → update:**
 
 - `workflow.md` — any edit (applies project-wide)
-- `crypto.md` — `crates/fhe/src/{bfv,trbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`
+- `crypto.md` — `crates/fhe/src/{bfv,trbfv,lbfv,mbfv}/**`, `crates/fhe/examples/*.rs`
 - `math.md` — `crates/fhe-math/src/**`
 - `codegen.md` — `**/build.rs`, `**/*.proto`, `**/src/proto/**`
 - `testing.md` — `**/tests/**`, `**/benches/**`, `.github/workflows/**`, `.pre-commit-config.yaml`
@@ -80,6 +80,7 @@ Update the canonical `.rules/*.md` in the same change when your edit makes a rul
 - **Never hand-edit generated protobuf output.** Regenerate via the build — see [`.rules/codegen.md`](.rules/codegen.md).
 - **No unsupported security claims.** This library has never been independently audited — see [`.rules/crypto.md`](.rules/crypto.md).
 - **Never commit, amend, or push without explicit user consent.**
+- **Add or extend tests for the code you change, even if nobody asked.** Follow the testing rules in [`.rules/testing.md`](.rules/testing.md).
 
 ## Style & lints
 
@@ -91,4 +92,4 @@ Workspace lints are strict — code that violates them won't pass CI:
 ## PR conventions
 
 - Title: `[agent] <Title>`
-- Run `cargo test --release --all-features`, `cargo +nightly fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings` before committing
+- Run `cargo test --release --all-features`, `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings` before committing

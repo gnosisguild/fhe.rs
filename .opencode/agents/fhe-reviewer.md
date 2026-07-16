@@ -7,7 +7,7 @@ permission:
     "cargo test *": allow
     "cargo build *": allow
     "cargo clippy *": allow
-    "cargo +nightly fmt *": allow
+    "cargo fmt *": allow
     "cargo check *": allow
     "git status": allow
     "git diff *": allow

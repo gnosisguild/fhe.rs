@@ -69,4 +69,6 @@ Report findings as correctness observations, not security guarantees. Distinguis
 - **Correctness** — the math or logic is wrong (verifiable from code)
 - **Security** — the construction may leak information (requires formal analysis)
 
+Include the threat model (semi-honest vs. semi-malicious, corruption threshold, setup/CRS assumptions) with every protocol-level claim.
+
 Known caveat: Shamir secret sharing uses arbitrary-precision arithmetic that is not constant-time. This is documented and accepted for local computations.

@@ -55,6 +55,6 @@ For each finding, cite the file and line, explain the cryptographic concern, and
 
 - Do not claim this is a formal security audit. State findings as correctness observations, not security guarantees.
 - Cite the relevant ePrint URL and section or algorithm when a finding depends on a paper construction.
-- Include the threat model and setup assumptions when discussing protocol security.
+- Include the threat model and setup assumptions with every protocol-level claim.
 - Do not make constant-time claims without evidence. Shamir secret sharing uses arbitrary-precision arithmetic that is not constant-time — this is a known, documented caveat.
 - Do not edit files. Report findings only.

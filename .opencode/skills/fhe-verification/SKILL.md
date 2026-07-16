@@ -28,8 +28,8 @@ cargo test --release -p fhe-math -- <test_name>
 ### Clippy on a single crate
 
 ```bash
-cargo clippy -p fhe-math -- -D warnings
-cargo clippy -p fhe -- -D warnings
+cargo clippy -p fhe-math --all-targets -- -D warnings
+cargo clippy -p fhe --all-targets -- -D warnings
 ```
 
 ## Full CI-equivalent verification
@@ -39,12 +39,7 @@ Run all three before declaring work complete:
 ```bash
 cargo test --release --all-features
 cargo clippy --all-targets --all-features -- -D warnings
-cargo +nightly fmt --all
-```
-
-Optionally run pre-commit (which executes fmt check, clippy, and typos):
-
-```bash
+cargo fmt --all
 pre-commit run --all-files
 ```
 
@@ -56,5 +51,5 @@ Always use `--release`. The trbfv secure-preset e2e tests (`crates/fhe/tests/trb
 
 - **Clippy: `expect_used` / `panic` / `indexing_slicing`** — library code must use `?` and `Result`, not `unwrap()`/`expect()`/`panic!`. Use `get()` instead of direct indexing.
 - **Missing docs** — `missing_docs` is warned. Public items need doc comments.
-- **Format check** — must use nightly: `cargo +nightly fmt --all`. Stable fmt may produce different output.
+- **Format check** — run `cargo fmt --all`.
 - **Protoc missing** — if `protoc` is not installed, `fhe` skips proto generation with a warning. Install it or use the `fhe-math` fallback.
