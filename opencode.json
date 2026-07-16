@@ -7,6 +7,28 @@
     }
   },
   "instructions": ["AGENTS.md"],
+  "agent": {
+    "fhe-architect": {
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "max"
+    },
+    "fhe-implementer": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "variant": "max"
+    },
+    "fhe-crypto-reviewer": {
+      "model": "openai/gpt-5.6-sol",
+      "reasoningEffort": "high"
+    },
+    "fhe-math-reviewer": {
+      "model": "openai/gpt-5.6-sol",
+      "reasoningEffort": "high"
+    },
+    "fhe-reviewer": {
+      "model": "openai/gpt-5.6-sol",
+      "reasoningEffort": "high"
+    }
+  },
   "permission": {
     "bash": {
       "cargo test *": "allow",
