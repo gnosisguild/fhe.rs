@@ -15,6 +15,15 @@ use super::Aggregate;
 ///
 /// Each party uses the `PublicKeySwitchShare` to generate their share of the
 /// new ciphertext and participate in the "Protocol 4: PubKeySwitch" protocol detailed in as detailed in [Multiparty BFV](https://eprint.iacr.org/2020/304.pdf) (p7). Use the [`Aggregate`] impl to combine the shares into a [`Ciphertext`].
+///
+/// # Security limitation
+///
+/// This implementation uses ordinary BFV error rather than flooding noise
+/// derived from the input ciphertext's current noise. It is functionally
+/// correct, but does not provide the transcript privacy required by the cited
+/// protocol. Do not expose this operation to repeated or adversarially chosen
+/// ciphertexts or rely on it to hide input-dependent information from the
+/// share recipient or aggregator.
 pub struct PublicKeySwitchShare {
     pub(crate) par: Arc<BfvParameters>,
     /// The first component of the input ciphertext

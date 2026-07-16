@@ -93,4 +93,13 @@ Run tests with `cargo test`.
 
 The implementations in this crate have never been independently audited for security.
 
+The experimental `mbfv` module implements a semi-honest N-out-of-N protocol,
+not a threshold or robust protocol. Its collective decryption, secret-key
+switch, and public-key switch operations do not currently implement the
+ciphertext-noise-dependent flooding required for transcript privacy. Do not use
+those operations where another party or aggregator must learn nothing beyond
+the protocol output, especially with repeated or adversarially supplied
+ciphertexts. This limitation does not apply to the separate BFV, LBFV, or TRBFV
+implementations.
+
 Use at your own risk.

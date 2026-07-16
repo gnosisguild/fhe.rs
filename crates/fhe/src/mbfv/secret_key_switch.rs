@@ -23,6 +23,16 @@ use super::Aggregate;
 ///
 /// Note: this protocol assumes the output key is split into the same number of
 /// parties as the input key, and is likely only useful for niche scenarios.
+///
+/// # Security limitation
+///
+/// This implementation uses ordinary BFV error rather than flooding noise
+/// derived from the input ciphertext's current noise. It is functionally
+/// correct, but does not provide the transcript privacy required by the cited
+/// protocol. A share exposes a noisy relation involving the difference between
+/// the input and output secret-key shares. Do not expose this operation to
+/// repeated or adversarially chosen ciphertexts or rely on it to hide that
+/// relation from the share recipient or aggregator.
 pub struct SecretKeySwitchShare {
     pub(crate) par: Arc<BfvParameters>,
     /// The original input ciphertext
@@ -141,6 +151,17 @@ impl Serialize for SecretKeySwitchShare {
 /// plaintext output. Note that this is a special case of the "Protocol 3:
 /// KeySwitch" protocol detailed in [Multiparty BFV](https://eprint.iacr.org/2020/304.pdf) (p7), using an output key of zero. Use the
 /// [`Aggregate`] impl to combine the shares into a [`Plaintext`].
+///
+/// # Security limitation
+///
+/// This implementation uses ordinary BFV error rather than flooding noise
+/// derived from the input ciphertext's current noise. It is functionally
+/// correct, but does not provide the transcript privacy required by the cited
+/// protocol. A decryption share exposes a noisy linear relation involving the
+/// party's secret-key share. Repeated or adversarially chosen requests may
+/// reveal secret-key-share information; single-transcript key recovery is not
+/// established by this warning. Do not use this API as a privacy-preserving
+/// multiparty decryption protocol.
 pub struct DecryptionShare {
     pub(crate) sks_share: SecretKeySwitchShare,
 }
