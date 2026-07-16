@@ -11,7 +11,6 @@ permission:
     "cargo fmt *": allow
     "cargo bench *": allow
     "cargo check *": allow
-    "pre-commit *": allow
     "git status": allow
     "git diff *": allow
     "git log *": allow

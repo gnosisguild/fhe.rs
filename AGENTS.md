@@ -15,7 +15,6 @@ Ring-LWE-based fully homomorphic encryption library in Rust. Workspace with 4 cr
 cargo test --release --all-features    # tests (release mode critical for trbfv speed)
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all                        # formatting
-pre-commit run --all-files             # runs fmt, clippy, typos
 ```
 
 ## Architecture
@@ -69,7 +68,7 @@ Update the canonical `.rules/*.md` in the same change when your edit makes a rul
 - `crypto.md` — `crates/fhe/src/{bfv,trbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`
 - `math.md` — `crates/fhe-math/src/**`
 - `codegen.md` — `**/build.rs`, `**/*.proto`, `**/src/proto/**`
-- `testing.md` — `**/tests/**`, `**/benches/**`, `.github/workflows/**`, `.pre-commit-config.yaml`
+- `testing.md` — `**/tests/**`, `**/benches/**`, `.github/workflows/**`
 - `harness.md` — `.rules/**`, `.opencode/**`, `AGENTS.md`, `CLAUDE.md`, `opencode.json`
 
 ## Constraints — hard rules
