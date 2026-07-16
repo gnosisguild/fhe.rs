@@ -7,14 +7,14 @@ Ring-LWE-based fully homomorphic encryption library in Rust. Workspace with 4 cr
 ## Prerequisites
 
 - Rust stable toolchain
-- `protoc` (protobuf compiler) — build fails without it
+- `protoc` (protobuf compiler) — only required when building with `--features protobuf`
 
 ## Commands
 
 ```bash
 cargo test --release --all-features    # tests (release mode critical for trbfv speed)
 cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt --all               # formatting
+cargo fmt --all                        # formatting
 pre-commit run --all-files             # runs fmt, clippy, typos
 ```
 
