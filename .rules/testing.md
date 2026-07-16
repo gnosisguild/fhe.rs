@@ -20,7 +20,6 @@ cargo test --release -p fhe -- test_name
 cargo test --release --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all
-pre-commit run --all-files
 ```
 
 ## proptest

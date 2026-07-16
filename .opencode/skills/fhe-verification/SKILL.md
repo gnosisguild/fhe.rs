@@ -42,12 +42,6 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all
 ```
 
-Optionally run pre-commit (which executes fmt check, clippy, and typos):
-
-```bash
-pre-commit run --all-files
-```
-
 ## Release mode
 
 Always use `--release`. The trbfv secure-preset e2e tests (`crates/fhe/tests/trbfv_secure_e2e.rs`) take minutes in debug and seconds in release. CI runs `cargo test --release --all-features`.
