@@ -15,11 +15,9 @@ use std::{error::Error, sync::Arc};
 
 use fhe::{
     bfv::{self, Encoding, Plaintext, SecretKey},
-    lbfv::{LBFVPublicKey, LBFVRelinKeyShare, LBFVRelinearizationKey},
+    lbfv::{LBFVCommonReferenceString, LBFVPublicKey, LBFVRelinKeyShare, LBFVRelinearizationKey},
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha8Rng;
 use util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -63,17 +61,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let sk = SecretKey::random(&params, &mut rng);
 
-    let mut pk_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-    let mut d1_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-    rng.fill(&mut pk_seed);
-    rng.fill(&mut d1_seed);
+    let crs_a  = LBFVCommonReferenceString::new(&params, &mut rng)?;
+    let crs_d1 = LBFVCommonReferenceString::new(&params, &mut rng)?;
     let pk_lbfv = timeit!(
         "l-BFV public key",
-        LBFVPublicKey::new_with_seed(&sk, pk_seed, &mut rng)
+        LBFVPublicKey::new_from_crs(&sk, &crs_a, &mut rng)
     );
 
     let rlk: LBFVRelinearizationKey = timeit!("Relinearization key generation", {
-        let share = LBFVRelinKeyShare::contribution(&sk, d1_seed, pk_seed, 0, 0, &mut rng)?;
+        let share = LBFVRelinKeyShare::contribution_from_crs(&sk, &crs_d1, &crs_a, 0, 0, &mut rng)?;
         LBFVRelinearizationKey::aggregate(&[share], &pk_lbfv)?
     });
     println!("l = {}", rlk.l()?);
