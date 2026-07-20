@@ -46,6 +46,7 @@
  * applies to all key material produced by this module.
  */
 
+/// Common reference string for the l-BFV distributed key generation protocol.
 pub mod crs;
 pub mod keys;
 

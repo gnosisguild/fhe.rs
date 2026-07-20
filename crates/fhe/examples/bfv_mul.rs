@@ -9,6 +9,8 @@
 //
 // Correctness: log₂(B_C after 1 mult) = 193.5 < log₂(Δ) = 234.0  ✓
 
+#![allow(clippy::indexing_slicing, missing_docs)]
+
 mod util;
 
 use std::{error::Error, sync::Arc};
