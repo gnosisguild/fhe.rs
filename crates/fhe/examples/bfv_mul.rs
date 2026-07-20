@@ -15,7 +15,7 @@ use std::{error::Error, sync::Arc};
 
 use fhe::{
     bfv::{self, Encoding, Plaintext, SecretKey},
-    lbfv::{LBFVCommonReferenceString, LBFVPublicKey, LBFVRelinKeyShare, LBFVRelinearizationKey},
+    lbfv::{LBFVCommonReferenceString, LBFVPublicKey, LBFVRelinearizationKey},
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use util::timeit::timeit;
@@ -65,13 +65,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crs_d1 = LBFVCommonReferenceString::new(&params, &mut rng)?;
     let pk_lbfv = timeit!(
         "l-BFV public key",
-        LBFVPublicKey::new_from_crs(&sk, &crs_a, &mut rng)
+        LBFVPublicKey::new_from_crs(&sk, &crs_a, &mut rng)?
     );
 
-    let rlk: LBFVRelinearizationKey = timeit!("Relinearization key generation", {
-        let share = LBFVRelinKeyShare::contribution_from_crs(&sk, &crs_d1, &crs_a, 0, 0, &mut rng)?;
-        LBFVRelinearizationKey::aggregate(&[share], &pk_lbfv)?
-    });
+    let rlk = timeit!(
+        "Relinearization key generation",
+        LBFVRelinearizationKey::new(&sk, &pk_lbfv, Some(crs_d1.seed()), &mut rng)?
+    );
     println!("l = {}", rlk.l()?);
 
     // Both factors and their product must be < k = 1000.
