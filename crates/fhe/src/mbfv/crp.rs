@@ -16,16 +16,16 @@ pub struct CommonRandomPoly {
 
 impl CommonRandomPoly {
     /// Generate a new random CRP.
-    pub fn new<R: RngCore + CryptoRng>(par: &Arc<BfvParameters>, rng: &mut R) -> Result<Self> {
-        Self::new_leveled(par, 0, rng)
+    pub fn new<R: RngCore + CryptoRng>(params: &Arc<BfvParameters>, rng: &mut R) -> Result<Self> {
+        Self::new_leveled(params, 0, rng)
     }
 
     /// Generate a new CRP from a shared deterministic seed.
     pub fn new_deterministic(
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
     ) -> Result<Self> {
-        Self::new_leveled_deterministic(par, 0, seed)
+        Self::new_leveled_deterministic(params, 0, seed)
     }
 
     /// Generate a new random CRP vector.
@@ -33,39 +33,39 @@ impl CommonRandomPoly {
     /// The size of the vector is equal to the number of ciphertext moduli, as
     /// required for the relinearization key generation protocol.
     pub fn new_vec<R: RngCore + CryptoRng>(
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
         rng: &mut R,
     ) -> Result<Vec<Self>> {
-        (0..par.moduli().len())
-            .map(|_| Self::new(par, rng))
+        (0..params.moduli().len())
+            .map(|_| Self::new(params, rng))
             .collect()
     }
 
     /// Generate a new random leveled CRP.
     pub fn new_leveled<R: RngCore + CryptoRng>(
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
         level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx = par.context_at_level(level)?;
+        let ctx = params.context_at_level(level)?;
         let poly = Poly::<Ntt>::random(ctx, rng);
         Ok(Self { poly })
     }
 
     /// Generate a new deterministic leveled CRP.
     pub fn new_leveled_deterministic(
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
         level: usize,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
     ) -> Result<Self> {
-        let ctx = par.context_at_level(level)?;
+        let ctx = params.context_at_level(level)?;
         let poly = Poly::<Ntt>::random_from_seed(ctx, seed);
         Ok(Self { poly })
     }
 
     /// Deserialize a CRP from bytes.
-    pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
-        let ctx = par.context_at_level(0)?;
+    pub fn deserialize(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self> {
+        let ctx = params.context_at_level(0)?;
         let poly = Poly::<Ntt>::from_bytes(bytes, ctx)?;
         Ok(Self { poly })
     }

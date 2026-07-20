@@ -129,8 +129,8 @@ impl LBFVRelinKeyShare {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx_relin_key = sk_i.par.context_at_level(key_level)?;
-        let ctx_ciphertext = sk_i.par.context_at_level(ciphertext_level)?;
+        let ctx_relin_key = sk_i.params.context_at_level(key_level)?;
+        let ctx_ciphertext = sk_i.params.context_at_level(ciphertext_level)?;
         let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
 
         if ciphertext_level < key_level {
@@ -150,7 +150,7 @@ impl LBFVRelinKeyShare {
         // (and zeroized) here. The joint ephemeral r = Σ r_i is what the
         // aggregated key effectively uses, but r is never materialized anywhere:
         // it only exists implicitly as the sum, mirroring sk = Σ sk_i.
-        let r: SecretKey = SecretKey::random(&sk_i.par, rng);
+        let r: SecretKey = SecretKey::random(&sk_i.params, rng);
         let r_poly =
             Poly::<PowerBasis>::try_convert_from(r.coeffs.as_ref(), ctx_ciphertext, false)?;
         let r_switched_up = r_poly.switch(&switcher_up)?;
@@ -396,7 +396,7 @@ impl LBFVRelinearizationKey {
     /// * `Err` if the number of moduli in the ciphertext context is not equal
     ///   to the number of polynomials in `b_vec`, which should be equal to "l".
     pub fn l(&self) -> Result<usize> {
-        if self.ksk_r_to_s.par.max_level() + 1 - self.ciphertext_level() != self.b_vec.len() {
+        if self.ksk_r_to_s.params.max_level() + 1 - self.ciphertext_level() != self.b_vec.len() {
             return Err(Error::DefaultError("'l' is not consistent.".to_string()));
         }
         Ok(self.b_vec.len())
@@ -528,7 +528,7 @@ impl LBFVRelinearizationKey {
     ///   as the BFV parameters of the key switching key.
     #[must_use]
     pub fn parameters(&self) -> Arc<BfvParameters> {
-        self.ksk_r_to_s.par.clone()
+        self.ksk_r_to_s.params.clone()
     }
 
     /// Decomposes a polynomial into its RNS components and computes the product-sum with an array of polynomials.
@@ -612,7 +612,7 @@ impl From<&LBFVRelinearizationKey> for LBFVRelinearizationKeyProto {
 ///
 /// # Arguments
 /// * `value` - The protobuf representation to convert
-/// * `par` - The BFV parameters to use for the conversion
+/// * `params` - The BFV parameters to use for the conversion
 ///
 /// # Returns
 /// * `Ok(LBFVRelinearizationKey)` if conversion succeeds
@@ -620,7 +620,7 @@ impl From<&LBFVRelinearizationKey> for LBFVRelinearizationKeyProto {
 impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
     fn try_convert_from(
         value: &LBFVRelinearizationKeyProto,
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
     ) -> Result<Self> {
         if value.ksk_r_to_s.is_none() || value.ksk_s_to_r.is_none() {
             return Err(Error::DefaultError(
@@ -629,9 +629,9 @@ impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
         }
 
         let ksk_r_to_s =
-            KeySwitchingKey::try_convert_from(value.ksk_r_to_s.as_ref().unwrap(), par)?;
+            KeySwitchingKey::try_convert_from(value.ksk_r_to_s.as_ref().unwrap(), params)?;
         let ksk_s_to_r =
-            KeySwitchingKey::try_convert_from(value.ksk_s_to_r.as_ref().unwrap(), par)?;
+            KeySwitchingKey::try_convert_from(value.ksk_s_to_r.as_ref().unwrap(), params)?;
 
         // Deserialize b_vec
         let key_ctx = ksk_r_to_s.ctx_ksk.clone();
@@ -666,7 +666,7 @@ impl FheParametrized for LBFVRelinearizationKey {
 ///
 /// # Arguments
 /// * `bytes` - The serialized relinearization key
-/// * `par` - The BFV parameters to use for deserialization
+/// * `params` - The BFV parameters to use for deserialization
 ///
 /// # Returns
 /// * `Ok(LBFVRelinearizationKey)` if deserialization succeeds
@@ -674,10 +674,10 @@ impl FheParametrized for LBFVRelinearizationKey {
 impl DeserializeParametrized for LBFVRelinearizationKey {
     type Error = Error;
 
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+    fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
         let rk = Message::decode(bytes);
         if let Ok(rk) = rk {
-            LBFVRelinearizationKey::try_convert_from(&rk, par)
+            LBFVRelinearizationKey::try_convert_from(&rk, params)
         } else {
             Err(Error::DefaultError("Invalid serialization".to_string()))
         }

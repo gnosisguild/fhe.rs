@@ -17,7 +17,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ciphertext {
     /// The parameters of the underlying BFV encryption scheme.
-    pub(crate) par: Arc<BfvParameters>,
+    pub(crate) params: Arc<BfvParameters>,
 
     /// The seed that generated the polynomial c1 in a fresh ciphertext.
     pub(crate) seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
@@ -48,7 +48,7 @@ impl Ciphertext {
     /// A ciphertext must contain at least two polynomials, and all polynomials
     /// must be in Ntt representation and with the same context.
     #[expect(clippy::expect_used, reason = "bounds are validated before use")]
-    pub fn new(c: Vec<Poly<Ntt>>, par: &Arc<BfvParameters>) -> Result<Self> {
+    pub fn new(c: Vec<Poly<Ntt>>, params: &Arc<BfvParameters>) -> Result<Self> {
         if c.len() < 2 {
             return Err(Error::TooFewValues {
                 actual: c.len(),
@@ -60,7 +60,7 @@ impl Ciphertext {
             .first()
             .expect("c has at least 2 elements due to length check above")
             .ctx();
-        let level = par.level_of_context(ctx)?;
+        let level = params.level_of_context(ctx)?;
 
         // Check that all polynomials have the expected context.
         for ci in c.iter() {
@@ -70,7 +70,7 @@ impl Ciphertext {
         }
 
         Ok(Self {
-            par: par.clone(),
+            params: params.clone(),
             seed: None,
             c,
             level,
@@ -121,7 +121,7 @@ impl Ciphertext {
     /// Get the deepest level this ciphertext can reach
     #[must_use]
     pub fn max_switchable_level(&self) -> usize {
-        self.par.max_level()
+        self.params.max_level()
     }
 }
 
@@ -138,13 +138,13 @@ impl Serialize for Ciphertext {
 }
 
 impl DeserializeParametrized for Ciphertext {
-    fn from_bytes(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
+    fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self> {
         let ctp = Message::decode(bytes).map_err(|_| {
             Error::SerializationError(SerializationError::ProtobufError {
                 message: "Ciphertext decode".into(),
             })
         })?;
-        Ciphertext::try_convert_from(&ctp, par)
+        Ciphertext::try_convert_from(&ctp, params)
     }
 
     type Error = Error;
@@ -153,9 +153,9 @@ impl DeserializeParametrized for Ciphertext {
 impl Ciphertext {
     /// Generate the zero ciphertext.
     #[must_use]
-    pub fn zero(par: &Arc<BfvParameters>) -> Self {
+    pub fn zero(params: &Arc<BfvParameters>) -> Self {
         Self {
-            par: par.clone(),
+            params: params.clone(),
             seed: None,
             c: Default::default(),
             level: 0,
@@ -195,22 +195,22 @@ impl From<&Ciphertext> for CiphertextProto {
 }
 
 impl TryConvertFrom<&CiphertextProto> for Ciphertext {
-    fn try_convert_from(value: &CiphertextProto, par: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_convert_from(value: &CiphertextProto, params: &Arc<BfvParameters>) -> Result<Self> {
         if value.c.is_empty() || (value.c.len() == 1 && value.seed.is_empty()) {
             return Err(Error::InvalidCiphertext {
                 reason: "Not enough polynomials".into(),
             });
         }
 
-        if value.level as usize > par.max_level() {
+        if value.level as usize > params.max_level() {
             return Err(Error::InvalidLevel {
                 level: value.level as usize,
                 min_level: 0,
-                max_level: par.max_level(),
+                max_level: params.max_level(),
             });
         }
 
-        let ctx = par.context_at_level(value.level as usize)?;
+        let ctx = params.context_at_level(value.level as usize)?;
 
         let mut c = Vec::with_capacity(value.c.len() + 1);
         for cip in &value.c {
@@ -233,7 +233,7 @@ impl TryConvertFrom<&CiphertextProto> for Ciphertext {
         }
 
         Ok(Ciphertext {
-            par: par.clone(),
+            params: params.clone(),
             seed,
             c,
             level: value.level as usize,

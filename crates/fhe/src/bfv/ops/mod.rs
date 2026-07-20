@@ -16,7 +16,7 @@ impl Add<&Ciphertext> for &Ciphertext {
     type Output = Ciphertext;
 
     fn add(self, rhs: &Ciphertext) -> Ciphertext {
-        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+        assert!(Arc::ptr_eq(&self.params, &rhs.params));
 
         if self.is_empty() {
             return rhs.clone();
@@ -34,7 +34,7 @@ impl Add<&Ciphertext> for &Ciphertext {
             .map(|(c1i, c2i)| c1i + c2i)
             .collect::<Vec<_>>();
         Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: None,
             c,
             level: self.level,
@@ -53,7 +53,7 @@ impl Add<&Ciphertext> for Ciphertext {
 
 impl AddAssign<&Ciphertext> for Ciphertext {
     fn add_assign(&mut self, rhs: &Ciphertext) {
-        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+        assert!(Arc::ptr_eq(&self.params, &rhs.params));
 
         if self.is_empty() {
             *self = rhs.clone()
@@ -88,7 +88,7 @@ impl Add<&Ciphertext> for &Plaintext {
 
 impl AddAssign<&Plaintext> for Ciphertext {
     fn add_assign(&mut self, rhs: &Plaintext) {
-        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+        assert!(Arc::ptr_eq(&self.params, &rhs.params));
         assert!(!self.is_empty());
         assert_eq!(self.level, rhs.level);
 
@@ -111,7 +111,7 @@ impl Sub<&Ciphertext> for &Ciphertext {
     type Output = Ciphertext;
 
     fn sub(self, rhs: &Ciphertext) -> Ciphertext {
-        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+        assert!(Arc::ptr_eq(&self.params, &rhs.params));
 
         if self.is_empty() {
             return -rhs.clone();
@@ -129,7 +129,7 @@ impl Sub<&Ciphertext> for &Ciphertext {
             .map(|(c1i, c2i)| c1i - c2i)
             .collect::<Vec<_>>();
         Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: None,
             c,
             level: self.level,
@@ -148,7 +148,7 @@ impl Sub<&Ciphertext> for Ciphertext {
 
 impl SubAssign<&Ciphertext> for Ciphertext {
     fn sub_assign(&mut self, rhs: &Ciphertext) {
-        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+        assert!(Arc::ptr_eq(&self.params, &rhs.params));
 
         if self.is_empty() {
             *self = -rhs
@@ -183,7 +183,7 @@ impl Sub<&Ciphertext> for &Plaintext {
 
 impl SubAssign<&Plaintext> for Ciphertext {
     fn sub_assign(&mut self, rhs: &Plaintext) {
-        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+        assert!(Arc::ptr_eq(&self.params, &rhs.params));
         assert!(!self.is_empty());
         assert_eq!(self.level, rhs.level);
 
@@ -208,7 +208,7 @@ impl Neg for &Ciphertext {
     fn neg(self) -> Ciphertext {
         let c = self.iter().map(|c1i| -c1i).collect::<Vec<_>>();
         Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: None,
             c,
             level: self.level,
@@ -228,7 +228,7 @@ impl Neg for Ciphertext {
 
 impl MulAssign<&Plaintext> for Ciphertext {
     fn mul_assign(&mut self, rhs: &Plaintext) {
-        assert!(Arc::ptr_eq(&self.par, &rhs.par));
+        assert!(Arc::ptr_eq(&self.params, &rhs.params));
         if !self.is_empty() {
             assert_eq!(self.level, rhs.level);
             self.iter_mut().for_each(|ci| *ci *= &rhs.poly_ntt);
@@ -266,7 +266,7 @@ impl Mul<&Ciphertext> for &Ciphertext {
 
         if rhs == self {
             // Squaring operation
-            let ctx_lvl = self.par.context_level_at(self.level).unwrap();
+            let ctx_lvl = self.params.context_level_at(self.level).unwrap();
             let mp = ctx_lvl.mul_params();
 
             // Scale all ciphertexts
@@ -292,16 +292,16 @@ impl Mul<&Ciphertext> for &Ciphertext {
                 .unwrap();
 
             Ciphertext {
-                par: self.par.clone(),
+                params: self.params.clone(),
                 seed: None,
                 c,
                 level: rhs.level,
             }
         } else {
-            assert!(Arc::ptr_eq(&self.par, &rhs.par));
+            assert!(Arc::ptr_eq(&self.params, &rhs.params));
             assert_eq!(self.level, rhs.level);
 
-            let ctx_lvl = self.par.context_level_at(self.level).unwrap();
+            let ctx_lvl = self.params.context_level_at(self.level).unwrap();
             let mp = ctx_lvl.mul_params();
 
             // Scale all ciphertexts
@@ -332,7 +332,7 @@ impl Mul<&Ciphertext> for &Ciphertext {
                 .unwrap();
 
             Ciphertext {
-                par: self.par.clone(),
+                params: self.params.clone(),
                 seed: None,
                 c,
                 level: rhs.level,
@@ -639,22 +639,22 @@ mod tests {
     #[test]
     fn mul() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
-        for par in [
+        for params in [
             BfvParameters::default_arc(2, 16),
             BfvParameters::default_arc(8, 16),
         ] {
-            let q = fhe_math::zq::Modulus::new(par.plaintext()).unwrap();
+            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
             for _ in 0..1 {
                 // We will encode `values` in an Simd format, and check that the product is
                 // computed correctly.
-                let v1 = q.random_vec(par.degree(), &mut rng);
-                let v2 = q.random_vec(par.degree(), &mut rng);
+                let v1 = q.random_vec(params.degree(), &mut rng);
+                let v2 = q.random_vec(params.degree(), &mut rng);
                 let mut expected = v1.clone();
                 q.mul_vec(&mut expected, &v2);
 
-                let sk = SecretKey::random(&par, &mut rng);
-                let pt1 = Plaintext::try_encode(&v1, Encoding::simd(), &par)?;
-                let pt2 = Plaintext::try_encode(&v2, Encoding::simd(), &par)?;
+                let sk = SecretKey::random(&params, &mut rng);
+                let pt1 = Plaintext::try_encode(&v1, Encoding::simd(), &params)?;
+                let pt2 = Plaintext::try_encode(&v2, Encoding::simd(), &params)?;
 
                 let ct1: Ciphertext = sk.try_encrypt(&pt1, &mut rng)?;
                 let ct2: Ciphertext = sk.try_encrypt(&pt2, &mut rng)?;
@@ -678,17 +678,17 @@ mod tests {
     #[test]
     fn square() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
-        let par = BfvParameters::default_arc(6, 16);
-        let q = fhe_math::zq::Modulus::new(par.plaintext()).unwrap();
+        let params = BfvParameters::default_arc(6, 16);
+        let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
         for _ in 0..20 {
             // We will encode `values` in an Simd format, and check that the product is
             // computed correctly.
-            let v = q.random_vec(par.degree(), &mut rng);
+            let v = q.random_vec(params.degree(), &mut rng);
             let mut expected = v.clone();
             q.mul_vec(&mut expected, &v);
 
-            let sk = SecretKey::random(&par, &mut rng);
-            let pt = Plaintext::try_encode(&v, Encoding::simd(), &par)?;
+            let sk = SecretKey::random(&params, &mut rng);
+            let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
 
             let ct1: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
             let ct2 = &ct1 * &ct1;
