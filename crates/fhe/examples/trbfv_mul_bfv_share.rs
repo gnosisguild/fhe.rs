@@ -42,7 +42,6 @@ use fhe::{
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
-use rand::Rng;
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
@@ -195,7 +194,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Party setup ───────────────────────────────────────────────────────────
     // Two shared strings for the l-BFV RLK protocol. In deployment these would
     // be established via coin-tossing.
-    let crs_a  = LBFVCommonReferenceString::new(&params_trbfv, &mut rng)?;
+    let crs_a = LBFVCommonReferenceString::new(&params_trbfv, &mut rng)?;
     let crs_d1 = LBFVCommonReferenceString::new(&params_trbfv, &mut rng)?;
 
     // Canonical participant set — one common session ID covering all parties.
@@ -261,13 +260,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                     LBFVContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32)
                         .unwrap();
                 let pk_lbfv_share = LBFVPublicKey::new_with_seed_and_binding(
-                    &sk_share, crs_a.seed(), lbfv_binding.clone(), &mut rng,
+                    &sk_share,
+                    crs_a.seed(),
+                    lbfv_binding.clone(),
+                    &mut rng,
                 )
                 .unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
                 let rlk_share = LBFVRelinKeyShare::contribution_with_binding(
-                    &sk_share, crs_d1.seed(), crs_a.seed(), lbfv_binding, 0, 0, &mut rng,
+                    &sk_share,
+                    crs_d1.seed(),
+                    crs_a.seed(),
+                    lbfv_binding,
+                    0,
+                    0,
+                    &mut rng,
                 )
                 .unwrap();
 
