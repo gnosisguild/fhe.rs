@@ -1,19 +1,17 @@
 //! Create parameters for the BFV encryption scheme
 
 use crate::bfv::{context::CipherPlainContext, context::ContextLevel};
-use crate::proto::bfv::{Parameters, parameters::PlaintextModulus as PlaintextModulusProto};
-use crate::{Error, ParametersError, Result, SerializationError};
+use crate::{Error, ParametersError, Result};
 use fhe_math::{
     ntt::NttOperator,
     rns::{RnsContext, ScalingFactor},
     rq::{Context, Poly, PowerBasis, scaler::Scaler, traits::TryConvertFrom},
     zq::{Modulus, primes::generate_prime},
 };
-use fhe_traits::{Deserialize, FheParameters, Serialize};
+use fhe_traits::FheParameters;
 use itertools::Itertools;
 use num_bigint::{BigInt, BigUint};
 use num_traits::{PrimInt as _, ToPrimitive};
-use prost::Message;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -749,54 +747,63 @@ impl BfvParametersBuilder {
     }
 }
 
-impl Serialize for BfvParameters {
-    fn to_bytes(&self) -> Vec<u8> {
-        let plaintext_modulus = if let Some(plaintext_u64) = self.plaintext.as_u64() {
-            Some(PlaintextModulusProto::Plaintext(plaintext_u64))
-        } else {
-            Some(PlaintextModulusProto::PlaintextBig(
-                self.plaintext.as_biguint().to_bytes_le(),
-            ))
-        };
+#[cfg(feature = "protobuf")]
+mod protobuf {
+    use super::*;
+    use crate::SerializationError;
+    use crate::proto::bfv::{Parameters, parameters::PlaintextModulus as PlaintextModulusProto};
+    use fhe_traits::{Deserialize, Serialize};
+    use prost::Message;
 
-        Parameters {
-            degree: self.polynomial_degree as u32,
-            moduli: self.moduli.to_vec(),
-            variance: self.variance as u32,
-            plaintext_modulus,
-        }
-        .encode_to_vec()
-    }
-}
+    impl Serialize for BfvParameters {
+        fn to_bytes(&self) -> Vec<u8> {
+            let plaintext_modulus = if let Some(plaintext_u64) = self.plaintext.as_u64() {
+                Some(PlaintextModulusProto::Plaintext(plaintext_u64))
+            } else {
+                Some(PlaintextModulusProto::PlaintextBig(
+                    self.plaintext.as_biguint().to_bytes_le(),
+                ))
+            };
 
-impl Deserialize for BfvParameters {
-    fn try_deserialize(bytes: &[u8]) -> Result<Self> {
-        let params: Parameters = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: "Parameters decode".into(),
-            })
-        })?;
-
-        let plaintext_modulus = match params.plaintext_modulus {
-            Some(PlaintextModulusProto::Plaintext(value)) => BigUint::from(value),
-            Some(PlaintextModulusProto::PlaintextBig(bytes)) => BigUint::from_bytes_le(&bytes),
-            None => {
-                return Err(Error::SerializationError(
-                    SerializationError::MissingField {
-                        field_name: "Parameters.plaintext_modulus".into(),
-                    },
-                ));
+            Parameters {
+                degree: self.polynomial_degree as u32,
+                moduli: self.moduli.to_vec(),
+                variance: self.variance as u32,
+                plaintext_modulus,
             }
-        };
-
-        BfvParametersBuilder::new()
-            .set_degree(params.degree as usize)
-            .set_plaintext_modulus_biguint(plaintext_modulus)
-            .set_moduli(&params.moduli)
-            .set_variance(params.variance as usize)
-            .build()
+            .encode_to_vec()
+        }
     }
-    type Error = Error;
+
+    impl Deserialize for BfvParameters {
+        fn try_deserialize(bytes: &[u8]) -> Result<Self> {
+            let params: Parameters = Message::decode(bytes).map_err(|_| {
+                Error::SerializationError(SerializationError::ProtobufError {
+                    message: "Parameters decode".into(),
+                })
+            })?;
+
+            let plaintext_modulus = match params.plaintext_modulus {
+                Some(PlaintextModulusProto::Plaintext(value)) => BigUint::from(value),
+                Some(PlaintextModulusProto::PlaintextBig(bytes)) => BigUint::from_bytes_le(&bytes),
+                None => {
+                    return Err(Error::SerializationError(
+                        SerializationError::MissingField {
+                            field_name: "Parameters.plaintext_modulus".into(),
+                        },
+                    ));
+                }
+            };
+
+            BfvParametersBuilder::new()
+                .set_degree(params.degree as usize)
+                .set_plaintext_modulus_biguint(plaintext_modulus)
+                .set_moduli(&params.moduli)
+                .set_variance(params.variance as usize)
+                .build()
+        }
+        type Error = Error;
+    }
 }
 
 /// Multiplication parameters
@@ -827,10 +834,7 @@ impl MultiplicationParameters {
 #[cfg(test)]
 mod tests {
     use super::{BfvParameters, BfvParametersBuilder};
-    use crate::proto::bfv::{Parameters, parameters::PlaintextModulus as PlaintextModulusProto};
-    use fhe_traits::{Deserialize, Serialize};
     use num_bigint::BigUint;
-    use prost::Message;
     use std::error::Error;
 
     #[test]
@@ -893,57 +897,67 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn serialize() -> Result<(), Box<dyn Error>> {
-        let params = BfvParametersBuilder::new()
-            .set_degree(16)
-            .set_plaintext_modulus(2)
-            .set_moduli_sizes(&[62, 62, 62, 61, 60, 11])
-            .set_variance(4)
-            .build()?;
-        let bytes = params.to_bytes();
-        let proto = Parameters::decode(bytes.as_slice())?;
-        assert!(matches!(
-            proto.plaintext_modulus,
-            Some(PlaintextModulusProto::Plaintext(2))
-        ));
-        assert_eq!(BfvParameters::try_deserialize(&bytes)?, params);
-
-        let p = BigUint::parse_bytes(b"340282366920938463463374607431768211507", 10).unwrap();
-        let params = BfvParametersBuilder::new()
-            .set_degree(16)
-            .set_plaintext_modulus_biguint(p)
-            .set_moduli_sizes(&[62, 62, 62, 62, 62])
-            .set_variance(4)
-            .build()?;
-        let bytes = params.to_bytes();
-        let proto = Parameters::decode(bytes.as_slice())?;
-        let proto_plaintext_bytes = match &proto.plaintext_modulus {
-            Some(PlaintextModulusProto::PlaintextBig(bytes)) => bytes.as_slice(),
-            _ => return Err("expected plaintext_big variant".into()),
+    #[cfg(feature = "protobuf")]
+    mod protobuf {
+        use super::*;
+        use crate::proto::bfv::{
+            Parameters, parameters::PlaintextModulus as PlaintextModulusProto,
         };
-        assert_eq!(
-            proto_plaintext_bytes,
-            params.plaintext_big().to_bytes_le().as_slice()
-        );
-        let decoded = BfvParameters::try_deserialize(&bytes)?;
-        assert_eq!(decoded, params);
-        assert_eq!(decoded.plaintext_big(), params.plaintext_big());
+        use fhe_traits::{Deserialize, Serialize};
+        use prost::Message;
 
-        Ok(())
-    }
+        #[test]
+        fn serialize() -> Result<(), Box<dyn std::error::Error>> {
+            let params = BfvParametersBuilder::new()
+                .set_degree(16)
+                .set_plaintext_modulus(2)
+                .set_moduli_sizes(&[62, 62, 62, 61, 60, 11])
+                .set_variance(4)
+                .build()?;
+            let bytes = params.to_bytes();
+            let proto = Parameters::decode(bytes.as_slice())?;
+            assert!(matches!(
+                proto.plaintext_modulus,
+                Some(PlaintextModulusProto::Plaintext(2))
+            ));
+            assert_eq!(BfvParameters::try_deserialize(&bytes)?, params);
 
-    #[test]
-    fn deserialize_missing_plaintext_modulus() {
-        let proto = Parameters {
-            degree: 16,
-            moduli: vec![4611686018427387617, 4611686018427387329],
-            variance: 4,
-            plaintext_modulus: None,
-        };
-        let bytes = proto.encode_to_vec();
-        let err = BfvParameters::try_deserialize(&bytes).unwrap_err();
-        assert!(format!("{err}").contains("Missing required field"));
+            let p = BigUint::parse_bytes(b"340282366920938463463374607431768211507", 10).unwrap();
+            let params = BfvParametersBuilder::new()
+                .set_degree(16)
+                .set_plaintext_modulus_biguint(p)
+                .set_moduli_sizes(&[62, 62, 62, 62, 62])
+                .set_variance(4)
+                .build()?;
+            let bytes = params.to_bytes();
+            let proto = Parameters::decode(bytes.as_slice())?;
+            let proto_plaintext_bytes = match &proto.plaintext_modulus {
+                Some(PlaintextModulusProto::PlaintextBig(bytes)) => bytes.as_slice(),
+                _ => return Err("expected plaintext_big variant".into()),
+            };
+            assert_eq!(
+                proto_plaintext_bytes,
+                params.plaintext_big().to_bytes_le().as_slice()
+            );
+            let decoded = BfvParameters::try_deserialize(&bytes)?;
+            assert_eq!(decoded, params);
+            assert_eq!(decoded.plaintext_big(), params.plaintext_big());
+
+            Ok(())
+        }
+
+        #[test]
+        fn deserialize_missing_plaintext_modulus() {
+            let proto = Parameters {
+                degree: 16,
+                moduli: vec![4611686018427387617, 4611686018427387329],
+                variance: 4,
+                plaintext_modulus: None,
+            };
+            let bytes = proto.encode_to_vec();
+            let err = BfvParameters::try_deserialize(&bytes).unwrap_err();
+            assert!(format!("{err}").contains("Missing required field"));
+        }
     }
 
     #[test]

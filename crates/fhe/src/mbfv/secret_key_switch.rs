@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
-use fhe_traits::{DeserializeWithContext, Serialize};
 use itertools::Itertools;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -86,22 +85,6 @@ impl SecretKeySwitchShare {
 
         Ok(Self { par, ct, h_share })
     }
-
-    /// Deserialize a SecretKeySwitchShare from bytes with the given parameters
-    /// and ciphertext
-    pub fn deserialize(
-        bytes: &[u8],
-        par: &Arc<BfvParameters>,
-        ct: Arc<Ciphertext>,
-    ) -> Result<Self> {
-        let ctx = par.context_at_level(0)?;
-        let h_share = Poly::<Ntt>::from_bytes(bytes, ctx)?;
-        Ok(Self {
-            par: par.clone(),
-            ct,
-            h_share,
-        })
-    }
 }
 
 impl Aggregate<SecretKeySwitchShare> for Ciphertext {
@@ -123,12 +106,6 @@ impl Aggregate<SecretKeySwitchShare> for Ciphertext {
         let c1 = share.ct[1].clone();
 
         Ciphertext::new(vec![c0, c1], &share.par)
-    }
-}
-
-impl Serialize for SecretKeySwitchShare {
-    fn to_bytes(&self) -> Vec<u8> {
-        self.h_share.to_bytes()
     }
 }
 
@@ -157,24 +134,6 @@ impl DecryptionShare {
         let zero = SecretKey::new(vec![0; par.degree()], par);
         let sks_share = SecretKeySwitchShare::new(sk_input_share, &zero, ct.clone(), rng)?;
         Ok(DecryptionShare { sks_share })
-    }
-
-    /// Deserialize a DecryptionShare from bytes with the given parameters and
-    /// ciphertext
-    pub fn deserialize(
-        bytes: &[u8],
-        par: &Arc<BfvParameters>,
-        ct: Arc<Ciphertext>,
-    ) -> Result<Self> {
-        Ok(Self {
-            sks_share: SecretKeySwitchShare::deserialize(bytes, par, ct)?,
-        })
-    }
-}
-
-impl Serialize for DecryptionShare {
-    fn to_bytes(&self) -> Vec<u8> {
-        self.sks_share.to_bytes()
     }
 }
 
@@ -230,6 +189,56 @@ impl Aggregate<DecryptionShare> for Plaintext {
         };
 
         Ok(pt)
+    }
+}
+
+#[cfg(feature = "protobuf")]
+mod protobuf {
+    use super::*;
+    use fhe_traits::{DeserializeWithContext, Serialize};
+
+    impl SecretKeySwitchShare {
+        /// Deserialize a SecretKeySwitchShare from bytes with the given parameters
+        /// and ciphertext
+        pub fn deserialize(
+            bytes: &[u8],
+            par: &std::sync::Arc<BfvParameters>,
+            ct: std::sync::Arc<Ciphertext>,
+        ) -> Result<Self> {
+            let ctx = par.context_at_level(0)?;
+            let h_share = Poly::<Ntt>::from_bytes(bytes, ctx)?;
+            Ok(Self {
+                par: par.clone(),
+                ct,
+                h_share,
+            })
+        }
+    }
+
+    impl Serialize for SecretKeySwitchShare {
+        fn to_bytes(&self) -> Vec<u8> {
+            self.h_share.to_bytes()
+        }
+    }
+
+    impl DecryptionShare {
+        /// Deserialize a DecryptionShare from bytes with the given parameters and
+        /// ciphertext
+        pub fn deserialize(
+            bytes: &[u8],
+            par: &std::sync::Arc<BfvParameters>,
+            ct: std::sync::Arc<Ciphertext>,
+        ) -> Result<Self> {
+            Ok(Self {
+                sks_share: SecretKeySwitchShare::deserialize(bytes, par, ct)?,
+            })
+        }
+    }
+
+    impl Serialize for DecryptionShare {
+        fn to_bytes(&self) -> Vec<u8> {
+            self.sks_share.to_bytes()
+        }
     }
 }
 

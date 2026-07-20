@@ -1,6 +1,6 @@
 //! BFV protobuf definitions and generated types.
 
-#[allow(clippy::all)]
-mod generated;
+#![allow(missing_docs)]
+#![allow(clippy::all)]
 
-pub use generated::*;
+include!(concat!(env!("OUT_DIR"), "/fhers.bfv.rs"));

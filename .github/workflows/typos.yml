@@ -1,15 +1,17 @@
+name: Spell checker
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
-name: Spell checker
+permissions:
+  contents: read
 
 jobs:
   typos:
-    name: Spell Check with typos
+    name: Spell Check
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout Actions Repository
-      uses: actions/checkout@v6
-    - name: Check spelling
-      uses: crate-ci/typos@master
+      - uses: actions/checkout@v6
+      - uses: crate-ci/typos@v1

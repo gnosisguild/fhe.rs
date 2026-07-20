@@ -2,23 +2,43 @@
 
 ## How it works
 
-Proto files compile to Rust via `prost` at build time, driven by `build.rs` scripts:
+Protobuf-based serialization is feature-gated behind the `protobuf` feature, which is **disabled by default**.
 
-- `crates/fhe-math/build.rs` — compiles `src/proto/rq.proto` into `OUT_DIR`. If `protoc` is unavailable, falls back to the committed pre-generated file at `src/proto/fhers.rq.rs`.
-- `crates/fhe/build.rs` — compiles `src/proto/bfv/bfv.proto` and `src/proto/trbfv/trbfv.proto` into `src/proto/bfv/generated.rs` and `src/proto/trbfv/generated.rs` respectively. If `protoc` is unavailable, it skips generation with a warning.
+When enabled, proto files compile to Rust via `prost` at build time, driven by `build.rs` scripts:
 
-BFV is compiled first because TRBFV imports from it.
+- `crates/fhe-math/build.rs` — compiles `src/proto/rq.proto` into `OUT_DIR`. Requires `protoc` to be installed.
+- `crates/fhe/build.rs` — compiles `src/proto/bfv/bfv.proto` and `src/proto/trbfv/trbfv.proto` into `OUT_DIR`. BFV is compiled first because TRBFV imports from it. Requires `protoc` to be installed.
 
-## Generated files
+When the `protobuf` feature is disabled, the build scripts do nothing and no `protoc` is required. Serialization implementations (`Serialize`, `DeserializeParametrized`, `DeserializeWithContext`) are not available in this mode.
 
-The following files are build output, not hand-authored source:
+## Enabling protobuf
 
-- `crates/fhe-math/src/proto/fhers.rq.rs`
-- `crates/fhe/src/proto/bfv/generated.rs`
-- `crates/fhe/src/proto/trbfv/generated.rs`
+```bash
+cargo build --features protobuf
+cargo test --release --features protobuf
+```
 
-Do not manually edit generated output unless the build flow requires it. If a `.proto` file changes, run the build to regenerate and commit the updated output.
+This requires `protoc` (the protobuf compiler) to be installed on the system.
 
-## Prerequisites
+## What is feature-gated
 
-`protoc` (the protobuf compiler) must be installed. Without it, `fhe-math` falls back to the committed file, but `fhe` skips generation entirely, which means the `generated.rs` files will not reflect proto changes.
+The following are only available with `--features protobuf`:
+
+- `fhe::proto` module (public API)
+- `fhe-math` protobuf polynomial serialization (`Poly::to_bytes`, `Poly::from_bytes`)
+- BFV/LBFV/MBFV `Serialize`, `DeserializeParametrized`, and `DeserializeWithContext` implementations
+- Serialization-dependent examples (`mulpir`, `sealpir`, `rgsw`)
+
+Core BFV encryption, homomorphic operations, and threshold protocols (TRBFV, MBFV) work without the feature.
+
+## When changing .proto files
+
+1. Edit the `.proto` file
+2. Enable the feature: `cargo build --features protobuf`
+3. Verify the generated code reflects your changes
+4. Commit the `.proto` file (generated code is not committed — it is produced in `OUT_DIR` at build time)
+
+## What not to do
+
+- Do not manually edit generated code — it is produced in `OUT_DIR` by the build script
+- Do not commit generated `.rs` files — they are build output

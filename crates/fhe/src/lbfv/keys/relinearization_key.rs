@@ -7,19 +7,14 @@
  * relinearization algorithm.
  */
 
-use crate::bfv::traits::TryConvertFrom;
 use crate::bfv::{BfvParameters, Ciphertext, KeySwitchingKey, SecretKey};
-use crate::proto::bfv::{
-    KeySwitchingKey as KeySwitchingKeyProto, LbfvRelinearizationKey as LBFVRelinearizationKeyProto,
-};
 use crate::{Error, Result};
 use fhe_math::rq::{
     Context, Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher,
     traits::TryConvertFrom as TryConvertFromPoly,
 };
-use fhe_traits::{DeserializeParametrized, DeserializeWithContext, FheParametrized, Serialize};
+use fhe_traits::FheParametrized;
 use itertools::izip;
-use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
@@ -366,90 +361,80 @@ impl LBFVRelinearizationKey {
     }
 }
 
-/// Converts a [`LBFVRelinearizationKey`] into its protobuf representation
-impl From<&LBFVRelinearizationKey> for LBFVRelinearizationKeyProto {
-    fn from(value: &LBFVRelinearizationKey) -> Self {
-        LBFVRelinearizationKeyProto {
-            ksk_r_to_s: Some(KeySwitchingKeyProto::from(&value.ksk_r_to_s)),
-            ksk_s_to_r: Some(KeySwitchingKeyProto::from(&value.ksk_s_to_r)),
-            b_vec: value.b_vec.iter().map(|p| p.to_bytes()).collect(),
-        }
-    }
-}
-
-/// Attempts to convert a protobuf representation back into a
-/// [`LBFVRelinearizationKey`]
-///
-/// # Arguments
-/// * `value` - The protobuf representation to convert
-/// * `par` - The BFV parameters to use for the conversion
-///
-/// # Returns
-/// * `Ok(LBFVRelinearizationKey)` if conversion succeeds
-/// * `Err` if the protobuf is invalid or conversion fails
-impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
-    fn try_convert_from(
-        value: &LBFVRelinearizationKeyProto,
-        par: &Arc<BfvParameters>,
-    ) -> Result<Self> {
-        if value.ksk_r_to_s.is_none() || value.ksk_s_to_r.is_none() {
-            return Err(Error::DefaultError(
-                "Invalid serialization: missing key switching keys".to_string(),
-            ));
-        }
-
-        let ksk_r_to_s =
-            KeySwitchingKey::try_convert_from(value.ksk_r_to_s.as_ref().unwrap(), par)?;
-        let ksk_s_to_r =
-            KeySwitchingKey::try_convert_from(value.ksk_s_to_r.as_ref().unwrap(), par)?;
-
-        // Deserialize b_vec
-        let key_ctx = ksk_r_to_s.ctx_ksk.clone();
-        let mut b_vec = Vec::with_capacity(value.b_vec.len());
-        for poly_bytes in &value.b_vec {
-            let poly = Poly::<NttShoup>::from_bytes(poly_bytes, &key_ctx)?;
-            b_vec.push(poly);
-        }
-
-        Ok(LBFVRelinearizationKey {
-            ksk_r_to_s,
-            ksk_s_to_r,
-            b_vec,
-        })
-    }
-}
-
-/// Serializes the [`LBFVRelinearizationKey`] into a byte vector
-impl Serialize for LBFVRelinearizationKey {
-    fn to_bytes(&self) -> Vec<u8> {
-        LBFVRelinearizationKeyProto::from(self).encode_to_vec()
-    }
-}
-
 /// Associates the [`LBFVRelinearizationKey`] with BFV parameters
 impl FheParametrized for LBFVRelinearizationKey {
     type Parameters = BfvParameters;
 }
 
-/// Deserializes a [`LBFVRelinearizationKey`] from bytes using the provided
-/// parameters
-///
-/// # Arguments
-/// * `bytes` - The serialized relinearization key
-/// * `par` - The BFV parameters to use for deserialization
-///
-/// # Returns
-/// * `Ok(LBFVRelinearizationKey)` if deserialization succeeds
-/// * `Err` if the bytes are invalid or deserialization fails
-impl DeserializeParametrized for LBFVRelinearizationKey {
-    type Error = Error;
+#[cfg(feature = "protobuf")]
+mod protobuf {
+    use super::*;
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::proto::bfv::{
+        KeySwitchingKey as KeySwitchingKeyProto,
+        LbfvRelinearizationKey as LBFVRelinearizationKeyProto,
+    };
+    use fhe_traits::{DeserializeParametrized, DeserializeWithContext, Serialize};
+    use prost::Message;
 
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-        let rk = Message::decode(bytes);
-        if let Ok(rk) = rk {
-            LBFVRelinearizationKey::try_convert_from(&rk, par)
-        } else {
-            Err(Error::DefaultError("Invalid serialization".to_string()))
+    impl From<&LBFVRelinearizationKey> for LBFVRelinearizationKeyProto {
+        fn from(value: &LBFVRelinearizationKey) -> Self {
+            LBFVRelinearizationKeyProto {
+                ksk_r_to_s: Some(KeySwitchingKeyProto::from(&value.ksk_r_to_s)),
+                ksk_s_to_r: Some(KeySwitchingKeyProto::from(&value.ksk_s_to_r)),
+                b_vec: value.b_vec.iter().map(|p| p.to_bytes()).collect(),
+            }
+        }
+    }
+
+    impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
+        fn try_convert_from(
+            value: &LBFVRelinearizationKeyProto,
+            par: &Arc<BfvParameters>,
+        ) -> Result<Self> {
+            if value.ksk_r_to_s.is_none() || value.ksk_s_to_r.is_none() {
+                return Err(Error::DefaultError(
+                    "Invalid serialization: missing key switching keys".to_string(),
+                ));
+            }
+
+            let ksk_r_to_s =
+                KeySwitchingKey::try_convert_from(value.ksk_r_to_s.as_ref().unwrap(), par)?;
+            let ksk_s_to_r =
+                KeySwitchingKey::try_convert_from(value.ksk_s_to_r.as_ref().unwrap(), par)?;
+
+            // Deserialize b_vec
+            let key_ctx = ksk_r_to_s.ctx_ksk.clone();
+            let mut b_vec = Vec::with_capacity(value.b_vec.len());
+            for poly_bytes in &value.b_vec {
+                let poly = Poly::<NttShoup>::from_bytes(poly_bytes, &key_ctx)?;
+                b_vec.push(poly);
+            }
+
+            Ok(LBFVRelinearizationKey {
+                ksk_r_to_s,
+                ksk_s_to_r,
+                b_vec,
+            })
+        }
+    }
+
+    impl Serialize for LBFVRelinearizationKey {
+        fn to_bytes(&self) -> Vec<u8> {
+            LBFVRelinearizationKeyProto::from(self).encode_to_vec()
+        }
+    }
+
+    impl DeserializeParametrized for LBFVRelinearizationKey {
+        type Error = Error;
+
+        fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+            let rk = Message::decode(bytes);
+            if let Ok(rk) = rk {
+                LBFVRelinearizationKey::try_convert_from(&rk, par)
+            } else {
+                Err(Error::DefaultError("Invalid serialization".to_string()))
+            }
         }
     }
 }
@@ -464,42 +449,48 @@ mod tests {
     use std::error::Error;
     use std::result::Result;
 
-    #[test]
-    fn test_serialize_deserialize() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let sk = SecretKey::random(&params, &mut rng);
-        let pk = LBFVPublicKey::new(&sk, &mut rng);
+    #[cfg(feature = "protobuf")]
+    mod protobuf {
+        use super::*;
+        use fhe_traits::{DeserializeParametrized, Serialize};
 
-        // Create relinearization key
-        let relin_key = LBFVRelinearizationKey::new(&sk, &pk, None, &mut rng)?;
+        #[test]
+        fn test_serialize_deserialize() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            let params = BfvParameters::default_arc(6, 8);
+            let sk = SecretKey::random(&params, &mut rng);
+            let pk = LBFVPublicKey::new(&sk, &mut rng);
 
-        // Serialize and deserialize
-        let bytes = relin_key.to_bytes();
-        let deserialized_key = LBFVRelinearizationKey::from_bytes(&bytes, &params)?;
+            // Create relinearization key
+            let relin_key = LBFVRelinearizationKey::new(&sk, &pk, None, &mut rng)?;
 
-        // Test that the deserialized key works correctly
-        let pt = Plaintext::try_encode(&[2u64], Encoding::poly(), &params)?;
-        let ct = pk.try_encrypt(&pt, &mut rng)?;
-        let mut ct_squared = &ct.clone() * &ct;
+            // Serialize and deserialize
+            let bytes = relin_key.to_bytes();
+            let deserialized_key = LBFVRelinearizationKey::from_bytes(&bytes, &params)?;
 
-        // Relinearize with original key
-        let mut ct_squared_original = ct_squared.clone();
-        relin_key.relinearizes(&mut ct_squared_original)?;
+            // Test that the deserialized key works correctly
+            let pt = Plaintext::try_encode(&[2u64], Encoding::poly(), &params)?;
+            let ct = pk.try_encrypt(&pt, &mut rng)?;
+            let mut ct_squared = &ct.clone() * &ct;
 
-        // Relinearize with deserialized key
-        deserialized_key.relinearizes(&mut ct_squared)?;
+            // Relinearize with original key
+            let mut ct_squared_original = ct_squared.clone();
+            relin_key.relinearizes(&mut ct_squared_original)?;
 
-        // Decrypt and verify both give the same result
-        let pt_original = sk.try_decrypt(&ct_squared_original)?;
-        let pt_deserialized = sk.try_decrypt(&ct_squared)?;
+            // Relinearize with deserialized key
+            deserialized_key.relinearizes(&mut ct_squared)?;
 
-        assert_eq!(pt_original, pt_deserialized);
+            // Decrypt and verify both give the same result
+            let pt_original = sk.try_decrypt(&ct_squared_original)?;
+            let pt_deserialized = sk.try_decrypt(&ct_squared)?;
 
-        let result = Vec::<u64>::try_decode(&pt_deserialized, Encoding::poly())?;
-        assert_eq!(result[0], 4);
+            assert_eq!(pt_original, pt_deserialized);
 
-        Ok(())
+            let result = Vec::<u64>::try_decode(&pt_deserialized, Encoding::poly())?;
+            assert_eq!(result[0], 4);
+
+            Ok(())
+        }
     }
 
     #[test]

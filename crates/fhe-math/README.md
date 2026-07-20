@@ -8,6 +8,7 @@ This crate exposes building blocks such as number theoretic transforms (NTT), re
 
 * `ntt`, `rns`, `rq`, and `zq` modules for modular arithmetic over large rings.
 * Optional `tfhe-ntt` features to enable hardware accelerated NTTs via the [`tfhe-ntt`](https://crates.io/crates/tfhe-ntt) crate.
+* **`protobuf`** *(disabled by default)* — Enables protobuf-based polynomial serialization via `prost`. Requires `protoc` at build time.
 
 ## Installation
 

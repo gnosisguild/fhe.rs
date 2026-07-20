@@ -2,20 +2,16 @@
  * This module contains the public key for the l-BFV encryption scheme.
  */
 
-use crate::{Error, Result, SerializationError};
+use crate::{Error, Result};
 use std::sync::Arc;
 
-use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
-use crate::bfv::{
-    BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
-};
-use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
+use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
 use fhe_math::rq::{Ntt, NttShoup, Poly, Representation, switcher::Switcher};
-use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
+use fhe_traits::{FheEncrypter, FheParametrized};
 
 /// Public key for the L-BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -250,79 +246,89 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
     }
 }
 
-impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
-    fn from(pk: &LBFVPublicKey) -> Self {
-        LBFVPublicKeyProto {
-            c: pk.c.iter().map(CiphertextProto::from).collect(),
-            l: pk.l as u32,
-            seed: pk.seed.map_or_else(Vec::new, |s| s.to_vec()),
+#[cfg(feature = "protobuf")]
+mod protobuf {
+    use super::*;
+    use crate::SerializationError;
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use prost::Message;
+
+    impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
+        fn from(pk: &LBFVPublicKey) -> Self {
+            LBFVPublicKeyProto {
+                c: pk.c.iter().map(CiphertextProto::from).collect(),
+                l: pk.l as u32,
+                seed: pk.seed.map_or_else(Vec::new, |s| s.to_vec()),
+            }
         }
     }
-}
 
-impl Serialize for LBFVPublicKey {
-    fn to_bytes(&self) -> Vec<u8> {
-        LBFVPublicKeyProto::from(self).encode_to_vec()
+    impl Serialize for LBFVPublicKey {
+        fn to_bytes(&self) -> Vec<u8> {
+            LBFVPublicKeyProto::from(self).encode_to_vec()
+        }
     }
-}
 
-impl DeserializeParametrized for LBFVPublicKey {
-    type Error = Error;
+    impl DeserializeParametrized for LBFVPublicKey {
+        type Error = Error;
 
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: LBFVPublicKeyProto = Message::decode(bytes).map_err(|e| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: e.to_string(),
+        fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+            let proto: LBFVPublicKeyProto = Message::decode(bytes).map_err(|e| {
+                Error::SerializationError(SerializationError::ProtobufError {
+                    message: e.to_string(),
+                })
+            })?;
+
+            if proto.c.is_empty() {
+                return Err(Error::SerializationError(
+                    SerializationError::InvalidFormat {
+                        reason: "LBFV public key has no ciphertexts".to_string(),
+                    },
+                ));
+            }
+
+            let mut c: Vec<Ciphertext> = Vec::with_capacity(proto.c.len());
+            for ct_proto in proto.c {
+                let mut ct = Ciphertext::try_convert_from(&ct_proto, par)?;
+                if ct.level != 0 {
+                    return Err(Error::SerializationError(
+                        SerializationError::InvalidFormat {
+                            reason: "LBFV public key ciphertext must be at level 0".to_string(),
+                        },
+                    ));
+                }
+                // The polynomials of a public key should not allow for variable time
+                // computation.
+                ct.c.iter_mut()
+                    .for_each(|p| p.disallow_variable_time_computations());
+                c.push(ct);
+            }
+
+            // Import the seed if it exists
+            let seed = if !proto.seed.is_empty() {
+                let mut seed_array = <ChaCha8Rng as SeedableRng>::Seed::default();
+                if proto.seed.len() != seed_array.len() {
+                    return Err(Error::SerializationError(
+                        SerializationError::InvalidFormat {
+                            reason: "Invalid LBFV public key seed length".to_string(),
+                        },
+                    ));
+                }
+                seed_array.copy_from_slice(&proto.seed);
+                Some(seed_array)
+            } else {
+                None
+            };
+
+            Ok(Self {
+                par: par.clone(),
+                c,
+                l: proto.l as usize,
+                seed,
             })
-        })?;
-
-        if proto.c.is_empty() {
-            return Err(Error::SerializationError(
-                SerializationError::InvalidFormat {
-                    reason: "LBFV public key has no ciphertexts".to_string(),
-                },
-            ));
         }
-
-        let mut c: Vec<Ciphertext> = Vec::with_capacity(proto.c.len());
-        for ct_proto in proto.c {
-            let mut ct = Ciphertext::try_convert_from(&ct_proto, par)?;
-            if ct.level != 0 {
-                return Err(Error::SerializationError(
-                    SerializationError::InvalidFormat {
-                        reason: "LBFV public key ciphertext must be at level 0".to_string(),
-                    },
-                ));
-            }
-            // The polynomials of a public key should not allow for variable time
-            // computation.
-            ct.c.iter_mut()
-                .for_each(|p| p.disallow_variable_time_computations());
-            c.push(ct);
-        }
-
-        // Import the seed if it exists
-        let seed = if !proto.seed.is_empty() {
-            let mut seed_array = <ChaCha8Rng as SeedableRng>::Seed::default();
-            if proto.seed.len() != seed_array.len() {
-                return Err(Error::SerializationError(
-                    SerializationError::InvalidFormat {
-                        reason: "Invalid LBFV public key seed length".to_string(),
-                    },
-                ));
-            }
-            seed_array.copy_from_slice(&proto.seed);
-            Some(seed_array)
-        } else {
-            None
-        };
-
-        Ok(Self {
-            par: par.clone(),
-            c,
-            l: proto.l as usize,
-            seed,
-        })
     }
 }
 
@@ -332,7 +338,7 @@ mod tests {
     use super::LBFVPublicKey;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
     use fhe_math::zq::Modulus;
-    use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
+    use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::error::Error;
@@ -385,19 +391,25 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_serialize() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
-            let pk = LBFVPublicKey::new(&sk, &mut rng);
-            let bytes = pk.to_bytes();
-            assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
+    #[cfg(feature = "protobuf")]
+    mod protobuf {
+        use super::*;
+        use fhe_traits::{DeserializeParametrized, Serialize};
+
+        #[test]
+        fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            for params in [
+                BfvParameters::default_arc(1, 8),
+                BfvParameters::default_arc(6, 8),
+            ] {
+                let sk = SecretKey::random(&params, &mut rng);
+                let pk = LBFVPublicKey::new(&sk, &mut rng);
+                let bytes = pk.to_bytes();
+                assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
+            }
+            Ok(())
         }
-        Ok(())
     }
 
     #[test]

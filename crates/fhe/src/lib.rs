@@ -7,6 +7,7 @@ mod errors;
 pub mod bfv;
 pub mod lbfv;
 pub mod mbfv;
+#[cfg(feature = "protobuf")]
 pub mod proto;
 pub mod trbfv;
 pub use errors::{Error, ParametersError, Result, SerializationError, ThresholdError};
