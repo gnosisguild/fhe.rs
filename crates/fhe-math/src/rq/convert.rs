@@ -1,141 +1,12 @@
 //! Implementation of conversions from and to polynomials.
 
 use super::{Context, Ntt, NttShoup, Poly, PowerBasis, traits::TryConvertFrom};
-#[cfg(feature = "protobuf")]
-use super::{Representation, RepresentationTag};
-#[cfg(feature = "protobuf")]
-use crate::proto::rq::{Representation as RepresentationProto, Rq};
 use crate::{Error, Result};
 use itertools::{Itertools, izip};
 use ndarray::{Array2, ArrayView, Axis};
 use num_bigint::BigUint;
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
-
-#[cfg(feature = "protobuf")]
-impl<R: RepresentationTag> From<&Poly<R>> for Rq {
-    fn from(p: &Poly<R>) -> Self {
-        assert!(!p.has_lazy_coefficients);
-        let q: Poly<PowerBasis> = match R::REPRESENTATION {
-            Representation::PowerBasis => Poly::<PowerBasis>::from_parts(p.clone()),
-            Representation::Ntt => Poly::<Ntt>::from_parts(p.clone()).into_power_basis(),
-            Representation::NttShoup => Poly::<NttShoup>::from_parts(p.clone()).into_power_basis(),
-        };
-
-        let mut proto = Rq::default();
-        match R::REPRESENTATION {
-            Representation::PowerBasis => {
-                proto.representation = RepresentationProto::Powerbasis as i32
-            }
-            Representation::Ntt => proto.representation = RepresentationProto::Ntt as i32,
-            Representation::NttShoup => proto.representation = RepresentationProto::Nttshoup as i32,
-        }
-        let serialization: Vec<u8> = izip!(q.coefficients.outer_iter(), p.ctx.q.iter())
-            .flat_map(|(v, qi)| qi.serialize_vec(v.as_slice().unwrap()))
-            .collect();
-        proto.coefficients = serialization;
-        proto.degree = p.ctx.degree as u32;
-        proto.allow_variable_time = p.allow_variable_time_computations;
-        proto
-    }
-}
-
-#[cfg(feature = "protobuf")]
-fn parse_proto(
-    value: &Rq,
-    ctx: &Arc<Context>,
-    variable_time: bool,
-) -> Result<(Representation, Vec<u64>, bool)> {
-    let repr = value
-        .representation
-        .try_into()
-        .map_err(|_| Error::Default("Invalid representation".to_string()))?;
-    let representation_from_proto = match repr {
-        RepresentationProto::Powerbasis => Representation::PowerBasis,
-        RepresentationProto::Ntt => Representation::Ntt,
-        RepresentationProto::Nttshoup => Representation::NttShoup,
-        RepresentationProto::Unknown => {
-            return Err(Error::Default("Unknown representation".to_string()));
-        }
-    };
-
-    let variable_time = variable_time || value.allow_variable_time;
-
-    let degree = value.degree as usize;
-    if !degree.is_multiple_of(8) || degree < 8 {
-        return Err(Error::Default("Invalid degree".to_string()));
-    }
-
-    let mut expected_nbytes = 0;
-    ctx.q
-        .iter()
-        .for_each(|qi| expected_nbytes += qi.serialization_length(degree));
-    if value.coefficients.len() != expected_nbytes {
-        return Err(Error::Default("Invalid coefficients".to_string()));
-    }
-
-    let mut index = 0;
-    let power_basis_coefficients: Vec<u64> = ctx
-        .q
-        .iter()
-        .flat_map(|qi| {
-            let size = qi.serialization_length(degree);
-            let v = qi.deserialize_vec(&value.coefficients[index..index + size]);
-            index += size;
-            v
-        })
-        .collect();
-
-    Ok((
-        representation_from_proto,
-        power_basis_coefficients,
-        variable_time,
-    ))
-}
-
-#[cfg(feature = "protobuf")]
-impl TryConvertFrom<&Rq> for Poly<PowerBasis> {
-    fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        let (representation_from_proto, coefficients, variable_time) =
-            parse_proto(value, ctx, variable_time)?;
-        if representation_from_proto != Representation::PowerBasis {
-            return Err(Error::Default(
-                "The representation asked for does not match the representation in the serialization".to_string(),
-            ));
-        }
-        Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)
-    }
-}
-
-#[cfg(feature = "protobuf")]
-impl TryConvertFrom<&Rq> for Poly<Ntt> {
-    fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        let (representation_from_proto, coefficients, variable_time) =
-            parse_proto(value, ctx, variable_time)?;
-        if representation_from_proto != Representation::Ntt {
-            return Err(Error::Default(
-                "The representation asked for does not match the representation in the serialization".to_string(),
-            ));
-        }
-        let p = Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)?;
-        Ok(p.into_ntt())
-    }
-}
-
-#[cfg(feature = "protobuf")]
-impl TryConvertFrom<&Rq> for Poly<NttShoup> {
-    fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        let (representation_from_proto, coefficients, variable_time) =
-            parse_proto(value, ctx, variable_time)?;
-        if representation_from_proto != Representation::NttShoup {
-            return Err(Error::Default(
-                "The representation asked for does not match the representation in the serialization".to_string(),
-            ));
-        }
-        let p = Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)?;
-        Ok(p.into_ntt_shoup())
-    }
-}
 
 impl TryConvertFrom<Vec<u64>> for Poly<PowerBasis> {
     fn try_convert_from(mut v: Vec<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
@@ -501,14 +372,139 @@ impl From<&Poly<NttShoup>> for Vec<BigUint> {
     }
 }
 
+#[cfg(feature = "protobuf")]
+mod protobuf {
+    use super::*;
+    use crate::proto::rq::{Representation as RepresentationProto, Rq};
+    use crate::rq::{Representation, RepresentationTag};
+
+    impl<R: RepresentationTag> From<&Poly<R>> for Rq {
+        fn from(p: &Poly<R>) -> Self {
+            assert!(!p.has_lazy_coefficients);
+            let q: Poly<PowerBasis> = match R::REPRESENTATION {
+                Representation::PowerBasis => Poly::<PowerBasis>::from_parts(p.clone()),
+                Representation::Ntt => Poly::<Ntt>::from_parts(p.clone()).into_power_basis(),
+                Representation::NttShoup => {
+                    Poly::<NttShoup>::from_parts(p.clone()).into_power_basis()
+                }
+            };
+
+            let mut proto = Rq::default();
+            match R::REPRESENTATION {
+                Representation::PowerBasis => {
+                    proto.representation = RepresentationProto::Powerbasis as i32
+                }
+                Representation::Ntt => proto.representation = RepresentationProto::Ntt as i32,
+                Representation::NttShoup => {
+                    proto.representation = RepresentationProto::Nttshoup as i32
+                }
+            }
+            let serialization: Vec<u8> = izip!(q.coefficients.outer_iter(), p.ctx.q.iter())
+                .flat_map(|(v, qi)| qi.serialize_vec(v.as_slice().unwrap()))
+                .collect();
+            proto.coefficients = serialization;
+            proto.degree = p.ctx.degree as u32;
+            proto.allow_variable_time = p.allow_variable_time_computations;
+            proto
+        }
+    }
+
+    fn parse_proto(
+        value: &Rq,
+        ctx: &Arc<Context>,
+        variable_time: bool,
+    ) -> Result<(Representation, Vec<u64>, bool)> {
+        let repr = value
+            .representation
+            .try_into()
+            .map_err(|_| Error::Default("Invalid representation".to_string()))?;
+        let representation_from_proto = match repr {
+            RepresentationProto::Powerbasis => Representation::PowerBasis,
+            RepresentationProto::Ntt => Representation::Ntt,
+            RepresentationProto::Nttshoup => Representation::NttShoup,
+            RepresentationProto::Unknown => {
+                return Err(Error::Default("Unknown representation".to_string()));
+            }
+        };
+
+        let variable_time = variable_time || value.allow_variable_time;
+
+        let degree = value.degree as usize;
+        if !degree.is_multiple_of(8) || degree < 8 {
+            return Err(Error::Default("Invalid degree".to_string()));
+        }
+
+        let mut expected_nbytes = 0;
+        ctx.q
+            .iter()
+            .for_each(|qi| expected_nbytes += qi.serialization_length(degree));
+        if value.coefficients.len() != expected_nbytes {
+            return Err(Error::Default("Invalid coefficients".to_string()));
+        }
+
+        let mut index = 0;
+        let power_basis_coefficients: Vec<u64> = ctx
+            .q
+            .iter()
+            .flat_map(|qi| {
+                let size = qi.serialization_length(degree);
+                let v = qi.deserialize_vec(&value.coefficients[index..index + size]);
+                index += size;
+                v
+            })
+            .collect();
+
+        Ok((
+            representation_from_proto,
+            power_basis_coefficients,
+            variable_time,
+        ))
+    }
+
+    impl TryConvertFrom<&Rq> for Poly<PowerBasis> {
+        fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
+            let (representation_from_proto, coefficients, variable_time) =
+                parse_proto(value, ctx, variable_time)?;
+            if representation_from_proto != Representation::PowerBasis {
+                return Err(Error::Default(
+                    "The representation asked for does not match the representation in the serialization".to_string(),
+                ));
+            }
+            Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)
+        }
+    }
+
+    impl TryConvertFrom<&Rq> for Poly<Ntt> {
+        fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
+            let (representation_from_proto, coefficients, variable_time) =
+                parse_proto(value, ctx, variable_time)?;
+            if representation_from_proto != Representation::Ntt {
+                return Err(Error::Default(
+                    "The representation asked for does not match the representation in the serialization".to_string(),
+                ));
+            }
+            let p = Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)?;
+            Ok(p.into_ntt())
+        }
+    }
+
+    impl TryConvertFrom<&Rq> for Poly<NttShoup> {
+        fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
+            let (representation_from_proto, coefficients, variable_time) =
+                parse_proto(value, ctx, variable_time)?;
+            if representation_from_proto != Representation::NttShoup {
+                return Err(Error::Default(
+                    "The representation asked for does not match the representation in the serialization".to_string(),
+                ));
+            }
+            let p = Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)?;
+            Ok(p.into_ntt_shoup())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "protobuf")]
-    use crate::Error as CrateError;
-    #[cfg(feature = "protobuf")]
-    use crate::proto::rq::Rq;
-    #[cfg(feature = "protobuf")]
-    use crate::rq::NttShoup;
     use crate::rq::{Context, Ntt, Poly, PowerBasis, traits::TryConvertFrom};
     use num_bigint::BigUint;
     use rand::rng;
@@ -517,41 +513,48 @@ mod tests {
     static MODULI: &[u64; 3] = &[1153, 4611686018326724609, 4611686018309947393];
 
     #[cfg(feature = "protobuf")]
-    #[test]
-    fn proto() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        for modulus in MODULI {
-            let ctx = Arc::new(Context::new(&[*modulus], 16)?);
-            let p = Poly::<PowerBasis>::random(&ctx, &mut rng);
+    mod protobuf {
+        use super::*;
+        use crate::Error as CrateError;
+        use crate::proto::rq::Rq;
+        use crate::rq::NttShoup;
+
+        #[test]
+        fn proto() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            for modulus in MODULI {
+                let ctx = Arc::new(Context::new(&[*modulus], 16)?);
+                let p = Poly::<PowerBasis>::random(&ctx, &mut rng);
+                let proto = Rq::from(&p);
+                assert_eq!(
+                    Poly::<PowerBasis>::try_convert_from(&proto, &ctx, false)?,
+                    p
+                );
+                assert_eq!(
+                    Poly::<Ntt>::try_convert_from(&proto, &ctx, false).unwrap_err(),
+                    CrateError::Default(
+                        "The representation asked for does not match the representation in the serialization".to_string()
+                    )
+                );
+                assert_eq!(
+                    Poly::<NttShoup>::try_convert_from(&proto, &ctx, false).unwrap_err(),
+                    CrateError::Default(
+                        "The representation asked for does not match the representation in the serialization".to_string()
+                    )
+                );
+            }
+
+            let ctx = Arc::new(Context::new(MODULI, 16)?);
+            let p = Poly::<Ntt>::random(&ctx, &mut rng);
             let proto = Rq::from(&p);
-            assert_eq!(
-                Poly::<PowerBasis>::try_convert_from(&proto, &ctx, false)?,
-                p
-            );
-            assert_eq!(
-                Poly::<Ntt>::try_convert_from(&proto, &ctx, false).unwrap_err(),
-                CrateError::Default(
-                    "The representation asked for does not match the representation in the serialization".to_string()
-                )
-            );
-            assert_eq!(
-                Poly::<NttShoup>::try_convert_from(&proto, &ctx, false).unwrap_err(),
-                CrateError::Default(
-                    "The representation asked for does not match the representation in the serialization".to_string()
-                )
-            );
+            assert_eq!(Poly::<Ntt>::try_convert_from(&proto, &ctx, false)?, p);
+
+            let p = Poly::<NttShoup>::random(&ctx, &mut rng);
+            let proto = Rq::from(&p);
+            assert_eq!(Poly::<NttShoup>::try_convert_from(&proto, &ctx, false)?, p);
+
+            Ok(())
         }
-
-        let ctx = Arc::new(Context::new(MODULI, 16)?);
-        let p = Poly::<Ntt>::random(&ctx, &mut rng);
-        let proto = Rq::from(&p);
-        assert_eq!(Poly::<Ntt>::try_convert_from(&proto, &ctx, false)?, p);
-
-        let p = Poly::<NttShoup>::random(&ctx, &mut rng);
-        let proto = Rq::from(&p);
-        assert_eq!(Poly::<NttShoup>::try_convert_from(&proto, &ctx, false)?, p);
-
-        Ok(())
     }
 
     #[test]

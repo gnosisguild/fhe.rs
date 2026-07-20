@@ -1,22 +1,12 @@
 //! Public keys for the BFV encryption scheme
 
-#[cfg(feature = "protobuf")]
-use crate::SerializationError;
-#[cfg(feature = "protobuf")]
-use crate::bfv::traits::TryConvertFrom;
 use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext};
-#[cfg(feature = "protobuf")]
-use crate::proto::bfv::{Ciphertext as CiphertextProto, PublicKey as PublicKeyProto};
 use crate::{Error, Result};
 use fhe_math::rq::{
     Ntt, Poly, PowerBasis, Representation, traits::TryConvertFrom as PolyTryConvertFrom,
 };
-#[cfg(feature = "protobuf")]
-use fhe_traits::{DeserializeParametrized, Serialize};
 use fhe_traits::{FheEncrypter, FheParametrized};
 use fhe_util::sample_vec_cbd_f32;
-#[cfg(feature = "protobuf")]
-use prost::Message;
 use rand::{CryptoRng, RngCore};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -210,53 +200,60 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
 }
 
 #[cfg(feature = "protobuf")]
-impl From<&PublicKey> for PublicKeyProto {
-    fn from(pk: &PublicKey) -> Self {
-        PublicKeyProto {
-            c: Some(CiphertextProto::from(&pk.c)),
+mod protobuf {
+    use super::*;
+    use crate::SerializationError;
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::proto::bfv::{Ciphertext as CiphertextProto, PublicKey as PublicKeyProto};
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use prost::Message;
+
+    impl From<&PublicKey> for PublicKeyProto {
+        fn from(pk: &PublicKey) -> Self {
+            PublicKeyProto {
+                c: Some(CiphertextProto::from(&pk.c)),
+            }
         }
     }
-}
 
-#[cfg(feature = "protobuf")]
-impl Serialize for PublicKey {
-    fn to_bytes(&self) -> Vec<u8> {
-        PublicKeyProto::from(self).encode_to_vec()
+    impl Serialize for PublicKey {
+        fn to_bytes(&self) -> Vec<u8> {
+            PublicKeyProto::from(self).encode_to_vec()
+        }
     }
-}
 
-#[cfg(feature = "protobuf")]
-impl DeserializeParametrized for PublicKey {
-    type Error = Error;
+    impl DeserializeParametrized for PublicKey {
+        type Error = Error;
 
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: PublicKeyProto = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: "PublicKey decode".into(),
-            })
-        })?;
-        if let Some(proto_c) = &proto.c {
-            let mut c = Ciphertext::try_convert_from(proto_c, par)?;
-            if c.level != 0 {
+        fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+            let proto: PublicKeyProto = Message::decode(bytes).map_err(|_| {
+                Error::SerializationError(SerializationError::ProtobufError {
+                    message: "PublicKey decode".into(),
+                })
+            })?;
+            if let Some(proto_c) = &proto.c {
+                let mut c = Ciphertext::try_convert_from(proto_c, par)?;
+                if c.level != 0 {
+                    Err(Error::SerializationError(
+                        SerializationError::InvalidFormat {
+                            reason: "ciphertext level must be 0".into(),
+                        },
+                    ))
+                } else {
+                    c.iter_mut()
+                        .for_each(|p| p.disallow_variable_time_computations());
+                    Ok(Self {
+                        par: par.clone(),
+                        c,
+                    })
+                }
+            } else {
                 Err(Error::SerializationError(
-                    SerializationError::InvalidFormat {
-                        reason: "ciphertext level must be 0".into(),
+                    SerializationError::MissingField {
+                        field_name: "c".into(),
                     },
                 ))
-            } else {
-                c.iter_mut()
-                    .for_each(|p| p.disallow_variable_time_computations());
-                Ok(Self {
-                    par: par.clone(),
-                    c,
-                })
             }
-        } else {
-            Err(Error::SerializationError(
-                SerializationError::MissingField {
-                    field_name: "c".into(),
-                },
-            ))
         }
     }
 }
@@ -269,8 +266,6 @@ mod tests {
         parameters::{BfvParameters, BfvParametersBuilder},
     };
     use fhe_math::rq::{Poly, PowerBasis, traits::TryConvertFrom};
-    #[cfg(feature = "protobuf")]
-    use fhe_traits::{DeserializeParametrized, Serialize};
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use num_bigint::BigUint;
     use rand::rng;
@@ -322,19 +317,24 @@ mod tests {
     }
 
     #[cfg(feature = "protobuf")]
-    #[test]
-    fn test_serialize() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(1, 16),
-            BfvParameters::default_arc(6, 16),
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
-            let pk = PublicKey::new(&sk, &mut rng);
-            let bytes = pk.to_bytes();
-            assert_eq!(pk, PublicKey::from_bytes(&bytes, &params)?);
+    mod protobuf {
+        use super::*;
+        use fhe_traits::{DeserializeParametrized, Serialize};
+
+        #[test]
+        fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            for params in [
+                BfvParameters::default_arc(1, 16),
+                BfvParameters::default_arc(6, 16),
+            ] {
+                let sk = SecretKey::random(&params, &mut rng);
+                let pk = PublicKey::new(&sk, &mut rng);
+                let bytes = pk.to_bytes();
+                assert_eq!(pk, PublicKey::from_bytes(&bytes, &params)?);
+            }
+            Ok(())
         }
-        Ok(())
     }
 
     #[test]

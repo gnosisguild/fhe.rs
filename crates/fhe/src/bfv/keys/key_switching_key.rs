@@ -2,11 +2,7 @@
 //! Brakerski-Vaikuntanathan key switching through decomposition technique
 //! adapted to RNS as described in the HPS optimization paper (https://eprint.iacr.org/2018/117)
 
-#[cfg(feature = "protobuf")]
-use crate::bfv::traits::TryConvertFrom as BfvTryConvertFrom;
 use crate::bfv::{BfvParameters, SecretKey};
-#[cfg(feature = "protobuf")]
-use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
 use crate::{Error, Result};
 use fhe_math::rq::Context;
 use fhe_math::rq::traits::TryConvertFrom;
@@ -14,8 +10,6 @@ use fhe_math::{
     rns::RnsContext,
     rq::{Ntt, NttShoup, Poly, PowerBasis},
 };
-#[cfg(feature = "protobuf")]
-use fhe_traits::{DeserializeWithContext, Serialize};
 use itertools::{Itertools, izip};
 use num_bigint::BigUint;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
@@ -363,111 +357,119 @@ impl KeySwitchingKey {
 }
 
 #[cfg(feature = "protobuf")]
-impl From<&KeySwitchingKey> for KeySwitchingKeyProto {
-    fn from(value: &KeySwitchingKey) -> Self {
-        let mut ksk = KeySwitchingKeyProto::default();
-        if let Some(seed) = value.seed.as_ref() {
-            ksk.seed = seed.to_vec();
-        } else {
-            ksk.c1.reserve_exact(value.c1.len());
-            for c1 in value.c1.iter() {
-                ksk.c1.push(c1.to_bytes())
-            }
-        }
-        ksk.c0.reserve_exact(value.c0.len());
-        for c0 in value.c0.iter() {
-            ksk.c0.push(c0.to_bytes())
-        }
-        ksk.ciphertext_level = value.ciphertext_level as u32;
-        ksk.ksk_level = value.ksk_level as u32;
-        ksk.log_base = value.log_base as u32;
-        ksk
-    }
-}
+mod protobuf {
+    use super::*;
+    use crate::bfv::traits::TryConvertFrom as BfvTryConvertFrom;
+    use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
+    use fhe_traits::{DeserializeWithContext, Serialize};
 
-#[cfg(feature = "protobuf")]
-impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
-    fn try_convert_from(value: &KeySwitchingKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
-        let ciphertext_level = value.ciphertext_level as usize;
-        let ksk_level = value.ksk_level as usize;
-        let ctx_ksk = par.context_at_level(ksk_level)?.clone();
-        let ctx_ciphertext = par.context_at_level(ciphertext_level)?.clone();
-
-        let c0_size: usize;
-        let log_base = value.log_base as usize;
-        if log_base != 0 {
-            if ksk_level != par.max_level() || ciphertext_level != par.max_level() {
-                return Err(Error::DefaultError(
-                    "A decomposition size is specified but the levels are not maximal".to_string(),
-                ));
+    impl From<&KeySwitchingKey> for KeySwitchingKeyProto {
+        fn from(value: &KeySwitchingKey) -> Self {
+            let mut ksk = KeySwitchingKeyProto::default();
+            if let Some(seed) = value.seed.as_ref() {
+                ksk.seed = seed.to_vec();
             } else {
-                let log_modulus: usize =
-                    par.moduli().first().unwrap().next_power_of_two().ilog2() as usize;
-                c0_size = log_modulus.div_ceil(log_base);
+                ksk.c1.reserve_exact(value.c1.len());
+                for c1 in value.c1.iter() {
+                    ksk.c1.push(c1.to_bytes())
+                }
             }
-        } else {
-            c0_size = ctx_ciphertext.moduli().len();
+            ksk.c0.reserve_exact(value.c0.len());
+            for c0 in value.c0.iter() {
+                ksk.c0.push(c0.to_bytes())
+            }
+            ksk.ciphertext_level = value.ciphertext_level as u32;
+            ksk.ksk_level = value.ksk_level as u32;
+            ksk.log_base = value.log_base as u32;
+            ksk
         }
+    }
 
-        if value.c0.len() != c0_size {
-            return Err(Error::DefaultError(
-                "Incorrect number of values in c0".to_string(),
-            ));
-        }
+    impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
+        fn try_convert_from(
+            value: &KeySwitchingKeyProto,
+            par: &Arc<BfvParameters>,
+        ) -> Result<Self> {
+            let ciphertext_level = value.ciphertext_level as usize;
+            let ksk_level = value.ksk_level as usize;
+            let ctx_ksk = par.context_at_level(ksk_level)?.clone();
+            let ctx_ciphertext = par.context_at_level(ciphertext_level)?.clone();
 
-        let seed = if value.seed.is_empty() {
-            if value.c1.len() != c0_size {
+            let c0_size: usize;
+            let log_base = value.log_base as usize;
+            if log_base != 0 {
+                if ksk_level != par.max_level() || ciphertext_level != par.max_level() {
+                    return Err(Error::DefaultError(
+                        "A decomposition size is specified but the levels are not maximal"
+                            .to_string(),
+                    ));
+                } else {
+                    let log_modulus: usize =
+                        par.moduli().first().unwrap().next_power_of_two().ilog2() as usize;
+                    c0_size = log_modulus.div_ceil(log_base);
+                }
+            } else {
+                c0_size = ctx_ciphertext.moduli().len();
+            }
+
+            if value.c0.len() != c0_size {
                 return Err(Error::DefaultError(
-                    "Incorrect number of values in c1".to_string(),
+                    "Incorrect number of values in c0".to_string(),
                 ));
             }
-            None
-        } else {
-            let unwrapped = <ChaCha8Rng as SeedableRng>::Seed::try_from(value.seed.clone());
-            if unwrapped.is_err() {
-                return Err(Error::DefaultError("Invalid seed".to_string()));
-            }
-            Some(unwrapped.unwrap())
-        };
 
-        let c1 = if let Some(seed) = seed {
-            Self::generate_c1(&ctx_ksk, seed, value.c0.len())
-        } else {
-            value
-                .c1
+            let seed = if value.seed.is_empty() {
+                if value.c1.len() != c0_size {
+                    return Err(Error::DefaultError(
+                        "Incorrect number of values in c1".to_string(),
+                    ));
+                }
+                None
+            } else {
+                let unwrapped = <ChaCha8Rng as SeedableRng>::Seed::try_from(value.seed.clone());
+                if unwrapped.is_err() {
+                    return Err(Error::DefaultError("Invalid seed".to_string()));
+                }
+                Some(unwrapped.unwrap())
+            };
+
+            let c1 = if let Some(seed) = seed {
+                KeySwitchingKey::generate_c1(&ctx_ksk, seed, value.c0.len())
+            } else {
+                value
+                    .c1
+                    .iter()
+                    .map(|c1i| {
+                        Poly::<NttShoup>::from_bytes(c1i, &ctx_ksk).map_err(Error::MathError)
+                    })
+                    .collect::<Result<Vec<Poly<NttShoup>>>>()?
+            };
+
+            let c0 = value
+                .c0
                 .iter()
-                .map(|c1i| Poly::<NttShoup>::from_bytes(c1i, &ctx_ksk).map_err(Error::MathError))
-                .collect::<Result<Vec<Poly<NttShoup>>>>()?
-        };
+                .map(|c0i| Poly::<NttShoup>::from_bytes(c0i, &ctx_ksk).map_err(Error::MathError))
+                .collect::<Result<Vec<Poly<NttShoup>>>>()?;
 
-        let c0 = value
-            .c0
-            .iter()
-            .map(|c0i| Poly::<NttShoup>::from_bytes(c0i, &ctx_ksk).map_err(Error::MathError))
-            .collect::<Result<Vec<Poly<NttShoup>>>>()?;
-
-        Ok(Self {
-            par: par.clone(),
-            seed,
-            c0: c0.into_boxed_slice(),
-            c1: c1.into_boxed_slice(),
-            ciphertext_level,
-            ctx_ciphertext,
-            ksk_level,
-            ctx_ksk,
-            log_base: value.log_base as usize,
-        })
+            Ok(Self {
+                par: par.clone(),
+                seed,
+                c0: c0.into_boxed_slice(),
+                c1: c1.into_boxed_slice(),
+                ciphertext_level,
+                ctx_ciphertext,
+                ksk_level,
+                ctx_ksk,
+                log_base: value.log_base as usize,
+            })
+        }
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
-    #[cfg(feature = "protobuf")]
-    use crate::bfv::traits::TryConvertFrom;
     use crate::bfv::{BfvParameters, SecretKey, keys::key_switching_key::KeySwitchingKey};
-    #[cfg(feature = "protobuf")]
-    use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
     use fhe_math::{
         rns::RnsContext,
         rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom as TryConvertFromPoly},
@@ -598,21 +600,27 @@ mod tests {
     }
 
     #[cfg(feature = "protobuf")]
-    #[test]
-    fn proto_conversion() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(6, 16),
-            BfvParameters::default_arc(3, 16),
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
-            let ctx = params.context_at_level(0)?;
-            let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
-            let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
-            let ksk_proto = KeySwitchingKeyProto::from(&ksk);
-            assert_eq!(ksk, KeySwitchingKey::try_convert_from(&ksk_proto, &params)?);
+    mod protobuf {
+        use super::*;
+        use crate::bfv::traits::TryConvertFrom;
+        use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
+
+        #[test]
+        fn proto_conversion() -> Result<(), Box<dyn Error>> {
+            let mut rng = rng();
+            for params in [
+                BfvParameters::default_arc(6, 16),
+                BfvParameters::default_arc(3, 16),
+            ] {
+                let sk = SecretKey::random(&params, &mut rng);
+                let ctx = params.context_at_level(0)?;
+                let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+                let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
+                let ksk_proto = KeySwitchingKeyProto::from(&ksk);
+                assert_eq!(ksk, KeySwitchingKey::try_convert_from(&ksk_proto, &params)?);
+            }
+            Ok(())
         }
-        Ok(())
     }
 
     #[test]

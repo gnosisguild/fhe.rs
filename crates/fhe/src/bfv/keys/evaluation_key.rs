@@ -1,18 +1,10 @@
 //! Leveled evaluation keys for the BFV encryption scheme.
 
-#[cfg(feature = "protobuf")]
-use crate::bfv::traits::TryConvertFrom;
 use crate::bfv::{BfvParameters, Ciphertext, SecretKey, keys::GaloisKey};
-#[cfg(feature = "protobuf")]
-use crate::proto::bfv::{EvaluationKey as EvaluationKeyProto, GaloisKey as GaloisKeyProto};
 use crate::{Error, Result};
 use fhe_math::rq::{NttShoup, Poly, PowerBasis, traits::TryConvertFrom as TryConvertFromPoly};
 use fhe_math::zq::Modulus;
 use fhe_traits::FheParametrized;
-#[cfg(feature = "protobuf")]
-use fhe_traits::{DeserializeParametrized, Serialize};
-#[cfg(feature = "protobuf")]
-use prost::Message;
 use rand::{CryptoRng, RngCore};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -214,22 +206,81 @@ impl FheParametrized for EvaluationKey {
 }
 
 #[cfg(feature = "protobuf")]
-impl Serialize for EvaluationKey {
-    fn to_bytes(&self) -> Vec<u8> {
-        EvaluationKeyProto::from(self).encode_to_vec()
+mod protobuf {
+    use super::*;
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::proto::bfv::{EvaluationKey as EvaluationKeyProto, GaloisKey as GaloisKeyProto};
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use prost::Message;
+
+    impl Serialize for EvaluationKey {
+        fn to_bytes(&self) -> Vec<u8> {
+            EvaluationKeyProto::from(self).encode_to_vec()
+        }
     }
-}
 
-#[cfg(feature = "protobuf")]
-impl DeserializeParametrized for EvaluationKey {
-    type Error = Error;
+    impl DeserializeParametrized for EvaluationKey {
+        type Error = Error;
 
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-        let gkp = Message::decode(bytes);
-        if let Ok(gkp) = gkp {
-            EvaluationKey::try_convert_from(&gkp, par)
-        } else {
-            Err(Error::DefaultError("Invalid serialization".to_string()))
+        fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+            let gkp = Message::decode(bytes);
+            if let Ok(gkp) = gkp {
+                EvaluationKey::try_convert_from(&gkp, par)
+            } else {
+                Err(Error::DefaultError("Invalid serialization".to_string()))
+            }
+        }
+    }
+
+    impl From<&EvaluationKey> for EvaluationKeyProto {
+        fn from(ek: &EvaluationKey) -> Self {
+            let mut proto = EvaluationKeyProto::default();
+            for gk in ek.gk.values() {
+                proto.gk.push(GaloisKeyProto::from(gk))
+            }
+            proto.ciphertext_level = ek.ciphertext_level as u32;
+            proto.evaluation_key_level = ek.evaluation_key_level as u32;
+            proto
+        }
+    }
+
+    impl TryConvertFrom<&EvaluationKeyProto> for EvaluationKey {
+        fn try_convert_from(value: &EvaluationKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
+            let mut gk = HashMap::new();
+            for gkp in &value.gk {
+                let key = GaloisKey::try_convert_from(gkp, par)?;
+                if key.ksk.ciphertext_level != value.ciphertext_level as usize {
+                    return Err(Error::DefaultError(
+                        "Galois key has incorrect ciphertext level".to_string(),
+                    ));
+                }
+                if key.ksk.ksk_level != value.evaluation_key_level as usize {
+                    return Err(Error::DefaultError(
+                        "Galois key has incorrect evaluation key level".to_string(),
+                    ));
+                }
+                gk.insert(key.element.exponent, key);
+            }
+
+            let ciphertext_ctx = par.context_at_level(value.ciphertext_level as usize)?;
+            let mut monomials = Vec::with_capacity(par.degree().ilog2() as usize);
+            for l in 0..par.degree().ilog2() {
+                let mut monomial = vec![0i64; par.degree()];
+                monomial[par.degree() - (1 << l)] = -1;
+                let mut monomial =
+                    Poly::<PowerBasis>::try_convert_from(&monomial, ciphertext_ctx, true)?;
+                unsafe { monomial.allow_variable_time_computations() }
+                monomials.push(monomial.into_ntt_shoup());
+            }
+
+            Ok(EvaluationKey {
+                gk,
+                par: par.clone(),
+                rot_to_gk_exponent: EvaluationKey::construct_rot_to_gk_exponent(par),
+                monomials,
+                ciphertext_level: value.ciphertext_level as usize,
+                evaluation_key_level: value.evaluation_key_level as usize,
+            })
         }
     }
 }
@@ -387,72 +438,10 @@ impl EvaluationKeyBuilder {
     }
 }
 
-#[cfg(feature = "protobuf")]
-impl From<&EvaluationKey> for EvaluationKeyProto {
-    fn from(ek: &EvaluationKey) -> Self {
-        let mut proto = EvaluationKeyProto::default();
-        for gk in ek.gk.values() {
-            proto.gk.push(GaloisKeyProto::from(gk))
-        }
-        proto.ciphertext_level = ek.ciphertext_level as u32;
-        proto.evaluation_key_level = ek.evaluation_key_level as u32;
-        proto
-    }
-}
-
-#[cfg(feature = "protobuf")]
-impl TryConvertFrom<&EvaluationKeyProto> for EvaluationKey {
-    fn try_convert_from(value: &EvaluationKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
-        let mut gk = HashMap::new();
-        for gkp in &value.gk {
-            let key = GaloisKey::try_convert_from(gkp, par)?;
-            if key.ksk.ciphertext_level != value.ciphertext_level as usize {
-                return Err(Error::DefaultError(
-                    "Galois key has incorrect ciphertext level".to_string(),
-                ));
-            }
-            if key.ksk.ksk_level != value.evaluation_key_level as usize {
-                return Err(Error::DefaultError(
-                    "Galois key has incorrect evaluation key level".to_string(),
-                ));
-            }
-            gk.insert(key.element.exponent, key);
-        }
-
-        let ciphertext_ctx = par.context_at_level(value.ciphertext_level as usize)?;
-        let mut monomials = Vec::with_capacity(par.degree().ilog2() as usize);
-        for l in 0..par.degree().ilog2() {
-            let mut monomial = vec![0i64; par.degree()];
-            monomial[par.degree() - (1 << l)] = -1;
-            let mut monomial =
-                Poly::<PowerBasis>::try_convert_from(&monomial, ciphertext_ctx, true)?;
-            unsafe { monomial.allow_variable_time_computations() }
-            monomials.push(monomial.into_ntt_shoup());
-        }
-
-        Ok(EvaluationKey {
-            gk,
-            par: par.clone(),
-            rot_to_gk_exponent: EvaluationKey::construct_rot_to_gk_exponent(par),
-            monomials,
-            ciphertext_level: value.ciphertext_level as usize,
-            evaluation_key_level: value.evaluation_key_level as usize,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "protobuf")]
-    use super::EvaluationKey;
     use super::EvaluationKeyBuilder;
-    #[cfg(feature = "protobuf")]
-    use crate::bfv::traits::TryConvertFrom;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
-    #[cfg(feature = "protobuf")]
-    use crate::proto::bfv::EvaluationKey as LeveledEvaluationKeyProto;
-    #[cfg(feature = "protobuf")]
-    use fhe_traits::{DeserializeParametrized, Serialize};
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use itertools::izip;
     use rand::rng;
@@ -746,91 +735,98 @@ mod tests {
     }
 
     #[cfg(feature = "protobuf")]
-    #[test]
-    fn proto_conversion() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(1, 16),
-            BfvParameters::default_arc(6, 16),
-            BfvParameters::default_arc(5, 16),
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
+    mod protobuf {
+        use super::super::EvaluationKey;
+        use super::*;
+        use crate::bfv::traits::TryConvertFrom;
+        use crate::proto::bfv::EvaluationKey as LeveledEvaluationKeyProto;
+        use fhe_traits::{DeserializeParametrized, Serialize};
 
-            let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?.build(&mut rng)?;
+        #[test]
+        fn proto_conversion() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            for params in [
+                BfvParameters::default_arc(1, 16),
+                BfvParameters::default_arc(6, 16),
+                BfvParameters::default_arc(5, 16),
+            ] {
+                let sk = SecretKey::random(&params, &mut rng);
 
-            let proto = LeveledEvaluationKeyProto::from(&ek);
-            assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
+                let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?.build(&mut rng)?;
 
-            let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
-                .enable_row_rotation()?
-                .build(&mut rng)?;
+                let proto = LeveledEvaluationKeyProto::from(&ek);
+                assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
 
-            let proto = LeveledEvaluationKeyProto::from(&ek);
-            assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
-
-            let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
-                .enable_inner_sum()?
-                .build(&mut rng)?;
-            let proto = LeveledEvaluationKeyProto::from(&ek);
-            assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
-
-            let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
-                .enable_expansion(params.degree().ilog2() as usize)?
-                .build(&mut rng)?;
-            let proto = LeveledEvaluationKeyProto::from(&ek);
-            assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
-
-            let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
-                .enable_inner_sum()?
-                .enable_expansion(params.degree().ilog2() as usize)?
-                .build(&mut rng)?;
-            let proto = LeveledEvaluationKeyProto::from(&ek);
-            assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "protobuf")]
-    #[test]
-    fn serialize() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(1, 16),
-            BfvParameters::default_arc(6, 16),
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
-
-            let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?.build(&mut rng)?;
-            let bytes = ek.to_bytes();
-            assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
-
-            if params.moduli.len() > 1 {
                 let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                     .enable_row_rotation()?
                     .build(&mut rng)?;
-                let bytes = ek.to_bytes();
-                assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
+
+                let proto = LeveledEvaluationKeyProto::from(&ek);
+                assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
 
                 let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                     .enable_inner_sum()?
                     .build(&mut rng)?;
-                let bytes = ek.to_bytes();
-                assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
+                let proto = LeveledEvaluationKeyProto::from(&ek);
+                assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
 
                 let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                     .enable_expansion(params.degree().ilog2() as usize)?
                     .build(&mut rng)?;
-                let bytes = ek.to_bytes();
-                assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
+                let proto = LeveledEvaluationKeyProto::from(&ek);
+                assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
 
                 let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                     .enable_inner_sum()?
                     .enable_expansion(params.degree().ilog2() as usize)?
                     .build(&mut rng)?;
-                let bytes = ek.to_bytes();
-                assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
+                let proto = LeveledEvaluationKeyProto::from(&ek);
+                assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
             }
+            Ok(())
         }
-        Ok(())
+
+        #[test]
+        fn serialize() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            for params in [
+                BfvParameters::default_arc(1, 16),
+                BfvParameters::default_arc(6, 16),
+            ] {
+                let sk = SecretKey::random(&params, &mut rng);
+
+                let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?.build(&mut rng)?;
+                let bytes = ek.to_bytes();
+                assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
+
+                if params.moduli.len() > 1 {
+                    let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                        .enable_row_rotation()?
+                        .build(&mut rng)?;
+                    let bytes = ek.to_bytes();
+                    assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
+
+                    let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                        .enable_inner_sum()?
+                        .build(&mut rng)?;
+                    let bytes = ek.to_bytes();
+                    assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
+
+                    let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                        .enable_expansion(params.degree().ilog2() as usize)?
+                        .build(&mut rng)?;
+                    let bytes = ek.to_bytes();
+                    assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
+
+                    let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                        .enable_inner_sum()?
+                        .enable_expansion(params.degree().ilog2() as usize)?
+                        .build(&mut rng)?;
+                    let bytes = ek.to_bytes();
+                    assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
+                }
+            }
+            Ok(())
+        }
     }
 }

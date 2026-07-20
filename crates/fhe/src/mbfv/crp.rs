@@ -3,8 +3,6 @@ use std::sync::Arc;
 use crate::Result;
 use crate::bfv::BfvParameters;
 use fhe_math::rq::{Ntt, Poly};
-#[cfg(feature = "protobuf")]
-use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -64,14 +62,6 @@ impl CommonRandomPoly {
         Ok(Self { poly })
     }
 
-    /// Deserialize a CRP from bytes.
-    #[cfg(feature = "protobuf")]
-    pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
-        let ctx = par.context_at_level(0)?;
-        let poly = Poly::<Ntt>::from_bytes(bytes, ctx)?;
-        Ok(Self { poly })
-    }
-
     /// Get a reference to the underlying polynomial.
     #[must_use]
     pub fn poly(&self) -> &Poly<Ntt> {
@@ -86,8 +76,22 @@ impl CommonRandomPoly {
 }
 
 #[cfg(feature = "protobuf")]
-impl Serialize for CommonRandomPoly {
-    fn to_bytes(&self) -> Vec<u8> {
-        self.poly.to_bytes()
+mod protobuf {
+    use super::*;
+    use fhe_traits::{DeserializeWithContext, Serialize};
+
+    impl CommonRandomPoly {
+        /// Deserialize a CRP from bytes.
+        pub fn deserialize(bytes: &[u8], par: &std::sync::Arc<BfvParameters>) -> Result<Self> {
+            let ctx = par.context_at_level(0)?;
+            let poly = Poly::<Ntt>::from_bytes(bytes, ctx)?;
+            Ok(Self { poly })
+        }
+    }
+
+    impl Serialize for CommonRandomPoly {
+        fn to_bytes(&self) -> Vec<u8> {
+            self.poly.to_bytes()
+        }
     }
 }

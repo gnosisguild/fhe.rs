@@ -1,25 +1,17 @@
 //! Secret keys for the BFV encryption scheme
 
-#[cfg(feature = "protobuf")]
-use crate::SerializationError;
 use crate::bfv::{
     BfvParameters, Ciphertext, Plaintext, parameters::PlaintextModulus, plaintext::PlaintextValues,
 };
-#[cfg(feature = "protobuf")]
-use crate::proto::bfv::SecretKey as SecretKeyProto;
 use crate::{Error, Result};
 use fhe_math::{
     rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom},
     zq::Modulus,
 };
-#[cfg(feature = "protobuf")]
-use fhe_traits::{DeserializeParametrized, Serialize};
 use fhe_traits::{FheDecrypter, FheEncrypter, FheParametrized};
 use fhe_util::sample_vec_cbd_f32;
 use itertools::Itertools;
 use num_bigint::BigUint;
-#[cfg(feature = "protobuf")]
-use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
@@ -230,44 +222,50 @@ impl SecretKey {
 }
 
 #[cfg(feature = "protobuf")]
-impl From<&SecretKey> for SecretKeyProto {
-    fn from(sk: &SecretKey) -> Self {
-        Self {
-            coeffs: sk.coeffs.to_vec(),
+mod protobuf {
+    use super::*;
+    use crate::SerializationError;
+    use crate::proto::bfv::SecretKey as SecretKeyProto;
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use prost::Message;
+
+    impl From<&SecretKey> for SecretKeyProto {
+        fn from(sk: &SecretKey) -> Self {
+            Self {
+                coeffs: sk.coeffs.to_vec(),
+            }
         }
     }
-}
 
-#[cfg(feature = "protobuf")]
-impl Serialize for SecretKey {
-    fn to_bytes(&self) -> Vec<u8> {
-        SecretKeyProto::from(self).encode_to_vec()
+    impl Serialize for SecretKey {
+        fn to_bytes(&self) -> Vec<u8> {
+            SecretKeyProto::from(self).encode_to_vec()
+        }
     }
-}
 
-#[cfg(feature = "protobuf")]
-impl DeserializeParametrized for SecretKey {
-    type Error = Error;
+    impl DeserializeParametrized for SecretKey {
+        type Error = Error;
 
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: SecretKeyProto = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: "SecretKey decode".into(),
+        fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+            let proto: SecretKeyProto = Message::decode(bytes).map_err(|_| {
+                Error::SerializationError(SerializationError::ProtobufError {
+                    message: "SecretKey decode".into(),
+                })
+            })?;
+
+            if proto.coeffs.len() != par.degree() {
+                return Err(Error::SerializationError(
+                    SerializationError::InvalidFormat {
+                        reason: "SecretKey coeffs length and parameters degree mismatch".into(),
+                    },
+                ));
+            }
+
+            Ok(Self {
+                par: par.clone(),
+                coeffs: proto.coeffs.into_boxed_slice(),
             })
-        })?;
-
-        if proto.coeffs.len() != par.degree() {
-            return Err(Error::SerializationError(
-                SerializationError::InvalidFormat {
-                    reason: "SecretKey coeffs length and parameters degree mismatch".into(),
-                },
-            ));
         }
-
-        Ok(Self {
-            par: par.clone(),
-            coeffs: proto.coeffs.into_boxed_slice(),
-        })
     }
 }
 
@@ -378,13 +376,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
 mod tests {
     use super::SecretKey;
     use crate::bfv::{Encoding, Plaintext, parameters::BfvParameters};
-    #[cfg(feature = "protobuf")]
-    use crate::proto::bfv::SecretKey as SecretKeyProto;
-    #[cfg(feature = "protobuf")]
-    use fhe_traits::{DeserializeParametrized, Serialize};
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
-    #[cfg(feature = "protobuf")]
-    use prost::Message;
     use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::error::Error;
@@ -482,34 +474,40 @@ mod tests {
     }
 
     #[cfg(feature = "protobuf")]
-    #[test]
-    fn serialize_roundtrip() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(2, 16);
-        let sk = SecretKey::random(&params, &mut rng);
+    mod protobuf {
+        use super::*;
+        use crate::proto::bfv::SecretKey as SecretKeyProto;
+        use fhe_traits::{DeserializeParametrized, Serialize};
+        use prost::Message;
 
-        let bytes = sk.to_bytes();
-        let decoded = SecretKey::from_bytes(&bytes, &params)?;
+        #[test]
+        fn serialize_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            let params = BfvParameters::default_arc(2, 16);
+            let sk = SecretKey::random(&params, &mut rng);
 
-        assert_eq!(decoded, sk);
-        Ok(())
-    }
+            let bytes = sk.to_bytes();
+            let decoded = SecretKey::from_bytes(&bytes, &params)?;
 
-    #[cfg(feature = "protobuf")]
-    #[test]
-    fn deserialize_invalid_length() {
-        let params = BfvParameters::default_arc(1, 16);
-        let mut proto = SecretKeyProto {
-            coeffs: vec![0; params.degree()],
-        };
-        proto.coeffs.pop();
+            assert_eq!(decoded, sk);
+            Ok(())
+        }
 
-        let bytes = proto.encode_to_vec();
-        let err = SecretKey::from_bytes(&bytes, &params).unwrap_err();
+        #[test]
+        fn deserialize_invalid_length() {
+            let params = BfvParameters::default_arc(1, 16);
+            let mut proto = SecretKeyProto {
+                coeffs: vec![0; params.degree()],
+            };
+            proto.coeffs.pop();
 
-        assert!(matches!(
-            err,
-            crate::Error::SerializationError(crate::SerializationError::InvalidFormat { .. })
-        ));
+            let bytes = proto.encode_to_vec();
+            let err = SecretKey::from_bytes(&bytes, &params).unwrap_err();
+
+            assert!(matches!(
+                err,
+                crate::Error::SerializationError(crate::SerializationError::InvalidFormat { .. })
+            ));
+        }
     }
 }

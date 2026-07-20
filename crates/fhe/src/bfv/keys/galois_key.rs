@@ -1,21 +1,13 @@
 //! Galois keys for the BFV encryption scheme
 
 use super::key_switching_key::KeySwitchingKey;
-#[cfg(feature = "protobuf")]
-use crate::bfv::BfvParameters;
-#[cfg(feature = "protobuf")]
-use crate::bfv::traits::TryConvertFrom;
 use crate::bfv::{Ciphertext, SecretKey};
-#[cfg(feature = "protobuf")]
-use crate::proto::bfv::{GaloisKey as GaloisKeyProto, KeySwitchingKey as KeySwitchingKeyProto};
 use crate::{Error, Result};
 use fhe_math::rq::{
     Ntt, Poly, PowerBasis, SubstitutionExponent, switcher::Switcher,
     traits::TryConvertFrom as TryConvertFromPoly,
 };
 use rand::{CryptoRng, RngCore};
-#[cfg(feature = "protobuf")]
-use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Galois key for the BFV encryption scheme.
@@ -132,28 +124,35 @@ impl GaloisKey {
 }
 
 #[cfg(feature = "protobuf")]
-impl From<&GaloisKey> for GaloisKeyProto {
-    fn from(value: &GaloisKey) -> Self {
-        GaloisKeyProto {
-            exponent: value.element.exponent as u32,
-            ksk: Some(KeySwitchingKeyProto::from(&value.ksk)),
+mod protobuf {
+    use super::*;
+    use crate::bfv::BfvParameters;
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::proto::bfv::{GaloisKey as GaloisKeyProto, KeySwitchingKey as KeySwitchingKeyProto};
+    use std::sync::Arc;
+
+    impl From<&GaloisKey> for GaloisKeyProto {
+        fn from(value: &GaloisKey) -> Self {
+            GaloisKeyProto {
+                exponent: value.element.exponent as u32,
+                ksk: Some(KeySwitchingKeyProto::from(&value.ksk)),
+            }
         }
     }
-}
 
-#[cfg(feature = "protobuf")]
-impl TryConvertFrom<&GaloisKeyProto> for GaloisKey {
-    fn try_convert_from(value: &GaloisKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
-        if let Some(ksk) = &value.ksk {
-            let ksk = KeySwitchingKey::try_convert_from(ksk, par)?;
+    impl TryConvertFrom<&GaloisKeyProto> for GaloisKey {
+        fn try_convert_from(value: &GaloisKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
+            if let Some(ksk) = &value.ksk {
+                let ksk = KeySwitchingKey::try_convert_from(ksk, par)?;
 
-            let ctx = par.context_at_level(ksk.ciphertext_level)?;
-            let element = SubstitutionExponent::new(ctx, value.exponent as usize)
-                .map_err(Error::MathError)?;
+                let ctx = par.context_at_level(ksk.ciphertext_level)?;
+                let element = SubstitutionExponent::new(ctx, value.exponent as usize)
+                    .map_err(Error::MathError)?;
 
-            Ok(GaloisKey { element, ksk })
-        } else {
-            Err(Error::DefaultError("Invalid serialization".to_string()))
+                Ok(GaloisKey { element, ksk })
+            } else {
+                Err(Error::DefaultError("Invalid serialization".to_string()))
+            }
         }
     }
 }
@@ -161,11 +160,7 @@ impl TryConvertFrom<&GaloisKeyProto> for GaloisKey {
 #[cfg(test)]
 mod tests {
     use super::GaloisKey;
-    #[cfg(feature = "protobuf")]
-    use crate::bfv::traits::TryConvertFrom;
     use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
-    #[cfg(feature = "protobuf")]
-    use crate::proto::bfv::GaloisKey as GaloisKeyProto;
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use rand::rng;
     use std::error::Error;
@@ -245,18 +240,24 @@ mod tests {
     }
 
     #[cfg(feature = "protobuf")]
-    #[test]
-    fn proto_conversion() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(6, 16),
-            BfvParameters::default_arc(4, 16),
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
-            let gk = GaloisKey::new(&sk, 9, 0, 0, &mut rng)?;
-            let proto = GaloisKeyProto::from(&gk);
-            assert_eq!(gk, GaloisKey::try_convert_from(&proto, &params)?);
+    mod protobuf {
+        use super::*;
+        use crate::bfv::traits::TryConvertFrom;
+        use crate::proto::bfv::GaloisKey as GaloisKeyProto;
+
+        #[test]
+        fn proto_conversion() -> Result<(), Box<dyn Error>> {
+            let mut rng = rng();
+            for params in [
+                BfvParameters::default_arc(6, 16),
+                BfvParameters::default_arc(4, 16),
+            ] {
+                let sk = SecretKey::random(&params, &mut rng);
+                let gk = GaloisKey::new(&sk, 9, 0, 0, &mut rng)?;
+                let proto = GaloisKeyProto::from(&gk);
+                assert_eq!(gk, GaloisKey::try_convert_from(&proto, &params)?);
+            }
+            Ok(())
         }
-        Ok(())
     }
 }
