@@ -115,10 +115,8 @@ impl KeySwitchingKey {
             let modulus = ctx_ksk.moduli().first().unwrap();
             let log_modulus = modulus.next_power_of_two().ilog2() as usize;
             let log_base = log_modulus / 2;
-
             let c1 = Self::generate_c1(&ctx_ksk, seed, log_modulus.div_ceil(log_base));
             let c0 = Self::generate_c0_decomposition(sk, from, &c1, rng, log_base)?;
-
             Ok(Self {
                 params,
                 seed: Some(seed),
@@ -133,10 +131,78 @@ impl KeySwitchingKey {
         } else {
             let c1 = Self::generate_c1(&ctx_ksk, seed, ctx_ciphertext.moduli().len());
             let c0 = Self::generate_c0(sk, from, &c1, rng)?;
-
             Ok(Self {
                 params,
                 seed: Some(seed),
+                c0: c0.into_boxed_slice(),
+                c1: c1.into_boxed_slice(),
+                ciphertext_level,
+                ctx_ciphertext,
+                ksk_level,
+                ctx_ksk,
+                log_base: 0,
+            })
+        }
+    }
+
+    /// Generate a [`KeySwitchingKey`] with explicit `c1` polynomials.
+    ///
+    /// This is the on-chain URS path: the caller provides `c1` directly
+    /// (as `NttShoup` polynomials) rather than a seed. No seed is stored;
+    /// deserialization will embed the `c1` bytes inline.
+    pub fn new_with_c1<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        from: &Poly<PowerBasis>,
+        c1: Vec<Poly<NttShoup>>,
+        ciphertext_level: usize,
+        ksk_level: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let params = sk.params.clone();
+        let ctx_ksk = params.context_at_level(ksk_level)?.clone();
+        let ctx_ciphertext = params.context_at_level(ciphertext_level)?.clone();
+
+        if from.ctx() != &ctx_ksk {
+            return Err(Error::DefaultError(
+                "Incorrect context for polynomial from".to_string(),
+            ));
+        }
+
+        if ctx_ksk.moduli().len() == 1 {
+            let modulus = ctx_ksk.moduli().first().unwrap();
+            let log_modulus = modulus.next_power_of_two().ilog2() as usize;
+            let log_base = log_modulus / 2;
+            let expected_len = log_modulus.div_ceil(log_base);
+            if c1.len() != expected_len {
+                return Err(Error::DefaultError(format!(
+                    "Expected {expected_len} c1 polynomials for single-modulus context, got {}",
+                    c1.len()
+                )));
+            }
+            let c0 = Self::generate_c0_decomposition(sk, from, &c1, rng, log_base)?;
+            Ok(Self {
+                params,
+                seed: None,
+                c0: c0.into_boxed_slice(),
+                c1: c1.into_boxed_slice(),
+                ciphertext_level,
+                ctx_ciphertext,
+                ksk_level,
+                ctx_ksk,
+                log_base,
+            })
+        } else {
+            let expected_len = ctx_ciphertext.moduli().len();
+            if c1.len() != expected_len {
+                return Err(Error::DefaultError(format!(
+                    "Expected {expected_len} c1 polynomials, got {}",
+                    c1.len()
+                )));
+            }
+            let c0 = Self::generate_c0(sk, from, &c1, rng)?;
+            Ok(Self {
+                params,
+                seed: None,
                 c0: c0.into_boxed_slice(),
                 c1: c1.into_boxed_slice(),
                 ciphertext_level,

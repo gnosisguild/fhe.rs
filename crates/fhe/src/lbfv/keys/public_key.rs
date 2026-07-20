@@ -14,7 +14,10 @@ use crate::bfv::{
     BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
 };
 use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
-use fhe_math::rq::{Ntt, NttShoup, Poly, Representation, switcher::Switcher};
+use fhe_math::rq::{
+    Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher,
+    traits::TryConvertFrom as RqTryConvertFrom,
+};
 use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 
 /// Public key for the L-BFV encryption scheme.
@@ -77,6 +80,122 @@ impl LBFVPublicKey {
         Self::new_with_seed(sk, seed, rng)
     }
 
+    /// Build an [`LBFVPublicKey`] from explicit `b` and `a` polynomials.
+    ///
+    /// This is the on-chain URS constructor: the caller supplies the
+    /// polynomials directly rather than deriving them from a seed.
+    ///
+    /// # Arguments
+    /// * `b_polynomials` - The `l` b-polynomials `(b₀, …, bₗ₋₁)` where
+    ///   `bⱼ = -aⱼ·sk + eⱼ`.
+    /// * `a_polynomials` - The `l` shared CRS polynomials `(a₀, …, aₗ₋₁)`.
+    ///   These are the *concrete* shared-input polynomials whose equality must
+    ///   be verifiable across all contributions and between the public key and
+    ///   the relinearization key. Must be at the same context as the
+    ///   `b_polynomials`.
+    /// * `seed` - Optional CRS seed for backwards compatibility. When `None`,
+    ///   the key carries no seed and polynomial-level comparisons are the sole
+    ///   consistency check.
+    pub fn from_parts(
+        b_polynomials: Vec<Poly<Ntt>>,
+        a_polynomials: Vec<Poly<Ntt>>,
+        params: Arc<BfvParameters>,
+        seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
+    ) -> Result<Self> {
+        if b_polynomials.len() != a_polynomials.len() {
+            return Err(Error::DefaultError(
+                "b and a polynomial vectors have different lengths".to_string(),
+            ));
+        }
+        let l = b_polynomials.len();
+        if l != params.moduli().len() {
+            return Err(Error::DefaultError(format!(
+                "Expected {} polynomial pairs (one per modulus), got {l}",
+                params.moduli().len()
+            )));
+        }
+
+        let ctx0 = params.context_at_level(0)?;
+        let mut c: Vec<Ciphertext> = Vec::with_capacity(l);
+        for (b_poly, a_poly) in b_polynomials.into_iter().zip(a_polynomials.into_iter()) {
+            if b_poly.ctx() != ctx0 || a_poly.ctx() != ctx0 {
+                return Err(Error::DefaultError(
+                    "Public-key polynomials must be at level 0".to_string(),
+                ));
+            }
+            let mut ct = Ciphertext {
+                params: params.clone(),
+                seed: None,
+                c: vec![b_poly, a_poly],
+                level: 0,
+            };
+            ct.c.iter_mut()
+                .for_each(|p| p.disallow_variable_time_computations());
+            c.push(ct);
+        }
+
+        Ok(Self { params, c, l, seed })
+    }
+
+    /// Compute one party's public-key contribution using explicit CRS
+    /// polynomials `a_j` from the on-chain URS.
+    ///
+    /// Each party encrypts zero under their `sk_i` using the shared `a_j`:
+    /// `b_j = -a_j·sk_i + e_j`, producing `l` ciphertexts `(b_j, a_j)`.
+    /// The result is an [`LBFVPublicKey`] contribution meant to be fed into
+    /// [`aggregate`](Self::aggregate).
+    ///
+    /// This mirrors [`new_with_seed`](Self::new_with_seed) but uses explicit
+    /// polynomials instead of a seed, so `seed` is `None`.
+    pub fn contribute<R: RngCore + CryptoRng>(
+        sk_i: &SecretKey,
+        a_polynomials: &[Poly<Ntt>],
+        rng: &mut R,
+    ) -> Result<Self> {
+        let l = sk_i.params.moduli().len();
+        if a_polynomials.len() != l {
+            return Err(Error::DefaultError(format!(
+                "Expected {l} a_polynomials (one per modulus), got {}",
+                a_polynomials.len()
+            )));
+        }
+
+        let ctx = sk_i.params.context_at_level(0)?;
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk_i.coeffs.as_ref(), ctx, false)?.into_ntt(),
+        );
+
+        let mut c: Vec<Ciphertext> = Vec::with_capacity(l);
+        for a_j in a_polynomials {
+            if a_j.ctx() != ctx {
+                return Err(Error::DefaultError(
+                    "a polynomial has incorrect context".to_string(),
+                ));
+            }
+
+            let a_s = Zeroizing::new(a_j * s.as_ref());
+            let mut b = Poly::<Ntt>::small(ctx, sk_i.params.variance, rng)?;
+            b -= a_s.as_ref();
+
+            let mut ct = Ciphertext {
+                params: sk_i.params.clone(),
+                seed: None,
+                c: vec![b, a_j.clone()],
+                level: 0,
+            };
+            ct.c.iter_mut()
+                .for_each(|p| p.disallow_variable_time_computations());
+            c.push(ct);
+        }
+
+        Ok(Self {
+            params: sk_i.params.clone(),
+            c,
+            l,
+            seed: None,
+        })
+    }
+
     /// Aggregate per-node public-key contributions into the threshold public key
     /// (DKG aggregation, Eq. (3) of §5.1 of
     /// [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf)).
@@ -109,10 +228,6 @@ impl LBFVPublicKey {
     /// which would mean they do not share a common CRS `a` and cannot be summed.
     #[allow(clippy::indexing_slicing)] // each ct.c has exactly 2 components (BFV invariant)
     pub fn aggregate(contributions: &[LBFVPublicKey]) -> Result<Self> {
-        // Split the per-node contributions into the first one and the rest.
-        // `first` is the reference every other contribution is validated against
-        // (same CRS seed / l / params) and the starting point for the b-sum; `rest`
-        // are the remaining nodes' contributions that get added in.
         let (first, rest) = contributions.split_first().ok_or_else(|| {
             Error::DefaultError("Cannot aggregate zero public-key contributions".to_string())
         })?;
@@ -130,24 +245,28 @@ impl LBFVPublicKey {
             }
         }
 
-        // Each c[j] is an encryption of zero: (b_{i,j}, a_j) with
-        // b_{i,j} = -a_j·sk_i + e_{i,j}, so b_{i,j} + a_j·sk_i = e_{i,j} ≈ 0.
-        // For each of the l zero-encryptions we sum the b components (c[0])
-        // across contributions and keep the shared a (c[1]).
-        // first.c are the public key ciphertexts, one per modulus.
+        // Verify that the actual a_j (c[1]) polynomials match across all
+        // contributions.  This is the concrete CRS check that seed equality
+        // alone cannot guarantee (e.g. seedless deserialized keys).
+        for j in 0..first.c.len() {
+            let a_first = &first.c[j].c[1];
+            for pk in rest {
+                if a_first != &pk.c[j].c[1] {
+                    return Err(Error::DefaultError(
+                        "Public-key contributions have inconsistent CRS polynomials (a_j differ)"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
         let mut c: Vec<Ciphertext> = Vec::with_capacity(first.c.len());
         for (j, first_ct) in first.c.iter().enumerate() {
-            // Sum the b component (c[0]) over all contributions:
-            //   b_j = Σ_i b_{i,j} = -a_j·(Σ_i sk_i) + Σ_i e_{i,j} = -a_j·sk + e_j.
-            // The result is still an encryption of zero, now under the joint
-            // sk = Σ_i sk_i (since b_j + a_j·sk = Σ_i e_{i,j} ≈ 0).
             let mut b = first_ct.c[0].clone();
             for pk in rest {
                 b += &pk.c[j].c[0];
             }
 
-            // c[1] is the shared CRS a_j: identical across all contributions
-            // (same seed), so it is taken as-is rather than summed.
             let a = first_ct.c[1].clone();
             let mut ct = Ciphertext {
                 params: first.params.clone(),
@@ -155,7 +274,6 @@ impl LBFVPublicKey {
                 c: vec![b, a],
                 level: first_ct.level,
             };
-            // Public-key polynomials must not allow variable-time computation.
             ct.c.iter_mut()
                 .for_each(|p| p.disallow_variable_time_computations());
             c.push(ct);
@@ -425,6 +543,7 @@ impl DeserializeParametrized for LBFVPublicKey {
 mod tests {
     use super::LBFVPublicKey;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
+    use fhe_math::rq::{Ntt, Poly};
     use fhe_math::zq::Modulus;
     use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
     use rand::{Rng, SeedableRng, rng};
@@ -553,6 +672,110 @@ mod tests {
             let bytes = pk.to_bytes();
             assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_parts_roundtrip() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let pk_seeded = LBFVPublicKey::new(&sk, &mut rng);
+        let b_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[0].clone()).collect();
+        let a_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[1].clone()).collect();
+        let pk_from_parts =
+            LBFVPublicKey::from_parts(b_polys, a_polys, params.clone(), pk_seeded.seed)?;
+
+        // Roundtrip encrypt/decrypt under the from_parts key.
+        let pt = Plaintext::try_encode(&[42u64], Encoding::poly(), &params)?;
+        let ct = pk_from_parts.try_encrypt(&pt, &mut rng)?;
+        assert_eq!(sk.try_decrypt(&ct)?, pt);
+
+        // All l zero-encryptions decrypt to zero.
+        for ct in pk_from_parts.c.iter() {
+            assert_eq!(
+                sk.try_decrypt(ct)?,
+                Plaintext::zero(Encoding::poly(), &params)?
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_contribute_and_aggregate() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let n = 3;
+
+        // Generate shared CRS a polynomials from a seed (simulating on-chain URS).
+        let a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        let pk_ref =
+            LBFVPublicKey::new_with_seed(&SecretKey::random(&params, &mut rng), a_seed, &mut rng);
+        let a_polys: Vec<Poly<Ntt>> = pk_ref.c.iter().map(|ct| ct.c[1].clone()).collect();
+
+        // Each party contributes using the shared a_polys.
+        let sk_shares: Vec<SecretKey> = (0..n)
+            .map(|_| SecretKey::random(&params, &mut rng))
+            .collect();
+        let contributions: Vec<LBFVPublicKey> = sk_shares
+            .iter()
+            .map(|sk_i| LBFVPublicKey::contribute(sk_i, &a_polys, &mut rng).unwrap())
+            .collect();
+
+        let pk = LBFVPublicKey::aggregate(&contributions)?;
+
+        // Verify: seed is None (from explicit polynomials) and a_j match the reference.
+        assert!(pk.seed.is_none());
+        for (j, ct) in pk.c.iter().enumerate() {
+            assert_eq!(ct.c[1], a_polys[j]);
+        }
+
+        // Joint secret key for decryption.
+        let mut sum_coeffs = vec![0i64; params.degree()];
+        for sk in &sk_shares {
+            for (acc, c) in sum_coeffs.iter_mut().zip(sk.coeffs.iter()) {
+                *acc = acc.wrapping_add(*c);
+            }
+        }
+        let sk_joint = SecretKey::new(sum_coeffs, &params);
+
+        let pt = Plaintext::try_encode(&[7u64], Encoding::poly(), &params)?;
+        let ct = pk.try_encrypt(&pt, &mut rng)?;
+        assert_eq!(sk_joint.try_decrypt(&ct)?, pt);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_rejects_inconsistent_a_polys() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+
+        let a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        let pk_ref =
+            LBFVPublicKey::new_with_seed(&SecretKey::random(&params, &mut rng), a_seed, &mut rng);
+        let a_polys: Vec<Poly<Ntt>> = pk_ref.c.iter().map(|ct| ct.c[1].clone()).collect();
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let c1 = LBFVPublicKey::contribute(&sk, &a_polys, &mut rng)?;
+
+        // Create a contribution with a tampered a polynomial.
+        let mut bad_a = a_polys.to_vec();
+        let ctx0 = params.context_at_level(0)?;
+        bad_a[0] = Poly::<Ntt>::small(ctx0, params.variance, &mut rng)?; // random replacement
+        let mut bad_cts = c1.c.clone();
+        bad_cts[0].c[1] = bad_a[0].clone();
+        let c_bad = LBFVPublicKey::from_parts(
+            bad_cts.iter().map(|ct| ct.c[0].clone()).collect(),
+            bad_a,
+            params.clone(),
+            None,
+        )?;
+
+        assert!(LBFVPublicKey::aggregate(&[c1, c_bad]).is_err());
+
         Ok(())
     }
 

@@ -8,6 +8,7 @@
 //   d (ring dim)     = 16384    |q|            ≈ 2^244 (4 × 61-bit primes)
 //
 // Correctness: log₂(B_C after 1 mult) = 193.5 < log₂(Δ) = 234.0  ✓
+#![allow(missing_docs)]
 
 mod util;
 
@@ -99,9 +100,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pt_result = timeit!("Decrypt", sk.try_decrypt(&ct_product)?);
     let result = Vec::<u64>::try_decode(&pt_result, Encoding::poly())?;
 
-    println!("\nResult:   {}", result[0]);
+    let val = result.first().copied().unwrap_or_default();
+    println!("\nResult:   {val}");
     println!("Expected: {}", a * b);
-    assert_eq!(result[0], a * b, "BFV multiplication gave wrong answer!");
+    assert_eq!(val, a * b, "BFV multiplication gave wrong answer!");
     println!("Correct — first parameter set supports BFV multiplication.");
 
     Ok(())
