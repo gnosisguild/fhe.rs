@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
 use crate::{Error, Result};
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
-use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 //use serde::{Serialize, Deserialize};
@@ -92,21 +91,6 @@ impl PublicKeyShare {
         Ok((pk_0, pk_1, (*s).clone(), (*e).clone()))
     }
 
-    /// Deserialize a PublicKeyShare from bytes with the given parameters and
-    /// CRP
-    pub fn deserialize(
-        bytes: &[u8],
-        params: &Arc<BfvParameters>,
-        crp: CommonRandomPoly,
-    ) -> Result<Self> {
-        let ctx = params.context_at_level(0)?;
-        let p0_share = Poly::<Ntt>::from_bytes(bytes, ctx)?;
-        Ok(Self {
-            params: params.clone(),
-            crp,
-            p0_share,
-        })
-    }
     /// Convert this PublicKeyShare to an individual PublicKey without aggregation.
     ///
     /// This creates a PublicKey that can be used for individual encryption/decryption
@@ -177,19 +161,6 @@ impl Aggregate<PublicKeyShare> for PublicKey {
 //     }
 // }
 
-impl Serialize for PublicKeyShare {
-    fn to_bytes(&self) -> Vec<u8> {
-        //PublicKeyShareProto::from(self).encode_to_vec()
-        // PublicKeyShare {
-        //     params: self.params,
-        //     crp: self.crp,
-        //     p0_share: self.p0_share,
-        // }
-        // .encode_to_vec()
-        self.p0_share.to_bytes()
-    }
-}
-
 // impl DeserializeWithCRP for PublicKeyShare {
 //     type Error = Error;
 
@@ -201,6 +172,36 @@ impl Serialize for PublicKeyShare {
 //         })
 //     }
 // }
+
+#[cfg(feature = "protobuf")]
+mod protobuf {
+    use super::*;
+    use fhe_traits::{DeserializeWithContext, Serialize};
+
+    impl PublicKeyShare {
+        /// Deserialize a PublicKeyShare from bytes with the given parameters and
+        /// CRP
+        pub fn deserialize(
+            bytes: &[u8],
+            par: &std::sync::Arc<BfvParameters>,
+            crp: CommonRandomPoly,
+        ) -> Result<Self> {
+            let ctx = par.context_at_level(0)?;
+            let p0_share = Poly::<Ntt>::from_bytes(bytes, ctx)?;
+            Ok(Self {
+                params: par.clone(),
+                crp,
+                p0_share,
+            })
+        }
+    }
+
+    impl Serialize for PublicKeyShare {
+        fn to_bytes(&self) -> Vec<u8> {
+            self.p0_share.to_bytes()
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

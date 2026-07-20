@@ -4,6 +4,7 @@
 //! Mathematical utilities for the fhe.rs library.
 
 mod errors;
+#[cfg(feature = "protobuf")]
 mod proto;
 
 pub mod ntt;

@@ -98,9 +98,13 @@ where
 }
 
 /// A ciphertext which will encrypt a plaintext.
+///
+/// Serialization is not required by this trait; implementations that support
+/// (de)serialization do so via the [`Serialize`], [`DeserializeParametrized`],
+/// and [`DeserializeWithContext`] traits, which may be feature-gated.
 pub trait FheCiphertext
 where
-    Self: Sized + Serialize + FheParametrized + DeserializeParametrized,
+    Self: Sized + FheParametrized,
 {
 }
 

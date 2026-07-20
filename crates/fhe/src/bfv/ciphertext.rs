@@ -1,13 +1,9 @@
 //! Ciphertext type in the BFV encryption scheme.
 
-use crate::bfv::{parameters::BfvParameters, traits::TryConvertFrom};
-use crate::proto::bfv::Ciphertext as CiphertextProto;
-use crate::{Error, Result, SerializationError};
+use crate::bfv::parameters::BfvParameters;
+use crate::{Error, Result};
 use fhe_math::rq::{Ntt, Poly};
-use fhe_traits::{
-    DeserializeParametrized, DeserializeWithContext, FheCiphertext, FheParametrized, Serialize,
-};
-use prost::Message;
+use fhe_traits::{FheCiphertext, FheParametrized};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::ops::{Deref, DerefMut};
@@ -131,25 +127,6 @@ impl FheParametrized for Ciphertext {
     type Parameters = BfvParameters;
 }
 
-impl Serialize for Ciphertext {
-    fn to_bytes(&self) -> Vec<u8> {
-        CiphertextProto::from(self).encode_to_vec()
-    }
-}
-
-impl DeserializeParametrized for Ciphertext {
-    fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self> {
-        let ctp = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: "Ciphertext decode".into(),
-            })
-        })?;
-        Ciphertext::try_convert_from(&ctp, params)
-    }
-
-    type Error = Error;
-}
-
 impl Ciphertext {
     /// Generate the zero ciphertext.
     #[must_use]
@@ -163,136 +140,169 @@ impl Ciphertext {
     }
 }
 
-/// Conversions from and to protobuf.
-impl From<&Ciphertext> for CiphertextProto {
-    fn from(ct: &Ciphertext) -> Self {
-        let mut proto = CiphertextProto::default();
+#[cfg(feature = "protobuf")]
+mod protobuf {
+    use super::*;
+    use crate::SerializationError;
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::proto::bfv::Ciphertext as CiphertextProto;
+    use fhe_traits::{DeserializeParametrized, DeserializeWithContext, Serialize};
+    use prost::Message;
 
-        // Split the ciphertext polynomials into all-but-last and last
-        match ct.c.split_last() {
-            None => {
-                // Empty ciphertext - this should not happen as new() requires
-                // at least 2 polys but we handle it gracefully
-            }
-            Some((last, rest)) => {
-                // Serialize all but the last polynomial
-                for poly in rest {
-                    proto.c.push(poly.to_bytes());
-                }
+    impl From<&Ciphertext> for CiphertextProto {
+        fn from(ct: &Ciphertext) -> Self {
+            let mut proto = CiphertextProto::default();
 
-                // Handle the last polynomial based on whether we have a seed
-                if let Some(seed) = ct.seed {
-                    proto.seed = seed.to_vec();
-                } else {
-                    proto.c.push(last.to_bytes());
+            // Split the ciphertext polynomials into all-but-last and last
+            match ct.c.split_last() {
+                None => {
+                    // Empty ciphertext - this should not happen as new() requires
+                    // at least 2 polys but we handle it gracefully
+                }
+                Some((last, rest)) => {
+                    // Serialize all but the last polynomial
+                    for poly in rest {
+                        proto.c.push(poly.to_bytes());
+                    }
+
+                    // Handle the last polynomial based on whether we have a seed
+                    if let Some(seed) = ct.seed {
+                        proto.seed = seed.to_vec();
+                    } else {
+                        proto.c.push(last.to_bytes());
+                    }
                 }
             }
+
+            proto.level = ct.level as u32;
+            proto
         }
-
-        proto.level = ct.level as u32;
-        proto
     }
-}
 
-impl TryConvertFrom<&CiphertextProto> for Ciphertext {
-    fn try_convert_from(value: &CiphertextProto, params: &Arc<BfvParameters>) -> Result<Self> {
-        if value.c.is_empty() || (value.c.len() == 1 && value.seed.is_empty()) {
-            return Err(Error::InvalidCiphertext {
-                reason: "Not enough polynomials".into(),
-            });
-        }
+    impl TryConvertFrom<&CiphertextProto> for Ciphertext {
+        fn try_convert_from(value: &CiphertextProto, par: &Arc<BfvParameters>) -> Result<Self> {
+            if value.c.is_empty() || (value.c.len() == 1 && value.seed.is_empty()) {
+                return Err(Error::InvalidCiphertext {
+                    reason: "Not enough polynomials".into(),
+                });
+            }
 
-        if value.level as usize > params.max_level() {
-            return Err(Error::InvalidLevel {
+            if value.level as usize > par.max_level() {
+                return Err(Error::InvalidLevel {
+                    level: value.level as usize,
+                    min_level: 0,
+                    max_level: par.max_level(),
+                });
+            }
+
+            let ctx = par.context_at_level(value.level as usize)?;
+
+            let mut c = Vec::with_capacity(value.c.len() + 1);
+            for cip in &value.c {
+                c.push(Poly::<Ntt>::from_bytes(cip, ctx)?)
+            }
+
+            let mut seed = None;
+            if !value.seed.is_empty() {
+                let try_seed = <ChaCha8Rng as SeedableRng>::Seed::try_from(value.seed.clone())
+                    .map_err(|_| {
+                        fhe_math::Error::InvalidSeedSize(
+                            value.seed.len(),
+                            <ChaCha8Rng as SeedableRng>::Seed::default().len(),
+                        )
+                    })?;
+                seed = Some(try_seed);
+                let mut c1 = Poly::<Ntt>::random_from_seed(ctx, try_seed);
+                unsafe { c1.allow_variable_time_computations() }
+                c.push(c1)
+            }
+
+            Ok(Ciphertext {
+                params: par.clone(),
+                seed,
+                c,
                 level: value.level as usize,
-                min_level: 0,
-                max_level: params.max_level(),
-            });
+            })
+        }
+    }
+
+    impl Serialize for Ciphertext {
+        fn to_bytes(&self) -> Vec<u8> {
+            CiphertextProto::from(self).encode_to_vec()
+        }
+    }
+
+    impl DeserializeParametrized for Ciphertext {
+        fn from_bytes(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
+            let ctp = Message::decode(bytes).map_err(|_| {
+                Error::SerializationError(SerializationError::ProtobufError {
+                    message: "Ciphertext decode".into(),
+                })
+            })?;
+            Ciphertext::try_convert_from(&ctp, par)
         }
 
-        let ctx = params.context_at_level(value.level as usize)?;
-
-        let mut c = Vec::with_capacity(value.c.len() + 1);
-        for cip in &value.c {
-            c.push(Poly::<Ntt>::from_bytes(cip, ctx)?)
-        }
-
-        let mut seed = None;
-        if !value.seed.is_empty() {
-            let try_seed = <ChaCha8Rng as SeedableRng>::Seed::try_from(value.seed.clone())
-                .map_err(|_| {
-                    Error::MathError(fhe_math::Error::InvalidSeedSize(
-                        value.seed.len(),
-                        <ChaCha8Rng as SeedableRng>::Seed::default().len(),
-                    ))
-                })?;
-            seed = Some(try_seed);
-            let mut c1 = Poly::<Ntt>::random_from_seed(ctx, try_seed);
-            unsafe { c1.allow_variable_time_computations() }
-            c.push(c1)
-        }
-
-        Ok(Ciphertext {
-            params: params.clone(),
-            seed,
-            c,
-            level: value.level as usize,
-        })
+        type Error = Error;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::Error as FheError;
-    use crate::bfv::{
-        BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
-    };
-    use crate::proto::bfv::Ciphertext as CiphertextProto;
+    use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
     use fhe_traits::FheDecrypter;
-    use fhe_traits::{DeserializeParametrized, FheEncoder, FheEncrypter, Serialize};
+    use fhe_traits::{FheEncoder, FheEncrypter};
     use rand::rng;
     use std::error::Error as StdError;
 
-    #[test]
-    fn proto_conversion() -> Result<(), Box<dyn StdError>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(1, 16),
-            BfvParameters::default_arc(6, 16),
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
-            let v = fhe_math::zq::Modulus::new(params.plaintext())
-                .unwrap()
-                .random_vec(params.degree(), &mut rng);
-            let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
-            let ct = sk.try_encrypt(&pt, &mut rng)?;
-            let ct_proto = CiphertextProto::from(&ct);
-            assert_eq!(ct, Ciphertext::try_convert_from(&ct_proto, &params)?);
+    #[cfg(feature = "protobuf")]
+    mod protobuf {
+        use super::*;
+        use crate::bfv::traits::TryConvertFrom;
+        use crate::proto::bfv::Ciphertext as CiphertextProto;
+        use fhe_traits::{DeserializeParametrized, Serialize};
 
-            let ct = &ct * &ct;
-            let ct_proto = CiphertextProto::from(&ct);
-            assert_eq!(ct, Ciphertext::try_convert_from(&ct_proto, &params)?)
-        }
-        Ok(())
-    }
+        #[test]
+        fn proto_conversion() -> Result<(), Box<dyn StdError>> {
+            let mut rng = rng();
+            for params in [
+                BfvParameters::default_arc(1, 16),
+                BfvParameters::default_arc(6, 16),
+            ] {
+                let sk = SecretKey::random(&params, &mut rng);
+                let v = fhe_math::zq::Modulus::new(params.plaintext())
+                    .unwrap()
+                    .random_vec(params.degree(), &mut rng);
+                let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
+                let ct = sk.try_encrypt(&pt, &mut rng)?;
+                let ct_proto = CiphertextProto::from(&ct);
+                assert_eq!(ct, Ciphertext::try_convert_from(&ct_proto, &params)?);
 
-    #[test]
-    fn serialize() -> Result<(), Box<dyn StdError>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(1, 16),
-            BfvParameters::default_arc(6, 16),
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
-            let v = fhe_math::zq::Modulus::new(params.plaintext())
-                .unwrap()
-                .random_vec(params.degree(), &mut rng);
-            let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
-            let ct: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
-            let ct_bytes = ct.to_bytes();
-            assert_eq!(ct, Ciphertext::from_bytes(&ct_bytes, &params)?);
+                let ct = &ct * &ct;
+                let ct_proto = CiphertextProto::from(&ct);
+                assert_eq!(ct, Ciphertext::try_convert_from(&ct_proto, &params)?)
+            }
+            Ok(())
         }
-        Ok(())
+
+        #[test]
+        fn serialize() -> Result<(), Box<dyn StdError>> {
+            let mut rng = rng();
+            for params in [
+                BfvParameters::default_arc(1, 16),
+                BfvParameters::default_arc(6, 16),
+            ] {
+                let sk = SecretKey::random(&params, &mut rng);
+                let v = fhe_math::zq::Modulus::new(params.plaintext())
+                    .unwrap()
+                    .random_vec(params.degree(), &mut rng);
+                let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
+                let ct: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
+                let ct_bytes = ct.to_bytes();
+                assert_eq!(ct, Ciphertext::from_bytes(&ct_bytes, &params)?);
+            }
+            Ok(())
+        }
     }
 
     #[test]

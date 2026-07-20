@@ -12,6 +12,7 @@
 mod context;
 mod convert;
 mod ops;
+#[cfg(feature = "protobuf")]
 mod serialize;
 
 pub mod scaler;
