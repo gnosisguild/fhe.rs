@@ -16,7 +16,7 @@ use std::{error::Error, sync::Arc};
 
 use fhe::{
     bfv::{self, Encoding, Plaintext, SecretKey},
-    lbfv::{LBFVPublicKey, LBFVRelinKeyShare, LBFVRelinearizationKey},
+    lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::{Rng, SeedableRng};
@@ -70,13 +70,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     rng.fill(&mut d1_seed);
     let pk_lbfv = timeit!(
         "l-BFV public key",
-        LBFVPublicKey::new_with_seed(&sk, pk_seed, &mut rng)
+        LBFVPublicKey::new_with_seed(&sk, pk_seed, &mut rng)?
     );
 
-    let rlk: LBFVRelinearizationKey = timeit!("Relinearization key generation", {
-        let share = LBFVRelinKeyShare::contribution(&sk, d1_seed, pk_seed, 0, 0, &mut rng)?;
-        LBFVRelinearizationKey::aggregate(&[share], &pk_lbfv)?
-    });
+    let rlk = timeit!(
+        "Relinearization key generation",
+        LBFVRelinearizationKey::new(&sk, &pk_lbfv, Some(d1_seed), &mut rng)?
+    );
     println!("l = {}", rlk.l()?);
 
     // Both factors and their product must be < k = 1000.

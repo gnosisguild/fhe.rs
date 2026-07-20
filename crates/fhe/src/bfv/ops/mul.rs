@@ -301,7 +301,7 @@ mod tests {
         let ct2 = sk.try_encrypt(&pt, rng)?;
 
         let mut multiplicator = if use_lbfv {
-            let pk = LBFVPublicKey::new(&sk, rng);
+            let pk = LBFVPublicKey::new(&sk, rng)?;
             let rk = LBFVRelinearizationKey::new(&sk, &pk, None, rng)?;
             Multiplicator::default(&rk)?
         } else {
@@ -376,7 +376,7 @@ mod tests {
         assert_eq!(ct2.level, level);
 
         let mut multiplicator = if use_lbfv {
-            let pk = LBFVPublicKey::new(&sk, rng);
+            let pk = LBFVPublicKey::new(&sk, rng)?;
             let rk = LBFVRelinearizationKey::new_leveled(&sk, &pk, None, level, 0, rng)?;
             assert_eq!(rk.ciphertext_level(), level);
             assert_eq!(rk.key_level(), 0);
@@ -540,7 +540,7 @@ mod tests {
         for i in 0..num_multiplications {
             // Create relinearization key for current level
             let mut multiplicator = if use_lbfv {
-                let pk = LBFVPublicKey::new(&sk, rng);
+                let pk = LBFVPublicKey::new(&sk, rng)?;
                 let rk = LBFVRelinearizationKey::new_leveled(&sk, &pk, None, i, key_level, rng)?;
                 Multiplicator::default(&rk)?
             } else {

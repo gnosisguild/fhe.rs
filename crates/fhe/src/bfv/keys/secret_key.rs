@@ -18,12 +18,22 @@ use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Secret key for the BFV encryption scheme.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct SecretKey {
     /// The BFV parameters
     pub(crate) params: Arc<BfvParameters>,
     /// The secret key coefficients
     pub coeffs: Box<[i64]>,
+}
+
+// Redacted `Debug` so that `{:?}` never leaks the secret coefficients.
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretKey")
+            .field("params", &self.params)
+            .field("coeffs", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Zeroize for SecretKey {
@@ -368,6 +378,19 @@ mod tests {
             let sk_variance = params.variance as f32 / 20.0;
             assert!((*ci).abs() as f32 <= 2.0 * sk_variance)
         })
+    }
+
+    #[test]
+    fn debug_does_not_leak_coefficients() {
+        // Use a distinctive sentinel value that will not appear in the params.
+        let params = BfvParameters::default_arc(1, 16);
+        let sk = SecretKey::new(vec![987654321i64; params.degree()], &params);
+        let debug = format!("{sk:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(
+            !debug.contains("987654321"),
+            "debug output leaked coefficients: {debug}"
+        );
     }
 
     #[test]
