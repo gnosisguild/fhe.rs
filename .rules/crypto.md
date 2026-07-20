@@ -49,8 +49,10 @@ Treat changes to the following as security-sensitive. Review them with extra car
 
 - Distinguish the two threshold-decryption methods in <https://eprint.iacr.org/2024/1285>: independently smudging each opening share is not the same as opening the decryption result together with one pre-shared joint noise polynomial.
 - The implemented trBFV path uses pre-shared joint smudging noise. Each such noise value is one-time material and must not be reused across decryptions.
-- Let `B_C` bound evaluated-ciphertext decryption noise, `B_sm` bound each party's contribution, and `Delta = floor(Q/t_plain)`. The paper requires `B_C / B_sm` negligible for hiding and `B_C + n * B_sm < Delta/2` for correctness. Check the exact integer bound derived from `Delta`; `Q/(2*t_plain)` is slightly looser and is not a conservative substitute when `Q` is not divisible by `t_plain`.
-- Smudging coefficients are sampled uniformly from `[-B_sm, B_sm]`. Do not silently replace this with a Gaussian or confuse a coefficient bound with a variance.
+- Let `B_C` bound evaluated-ciphertext decryption noise, `B_sm` bound each party's contribution, and `Delta = floor(Q/t_plain)`. The paper requires `B_C / B_sm` negligible for hiding and the strict integer bound `2 * (B_C + n * B_sm) < Delta` for correctness. `Q/(2*t_plain)` and `Delta/2` are looser and not conservative substitutes when `Q` is not divisible by `t_plain`; always derive the bound from the exact integer `Delta`.
+- Samplers must be aligned with `B_enc`: for CBD samplers, use `2 * error1_variance`; for the large-variance uniform branch, use `floor(sqrt(3 * error1_variance))`. These bounds must match the actual configured error sampler, not a fixed constant.
+- Distributed RLK error must account for `|S| * B_e` (the number of accepted participants times the base error bound) or an explicitly documented aggregate bound. The smudging calculator accepts an `accepted_participant_count` parameter and folds this into the recursion.
+- Smudging coefficients are sampled uniformly from `[-B_sm, B_sm]`. Do not silently replace this with a Gaussian or confuse a coefficient bound with a variance (the `B_sm` and `B_e` symbols used here are coefficient bounds, not variances).
 - A decryption share API must state whether it accepts a party's local noise contribution, a Shamir share of the joint noise, or the reconstructed joint noise. These are not interchangeable.
 
 ### MBFV
@@ -71,7 +73,7 @@ Treat changes to the following as security-sensitive. Review them with extra car
 Treat these as review priorities, not as properties already enforced by the code:
 
 - `trbfv/config.rs` accepts even party counts, although the cited robustness theorem requires `n = 2t + 1`.
-- `trbfv/smudging.rs` currently computes the upper budget as `Q/(2*t_plain)` instead of deriving it from `Delta/2`.
+- `trbfv/smudging.rs` now computes the correctness bound from the strict `2 * (B_C + n * B_sm) < Delta` with `Delta = floor(Q/t_plain)`. The old `Q/(2*t_plain)` approximation has been replaced; when touching the calculator, keep the integer `Delta` branch.
 - The trBFV APIs do not enforce one-time consumption of pre-shared smudging noise; callers must currently prevent reuse.
 - MBFV key-switch and decryption shares sample ordinary BFV error despite the paper requiring noise flooding based on current ciphertext noise.
 - MBFV final relinearization aggregation does not currently verify that every round-2 share references the same round-1 aggregate or that each intended party contributed exactly once.

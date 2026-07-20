@@ -1,6 +1,10 @@
-/// Configuration and validation for threshold BFV.
+/// Configuration and validation for threshold BFV (Urban–Rambaud 2024).
 ///
-/// This module provides configuration validation logic for threshold BFV operations.
+/// This module enforces `n >= 3` and `T = (n - 1) / 2` for the honest-majority
+/// model.  **Even `n` is accepted** for compatibility, but Urban–Rambaud&nbsp;2024
+/// proves security only for odd party counts under the `n = 2t + 1` theorem.
+/// Even-`n` deployments fall outside the paper's coverage and have not been
+/// independently analyzed.
 use crate::Error;
 
 /// Validates threshold configuration parameters.
