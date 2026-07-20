@@ -30,6 +30,7 @@
     }
   },
   "permission": {
+    "external_directory": "deny",
     "bash": {
       "cargo test *": "allow",
       "cargo build *": "allow",
@@ -42,7 +43,62 @@
       "git status": "allow",
       "git diff *": "allow",
       "git log *": "allow",
+      "git checkout *": "allow",
+      "git branch *": "allow",
       "*": "ask"
+    }
+  },
+  "agent": {
+    "work": {
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "xhigh",
+      "variant": "xhigh"
+    },
+    "architect": {
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "xhigh",
+      "variant": "xhigh"
+    },
+    "fix": {
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "xhigh",
+      "variant": "xhigh"
+    },
+    "plan": {
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "max",
+      "variant": "max"
+    },
+    "implementer": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "variant": "high"
+    },
+    "guard-review": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "variant": "high"
+    },
+    "quality-review": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "variant": "high"
+    },
+    "crypto-reviewer": {
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "xhigh",
+      "variant": "xhigh"
+    },
+    "math-reviewer": {
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "xhigh",
+      "variant": "xhigh"
+    },
+    "reviewer": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "variant": "high"
+    },
+    "harness": {
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "high",
+      "variant": "high"
     }
   }
 }

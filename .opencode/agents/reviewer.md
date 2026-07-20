@@ -1,18 +1,19 @@
 ---
-description: Reviews changes for correctness, regressions, API quality, tests, and repository conventions. Read-only.
+description: Reviews changes for correctness, regressions, API quality, tests, and repository conventions. Read-only. Part of the review ecosystem — dispatched by the review skill alongside guard-review and quality-review for comprehensive coverage.
 mode: subagent
 permission:
-  edit: deny
+  read: allow
+  glob: allow
+  grep: allow
+  list: allow
   bash:
-    "cargo test *": allow
-    "cargo build *": allow
-    "cargo clippy *": allow
-    "cargo fmt *": allow
-    "cargo check *": allow
-    "git status": allow
-    "git diff *": allow
-    "git log *": allow
-    "*": ask
+    '*': allow
+    git commit *: deny
+    git push *: deny
+    git checkout *: deny
+    rm *: deny
+  edit: deny
+  task: deny
 ---
 
 You are a code reviewer for fhe.rs, a Ring-LWE-based fully homomorphic encryption library in Rust.
