@@ -374,7 +374,14 @@ impl LBFVRelinKeyShare {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        Self::contribution(sk_i, crs_d1.seed, crs_a.seed, ciphertext_level, key_level, rng)
+        Self::contribution(
+            sk_i,
+            crs_d1.seed,
+            crs_a.seed,
+            ciphertext_level,
+            key_level,
+            rng,
+        )
     }
 }
 

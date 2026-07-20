@@ -48,10 +48,10 @@ use zeroize::Zeroizing;
 
 use super::{LBFVContributionBinding, LBFVKeyBinding, LBFVParticipantSet};
 use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
+use crate::lbfv::crs::LBFVCommonReferenceString;
 use fhe_math::rq::{
     Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher, traits::TryConvertFrom,
 };
-use crate::lbfv::crs::LBFVCommonReferenceString;
 use fhe_traits::{FheEncrypter, FheParametrized};
 
 /// Public key for the L-BFV encryption scheme.

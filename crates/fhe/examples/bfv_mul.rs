@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let sk = SecretKey::random(&params, &mut rng);
 
-    let crs_a  = LBFVCommonReferenceString::new(&params, &mut rng)?;
+    let crs_a = LBFVCommonReferenceString::new(&params, &mut rng)?;
     let crs_d1 = LBFVCommonReferenceString::new(&params, &mut rng)?;
     let pk_lbfv = timeit!(
         "l-BFV public key",

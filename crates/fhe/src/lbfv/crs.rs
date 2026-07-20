@@ -3,9 +3,9 @@ use std::sync::Arc;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
+use crate::Result;
 use crate::bfv::BfvParameters;
 use crate::mbfv::CommonRandomPoly;
-use crate::Result;
 
 /// The common reference string for the l-BFV protocol.
 ///
