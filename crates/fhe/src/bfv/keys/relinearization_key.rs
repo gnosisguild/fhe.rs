@@ -87,8 +87,8 @@ impl RelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx_relin_key = sk.par.context_at_level(key_level)?;
-        let ctx_ciphertext = sk.par.context_at_level(ciphertext_level)?;
+        let ctx_relin_key = sk.params.context_at_level(key_level)?;
+        let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
 
         if ctx_relin_key.moduli().len() == 1 {
             return Err(crate::EvaluationKeyError::KeySwitchingNotSupported.into());
@@ -112,7 +112,7 @@ impl RelinearizationKey {
     /// `c₀' + c₁'·s ≈ m + e'` by key-switching `c₂` under `s² → s` and adding
     /// the result to `(c₀, c₁)`.
     pub fn relinearizes(&self, ct: &mut Ciphertext) -> Result<()> {
-        ct.validate_for(&self.ksk.par)?;
+        ct.validate_for(&self.ksk.params)?;
         if ct.len() != 3 {
             Err(crate::CiphertextError::InvalidPolynomialCount {
                 operation: crate::CiphertextOperation::Relinearization,
@@ -149,7 +149,7 @@ impl RelinearizationKey {
     /// Get the parameters of the relinearization key
     #[must_use]
     pub fn parameters(&self) -> Arc<BfvParameters> {
-        self.ksk.par.clone()
+        self.ksk.params.clone()
     }
 
     /// Get the ciphertext level of the relinearization key
@@ -180,10 +180,10 @@ impl From<&RelinearizationKey> for RelinearizationKeyProto {
 }
 
 impl TryConvertFrom<&RelinearizationKeyProto> for RelinearizationKey {
-    fn try_convert_from(value: &RelinearizationKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_convert_from(value: &RelinearizationKeyProto, params: &Arc<BfvParameters>) -> Result<Self> {
         if let Some(ksk) = &value.ksk {
             Ok(RelinearizationKey {
-                ksk: KeySwitchingKey::try_convert_from(ksk, par)?,
+                ksk: KeySwitchingKey::try_convert_from(ksk, params)?,
             })
         } else {
             Err(Error::SerializationError(
@@ -208,13 +208,13 @@ impl FheParametrized for RelinearizationKey {
 impl DeserializeParametrized for RelinearizationKey {
     type Error = Error;
 
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+    fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
         let rk = Message::decode(bytes).map_err(|_| {
             Error::SerializationError(SerializationError::Decode {
                 object: crate::SerializedObject::RelinearizationKey,
             })
         })?;
-        RelinearizationKey::try_convert_from(&rk, par)
+        RelinearizationKey::try_convert_from(&rk, params)
     }
 }
 

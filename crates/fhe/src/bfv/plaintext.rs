@@ -24,7 +24,7 @@ enum PlaintextCoefficients {
 #[derive(Debug, Clone, Eq)]
 pub struct Plaintext {
     /// The parameters of the underlying BFV encryption scheme.
-    pub(crate) par: Arc<BfvParameters>,
+    pub(crate) params: Arc<BfvParameters>,
     /// The encoding of the plaintext, if known
     pub(crate) encoding: Option<Encoding>,
     /// Canonical plaintext representation.
@@ -53,26 +53,26 @@ impl FhePlaintext for Plaintext {
 
 impl Plaintext {
     #[inline]
-    pub(crate) fn validate_for(&self, par: &Arc<BfvParameters>) -> Result<()> {
-        if !Arc::ptr_eq(&self.par, par) {
+    pub(crate) fn validate_for(&self, params: &Arc<BfvParameters>) -> Result<()> {
+        if !Arc::ptr_eq(&self.params, params) {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Plaintext,
                 right: crate::ParameterSource::Parameters,
             });
         }
         let level = self.level();
-        let expected_ctx = par.context_at_level(level)?;
+        let expected_ctx = params.context_at_level(level)?;
         self.validate_context(level, expected_ctx)
     }
 
     #[inline]
     pub(crate) fn validate_for_context(
         &self,
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
         expected_level: usize,
         expected_ctx: &Arc<Context>,
     ) -> Result<()> {
-        if !Arc::ptr_eq(&self.par, par) {
+        if !Arc::ptr_eq(&self.params, params) {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Plaintext,
                 right: crate::ParameterSource::Parameters,
@@ -102,7 +102,7 @@ impl Plaintext {
 
     fn coefficients(&self) -> PlaintextCoefficients {
         let poly = Zeroizing::new(self.poly_ntt.clone().into_power_basis());
-        match self.par.plaintext.small() {
+        match self.params.plaintext.small() {
             Some(modulus)
                 if self
                     .poly_ntt
@@ -112,13 +112,13 @@ impl Plaintext {
                     .is_some_and(|ciphertext_modulus| **modulus < *ciphertext_modulus) =>
             {
                 let coefficients = Vec::<u64>::try_from(poly.as_ref()).unwrap();
-                let mut values = coefficients[..self.par.degree()].to_vec();
+                let mut values = coefficients[..self.params.degree()].to_vec();
                 modulus.reduce_vec(&mut values);
                 PlaintextCoefficients::Small(values)
             }
             Some(_) => {
                 let mut values = Vec::<BigUint>::from(poly.as_ref());
-                self.par.plaintext.reduce_vec(&mut values);
+                self.params.plaintext.reduce_vec(&mut values);
                 PlaintextCoefficients::Small(
                     values
                         .into_iter()
@@ -128,7 +128,7 @@ impl Plaintext {
             }
             None => {
                 let mut values = Vec::<BigUint>::from(poly.as_ref());
-                self.par.plaintext.reduce_vec(&mut values);
+                self.params.plaintext.reduce_vec(&mut values);
                 PlaintextCoefficients::Large(values)
             }
         }
@@ -154,13 +154,13 @@ impl Plaintext {
 
     fn decode_simd_u64(&self, mut values: Vec<u64>) -> Result<Vec<u64>> {
         let op = self
-            .par
+            .params
             .ntt_operator
             .as_ref()
             .ok_or(crate::EncodingError::SimdUnavailable)?;
         op.forward(&mut values);
         let reordered = self
-            .par
+            .params
             .matrix_reps_index_map
             .iter()
             .map(|&index| values[index])
@@ -170,12 +170,12 @@ impl Plaintext {
     }
 
     pub(crate) fn to_poly(&self) -> Poly<Ntt> {
-        let ctx_lvl = self.par.context_level_at(self.level()).unwrap();
+        let ctx_lvl = self.params.context_level_at(self.level()).unwrap();
         let ctx = &ctx_lvl.poly_context;
         let m = match self.coefficients() {
             PlaintextCoefficients::Small(values) => {
                 let mut values = Zeroizing::new(values);
-                let Some(modulus) = self.par.plaintext.small() else {
+                let Some(modulus) = self.params.plaintext.small() else {
                     unreachable!("small plaintext values require the u64 modulus fast path");
                 };
                 let q_mod_t = ctx_lvl.cipher_plain_context.q_mod_t.to_u64().unwrap();
@@ -183,7 +183,7 @@ impl Plaintext {
                 Poly::<PowerBasis>::try_convert_from(values.as_slice(), ctx, false).unwrap()
             }
             PlaintextCoefficients::Large(mut values) => {
-                self.par
+                self.params
                     .plaintext
                     .scalar_mul_vec(&mut values, &ctx_lvl.cipher_plain_context.q_mod_t);
                 Poly::<PowerBasis>::try_convert_from(values.as_slice(), ctx, false).unwrap()
@@ -196,11 +196,11 @@ impl Plaintext {
     }
 
     /// Generate a zero plaintext.
-    pub fn zero(encoding: Encoding, par: &Arc<BfvParameters>) -> Result<Self> {
-        let ctx = par.context_at_level(encoding.level)?;
+    pub fn zero(encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+        let ctx = params.context_at_level(encoding.level)?;
         let poly_ntt = Poly::<Ntt>::zero(ctx);
         Ok(Self {
-            par: par.clone(),
+            params: params.clone(),
             encoding: Some(encoding),
             poly_ntt,
         })
@@ -209,7 +209,7 @@ impl Plaintext {
     /// Returns the level of this plaintext.
     #[must_use]
     pub fn level(&self) -> usize {
-        self.par.moduli().len() - self.poly_ntt.ctx().moduli().len()
+        self.params.moduli().len() - self.poly_ntt.ctx().moduli().len()
     }
 }
 
@@ -218,17 +218,17 @@ unsafe impl Send for Plaintext {}
 impl PartialEq for Plaintext {
     fn eq(&self, other: &Self) -> bool {
         let Self {
-            par,
+            params,
             encoding,
             poly_ntt,
         } = self;
         let Self {
-            par: other_par,
+            params: other_par,
             encoding: other_encoding,
             poly_ntt: other_poly_ntt,
         } = other;
 
-        let mut eq = par == other_par;
+        let mut eq = params == other_par;
         eq &= poly_ntt == other_poly_ntt;
         if encoding.is_some() && other_encoding.is_some() {
             eq &= encoding == other_encoding;
@@ -246,7 +246,7 @@ impl TryConvertFrom<&Plaintext> for Poly<PowerBasis> {
     ) -> fhe_math::Result<Self> {
         if ctx
             != pt
-                .par
+                .params
                 .context_at_level(pt.level())
                 .map_err(|_| fhe_math::Error::ContextNotReachable)?
         {
@@ -272,8 +272,8 @@ where
     Plaintext: FheEncoder<&'a [T], Error = Error>,
 {
     type Error = Error;
-    fn try_encode(value: &'a [T; N], encoding: Encoding, par: &Arc<BfvParameters>) -> Result<Self> {
-        Plaintext::try_encode(value.as_ref(), encoding, par)
+    fn try_encode(value: &'a [T; N], encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+        Plaintext::try_encode(value.as_ref(), encoding, params)
     }
 }
 
@@ -282,8 +282,8 @@ where
     Plaintext: FheEncoder<&'a [T], Error = Error>,
 {
     type Error = Error;
-    fn try_encode(value: &'a Vec<T>, encoding: Encoding, par: &Arc<BfvParameters>) -> Result<Self> {
-        Plaintext::try_encode(value.as_ref(), encoding, par)
+    fn try_encode(value: &'a Vec<T>, encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+        Plaintext::try_encode(value.as_ref(), encoding, params)
     }
 }
 
@@ -292,32 +292,32 @@ impl<'a> FheEncoder<&'a [BigUint]> for Plaintext {
     fn try_encode(
         value: &'a [BigUint],
         encoding: Encoding,
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
     ) -> Result<Self> {
-        if value.len() > par.degree() {
+        if value.len() > params.degree() {
             return Err(crate::PlaintextError::TooManyValues {
                 actual: value.len(),
-                maximum: par.degree(),
+                maximum: params.degree(),
             }
             .into());
         }
 
-        let v = PlaintextVec::try_encode(value, encoding, par)?;
+        let v = PlaintextVec::try_encode(value, encoding, params)?;
         Ok(v[0].clone())
     }
 }
 
 impl<'a> FheEncoder<&'a [u64]> for Plaintext {
     type Error = Error;
-    fn try_encode(value: &'a [u64], encoding: Encoding, par: &Arc<BfvParameters>) -> Result<Self> {
-        if value.len() > par.degree() {
+    fn try_encode(value: &'a [u64], encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+        if value.len() > params.degree() {
             return Err(crate::PlaintextError::TooManyValues {
                 actual: value.len(),
-                maximum: par.degree(),
+                maximum: params.degree(),
             }
             .into());
         }
-        let v = PlaintextVec::try_encode(value, encoding, par)?;
+        let v = PlaintextVec::try_encode(value, encoding, params)?;
         Ok(v[0].clone())
     }
 }
@@ -328,31 +328,31 @@ impl<'a> FheEncoderVariableTime<&'a [u64]> for Plaintext {
     fn try_encode_vt(
         value: &'a [u64],
         encoding: Encoding,
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
         variable_time: VariableTime,
     ) -> Result<Self> {
-        if value.len() > par.degree() {
+        if value.len() > params.degree() {
             return Err(crate::PlaintextError::TooManyValues {
                 actual: value.len(),
-                maximum: par.degree(),
+                maximum: params.degree(),
             }
             .into());
         }
-        let v = PlaintextVec::try_encode_vt(value, encoding, par, variable_time)?;
+        let v = PlaintextVec::try_encode_vt(value, encoding, params, variable_time)?;
         Ok(v[0].clone())
     }
 }
 
 impl<'a> FheEncoder<&'a [i64]> for Plaintext {
     type Error = Error;
-    fn try_encode(value: &'a [i64], encoding: Encoding, par: &Arc<BfvParameters>) -> Result<Self> {
-        match par.plaintext.small() {
+    fn try_encode(value: &'a [i64], encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+        match params.plaintext.small() {
             Some(m) => {
                 let w = Zeroizing::new(m.reduce_vec_i64(value));
-                Plaintext::try_encode(w.as_ref() as &[u64], encoding, par)
+                Plaintext::try_encode(w.as_ref() as &[u64], encoding, params)
             }
             None => {
-                let modulus_int = BigInt::from_biguint(Sign::Plus, par.plaintext_big().clone());
+                let modulus_int = BigInt::from_biguint(Sign::Plus, params.plaintext_big().clone());
                 let v: Vec<BigUint> = value
                     .iter()
                     .map(|&x| {
@@ -364,7 +364,7 @@ impl<'a> FheEncoder<&'a [i64]> for Plaintext {
                         x_int.to_biguint().unwrap()
                     })
                     .collect();
-                Plaintext::try_encode(v.as_slice(), encoding, par)
+                Plaintext::try_encode(v.as_slice(), encoding, params)
             }
         }
     }
@@ -435,12 +435,12 @@ impl FheDecoder<Plaintext> for Vec<i64> {
     where
         E: Into<Option<Encoding>>,
     {
-        if let Some(modulus) = pt.par.plaintext.small() {
+        if let Some(modulus) = pt.params.plaintext.small() {
             let values = Vec::<u64>::try_decode(pt, encoding)?;
             Ok(modulus.center_vec(&values))
         } else {
             let values = Vec::<BigUint>::try_decode(pt, encoding)?;
-            let modulus_big = pt.par.plaintext_big();
+            let modulus_big = pt.params.plaintext_big();
             let modulus_int = BigInt::from_biguint(Sign::Plus, modulus_big.clone());
             let half_modulus = modulus_big / 2u32;
 

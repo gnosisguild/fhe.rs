@@ -21,7 +21,7 @@ use super::SecretKey;
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PublicKey {
     /// The BFV parameters
-    pub par: Arc<BfvParameters>,
+    pub params: Arc<BfvParameters>,
     /// The public key ciphertext
     pub c: Ciphertext,
 }
@@ -29,14 +29,14 @@ pub struct PublicKey {
 impl PublicKey {
     /// Generate a new [`PublicKey`] from a [`SecretKey`].
     pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Self {
-        let zero = Plaintext::zero(Encoding::poly(), &sk.par).unwrap();
+        let zero = Plaintext::zero(Encoding::poly(), &sk.params).unwrap();
         let mut c: Ciphertext = sk.try_encrypt(&zero, rng).unwrap();
         // The polynomials of a public key should not allow for variable time
         // computation.
         c.iter_mut()
             .for_each(|p| p.disallow_variable_time_computations());
         Self {
-            par: sk.par.clone(),
+            params: sk.params.clone(),
             c,
         }
     }
@@ -53,7 +53,7 @@ impl PublicKey {
         sk: &SecretKey,
         rng: &mut R,
     ) -> Result<(Self, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
-        let zero = Plaintext::zero(Encoding::poly(), &sk.par)?;
+        let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
         let zero_poly = Zeroizing::new(zero.to_poly());
 
         let (mut c, a, e) = sk.encrypt_poly_extended(zero_poly.as_ref(), rng)?;
@@ -65,7 +65,7 @@ impl PublicKey {
             .for_each(|p| p.disallow_variable_time_computations());
 
         let pk = Self {
-            par: sk.par.clone(),
+            params: sk.params.clone(),
             c,
         };
 
@@ -87,7 +87,7 @@ impl PublicKey {
             ct.switch_down()?;
         }
 
-        let ctx = self.par.context_at_level(ct.level)?.clone();
+        let ctx = self.params.context_at_level(ct.level)?.clone();
 
         let u_coefficients = Zeroizing::new(
             sample_vec_cbd_f32(ctx.degree, SecretKey::SK_VARIANCE, rng).map_err(|e| {
@@ -101,11 +101,11 @@ impl PublicKey {
                 .into_ntt(),
         );
 
-        let e2 = Zeroizing::new(Poly::<Ntt>::small(&ctx, self.par.variance, rng)?);
+        let e2 = Zeroizing::new(Poly::<Ntt>::small(&ctx, self.params.variance, rng)?);
         let e1 = Zeroizing::new(Poly::<Ntt>::error_1(
             &ctx,
             Representation::Ntt,
-            &self.par.error1_variance,
+            &self.params.error1_variance,
             rng,
         )?);
 
@@ -126,7 +126,7 @@ impl PublicKey {
         c1.allow_variable_time_computations(variable_time);
 
         let ciphertext = Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: None,
             c: vec![c0, c1],
             level: ct.level,
@@ -153,14 +153,14 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        pt.validate_for(&self.par)?;
-        self.c.validate_for(&self.par)?;
+        pt.validate_for(&self.params)?;
+        self.c.validate_for(&self.params)?;
         let plaintext_level = pt.level();
         if plaintext_level < self.c.level {
             return Err(Error::InvalidLevel {
                 level: plaintext_level,
                 min_level: self.c.level,
-                max_level: self.par.max_level(),
+                max_level: self.params.max_level(),
             });
         }
 
@@ -175,7 +175,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
             Cow::Borrowed(&self.c)
         };
 
-        let ctx = self.par.context_at_level(ct.level)?.clone();
+        let ctx = self.params.context_at_level(ct.level)?.clone();
 
         let u_coefficients = Zeroizing::new(
             sample_vec_cbd_f32(ctx.degree, SecretKey::SK_VARIANCE, rng).map_err(|e| {
@@ -189,11 +189,11 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
                 .into_ntt(),
         );
 
-        let e2 = Zeroizing::new(Poly::<Ntt>::small(&ctx, self.par.variance, rng)?);
+        let e2 = Zeroizing::new(Poly::<Ntt>::small(&ctx, self.params.variance, rng)?);
         let e1 = Zeroizing::new(Poly::<Ntt>::error_1(
             &ctx,
             Representation::Ntt,
-            &self.par.error1_variance,
+            &self.params.error1_variance,
             rng,
         )?);
 
@@ -210,7 +210,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
         c1.allow_variable_time_computations(variable_time);
 
         Ok(Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: None,
             c: vec![c0, c1],
             level: ct.level,
@@ -235,14 +235,14 @@ impl Serialize for PublicKey {
 impl DeserializeParametrized for PublicKey {
     type Error = Error;
 
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+    fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
         let proto: PublicKeyProto = Message::decode(bytes).map_err(|_| {
             Error::SerializationError(SerializationError::Decode {
                 object: crate::SerializedObject::PublicKey,
             })
         })?;
         if let Some(proto_c) = &proto.c {
-            let mut c = Ciphertext::try_convert_from(proto_c, par)?;
+            let mut c = Ciphertext::try_convert_from(proto_c, params)?;
             if c.level != 0 {
                 Err(Error::SerializationError(
                     SerializationError::InvalidPublicKeyLevel {
@@ -254,7 +254,7 @@ impl DeserializeParametrized for PublicKey {
                 c.iter_mut()
                     .for_each(|p| p.disallow_variable_time_computations());
                 Ok(Self {
-                    par: par.clone(),
+                    params: params.clone(),
                     c,
                 })
             }
@@ -287,7 +287,7 @@ mod tests {
         let params = BfvParameters::default_arc(1, 16);
         let sk = SecretKey::random(&params, &mut rng);
         let pk = PublicKey::new(&sk, &mut rng);
-        assert_eq!(pk.par, params);
+        assert_eq!(pk.params, params);
         assert_eq!(
             sk.try_decrypt(&pk.c)?,
             Plaintext::zero(Encoding::poly(), &params)?
@@ -540,8 +540,8 @@ mod tests {
 
         let (pk, a, s, e) = PublicKey::new_extended(&sk, &mut rng)?;
 
-        assert_eq!(pk.par, params);
-        assert_eq!(pk.c.par, params);
+        assert_eq!(pk.params, params);
+        assert_eq!(pk.c.params, params);
         assert_eq!(pk.c.len(), 2);
         assert_eq!(pk.c[1].coefficients(), a.coefficients());
         assert_eq!(pk.c[1].ctx(), a.ctx());
@@ -588,7 +588,7 @@ mod tests {
         let pk1 = PublicKey::new(&sk, &mut rng);
         let (pk2, _, _, _) = PublicKey::new_extended(&sk, &mut rng)?;
 
-        assert_eq!(pk1.par, pk2.par);
+        assert_eq!(pk1.params, pk2.params);
         assert_eq!(pk1.c.len(), 2);
         assert_eq!(pk2.c.len(), 2);
 

@@ -283,7 +283,7 @@ impl ShareManager {
         sk_i: Poly<Ntt>,
         es_i: Poly<PowerBasis>,
     ) -> Result<Poly<PowerBasis>, Error> {
-        if ciphertext.par != self.params {
+        if ciphertext.params != self.params {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Ciphertext,
                 right: crate::ParameterSource::Parameters,
@@ -333,7 +333,7 @@ impl ShareManager {
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
-        if ciphertext.par != self.params {
+        if ciphertext.params != self.params {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Ciphertext,
                 right: crate::ParameterSource::Parameters,
@@ -456,8 +456,8 @@ impl ShareManager {
             .collect();
         let scalers = scalers?;
 
-        let par = ciphertext.par.clone();
-        let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
+        let params = ciphertext.params.clone();
+        let ptxt_u64 = params.plaintext.as_u64().ok_or_else(|| {
             Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
                 reason: "threshold BFV decrypt_from_shares requires a u64 plaintext modulus"
                     .to_string(),
@@ -476,8 +476,8 @@ impl ShareManager {
                 .map(|vi| vi + ptxt_u64)
                 .collect_vec(),
         );
-        let mut w = v[..par.degree()].to_vec();
-        let q = Modulus::new(par.moduli()[0]).map_err(Error::MathError)?;
+        let mut w = v[..params.degree()].to_vec();
+        let q = Modulus::new(params.moduli()[0]).map_err(Error::MathError)?;
         q.reduce_vec(&mut w);
         Modulus::new(ptxt_u64)
             .map_err(Error::MathError)?
@@ -487,7 +487,7 @@ impl ShareManager {
             Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt();
 
         let pt = Plaintext {
-            par: par.clone(),
+            params: params.clone(),
             encoding: None,
             poly_ntt: poly,
         };
