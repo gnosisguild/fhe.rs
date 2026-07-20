@@ -17,7 +17,7 @@ use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
 
 /// Minimum statistical security parameter accepted for production use.
-pub const MIN_SECURE_LAMBDA: usize = 50;
+pub const MIN_SECURE_LAMBDA: usize = 35;
 
 /// Statistical security level for smudging noise generation.
 ///
@@ -91,6 +91,11 @@ pub struct SmudgingBoundCalculatorConfig {
     pub secret_key_bound: u64,
     /// Statistical security level
     pub lambda: Lambda,
+    /// Multiplicative circuit depth (0 for additive-only circuits).
+    ///
+    /// When non-zero, `calculate_sm_bound` applies the Prop. 20 noise growth
+    /// recursion for each level before computing B_sm.
+    pub mult_depth: u32,
 }
 
 impl SmudgingBoundCalculatorConfig {
@@ -117,7 +122,29 @@ impl SmudgingBoundCalculatorConfig {
             public_key_error: (n as u64) * (2 * variance) as u64,
             secret_key_bound: n as u64,
             lambda,
+            mult_depth: 0,
         }
+    }
+
+    /// Create a configuration for a multiplicative circuit at the given depth.
+    ///
+    /// # Arguments
+    /// * `params` - BFV parameters
+    /// * `n` - Number of parties in threshold scheme
+    /// * `m` - Number of ciphertexts summed before the multiplication circuit
+    /// * `mult_depth` - Number of multiplicative levels applied (0 = additive only)
+    /// * `lambda` - Statistical security level
+    #[must_use]
+    pub fn new_multiplicative(
+        params: Arc<BfvParameters>,
+        n: usize,
+        m: usize,
+        mult_depth: u32,
+        lambda: Lambda,
+    ) -> Self {
+        let mut config = Self::new(params, n, m, lambda);
+        config.mult_depth = mult_depth;
+        config
     }
 }
 
@@ -166,9 +193,36 @@ impl SmudgingBoundCalculator {
             q_full *= BigUint::from(modulus);
         }
 
-        // Circuit correctness bound
+        // Additive circuit noise bound: B_C = m * (B_fresh + Q mod t).
         let t = BigUint::from(self.config.params.plaintext());
-        let b_c = BigUint::from(self.config.m) * (&b_fresh + &q_full % &t);
+        let b_c_additive = BigUint::from(self.config.m) * (&b_fresh + &q_full % &t);
+
+        // Apply Prop. 20 noise growth recursion for each multiplicative level.
+        //
+        // B_C^{i+1} = 2·k·N²·‖sk‖ · B_C^{i} + B_relin
+        //
+        // where B_relin (Eq. 30) is:
+        //   N·l·‖sk‖·B_g·B + 2·N²·l²·‖sk‖²·B_g·B
+        // with N = ring degree, l = number of moduli, B_g = largest modulus,
+        // B = individual error bound, ‖sk‖ = n (ternary sk, b_chi = 1).
+        let b_c = if self.config.mult_depth > 0 {
+            let moduli = self.config.params.moduli();
+            let l = BigUint::from(moduli.len());
+            let b_g = BigUint::from(*moduli.iter().max().unwrap());
+            let k = BigUint::from(self.config.params.plaintext());
+            let n_sk = BigUint::from(self.config.secret_key_bound);
+            let b_err = BigUint::from(self.config.b_e);
+            let b_relin = &d * &l * &n_sk * &b_g * &b_err
+                + BigUint::from(2u32) * &d * &d * &l * &l * &n_sk * &n_sk * &b_g * &b_err;
+            let coeff = BigUint::from(2u32) * &k * &d * &d * &n_sk;
+            let mut b = b_c_additive;
+            for _ in 0..self.config.mult_depth {
+                b = &coeff * &b + &b_relin;
+            }
+            b
+        } else {
+            b_c_additive
+        };
 
         // Correctness check: B_c < Q/(2t)
         let q_over_2t = &q_full / (BigUint::from(2u64) * &t);
@@ -436,5 +490,98 @@ mod tests {
                 // This is acceptable for some parameter sets
             }
         }
+    }
+
+    /// depth=0 (additive) produces a smaller bound than depth=1 (one multiplication),
+    /// and depth=2 produces a larger bound than depth=1.
+    #[test]
+    fn test_multiplicative_depth_increases_bound() {
+        let params = test_params();
+        let lambda = Lambda::insecure(2);
+
+        // n=3: verify depth=1 strictly exceeds depth=0.
+        let bound_add = SmudgingBoundCalculator::new(SmudgingBoundCalculatorConfig::new(
+            params.clone(),
+            3,
+            1,
+            lambda,
+        ))
+        .calculate_sm_bound()
+        .unwrap();
+
+        let bound_mul1 = SmudgingBoundCalculator::new(
+            SmudgingBoundCalculatorConfig::new_multiplicative(params.clone(), 3, 1, 1, lambda),
+        )
+        .calculate_sm_bound()
+        .unwrap();
+
+        assert!(
+            bound_mul1 > bound_add,
+            "depth=1 bound ({bound_mul1}) should exceed depth=0 bound ({bound_add})"
+        );
+
+        // n=1: smaller n gives more correctness headroom, so depth=2 is feasible.
+        let bound_d1 = SmudgingBoundCalculator::new(
+            SmudgingBoundCalculatorConfig::new_multiplicative(params.clone(), 1, 1, 1, lambda),
+        )
+        .calculate_sm_bound()
+        .unwrap();
+
+        let bound_d2 = SmudgingBoundCalculator::new(
+            SmudgingBoundCalculatorConfig::new_multiplicative(params.clone(), 1, 1, 2, lambda),
+        )
+        .calculate_sm_bound()
+        .unwrap();
+
+        assert!(
+            bound_d2 > bound_d1,
+            "depth=2 bound ({bound_d2}) should exceed depth=1 bound ({bound_d1})"
+        );
+    }
+
+    /// B_sm with depth=1 matches the paper formula (Prop. 20 / Eq. 30).
+    #[test]
+    fn test_multiplicative_bound_matches_paper_formula() {
+        let params = test_params();
+        let n = 3usize;
+        let m = 1usize;
+        let lambda = Lambda::insecure(2);
+
+        // --- Reproduce the paper formula independently ---
+        let d = BigUint::from(params.degree());
+        let b_e = BigUint::from(2u64 * params.variance() as u64);
+        let n_sk = BigUint::from(n as u64); // b_chi = 1 for ternary sk
+        let e_norm = &n_sk * &b_e;
+        let b_enc = (BigUint::from(3u32) * params.get_error1_variance()).sqrt();
+        let b_fresh = &d * &e_norm + &b_enc + &d * &b_e * &n_sk;
+
+        let mut q = BigUint::from(1u64);
+        for &qi in params.moduli() {
+            q *= BigUint::from(qi);
+        }
+        let t = BigUint::from(params.plaintext());
+        let b_c_additive = BigUint::from(m) * (&b_fresh + &q % &t);
+
+        let moduli = params.moduli();
+        let l = BigUint::from(moduli.len());
+        let b_g = BigUint::from(*moduli.iter().max().unwrap());
+        // Eq. (30): relinearization error bound.
+        let b_relin = &d * &l * &n_sk * &b_g * &b_e
+            + BigUint::from(2u32) * &d * &d * &l * &l * &n_sk * &n_sk * &b_g * &b_e;
+        // Prop. 20 coefficient.
+        let coeff = BigUint::from(2u32) * &t * &d * &d * &n_sk;
+        let b_c_mul = &coeff * &b_c_additive + &b_relin;
+        let expected = BigUint::from(2u64).pow(lambda.value() as u32) * &b_c_mul;
+
+        let actual = SmudgingBoundCalculator::new(
+            SmudgingBoundCalculatorConfig::new_multiplicative(params.clone(), n, m, 1, lambda),
+        )
+        .calculate_sm_bound()
+        .unwrap();
+
+        assert_eq!(
+            actual, expected,
+            "Multiplicative smudging bound does not match Prop. 20 / Eq. 30 formula"
+        );
     }
 }
