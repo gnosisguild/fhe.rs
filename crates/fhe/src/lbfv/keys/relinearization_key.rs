@@ -370,7 +370,7 @@ impl LBFVRelinKeyShare {
     /// # Arguments
     /// * `crs_d1` — shared string for `d₁` (used in `ksk_r_to_s`, RLK `d₀`)
     /// * `crs_a`  — shared string for `a`  (used in `ksk_s_to_r`, RLK `d₂`; must
-    ///              match the `crs_a` passed to [`LBFVPublicKey::new_from_crs`])
+    ///   match the `crs_a` passed to [`LBFVPublicKey::new_from_crs`])
     pub fn contribution_from_crs<R: RngCore + CryptoRng>(
         sk_i: &SecretKey,
         crs_d1: &LBFVCommonReferenceString,
