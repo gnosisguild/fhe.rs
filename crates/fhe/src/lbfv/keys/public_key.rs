@@ -51,6 +51,7 @@ use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
 use fhe_math::rq::{
     Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher, traits::TryConvertFrom,
 };
+use crate::lbfv::crs::LBFVCommonReferenceString;
 use fhe_traits::{FheEncrypter, FheParametrized};
 
 /// Public key for the L-BFV encryption scheme.
@@ -462,6 +463,21 @@ impl LBFVPublicKey {
         key.binding = Some(LBFVKeyBinding::Contribution(binding));
         key.validate_structure()?;
         Ok(key)
+    }
+
+    /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using an explicit
+    /// [`LBFVCommonReferenceString`].
+    ///
+    /// This is the preferred constructor when following the paper's protocol:
+    /// the CRS `a = (a₀,...,a_{l-1})` is a first-class shared object established
+    /// by coin-tossing, and the same `crs` is passed to every party and to
+    /// [`LBFVRelinKeyShare::contribution_from_crs`].
+    pub fn new_from_crs<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        crs: &LBFVCommonReferenceString,
+        rng: &mut R,
+    ) -> Result<Self> {
+        Self::new_with_seed(sk, crs.seed, rng)
     }
 
     // ---------------------------------------------------------------------------

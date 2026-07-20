@@ -46,8 +46,10 @@
  * applies to all key material produced by this module.
  */
 
+pub mod crs;
 pub mod keys;
 
+pub use crs::LBFVCommonReferenceString;
 pub use keys::{
     LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey, LBFVRelinKeyShare,
     LBFVRelinearizationKey,

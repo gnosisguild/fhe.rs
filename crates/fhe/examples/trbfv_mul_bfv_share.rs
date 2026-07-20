@@ -33,15 +33,13 @@ use std::{env, error::Error, process::exit, sync::Arc};
 use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
-    lbfv::{LBFVPublicKey, LBFVRelinKeyShare, LBFVRelinearizationKey},
-    mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
+    lbfv::{LBFVCommonReferenceString, LBFVPublicKey, LBFVRelinKeyShare, LBFVRelinearizationKey},
     trbfv::{Lambda, ShareManager, TRBFV},
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2, ArrayView};
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha8Rng;
+use rand::Rng;
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
@@ -192,30 +190,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // ── Party setup ───────────────────────────────────────────────────────────
-    // Two public seeds for the l-BFV RLK protocol. In deployment these would be
-    // established via coin-tossing.
-    let mut pk_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-    let mut d1_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-    rng.fill(&mut pk_seed);
-    rng.fill(&mut d1_seed);
+    // Two shared strings for the l-BFV RLK protocol. In deployment these would
+    // be established via coin-tossing.
+    let crs_a  = LBFVCommonReferenceString::new(&params_trbfv, &mut rng)?;
+    let crs_d1 = LBFVCommonReferenceString::new(&params_trbfv, &mut rng)?;
 
     struct Party {
-        pk_share: PublicKeyShare,
-        sk_sss: Vec<Array2<u64>>,  // sk_sss[m]: shape (num_parties, degree)
-        esi_sss: Vec<Array2<u64>>, // smudging error Shamir shares, same shape
+        sk_sss: Vec<Array2<u64>>,           // sk_sss[m]: shape (num_parties, degree)
+        esi_sss: Vec<Array2<u64>>,          // smudging error Shamir shares, same shape
         sk_sss_collected: Vec<Array2<u64>>, // collected from all senders; each (num_moduli, degree)
         es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
         es_poly_sum: Poly<PowerBasis>,
         d_share_poly: Poly<PowerBasis>,
-        pk_lbfv_share: LBFVPublicKey, // l-BFV PK contribution (CRS = pk_seed)
+        pk_lbfv_share: LBFVPublicKey, // l-BFV PK contribution (shared crs_a)
         rlk_share: LBFVRelinKeyShare,
         // Share-encryption key pair (second BFV parameter set).
         sk_share_enc: SecretKey,
         pk_share_enc: PublicKey,
     }
 
-    let crp = CommonRandomPoly::new(&params_trbfv, &mut rng)?;
     let trbfv: TRBFV = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
     let num_moduli = params_trbfv.moduli().len();
 
@@ -226,9 +220,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(|_| {
                 let mut rng = rand::rng();
 
-                // trBFV keys and Shamir shares.
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-                let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
                 let mut share_manager =
                     ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
@@ -256,14 +248,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .generate_secret_shares_from_poly(esi_poly, &mut rng)
                     .unwrap();
 
-                // l-BFV PK contribution (CRS seed = pk_seed, shared by all parties).
+                // l-BFV PK contribution (shared crs_a, same a_j across all parties).
                 let pk_lbfv_share =
-                    LBFVPublicKey::new_with_seed(&sk_share, pk_seed, &mut rng).unwrap();
+                    LBFVPublicKey::new_from_crs(&sk_share, &crs_a, &mut rng).unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
-                let rlk_share = LBFVRelinKeyShare::contribution(
-                    &sk_share, d1_seed, pk_seed, // a_seed must match pk_lbfv_share's CRS seed
-                    0, 0, &mut rng,
+                let rlk_share = LBFVRelinKeyShare::contribution_from_crs(
+                    &sk_share, &crs_d1, &crs_a, 0, 0, &mut rng,
                 )
                 .unwrap();
 
@@ -273,7 +264,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 let ctx0 = params_trbfv.context_at_level(0).unwrap();
                 Party {
-                    pk_share,
                     sk_sss,
                     esi_sss,
                     sk_sss_collected: Vec::with_capacity(num_parties),
@@ -290,16 +280,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect()
     });
 
-    // ── Distributed RLK aggregation ───────────────────────────────────────────
-    let rlk: LBFVRelinearizationKey = timeit!("Distributed RLK aggregation", {
+    // ── Distributed pk + RLK aggregation ─────────────────────────────────────
+    // pk_lbfv is used for both RLK (b_vec) and encryption (c[0]).
+    let pk_lbfv: LBFVPublicKey;
+    let rlk: LBFVRelinearizationKey = timeit!("Distributed pk + RLK aggregation", {
         let pk_lbfv_shares: Vec<LBFVPublicKey> =
             parties.iter().map(|p| p.pk_lbfv_share.clone()).collect();
-        let pk_lbfv = LBFVPublicKey::aggregate(&pk_lbfv_shares)?;
+        pk_lbfv = LBFVPublicKey::aggregate(&pk_lbfv_shares)?;
         let rlk_shares: Vec<LBFVRelinKeyShare> =
             parties.iter().map(|p| p.rlk_share.clone()).collect();
         LBFVRelinearizationKey::aggregate(&rlk_shares, &pk_lbfv)?
     });
-    println!("✓ Relinearization key aggregated (l = {})", rlk.l()?);
+    println!("✓ pk_lbfv and RLK aggregated (l = {})", rlk.l()?);
 
     // ── Share encryption and transmission ─────────────────────────────────────
     // Each sender BFV-encrypts the share row it owes to each receiver under that
@@ -397,12 +389,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         });
     });
 
-    // ── mbfv public key aggregation ───────────────────────────────────────────
-    let pk = timeit!("Public key aggregation", {
-        let pk: PublicKey = parties.iter().map(|p| p.pk_share.clone()).aggregate()?;
-        pk
-    });
-
     // ── Homomorphic multiplication (depth 3) ─────────────────────────────────
     // k=1000. Three chained multiplications: ((a×b)×c)×d.
     // Values in [1,5] so the max product is 5⁴=625 < 1000.
@@ -415,19 +401,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let ct_a = timeit!("Encrypt a", {
         let pt = Plaintext::try_encode(&[a], Encoding::poly(), &params_trbfv)?;
-        pk.try_encrypt(&pt, &mut rng)?
+        pk_lbfv.try_encrypt(&pt, &mut rng)?
     });
     let ct_b = timeit!("Encrypt b", {
         let pt = Plaintext::try_encode(&[b], Encoding::poly(), &params_trbfv)?;
-        pk.try_encrypt(&pt, &mut rng)?
+        pk_lbfv.try_encrypt(&pt, &mut rng)?
     });
     let ct_c = timeit!("Encrypt c", {
         let pt = Plaintext::try_encode(&[c], Encoding::poly(), &params_trbfv)?;
-        pk.try_encrypt(&pt, &mut rng)?
+        pk_lbfv.try_encrypt(&pt, &mut rng)?
     });
     let ct_d = timeit!("Encrypt d", {
         let pt = Plaintext::try_encode(&[d], Encoding::poly(), &params_trbfv)?;
-        pk.try_encrypt(&pt, &mut rng)?
+        pk_lbfv.try_encrypt(&pt, &mut rng)?
     });
 
     let product = timeit!("Multiply and relinearize (depth 3)", {

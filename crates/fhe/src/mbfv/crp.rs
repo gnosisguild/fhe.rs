@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::Result;
 use crate::bfv::BfvParameters;
 use fhe_math::rq::{Ntt, Poly};
-use rand::{CryptoRng, RngCore, SeedableRng};
+use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 /// A polynomial sampled from a random _common reference string_.
@@ -37,6 +37,25 @@ impl CommonRandomPoly {
     ) -> Result<Vec<Self>> {
         (0..params.moduli().len())
             .map(|_| Self::new(params, rng))
+            .collect()
+    }
+
+    /// Generate a deterministic CRP vector from a shared seed.
+    ///
+    /// Derives l sub-seeds from `seed` (one per RNS modulus) using a ChaCha8Rng,
+    /// then calls `new_deterministic` for each. All parties calling this with the
+    /// same `seed` get identical polynomials — this is the l-BFV CRS `a = (a₀,...,a_{l-1})`.
+    pub fn new_vec_deterministic(
+        par: &Arc<BfvParameters>,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+    ) -> Result<Vec<Self>> {
+        let mut seed_rng = ChaCha8Rng::from_seed(seed);
+        (0..par.moduli().len())
+            .map(|_| {
+                let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
+                seed_rng.fill(&mut seed_i);
+                Self::new_deterministic(par, seed_i)
+            })
             .collect()
     }
 
