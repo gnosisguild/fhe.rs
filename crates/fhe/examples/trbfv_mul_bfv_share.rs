@@ -19,6 +19,7 @@
 //     its Lagrange evaluation point of the combined secret key SK = Σ sk_j.
 //  4. Two values are encrypted under the combined mbfv PublicKey, multiplied and
 //     relinearized using the aggregated RLK, then threshold-decrypted by t+1 parties.
+#![allow(missing_docs)]
 
 mod util;
 
@@ -132,28 +133,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut threshold = 2usize;
     let mut lambda = 40usize;
 
+    fn parse_opt(arg: &str, prefix: &str) -> Option<usize> {
+        arg.strip_prefix(prefix)
+            .and_then(|v| v.strip_prefix('='))
+            .and_then(|v| v.parse::<usize>().ok())
+    }
+
     for arg in &args {
-        if arg.starts_with("--num_parties") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--num_parties` argument".to_string()))
-            } else {
-                num_parties = a[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--threshold") {
-            let parts: Vec<&str> = arg.rsplit('=').collect();
-            if parts.len() != 2 || parts[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--threshold` argument".to_string()))
-            } else {
-                threshold = parts[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--lambda") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--lambda` argument".to_string()))
-            } else {
-                lambda = a[0].parse::<usize>()?
-            }
+        if let Some(n) = parse_opt(arg, "--num_parties") {
+            num_parties = n;
+        } else if let Some(t) = parse_opt(arg, "--threshold") {
+            threshold = t;
+        } else if let Some(l) = parse_opt(arg, "--lambda") {
+            lambda = l;
         } else {
             print_notice_and_exit(Some(format!("Unrecognized argument: {arg}")))
         }
@@ -168,7 +160,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
     }
 
-    // λ=40 is the design point of this parameter set (below the library's MIN_SECURE_LAMBDA=50).
+    // λ=40 is the design point of this parameter set (above the library's MIN_SECURE_LAMBDA=35).
     let security = Lambda::insecure(lambda);
     let mut rng = rand::rng();
 
@@ -299,11 +291,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     (0..num_parties)
                         .map(|receiver_idx| {
                             let mut rng = rand::rng();
-                            let rpk = &pk_share_enc_list[receiver_idx];
+                            let rpk = pk_share_enc_list.get(receiver_idx).unwrap();
 
                             let enc_sk: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
-                                    let row = party.sk_sss[m].row(receiver_idx).to_vec();
+                                    let row =
+                                        party.sk_sss.get(m).unwrap().row(receiver_idx).to_vec();
                                     let pt = Plaintext::try_encode(
                                         &row,
                                         Encoding::poly(),
@@ -316,7 +309,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                             let enc_es: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
-                                    let row = party.esi_sss[m].row(receiver_idx).to_vec();
+                                    let row =
+                                        party.esi_sss.get(m).unwrap().row(receiver_idx).to_vec();
                                     let pt = Plaintext::try_encode(
                                         &row,
                                         Encoding::poly(),
@@ -341,7 +335,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .enumerate()
             .for_each(|(receiver_idx, party)| {
                 for sender_shares in encrypted_shares.iter() {
-                    let (enc_sk, enc_es) = &sender_shares[receiver_idx];
+                    let (enc_sk, enc_es) = sender_shares.get(receiver_idx).unwrap();
 
                     let mut node_sk = Array::zeros((0, degree));
                     for ct in enc_sk {
@@ -448,7 +442,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .decrypt(d_shares, party_indices, product.clone())
             .unwrap();
         let v = Vec::<u64>::try_decode(&pt, Encoding::poly())?;
-        Ok::<u64, Box<dyn Error>>(v[0])
+        Ok::<u64, Box<dyn Error>>(v.first().copied().unwrap_or_default())
     })?;
 
     println!("\nComputed result: {result}");

@@ -182,6 +182,80 @@ impl LBFVRelinKeyShare {
             ksk_s_to_r,
         })
     }
+
+    /// Compute this party's contribution using explicit URS/CRS polynomials
+    /// instead of seeds.
+    ///
+    /// This is the on-chain URS path: the caller provides the shared `d1` and
+    /// `a` polynomials (as `NttShoup`) directly. The same `d1` and `a` must be
+    /// used by all parties and must match the public key's CRS `a_j`.
+    ///
+    /// # Arguments
+    /// * `sk_i` - This party's secret-key contribution.
+    /// * `d1_polys` - The shared URS polynomials for the `(d0, d1)` key.
+    /// * `a_polys` - The shared CRS polynomials; must be identical to the
+    ///   polynomials embedded in the threshold public key's ciphertexts.
+    /// * `ciphertext_level` / `key_level` - Levels.
+    /// * `rng` - RNG for `r_i` and the errors.
+    pub fn contribution_with_polys<R: RngCore + CryptoRng>(
+        sk_i: &SecretKey,
+        d1_polys: Vec<Poly<NttShoup>>,
+        a_polys: Vec<Poly<NttShoup>>,
+        ciphertext_level: usize,
+        key_level: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let ctx_relin_key = sk_i.params.context_at_level(key_level)?;
+        let ctx_ciphertext = sk_i.params.context_at_level(ciphertext_level)?;
+        let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
+
+        if ciphertext_level < key_level {
+            return Err(Error::DefaultError(
+                "Ciphertext level must be greater than or equal to key level".to_string(),
+            ));
+        }
+        if ctx_relin_key.moduli().len() == 1 || ctx_ciphertext.moduli().len() == 1 {
+            return Err(Error::DefaultError(
+                "These parameters do not support key switching".to_string(),
+            ));
+        }
+
+        let r: SecretKey = SecretKey::random(&sk_i.params, rng);
+        let r_poly =
+            Poly::<PowerBasis>::try_convert_from(r.coeffs.as_ref(), ctx_ciphertext, false)?;
+        let r_switched_up = r_poly.switch(&switcher_up)?;
+
+        let sk_poly =
+            Poly::<PowerBasis>::try_convert_from(sk_i.coeffs.as_ref(), ctx_ciphertext, false)?;
+        let sk_switched_up = sk_poly.switch(&switcher_up)?;
+
+        // (d0_i, d1) = (-sk_i·d1 + e0_i + r_i·g, d1)
+        let ksk_r_to_s = KeySwitchingKey::new_with_c1(
+            sk_i,
+            &r_switched_up,
+            d1_polys,
+            ciphertext_level,
+            key_level,
+            rng,
+        )?;
+
+        // (d2_i, a) = (r_i·a + e2_i + sk_i·g, a)
+        let mut neg_r = r.clone();
+        neg_r.coeffs.iter_mut().for_each(|x| *x = x.wrapping_neg());
+        let ksk_s_to_r = KeySwitchingKey::new_with_c1(
+            &neg_r,
+            &sk_switched_up,
+            a_polys,
+            ciphertext_level,
+            key_level,
+            rng,
+        )?;
+
+        Ok(Self {
+            ksk_r_to_s,
+            ksk_s_to_r,
+        })
+    }
 }
 
 /// Sum the `c0` components of a set of key-switching keys, coordinate-wise over
@@ -322,13 +396,12 @@ impl LBFVRelinearizationKey {
     /// Returns an error if `shares` is empty, if the shares disagree on their
     /// seeds/levels, or if `pk.seed` does not match the CRS seed the
     /// contributions used (a mismatched CRS `a` between `b_vec` and `d2`).
+    #[allow(clippy::indexing_slicing)] // c1.len() checked against new_l; both indexed under same j
     pub fn aggregate(shares: &[LBFVRelinKeyShare], pk: &LBFVPublicKey) -> Result<Self> {
         let (first, rest) = shares.split_first().ok_or_else(|| {
             Error::DefaultError("Cannot aggregate zero relinearization key shares".to_string())
         })?;
 
-        // All shares must agree on the common strings (seeds) and levels so that
-        // their d1 / a components are identical and the c0 sums are meaningful.
         for s in rest {
             if s.ksk_r_to_s.seed != first.ksk_r_to_s.seed
                 || s.ksk_s_to_r.seed != first.ksk_s_to_r.seed
@@ -342,14 +415,53 @@ impl LBFVRelinearizationKey {
             }
         }
 
-        // CRS binding: the `a` used to build d2 (ksk_s_to_r's seed) must be the
-        // same CRS `a` the public key's b_vec was built under (pk.seed). Without
-        // this, the -a_j·sk and +r·a_j·sk terms would not cancel during relin.
-        if first.ksk_s_to_r.seed != pk.seed {
+        // Verify the concrete d1 (URS) polynomials match across all shares.
+        for s in rest {
+            if s.ksk_r_to_s.c1 != first.ksk_r_to_s.c1 {
+                return Err(Error::DefaultError(
+                    "Relinearization key shares have inconsistent d1 (URS) polynomials".to_string(),
+                ));
+            }
+        }
+
+        // Verify the concrete a (CRS) polynomials match across all shares.
+        for s in rest {
+            if s.ksk_s_to_r.c1 != first.ksk_s_to_r.c1 {
+                return Err(Error::DefaultError(
+                    "Relinearization key shares have inconsistent a (CRS) polynomials".to_string(),
+                ));
+            }
+        }
+
+        // CRS binding: the `a` polynomials embedded in ksk_s_to_r.c1 must
+        // match the public key's `a_j` ciphertext polynomials.  This is the
+        // concrete cross-check that seed equality alone cannot guarantee.
+        //
+        // For leveled keys the KSK has l - ciphertext_level polynomials; we
+        // compare each against the PK's first l - ciphertext_level ciphertexts.
+        let pk_ctx0 = pk.params.context_at_level(0)?;
+        let ksk_ctx = &first.ksk_s_to_r.ctx_ksk;
+        if ksk_ctx != pk_ctx0 {
             return Err(Error::DefaultError(
-                "Relinearization key shares use a different CRS 'a' than the public key"
+                "Cannot verify CRS binding: RLK key context differs from public key level-0 context"
                     .to_string(),
             ));
+        }
+        let new_l = pk.l - first.ksk_r_to_s.ciphertext_level;
+        if first.ksk_s_to_r.c1.len() != new_l {
+            return Err(Error::DefaultError(
+                "CRS binding failed: RLK's a polynomial count does not match expected l - ciphertext_level"
+                    .to_string(),
+            ));
+        }
+        for (j, c1_j) in first.ksk_s_to_r.c1.iter().enumerate() {
+            let mut a_ksk: Poly<Ntt> = c1_j.clone().into_ntt();
+            a_ksk.disallow_variable_time_computations();
+            if a_ksk != pk.c[j].c[1] {
+                return Err(Error::DefaultError(
+                    "CRS binding failed: RLK's a_j does not match public key's a_j".to_string(),
+                ));
+            }
         }
 
         // Levels are defined by the shares; b_vec is extracted from the public
@@ -792,6 +904,132 @@ mod tests {
 
         // The aggregated key must relinearize a product that decrypts under the
         // joint sk, for both encodings.
+        for encoding in [Encoding::poly(), Encoding::simd()] {
+            let pt1 = Plaintext::try_encode(&[3u64], encoding.clone(), &params)?;
+            let pt2 = Plaintext::try_encode(&[5u64], encoding.clone(), &params)?;
+            let ct1 = pk.try_encrypt(&pt1, &mut rng)?;
+            let ct2 = pk.try_encrypt(&pt2, &mut rng)?;
+
+            let mut ct_product = &ct1 * &ct2;
+            relin_key.relinearizes(&mut ct_product)?;
+
+            let pt_result = sk_joint.try_decrypt(&ct_product)?;
+            let result = Vec::<u64>::try_decode(&pt_result, encoding.clone())?;
+            assert_eq!(result[0], 15);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_distributed_relinearization_with_explicit_polys() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let n = 3;
+
+        let sk_shares: Vec<SecretKey> = (0..n)
+            .map(|_| SecretKey::random(&params, &mut rng))
+            .collect();
+
+        let mut sum_coeffs = vec![0i64; params.degree()];
+        for sk in &sk_shares {
+            for (acc, c) in sum_coeffs.iter_mut().zip(sk.coeffs.iter()) {
+                *acc = acc.wrapping_add(*c);
+            }
+        }
+        let sk_joint = SecretKey::new(sum_coeffs, &params);
+
+        // Build shared CRS a polynomials from a seed.
+        let mut a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut a_seed);
+        let a_polys_ntt: Vec<Poly<Ntt>> = {
+            let tmp = LBFVPublicKey::new_with_seed(&sk_shares[0], a_seed, &mut rng);
+            tmp.c.iter().map(|ct| ct.c[1].clone()).collect()
+        };
+
+        // Build shared URS d1 polynomials.
+        let mut d1_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut d1_seed);
+        let d1_polys: Vec<Poly<NttShoup>> = {
+            let ksk_tmp = KeySwitchingKey::new_with_seed(
+                &sk_shares[0],
+                &Poly::<PowerBasis>::try_convert_from(
+                    sk_shares[0].coeffs.as_ref(),
+                    params.context_at_level(0)?,
+                    false,
+                )?,
+                d1_seed,
+                0,
+                0,
+                &mut rng,
+            )?;
+            ksk_tmp.c1.to_vec()
+        };
+
+        // Convert a polys to NttShoup for the RLK contribution API.
+        let a_polys_shoup: Vec<Poly<NttShoup>> = a_polys_ntt
+            .iter()
+            .map(|p| p.clone().into_ntt_shoup())
+            .collect();
+
+        // Build PK from contributions using explicit a polys.
+        let pk_contributions: Vec<LBFVPublicKey> = sk_shares
+            .iter()
+            .map(|sk_i| LBFVPublicKey::contribute(sk_i, &a_polys_ntt, &mut rng).unwrap())
+            .collect();
+        let pk = LBFVPublicKey::aggregate(&pk_contributions)?;
+
+        // Build RLK shares using explicit d1 and a polys.
+        let shares: Vec<LBFVRelinKeyShare> = sk_shares
+            .iter()
+            .map(|sk_i| {
+                LBFVRelinKeyShare::contribution_with_polys(
+                    sk_i,
+                    d1_polys.clone(),
+                    a_polys_shoup.clone(),
+                    0,
+                    0,
+                    &mut rng,
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let relin_key = LBFVRelinearizationKey::aggregate(&shares, &pk)?;
+
+        // Aggregating with mismatched d1 polys must be rejected.
+        let bad_d1: Vec<Poly<NttShoup>> = {
+            let mut bad = d1_polys.clone();
+            let ctx0 = params.context_at_level(0)?;
+            bad[0] = Poly::<NttShoup>::random_from_seed(
+                ctx0,
+                <ChaCha8Rng as SeedableRng>::Seed::default(),
+            );
+            bad
+        };
+        let bad_share = LBFVRelinKeyShare::contribution_with_polys(
+            &sk_shares[0],
+            bad_d1,
+            a_polys_shoup.clone(),
+            0,
+            0,
+            &mut rng,
+        )?;
+        assert!(LBFVRelinearizationKey::aggregate(&[shares[0].clone(), bad_share], &pk).is_err());
+
+        // Aggregating with an RLK built under a different CRS a than the PK
+        // must be rejected.
+        let mut other_a_seed = a_seed;
+        other_a_seed[0] ^= 0xff;
+        let pk_other = LBFVPublicKey::aggregate(
+            &sk_shares
+                .iter()
+                .map(|sk_i| LBFVPublicKey::new_with_seed(sk_i, other_a_seed, &mut rng))
+                .collect::<Vec<_>>(),
+        )?;
+        assert!(LBFVRelinearizationKey::aggregate(&shares, &pk_other).is_err());
+
+        // The aggregated key must relinearize correctly.
         for encoding in [Encoding::poly(), Encoding::simd()] {
             let pt1 = Plaintext::try_encode(&[3u64], encoding.clone(), &params)?;
             let pt2 = Plaintext::try_encode(&[5u64], encoding.clone(), &params)?;
