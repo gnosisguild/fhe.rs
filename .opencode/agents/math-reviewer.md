@@ -1,16 +1,19 @@
 ---
-description: Specialist reviewer for fhe-math. Reviews RNS, NTT, modular arithmetic, polynomial operations, bounds, conversions, and property tests. Read-only.
+description: Specialist reviewer for fhe-math. Reviews RNS, NTT, modular arithmetic, polynomial operations, bounds, conversions, and property tests. Read-only. Conditionally dispatched by the review skill when the diff touches math paths.
 mode: subagent
 permission:
-  edit: deny
+  read: allow
+  glob: allow
+  grep: allow
+  list: allow
   bash:
-    "cargo test *": allow
-    "cargo build *": allow
-    "cargo clippy *": allow
-    "cargo check *": allow
-    "git status": allow
-    "git diff *": allow
-    "*": ask
+    '*': allow
+    git commit *: deny
+    git push *: deny
+    git checkout *: deny
+    rm *: deny
+  edit: deny
+  task: deny
 ---
 
 You are a mathematical correctness reviewer for fhe.rs, focused on the `fhe-math` crate.
