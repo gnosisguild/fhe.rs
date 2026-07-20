@@ -28,7 +28,10 @@ use std::{env, error::Error, process::exit, sync::Arc};
 use console::style;
 use fhe::{
     bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
-    lbfv::{LBFVPublicKey, LBFVRelinKeyShare, LBFVRelinearizationKey},
+    lbfv::{
+        LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey, LBFVRelinKeyShare,
+        LBFVRelinearizationKey,
+    },
     mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
     trbfv::{Lambda, ShareManager, TRBFV},
 };
@@ -177,6 +180,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     rng.fill(&mut pk_seed);
     rng.fill(&mut d1_seed);
 
+    // Canonical participant set — one common session ID covering all parties.
+    let lbfv_session_id: [u8; 32] = rng.random();
+    let lbfv_participant_set =
+        LBFVParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
+
     struct Party {
         pk_share: PublicKeyShare,
         sk_sss: Vec<Array2<u64>>,  // sk_sss[m]: shape (num_parties, degree)
@@ -198,11 +206,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let num_moduli = params_trbfv.moduli().len();
 
     println!("\n💻 Available CPU cores: {}", rayon::current_num_threads());
+    let participant_set_ref = &lbfv_participant_set;
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
         (0..num_parties)
             .into_par_iter()
-            .map(|_| {
+            .map(|party_idx| {
                 let mut rng = rand::rng();
+                let participant_id = (party_idx + 1) as u32;
+
+                // Unique contribution binding for this party.
+                let binding =
+                    LBFVContributionBinding::new(participant_set_ref.clone(), participant_id)
+                        .unwrap();
 
                 // trBFV keys and Shamir shares.
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
@@ -228,12 +243,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
 
                 // l-BFV PK contribution (CRS seed = pk_seed, shared by all parties).
-                let pk_lbfv_share = LBFVPublicKey::new_with_seed(&sk_share, pk_seed, &mut rng);
+                let pk_lbfv_share = LBFVPublicKey::new_with_seed_and_binding(
+                    &sk_share,
+                    pk_seed,
+                    binding.clone(),
+                    &mut rng,
+                )
+                .unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
-                let rlk_share = LBFVRelinKeyShare::contribution(
+                let rlk_share = LBFVRelinKeyShare::contribution_with_binding(
                     &sk_share, d1_seed, pk_seed, // a_seed must match pk_lbfv_share's CRS seed
-                    0, 0, &mut rng,
+                    binding, 0, 0, &mut rng,
                 )
                 .unwrap();
 
