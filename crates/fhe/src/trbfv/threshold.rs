@@ -4,7 +4,8 @@ use crate::Error;
 /// Main threshold BFV orchestrator.
 ///
 /// This module provides the main TRBFV struct that coordinates between secret sharing,
-/// smudging, and share management operations to implement the threshold BFV protocol.
+/// smudging, and share management operations to implement the threshold BFV protocol
+/// (Urban–Rambaud 2024).
 ///
 /// # Threshold BFV Overview
 ///
@@ -13,6 +14,22 @@ use crate::Error;
 /// - Only t+1 parties (threshold) are needed to decrypt
 /// - Up to t parties can be compromised without breaking security
 /// - Smudging noise protects intermediate values during decryption
+///
+/// ## What this module does NOT cover
+///
+/// This module implements the core sharing, smudging, and decryption logic.  It is
+/// **not** the complete robust threshold protocol from Urban–Rambaud&nbsp;2024:
+/// - **No distributed key generation (DKG)** — keys must be generated offline.
+/// - **No broadcast channel** — all share exchanges are assumed to happen
+///   out-of-band.
+/// - **No FLSS** (function-linear secret sharing) pre-processing.
+/// - **No GURS** (guaranteed uniform random string) generation.
+/// - **No proactive refresh** or identifiable-abort mechanisms.
+/// - **No PVSS** (publicly verifiable secret sharing) — the current
+///   implementation is passively secure.
+///
+/// Callers who require full end-to-end robust threshold FHE must supply these
+/// components externally.
 ///
 /// # Protocol Flow
 ///
@@ -109,8 +126,19 @@ impl TRBFV {
     /// Creates noise that will be added to decryption shares.
     /// Uses optimal variance calculation based on security parameters and number of ciphertexts.
     ///
+    /// This is a convenience wrapper that uses all parties as the accepted
+    /// participant set. For explicit control over relinearization key
+    /// contributors, use [`Self::generate_smudging_error_with_participant_count`].
+    ///
+    /// # Limitations
+    ///
+    /// The generated smudging noise is one-time pre-shared material that must
+    /// not be reused across decryptions. This API does not track or enforce
+    /// consumption.
+    ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed (e.g., votes to count, numbers to sum)
+    /// * `mult_depth` - Multiplicative circuit depth (0 for additive-only)
     /// * `lambda` - Statistical security level (use `Lambda::secure(lambda)`
     ///   in production; `Lambda::insecure(lambda)` for fast tests)
     /// * `rng` - Cryptographically secure random number generator
@@ -124,6 +152,55 @@ impl TRBFV {
         lambda: Lambda,
         rng: &mut R,
     ) -> Result<Vec<BigInt>, Error> {
+        // Forward to the explicit API using all n parties as the accepted set.
+        self.generate_smudging_error_with_participant_count(
+            num_ciphertexts,
+            mult_depth,
+            self.n,
+            lambda,
+            rng,
+        )
+    }
+
+    /// Generate smudging error coefficients with an explicit accepted
+    /// participant count.
+    ///
+    /// The `accepted_participant_count` must equal the number of parties that
+    /// contributed to the distributed relinearization key (the *l*-BFV accepted
+    /// set). The distributed RLK error scales linearly with this count, so
+    /// mismatching it will produce a smudging bound that is either too loose
+    /// (wasting correctness budget) or too tight (breaking statistical
+    /// hiding).
+    ///
+    /// # Limitations
+    ///
+    /// The generated smudging noise is **one-time pre-shared material**: it
+    /// must not be reused across decryptions. This API does not track or
+    /// enforce consumption.
+    ///
+    /// # Arguments
+    /// * `num_ciphertexts` - Number of ciphertexts being processed
+    /// * `mult_depth` - Multiplicative circuit depth (0 for additive-only)
+    /// * `accepted_participant_count` - Number of parties in the accepted
+    ///   *l*-BFV set; must be in `1..=n`
+    /// * `lambda` - Statistical security level
+    /// * `rng` - Cryptographically secure random number generator
+    ///
+    /// # Returns
+    /// Vector of smudging error coefficients
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - `accepted_participant_count` is zero or exceeds `n`
+    /// - The smudging bound computation is infeasible for the given parameters
+    pub fn generate_smudging_error_with_participant_count<R: RngCore + CryptoRng>(
+        &self,
+        num_ciphertexts: usize,
+        mult_depth: u32,
+        accepted_participant_count: usize,
+        lambda: Lambda,
+        rng: &mut R,
+    ) -> Result<Vec<BigInt>, Error> {
         let config = SmudgingBoundCalculatorConfig::new_multiplicative(
             self.params.clone(),
             self.n,
@@ -131,7 +208,8 @@ impl TRBFV {
             mult_depth,
             lambda,
         );
-        let calculator = SmudgingBoundCalculator::new(config);
+        let calculator = SmudgingBoundCalculator::new(config)
+            .with_accepted_participant_count(accepted_participant_count);
         let generator = SmudgingNoiseGenerator::from_bound_calculator(calculator)?;
 
         generator.generate_smudging_error(rng)
@@ -307,6 +385,106 @@ mod tests {
             }
         }
         assert_eq!(result.unwrap().len(), params.degree());
+    }
+
+    // ── generate_smudging_error_with_participant_count tests ──────────────
+
+    #[test]
+    fn smudging_error_with_valid_participant_count_succeeds() {
+        let params = test_params();
+        let n = 5;
+        let trbfv = TRBFV::new(n, 2, params.clone()).unwrap();
+        let mut rng = rng();
+
+        // Use an accepted_participant_count that is a strict subset (3 of 5).
+        let result = trbfv.generate_smudging_error_with_participant_count(
+            1,
+            0,
+            3,
+            Lambda::secure(80).unwrap(),
+            &mut rng,
+        );
+        assert!(result.is_ok(), "valid participant count should succeed");
+        let coeffs = result.unwrap();
+        assert_eq!(coeffs.len(), params.degree());
+        assert!(coeffs.iter().any(|c| !c.is_zero()));
+    }
+
+    #[test]
+    fn smudging_error_with_participant_count_zero_rejected() {
+        let params = test_params();
+        let n = 3;
+        let trbfv = TRBFV::new(n, 1, params.clone()).unwrap();
+        let mut rng = rng();
+
+        let err = trbfv
+            .generate_smudging_error_with_participant_count(
+                1,
+                0,
+                0,
+                Lambda::secure(80).unwrap(),
+                &mut rng,
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("accepted participant"),
+            "zero count should be rejected; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn smudging_error_with_participant_count_above_n_rejected() {
+        let params = test_params();
+        let n = 3;
+        let trbfv = TRBFV::new(n, 1, params.clone()).unwrap();
+        let mut rng = rng();
+
+        let err = trbfv
+            .generate_smudging_error_with_participant_count(
+                1,
+                0,
+                4, // > n = 3
+                Lambda::secure(80).unwrap(),
+                &mut rng,
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("accepted participant"),
+            "over-limit count should be rejected; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn smudging_error_with_all_participants_matches_default() {
+        let params = test_params();
+        let n = 3;
+        let trbfv = TRBFV::new(n, 1, params.clone()).unwrap();
+
+        // The default method uses all n parties as accepted participants.
+        // The explicit method with accepted_participant_count = n should be
+        // semantically equivalent (same calculator config).
+        // We test this by verifying both produce errors or success together.
+        let mut rng_default = rng();
+        let default_result =
+            trbfv.generate_smudging_error(1, 0, Lambda::secure(80).unwrap(), &mut rng_default);
+        let mut rng_explicit = rng();
+        let explicit_result = trbfv.generate_smudging_error_with_participant_count(
+            1,
+            0,
+            n,
+            Lambda::secure(80).unwrap(),
+            &mut rng_explicit,
+        );
+        assert_eq!(
+            default_result.is_ok(),
+            explicit_result.is_ok(),
+            "default and explicit(n) should both succeed or both fail"
+        );
+        if let (Ok(d), Ok(e)) = (default_result.as_ref(), explicit_result.as_ref()) {
+            assert_eq!(d.len(), e.len());
+        }
     }
 
     #[test]

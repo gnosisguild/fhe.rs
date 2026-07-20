@@ -1,5 +1,11 @@
 // Threshold BFV multiplication with distributed l-BFV RLK and encrypted share transport.
 //
+// Smudging noise is computed via the secure `Lambda::secure(lambda)` API and
+// `generate_smudging_error_with_participant_count(..., num_parties, ...)` so the
+// accepted l-BFV participant count is explicit in the smudging bound. Paper-conforming
+// robustness requires odd n = 2t + 1; even n is accepted for compatibility but lies
+// outside the theorem.
+//
 // Two BFV parameter sets:
 //
 //   First set  (computation) — n=5, z=3, k=1000, d=16384, 4×61-bit moduli, λ=40.
@@ -55,8 +61,13 @@ fn print_notice_and_exit(error: Option<String>) {
         style("     usage:").magenta().bold()
     );
     println!(
-        "{} T ≤ (N-1)/2, N ≥ 1, L ≥ 1",
+        "{} T ≤ (N-1)/2, N ≥ 1, L ≥ {}. Paper-conforming robustness requires odd N (N = 2t + 1);",
         style("constraints:").magenta().bold(),
+        fhe::trbfv::MIN_SECURE_LAMBDA,
+    );
+    println!(
+        "{} even N is accepted for compatibility but lies outside the paper's theorem.",
+        style("           ").magenta().bold(),
     );
     if let Some(error) = error {
         println!("{} {}", style("     error:").red().bold(), error);
@@ -163,14 +174,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
     }
 
-    // λ=40 is the design point of this parameter set (above the library's MIN_SECURE_LAMBDA=35).
-    let security = Lambda::insecure(lambda);
+    // λ=40 is the design point of this parameter set (≥ fhe::trbfv::MIN_SECURE_LAMBDA=35).
+    let security = Lambda::secure(lambda)?;
     let mut rng = rand::rng();
 
     println!("\n# Threshold BFV multiplication");
-    println!("  num_parties = {num_parties}  (params: n=5, k=1000, z=3, λ=40)");
-    println!("  threshold   = {threshold}");
-    println!("  lambda      = {lambda}");
+    println!("  num_parties       = {num_parties}  (params: n=5, k=1000, z=3, λ=40)");
+    println!("  threshold         = {threshold}");
+    println!("  lambda            = {lambda}  (secure, >= fhe::trbfv::MIN_SECURE_LAMBDA)");
+    println!(
+        "  l-BFV participants = {num_parties}  (accepted RLK contributors for smudging bound)"
+    );
 
     // ── Party setup ───────────────────────────────────────────────────────────
     // Two public seeds for the l-BFV RLK protocol. In deployment these would be
@@ -233,9 +247,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .generate_secret_shares_from_poly(sk_poly, &mut rng)
                     .unwrap();
 
-                // Smudging noise shares (m=1 ciphertext, depth=3 multiplications).
+                // Smudging noise shares (m=1 ciphertext, depth=3 multiplications,
+                // accepted l-BFV participant count = num_parties).
                 let esi_coeffs = trbfv
-                    .generate_smudging_error(1, 3, security, &mut rng)
+                    .generate_smudging_error_with_participant_count(
+                        1,
+                        3,
+                        num_parties,
+                        security,
+                        &mut rng,
+                    )
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager
