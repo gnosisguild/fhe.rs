@@ -12,11 +12,12 @@
 use std::sync::Arc;
 
 use fhe::bfv::{BfvParameters, BfvParametersBuilder, Ciphertext, Encoding, Plaintext, SecretKey};
-use fhe::lbfv::{
-    LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey, LBFVRelinKeyShare,
-    LBFVRelinearizationKey,
-};
+use fhe::mbfv::AggregateIter;
 use fhe::trbfv::{Lambda, ShareManager, TRBFV};
+use fhe::trlbfv::{
+    AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
+    aggregate_relinearization_key,
+};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2};
@@ -68,7 +69,7 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
     };
 
     // ── Participant set (1‑based IDs) ╌─────────────────────────────────
-    let participant_set = LBFVParticipantSet::new([42u8; 32], (1..=N as u32).collect())
+    let participant_set = ParticipantSet::new([42u8; 32], (1..=N as u32).collect())
         .expect("sorted unique participant IDs");
 
     // ── Per-party secret-key contributions ╌───────────────────────────
@@ -77,26 +78,30 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
         .collect();
 
     // ── Distributed l-BFV public key ╌─────────────────────────────────
-    let pk_contributions: Vec<LBFVPublicKey> = sk_shares
+    let pk_contributions: Vec<PublicKeyShare> = sk_shares
         .iter()
         .enumerate()
         .map(|(i, sk_i)| {
-            let binding = LBFVContributionBinding::new(participant_set.clone(), (i + 1) as u32)
+            let binding = ContributionBinding::new(participant_set.clone(), (i + 1) as u32)
                 .expect("valid contribution binding");
-            LBFVPublicKey::new_with_seed_and_binding(sk_i, crs_seed, binding, &mut rng)
+            PublicKeyShare::new_with_seed_and_binding(sk_i, crs_seed, binding, &mut rng)
         })
         .collect::<Result<Vec<_>, _>>()
         .expect("PK contribution generation");
-    let aggregated_pk = LBFVPublicKey::aggregate(&pk_contributions).expect("PK aggregation");
+    let aggregated_pk = pk_contributions
+        .into_iter()
+        .aggregate::<AggregatedPublicKey>()
+        .expect("PK aggregation");
+    let pk = aggregated_pk.operational();
 
     // ── Distributed l-BFV relinearization key ╌────────────────────────
-    let rlk_shares: Vec<LBFVRelinKeyShare> = sk_shares
+    let rlk_shares: Vec<RelinKeyShare> = sk_shares
         .iter()
         .enumerate()
         .map(|(i, sk_i)| {
-            let binding = LBFVContributionBinding::new(participant_set.clone(), (i + 1) as u32)
+            let binding = ContributionBinding::new(participant_set.clone(), (i + 1) as u32)
                 .expect("valid contribution binding");
-            LBFVRelinKeyShare::contribution_with_binding(
+            RelinKeyShare::contribution_with_binding(
                 sk_i, urs_seed, crs_seed, binding, 0, // ciphertext_level
                 0, // key_level
                 &mut rng,
@@ -105,7 +110,7 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
         .collect::<Result<Vec<_>, _>>()
         .expect("RLK share generation");
     let aggregated_rlk =
-        LBFVRelinearizationKey::aggregate(&rlk_shares, &aggregated_pk).expect("RLK aggregation");
+        aggregate_relinearization_key(&rlk_shares, &aggregated_pk).expect("RLK aggregation");
 
     // ── Smudging noise (pre-shared, one‑time per party) ╌─────────────
     let smudging_noises: Vec<Vec<BigInt>> = (0..N)
@@ -201,9 +206,7 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
     let mut encrypt = |value: u64| -> Ciphertext {
         let pt =
             Plaintext::try_encode(&[value], Encoding::poly(), &params).expect("plaintext encode");
-        aggregated_pk
-            .try_encrypt(&pt, &mut rng)
-            .expect("encryption")
+        pk.try_encrypt(&pt, &mut rng).expect("encryption")
     };
 
     let ct_a = encrypt(2);

@@ -31,3 +31,7 @@
 - Both types live in `crates/fhe/src/bfv/crp.rs` and are exported from `fhe::bfv`. Legacy scheme-local CRP/CRS modules have been consolidated here — no scheme-specific CRP wrappers remain.
 - Concrete polynomials are authoritative. Seeds are metadata that reconstruct values but are not authentication. Equality comparisons of keys, shares, and CRP vectors use concrete polynomial equality, never seed equality alone.
 - `CommonRandomPolyVec::from_polys` validates length, polynomial contexts, and seed consistency. Vectors with missing or contradictory seed metadata are rejected.
+
+## L-BFV / TRLBFV boundary
+
+- `crates/fhe/src/lbfv/**` must not import `crate::trlbfv`. Threshold bindings, shares, aggregation, and threshold validation belong exclusively to `crate::trlbfv`.

@@ -23,7 +23,7 @@ Your role is to review changes to cryptographic code for correctness and to flag
 ## Scope
 
 Review changes that touch:
-- BFV, TRBFV, LBFV, or MBFV scheme implementations (`crates/fhe/src/bfv/`, `crates/fhe/src/trbfv/`, `crates/fhe/src/lbfv/`, `crates/fhe/src/mbfv/`)
+- BFV, TRBFV, TRLBFV, LBFV, or MBFV scheme implementations (`crates/fhe/src/bfv/`, `crates/fhe/src/trbfv/`, `crates/fhe/src/trlbfv/`, `crates/fhe/src/lbfv/`, `crates/fhe/src/mbfv/`)
 - Key generation, serialization, or handling
 - Noise sampling or smudging error generation
 - Parameter selection or validation

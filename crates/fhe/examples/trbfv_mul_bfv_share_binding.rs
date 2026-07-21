@@ -28,12 +28,13 @@ use std::{env, error::Error, process::exit, sync::Arc};
 use console::style;
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
-    lbfv::{
-        LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey, LBFVRelinKeyShare,
-        LBFVRelinearizationKey,
-    },
-    mbfv::{AggregateIter, PublicKeyShare},
+    lbfv::LBFVRelinearizationKey,
+    mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
     trbfv::{Lambda, ShareManager, TRBFV},
+    trlbfv::{
+        AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
+        aggregate_relinearization_key,
+    },
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -183,10 +184,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Canonical participant set — one common session ID covering all parties.
     let lbfv_session_id: [u8; 32] = rng.random();
     let lbfv_participant_set =
-        LBFVParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
+        ParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
 
     struct Party {
-        pk_share: PublicKeyShare,
+        pk_share: MBFVPublicKeyShare,
         sk_sss: Vec<Array2<u64>>,  // sk_sss[m]: shape (num_parties, degree)
         esi_sss: Vec<Array2<u64>>, // smudging error Shamir shares, same shape
         sk_sss_collected: Vec<Array2<u64>>, // collected from all senders; each (num_moduli, degree)
@@ -194,8 +195,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         sk_poly_sum: Poly<PowerBasis>,
         es_poly_sum: Poly<PowerBasis>,
         d_share_poly: Poly<PowerBasis>,
-        pk_lbfv_share: LBFVPublicKey, // l-BFV PK contribution (CRS = pk_seed)
-        rlk_share: LBFVRelinKeyShare,
+        pk_lbfv_share: PublicKeyShare, // l-BFV PK contribution (CRS = pk_seed)
+        rlk_share: RelinKeyShare,
         // Share-encryption key pair (second BFV parameter set).
         sk_share_enc: SecretKey,
         pk_share_enc: PublicKey,
@@ -216,12 +217,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Unique contribution binding for this party.
                 let binding =
-                    LBFVContributionBinding::new(participant_set_ref.clone(), participant_id)
-                        .unwrap();
+                    ContributionBinding::new(participant_set_ref.clone(), participant_id).unwrap();
 
                 // trBFV keys and Shamir shares.
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-                let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
+                let pk_share = MBFVPublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
                 let mut share_manager =
                     ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
@@ -243,7 +243,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
 
                 // l-BFV PK contribution (CRS seed = pk_seed, shared by all parties).
-                let pk_lbfv_share = LBFVPublicKey::new_with_seed_and_binding(
+                let pk_lbfv_share = PublicKeyShare::new_with_seed_and_binding(
                     &sk_share,
                     pk_seed,
                     binding.clone(),
@@ -252,7 +252,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
-                let rlk_share = LBFVRelinKeyShare::contribution_with_binding(
+                let rlk_share = RelinKeyShare::contribution_with_binding(
                     &sk_share, d1_seed, pk_seed, // a_seed must match pk_lbfv_share's CRS seed
                     binding, 0, 0, &mut rng,
                 )
@@ -283,12 +283,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // ── Distributed RLK aggregation ───────────────────────────────────────────
     let rlk: LBFVRelinearizationKey = timeit!("Distributed RLK aggregation", {
-        let pk_lbfv_shares: Vec<LBFVPublicKey> =
+        let pk_lbfv_shares: Vec<PublicKeyShare> =
             parties.iter().map(|p| p.pk_lbfv_share.clone()).collect();
-        let pk_lbfv = LBFVPublicKey::aggregate(&pk_lbfv_shares)?;
-        let rlk_shares: Vec<LBFVRelinKeyShare> =
-            parties.iter().map(|p| p.rlk_share.clone()).collect();
-        LBFVRelinearizationKey::aggregate(&rlk_shares, &pk_lbfv)?
+        let aggregated_pk = pk_lbfv_shares
+            .into_iter()
+            .aggregate::<AggregatedPublicKey>()?;
+        let rlk_shares: Vec<RelinKeyShare> = parties.iter().map(|p| p.rlk_share.clone()).collect();
+        aggregate_relinearization_key(&rlk_shares, &aggregated_pk)?
     });
     println!("✓ Relinearization key aggregated (l = {})", rlk.l()?);
 

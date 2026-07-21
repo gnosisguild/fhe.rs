@@ -37,7 +37,7 @@
 
 ## Workspace structure
 
-- `crates/fhe` — BFV, TRBFV, LBFV, MBFV scheme implementations
+- `crates/fhe` — BFV, TRBFV, TRLBFV (threshold l-BFV key generation, participant binding, and public-key/relinearization-key aggregation), LBFV, MBFV scheme implementations
 - `crates/fhe-math` — RNS, NTT, modular and polynomial arithmetic
 - `crates/fhe-traits` — shared HE traits
 - `crates/fhe-util` — utilities

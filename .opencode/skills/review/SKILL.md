@@ -9,7 +9,7 @@ One command that dispatches up to four review subagents and folds their findings
 
 - **`guard-review`** (subagent, always) — project-specific constraints and conventions: no panics/unwrap/expect/indexing in library code, `--release` tests, protobuf codegen rules, security claims policy, Touch → update parity.
 - **`quality-review`** (subagent, always) — universal Rust code quality: correctness, error handling, API quality, test coverage, design, performance.
-- **`crypto-reviewer`** (subagent, conditional) — cryptographic correctness: key handling, noise, parameters, serialization, decryption, threshold logic. Dispatched only when the diff touches `crates/fhe/src/{bfv,trbfv,lbfv,mbfv}/**` or `crates/fhe/examples/{mulpir,sealpir}.rs`.
+- **`crypto-reviewer`** (subagent, conditional) — cryptographic correctness: key handling, noise, parameters, serialization, decryption, threshold logic. Dispatched only when the diff touches `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**` or `crates/fhe/examples/{mulpir,sealpir}.rs`.
 - **`math-reviewer`** (subagent, conditional) — mathematical correctness: RNS, NTT, modular arithmetic, polynomial operations, bounds, conversions. Dispatched only when the diff touches `crates/fhe-math/src/**`.
 
 All subagents are read-only. This skill synthesizes, deduplicates, and resolves conflicts (guard-review wins on project-specific conflicts by definition).
@@ -29,7 +29,7 @@ git diff origin/main...HEAD --stat
 
 Determine which specialist reviewers to dispatch:
 
-- Does the diff touch `crates/fhe/src/{bfv,trbfv,lbfv,mbfv}/**` or `crates/fhe/examples/{mulpir,sealpir}.rs`? → dispatch `crypto-reviewer`
+- Does the diff touch `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**` or `crates/fhe/examples/{mulpir,sealpir}.rs`? → dispatch `crypto-reviewer`
 - Does the diff touch `crates/fhe-math/src/**`? → dispatch `math-reviewer`
 
 ## 2. Dispatch subagents in parallel

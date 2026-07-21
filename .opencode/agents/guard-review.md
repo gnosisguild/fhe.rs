@@ -22,7 +22,7 @@ You are the fhe.rs constraint guard. Review the current change — by default th
 
 Before reviewing, read `AGENTS.md` (the **Constraints** section and **Keeping rules up to date**). Then load only the area rules relevant to the diff — use the **Touch → update** table in AGENTS.md to decide:
 
-- Diff touches `crates/fhe/src/{bfv,trbfv,lbfv,mbfv}/**` or `crates/fhe/examples/{mulpir,sealpir}.rs` → load `.rules/crypto.md`
+- Diff touches `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**` or `crates/fhe/examples/{mulpir,sealpir}.rs` → load `.rules/crypto.md`
 - Diff touches `crates/fhe-math/src/**` → load `.rules/math.md`
 - Diff touches `**/build.rs`, `**/*.proto`, or `**/src/proto/**` → load `.rules/codegen.md`
 - Diff touches `**/tests/**`, `**/benches/**`, or `.github/workflows/**` → load `.rules/testing.md`
