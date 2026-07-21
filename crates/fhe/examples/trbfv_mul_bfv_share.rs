@@ -34,10 +34,10 @@ use std::{env, error::Error, process::exit, sync::Arc};
 
 use console::style;
 use fhe::{
-    bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
+    bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{
-        LBFVCommonReferenceString, LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey,
-        LBFVRelinKeyShare, LBFVRelinearizationKey,
+        LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey, LBFVRelinKeyShare,
+        LBFVRelinearizationKey,
     },
     trbfv::{Lambda, ShareManager, TRBFV},
 };
@@ -194,10 +194,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // ── Party setup ───────────────────────────────────────────────────────────
-    // Two shared strings for the l-BFV RLK protocol. In deployment these would
+    // Two shared CRP vectors for the l-BFV RLK protocol. In deployment these would
     // be established via coin-tossing.
-    let crs_a = LBFVCommonReferenceString::new(&params_trbfv, &mut rng)?;
-    let crs_d1 = LBFVCommonReferenceString::new(&params_trbfv, &mut rng)?;
+    let crp_a = CommonRandomPolyVec::new(&params_trbfv, &mut rng)?;
+    let crp_d1 = CommonRandomPolyVec::new(&params_trbfv, &mut rng)?;
 
     // Canonical participant set — one common session ID covering all parties.
     let lbfv_session_id: [u8; 32] = rand::random();
@@ -257,23 +257,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .generate_secret_shares_from_poly(esi_poly, &mut rng)
                     .unwrap();
 
-                // l-BFV PK contribution (shared crs_a, same a_j across all parties).
+                // l-BFV PK contribution (shared crp_a, same a_j across all parties).
                 let lbfv_binding =
                     LBFVContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32)
                         .unwrap();
-                let pk_lbfv_share = LBFVPublicKey::new_with_seed_and_binding(
+                let pk_lbfv_share = LBFVPublicKey::contribute_with_crp_and_binding(
                     &sk_share,
-                    crs_a.seed(),
+                    &crp_a,
                     lbfv_binding.clone(),
                     &mut rng,
                 )
                 .unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
-                let rlk_share = LBFVRelinKeyShare::contribution_with_binding(
+                let rlk_share = LBFVRelinKeyShare::contribution_with_crp_and_binding(
                     &sk_share,
-                    crs_d1.seed(),
-                    crs_a.seed(),
+                    &crp_d1,
+                    &crp_a,
                     lbfv_binding,
                     0,
                     0,

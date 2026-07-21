@@ -9,8 +9,10 @@ use itertools::izip;
 use rand::{CryptoRng, Rng as RngCore};
 use zeroize::Zeroizing;
 
+use crate::bfv::{CommonRandomPoly, CommonRandomPolyVec};
+
+use super::Aggregate;
 use super::round::{R1, R1Aggregated, R2, Round};
-use super::{Aggregate, CommonRandomPoly};
 
 /// A party's share in the relinearization key generation protocol.
 /// Use the [`RelinKeyGenerator`] to create these shares.
@@ -32,8 +34,8 @@ pub struct RelinKeyShare<R: Round = R1> {
 ///
 /// ```rust
 /// use std::sync::Arc;
-/// use fhe::bfv::{BfvParametersBuilder, RelinearizationKey, SecretKey};
-/// use fhe::mbfv::{Aggregate, CommonRandomPoly, RelinKeyGenerator, RelinKeyShare, round::*};
+/// use fhe::bfv::{BfvParametersBuilder, CommonRandomPolyVec, RelinearizationKey, SecretKey};
+/// use fhe::mbfv::{Aggregate, RelinKeyGenerator, RelinKeyShare, round::*};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let parameters = BfvParametersBuilder::new()
@@ -45,7 +47,7 @@ pub struct RelinKeyShare<R: Round = R1> {
 /// // Party perspective
 /// let mut rng = rand::rng();
 /// let sk_share = SecretKey::random(&parameters, &mut rng);
-/// let crp = CommonRandomPoly::new_vec(&parameters, &mut rng)?;
+/// let crp = CommonRandomPolyVec::new(&parameters, &mut rng)?;
 /// let rlk_generator = RelinKeyGenerator::new(&sk_share, &crp, &mut rng)?;
 /// let rlk_r1_share = rlk_generator.round_1(&mut rng)?;
 ///
@@ -64,7 +66,7 @@ pub struct RelinKeyShare<R: Round = R1> {
 /// ```
 pub struct RelinKeyGenerator<'a, 'b> {
     sk_share: &'a SecretKey,
-    crp: &'b [CommonRandomPoly],
+    crp: &'b CommonRandomPolyVec,
     u: Zeroizing<Poly<Ntt>>,
 }
 
@@ -75,7 +77,7 @@ impl<'a, 'b> RelinKeyGenerator<'a, 'b> {
     /// 2. *Public input*: common random polynomial vector
     pub fn new<R: RngCore + CryptoRng>(
         sk_share: &'a SecretKey,
-        crp: &'b [CommonRandomPoly],
+        crp: &'b CommonRandomPolyVec,
         rng: &mut R,
     ) -> Result<Self> {
         let params = sk_share.params.clone();
@@ -96,7 +98,7 @@ impl<'a, 'b> RelinKeyGenerator<'a, 'b> {
 
     /// Generate share for round 1
     pub fn round_1<R: RngCore + CryptoRng>(&self, rng: &mut R) -> Result<RelinKeyShare<R1>> {
-        <RelinKeyShare<R1>>::new(self.sk_share, self.crp, &self.u, rng)
+        <RelinKeyShare<R1>>::new(self.sk_share, self.crp.as_slice(), &self.u, rng)
     }
 
     /// Generate share for round 2
@@ -360,13 +362,10 @@ mod tests {
 
     use crate::{
         bfv::{
-            BfvParameters, Encoding, Multiplicator, Plaintext, PublicKey, RelinearizationKey,
-            SecretKey,
+            BfvParameters, CommonRandomPoly, CommonRandomPolyVec, Encoding, Multiplicator,
+            Plaintext, PublicKey, RelinearizationKey, SecretKey,
         },
-        mbfv::{
-            Aggregate as _, AggregateIter, CommonRandomPoly, DecryptionShare, PublicKeyShare,
-            RelinKeyGenerator,
-        },
+        mbfv::{Aggregate as _, AggregateIter, DecryptionShare, PublicKeyShare, RelinKeyGenerator},
     };
 
     const NUM_PARTIES: usize = 5;
@@ -381,7 +380,7 @@ mod tests {
             // Just support level 0 for now.
             let level = 0;
             for _ in 0..10 {
-                let crp = CommonRandomPoly::new_vec(&params, &mut rng).unwrap();
+                let crp = CommonRandomPolyVec::new(&params, &mut rng).unwrap();
 
                 let mut party_sks: Vec<SecretKey> = vec![];
                 let mut party_pks: Vec<PublicKeyShare> = vec![];

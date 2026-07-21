@@ -234,11 +234,8 @@ mod tests {
     use rand::rng;
 
     use crate::{
-        bfv::{BfvParameters, Encoding, Plaintext, PublicKey, SecretKey},
-        mbfv::{
-            Aggregate, AggregateIter, CommonRandomPoly, DecryptionShare, PublicKeyShare,
-            SecretKeySwitchShare,
-        },
+        bfv::{BfvParameters, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
+        mbfv::{Aggregate, AggregateIter, DecryptionShare, PublicKeyShare, SecretKeySwitchShare},
     };
 
     const NUM_PARTIES: usize = 11;

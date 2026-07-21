@@ -24,10 +24,10 @@ mod util;
 use std::{error::Error, sync::Arc};
 
 use fhe::{
-    bfv::{self, Encoding, Plaintext, SecretKey},
+    bfv::{self, CommonRandomPolyVec, Encoding, Plaintext, SecretKey},
     lbfv::{
-        LBFVCommonReferenceString, LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey,
-        LBFVRelinKeyShare, LBFVRelinearizationKey,
+        LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey, LBFVRelinKeyShare,
+        LBFVRelinearizationKey,
     },
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -64,12 +64,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let num_parties = 3usize;
 
-    // ── Shared CRS strings (established by coin-tossing in a real protocol) ──
-    // crs_a:  shared string for a = (a₀,...,a_{l-1}) — used in both pk and RLK d₂.
-    // crs_d1: shared string for d₁ — used in RLK d₀.
+    // ── Shared CRP vectors (established by coin-tossing in a real protocol) ──
+    // crp_a:  shared CRP vector for a = (a₀,...,a_{l-1}) — used in both pk and RLK d₂.
+    // crp_d1: shared CRP vector for d₁ — used in RLK d₀.
     // Both must be identical across all parties.
-    let crs_a = LBFVCommonReferenceString::new(&params, &mut rng)?;
-    let crs_d1 = LBFVCommonReferenceString::new(&params, &mut rng)?;
+    let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
+    let crp_d1 = CommonRandomPolyVec::new(&params, &mut rng)?;
 
     let lbfv_session_id: [u8; 32] = rand::random();
     let lbfv_participant_set =
@@ -85,36 +85,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Each party computes its l-BFV pk contribution:
     //   pk_share_i = [(b_{0,i}, a₀), ..., (b_{l-1,i}, a_{l-1})]
     //   where b_{j,i} = −a_j · sk_i + e_{j,i}
-    // All parties use the same crs so every a_j is identical across parties.
+    // All parties use the same crp_a so every a_j is identical across parties.
     let pk_shares: Vec<LBFVPublicKey> = sk_shares
         .iter()
         .enumerate()
         .map(|(i, sk_i)| {
             let binding =
                 LBFVContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32)?;
-            LBFVPublicKey::new_with_seed_and_binding(sk_i, crs_a.seed(), binding, &mut rng)
+            LBFVPublicKey::contribute_with_crp_and_binding(sk_i, &crp_a, binding, &mut rng)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
     // Each party computes its RLK contribution (d₀_i, d₂_i):
-    //   d₀_i[j] = −sk_i · d₁_j + e₀_{i,j} + g_j · r_i   (ksk_r_to_s, uses crs_d1)
-    //   d₂_i[j] =  r_i · a_j  + e₂_{i,j} + g_j · sk_i   (ksk_s_to_r, uses crs_a)
+    //   d₀_i[j] = −sk_i · d₁_j + e₀_{i,j} + g_j · r_i   (ksk_r_to_s, uses crp_d1)
+    //   d₂_i[j] =  r_i · a_j  + e₂_{i,j} + g_j · sk_i   (ksk_s_to_r, uses crp_a)
     // r_i is an ephemeral key sampled locally and discarded after this call.
-    // crs_a must equal the crs used for pk_shares (CRS binding check).
+    // crp_a must equal the crp used for pk_shares (CRS binding check).
     let rlk_shares: Vec<LBFVRelinKeyShare> = sk_shares
         .iter()
         .enumerate()
         .map(|(i, sk_i)| {
             let binding =
                 LBFVContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32)?;
-            LBFVRelinKeyShare::contribution_with_binding(
-                sk_i,
-                crs_d1.seed(),
-                crs_a.seed(),
-                binding,
-                0,
-                0,
-                &mut rng,
+            LBFVRelinKeyShare::contribution_with_crp_and_binding(
+                sk_i, &crp_d1, &crp_a, binding, 0, 0, &mut rng,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;

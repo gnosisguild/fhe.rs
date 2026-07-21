@@ -18,6 +18,27 @@
  *    implement robust DKG, broadcast, authentication, FLSS/GURS, or
  *    guaranteed output delivery.
  *
+ * # CRP vectors
+ *
+ * The shared polynomials `a` (CRS) and `d1` (URS) are supplied as
+ * [`CommonRandomPolyVec`](crate::bfv::CommonRandomPolyVec) values —
+ * vectors of `l` concrete random polynomials (one per RNS modulus).
+ *
+ * - Every [`CommonRandomPolyVec`] **always** stores concrete polynomials.
+ *   Equality checks use the polynomials, never relying on seeds alone.
+ * - The optional seed in a [`CommonRandomPolyVec`] is reconstruction
+ *   metadata only; it reconstructs the same values but is not
+ *   authentication.  A seed that contradicts the concrete polynomials is
+ *   rejected at construction.
+ * - Two independent [`CommonRandomPolyVec`] values (for `a` and `d1`) must
+ *   be agreed upon by all parties before key generation — this is the
+ *   protocol-level CRS/URS agreement step.  DKG, broadcast, authentication,
+ *   coin-tossing, FLSS, GURS, and guaranteed output delivery remain caller
+ *   responsibilities.
+ * - The implementation's `l` equals the number of RNS moduli, which need not
+ *   match the paper's gadget dimension because of the HPS optimisation
+ *   (<https://eprint.iacr.org/2018/117>).
+ *
  * # Distributed key aggregation
  *
  * This crate supports multi-party distributed key generation for l-BFV
@@ -46,11 +67,8 @@
  * applies to all key material produced by this module.
  */
 
-/// Common reference string for the l-BFV distributed key generation protocol.
-pub mod crs;
 pub mod keys;
 
-pub use crs::LBFVCommonReferenceString;
 pub use keys::{
     LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey, LBFVRelinKeyShare,
     LBFVRelinearizationKey,
