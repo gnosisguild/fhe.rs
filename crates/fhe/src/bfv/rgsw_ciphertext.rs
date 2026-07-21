@@ -30,7 +30,7 @@ impl FheEncrypter<Plaintext, RGSWCiphertext> for SecretKey {
         rng: &mut R,
     ) -> Result<RGSWCiphertext> {
         let level = pt.level;
-        let ctx = self.par.context_at_level(level)?;
+        let ctx = self.params.context_at_level(level)?;
 
         let m = Zeroizing::new(pt.poly_ntt.clone().into_power_basis());
         let mut m_s = Zeroizing::new(
@@ -53,7 +53,7 @@ impl Mul<&RGSWCiphertext> for &Ciphertext {
 
     fn mul(self, rhs: &RGSWCiphertext) -> Self::Output {
         assert_eq!(
-            self.par, rhs.ksk0.par,
+            self.params, rhs.ksk0.params,
             "Ciphertext and RGSWCiphertext must have the same parameters"
         );
         assert_eq!(
@@ -76,7 +76,7 @@ impl Mul<&RGSWCiphertext> for &Ciphertext {
             .unwrap();
 
         Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: None,
             c: vec![&c0 + &c0p, &c1 + &c1p],
             level: self.level,

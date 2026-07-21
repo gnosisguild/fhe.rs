@@ -28,8 +28,8 @@ impl GaloisKey {
         galois_key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx_galois_key = sk.par.context_at_level(galois_key_level)?;
-        let ctx_ciphertext = sk.par.context_at_level(ciphertext_level)?;
+        let ctx_galois_key = sk.params.context_at_level(galois_key_level)?;
+        let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
 
         let ciphertext_exponent =
             SubstitutionExponent::new(ctx_ciphertext, exponent).map_err(Error::MathError)?;
@@ -60,7 +60,7 @@ impl GaloisKey {
     /// Relinearize a [`Ciphertext`] using the [`GaloisKey`]
     #[allow(dead_code)]
     pub fn relinearize(&self, ct: &Ciphertext) -> Result<Ciphertext> {
-        // assert_eq!(ct.par, self.ksk.par);
+        // assert_eq!(ct.params, self.ksk.params);
         assert_eq!(ct.len(), 2);
 
         let c2 = ct[1].substitute(&self.element)?.into_power_basis();
@@ -78,7 +78,7 @@ impl GaloisKey {
         c0 += &ct[0].substitute(&self.element)?;
 
         Ok(Ciphertext {
-            par: ct.par.clone(),
+            params: ct.params.clone(),
             seed: None,
             c: vec![c0, c1],
             level: self.ksk.ciphertext_level,
@@ -95,7 +95,7 @@ impl GaloisKey {
                 Poly::<Ntt>::zero(ct[1].ctx()),
             ];
         }
-        out.par = ct.par.clone();
+        out.params = ct.params.clone();
         out.seed = None;
         out.level = self.ksk.ciphertext_level;
 
@@ -231,7 +231,7 @@ mod tests {
 
             let ct_expected = gk.relinearize(&ct)?;
 
-            let mut out = Ciphertext::zero(&ct.par);
+            let mut out = Ciphertext::zero(&ct.params);
             gk.relinearize_into(&ct, &mut out)?;
 
             assert_eq!(ct_expected, out);

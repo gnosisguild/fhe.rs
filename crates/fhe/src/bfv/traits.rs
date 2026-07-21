@@ -17,7 +17,7 @@ where
     Self: Sized,
 {
     /// Attempt to convert the `value` with a specific parameter.
-    fn try_convert_from(value: T, par: &Arc<BfvParameters>) -> Result<Self>;
+    fn try_convert_from(value: T, params: &Arc<BfvParameters>) -> Result<Self>;
 }
 
 /// Enum that can hold any type of relinearization key

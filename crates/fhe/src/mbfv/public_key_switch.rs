@@ -16,7 +16,7 @@ use super::Aggregate;
 /// Each party uses the `PublicKeySwitchShare` to generate their share of the
 /// new ciphertext and participate in the "Protocol 4: PubKeySwitch" protocol detailed in as detailed in [Multiparty BFV](https://eprint.iacr.org/2020/304.pdf) (p7). Use the [`Aggregate`] impl to combine the shares into a [`Ciphertext`].
 pub struct PublicKeySwitchShare {
-    pub(crate) par: Arc<BfvParameters>,
+    pub(crate) params: Arc<BfvParameters>,
     /// The first component of the input ciphertext
     pub(crate) c0: Poly<Ntt>,
     pub(crate) h0_share: Poly<Ntt>,
@@ -36,29 +36,29 @@ impl PublicKeySwitchShare {
         ct: &Ciphertext,
         rng: &mut R,
     ) -> Result<Self> {
-        if sk_share.par != public_key.par || public_key.par != ct.par {
+        if sk_share.params != public_key.params || public_key.params != ct.params {
             return Err(Error::DefaultError(
                 "Incompatible BFV parameters".to_string(),
             ));
         }
-        let par = sk_share.par.clone();
+        let params = sk_share.params.clone();
 
         // Get appropriate context / level for the following computations
         let mut pk_ct = public_key.c.clone();
         while pk_ct.level != ct.level {
             pk_ct.switch_down()?;
         }
-        let ctx = par.context_at_level(ct.level)?;
+        let ctx = params.context_at_level(ct.level)?;
 
         let mut s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
         );
         s.disallow_variable_time_computations();
 
-        let u = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
+        let u = Zeroizing::new(Poly::<Ntt>::small(ctx, params.variance, rng)?);
         // TODO this should be exponential in ciphertext noise!
-        let e0 = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
-        let e1 = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
+        let e0 = Zeroizing::new(Poly::<Ntt>::small(ctx, params.variance, rng)?);
+        let e1 = Zeroizing::new(Poly::<Ntt>::small(ctx, params.variance, rng)?);
 
         let mut h0 = pk_ct[0].clone();
         h0.disallow_variable_time_computations();
@@ -78,7 +78,7 @@ impl PublicKeySwitchShare {
         }
 
         Ok(Self {
-            par,
+            params,
             c0: ct[0].clone(),
             h0_share: h0,
             h1_share: h1,
@@ -105,7 +105,7 @@ impl Aggregate<PublicKeySwitchShare> for Ciphertext {
 
         let c0 = &share.c0 + &h0;
 
-        Ciphertext::new(vec![c0, h1], &share.par)
+        Ciphertext::new(vec![c0, h1], &share.params)
     }
 }
 
@@ -131,18 +131,18 @@ mod tests {
     #[test]
     fn encrypt_keyswitch_decrypt() {
         let mut rng = rng();
-        for par in [
+        for params in [
             BfvParameters::default_arc(1, 16),
             BfvParameters::default_arc(6, 32),
         ] {
-            for level in 0..=par.max_level() {
+            for level in 0..=params.max_level() {
                 for _ in 0..20 {
-                    let crp = CommonRandomPoly::new(&par, &mut rng).unwrap();
+                    let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
 
                     // Parties collectively generate public key
                     let mut parties: Vec<Party> = vec![];
                     for _ in 0..NUM_PARTIES {
-                        let sk_share = SecretKey::random(&par, &mut rng);
+                        let sk_share = SecretKey::random(&params, &mut rng);
                         let pk_share =
                             PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
                         parties.push(Party { sk_share, pk_share })
@@ -156,17 +156,17 @@ mod tests {
 
                     // Use it to encrypt a random polynomial ct1
                     let pt1 = Plaintext::try_encode(
-                        &fhe_math::zq::Modulus::new(par.plaintext())
+                        &fhe_math::zq::Modulus::new(params.plaintext())
                             .unwrap()
-                            .random_vec(par.degree(), &mut rng),
+                            .random_vec(params.degree(), &mut rng),
                         Encoding::poly_at_level(level),
-                        &par,
+                        &params,
                     )
                     .unwrap();
                     let ct1 = Arc::new(public_key.try_encrypt(&pt1, &mut rng).unwrap());
 
                     // Key switch ct1 to a new keypair
-                    let sk_out = SecretKey::random(&par, &mut rng);
+                    let sk_out = SecretKey::random(&params, &mut rng);
                     let pk_out = PublicKey::new(&sk_out, &mut rng);
                     let ct2 = parties
                         .iter()
