@@ -1,5 +1,6 @@
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use zeroize::Zeroizing;
 
 use crate::Result;
 use crate::bfv::{BfvParameters, CommonRandomPolyVec, KeySwitchingKey, SecretKey};
@@ -8,6 +9,21 @@ use fhe_math::rq::{NttShoup, Poly};
 use fhe_traits::FheParametrized;
 
 use super::ContributionBinding;
+
+/// Witness material produced alongside an [`RelinKeyShare`] for ZK proof generation.
+///
+/// Holds the private values that a party must commit to in order to prove
+/// correct construction of its relinearization-key contribution.  The witness
+/// must be kept confidential and **zeroized after use**.
+pub struct RlkWitness {
+    /// Ephemeral randomness key used during RLK generation.
+    /// Auto-zeroized when dropped.
+    pub r: Zeroizing<SecretKey>,
+    /// Per-row errors from `ksk_r_to_s`: `eᵢ` such that `d0ᵢ = eᵢ − sk·d1ᵢ + rᵢ·g`.
+    pub errors_d0: Vec<Poly<NttShoup>>,
+    /// Per-row errors from `ksk_s_to_r`: `eᵢ` such that `d2ᵢ = eᵢ + r·aᵢ + skᵢ·g`.
+    pub errors_d2: Vec<Poly<NttShoup>>,
+}
 
 /// A party's additive contribution to threshold l-BFV relinearization-key
 /// generation.
@@ -161,6 +177,68 @@ impl RelinKeyShare {
             Self::contribution_with_crp(sk, crp_d1, crp_a, ciphertext_level, key_level, rng)?;
         share.binding = Some(binding);
         Ok(share)
+    }
+
+    /// Like [`contribution_with_crp`](Self::contribution_with_crp) but also
+    /// returns an [`RlkWitness`] containing the ephemeral key `r` and the
+    /// per-row error polynomials needed for ZK witness generation.
+    pub fn contribution_with_crp_extended<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        crp_d1: &CommonRandomPolyVec,
+        crp_a: &CommonRandomPolyVec,
+        ciphertext_level: usize,
+        key_level: usize,
+        rng: &mut R,
+    ) -> Result<(Self, RlkWitness)> {
+        let d1_polys: Vec<Poly<NttShoup>> = crp_d1
+            .to_polys()
+            .into_iter()
+            .map(|p| p.into_ntt_shoup())
+            .collect();
+        let a_polys: Vec<Poly<NttShoup>> = crp_a
+            .to_polys()
+            .into_iter()
+            .map(|p| p.into_ntt_shoup())
+            .collect();
+
+        let (mut ksk_r_to_s, mut ksk_s_to_r, r, errors_d0, errors_d2) =
+            LBFVRelinearizationKey::generate_components_with_polys_extended(
+                sk,
+                d1_polys,
+                a_polys,
+                ciphertext_level,
+                key_level,
+                rng,
+            )?;
+
+        ksk_r_to_s.seed = crp_d1.seed();
+        ksk_s_to_r.seed = crp_a.seed();
+
+        Ok((
+            Self {
+                ksk_r_to_s,
+                ksk_s_to_r,
+                binding: None,
+            },
+            RlkWitness { r, errors_d0, errors_d2 },
+        ))
+    }
+
+    /// Like [`contribution_with_crp_and_binding`](Self::contribution_with_crp_and_binding)
+    /// but also returns an [`RlkWitness`] for ZK witness generation.
+    pub fn contribution_with_crp_and_binding_extended<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        crp_d1: &CommonRandomPolyVec,
+        crp_a: &CommonRandomPolyVec,
+        binding: ContributionBinding,
+        ciphertext_level: usize,
+        key_level: usize,
+        rng: &mut R,
+    ) -> Result<(Self, RlkWitness)> {
+        let (mut share, witness) =
+            Self::contribution_with_crp_extended(sk, crp_d1, crp_a, ciphertext_level, key_level, rng)?;
+        share.binding = Some(binding);
+        Ok((share, witness))
     }
 }
 
