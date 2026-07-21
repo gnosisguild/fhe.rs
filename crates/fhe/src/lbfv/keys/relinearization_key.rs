@@ -200,6 +200,85 @@ impl LBFVRelinearizationKey {
         Ok((ksk_r_to_s, ksk_s_to_r))
     }
 
+    /// Like [`generate_components_with_polys`](Self::generate_components_with_polys)
+    /// but also returns the ephemeral key `r` and the per-row error polynomials
+    /// from both KSKs — needed for ZK witness generation.
+    ///
+    /// Returns `(ksk_r_to_s, ksk_s_to_r, r, errors_d0, errors_d2)` where:
+    /// - `r` is the ephemeral `SecretKey`; auto-zeroized when dropped.
+    /// - `errors_d0[i]` is the small error `eᵢ` such that `d0ᵢ = eᵢ − sk·d1ᵢ + rᵢ·g`.
+    /// - `errors_d2[i]` is the small error `eᵢ` such that `d2ᵢ = eᵢ + r·aᵢ + skᵢ·g`.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn generate_components_with_polys_extended<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        d1_polys: Vec<Poly<NttShoup>>,
+        a_polys: Vec<Poly<NttShoup>>,
+        ciphertext_level: usize,
+        key_level: usize,
+        rng: &mut R,
+    ) -> Result<(
+        KeySwitchingKey,
+        KeySwitchingKey,
+        Zeroizing<SecretKey>,
+        Vec<Poly<NttShoup>>,
+        Vec<Poly<NttShoup>>,
+    )> {
+        let ctx_relin_key = sk.params.context_at_level(key_level)?;
+        let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
+        let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
+
+        if ciphertext_level < key_level {
+            return Err(Error::DefaultError(
+                "Ciphertext level must be greater than or equal to key level".to_string(),
+            ));
+        }
+        if ctx_relin_key.moduli().len() == 1 || ctx_ciphertext.moduli().len() == 1 {
+            return Err(Error::DefaultError(
+                "These parameters do not support key switching".to_string(),
+            ));
+        }
+
+        let r = Zeroizing::new(SecretKey::random(&sk.params, rng));
+        let r_poly = Zeroizing::new(Poly::<PowerBasis>::try_convert_from(
+            r.coeffs.as_ref(),
+            ctx_ciphertext,
+            false,
+        )?);
+        let r_switched_up = Zeroizing::new(r_poly.switch(&switcher_up)?);
+
+        let sk_poly = Zeroizing::new(Poly::<PowerBasis>::try_convert_from(
+            sk.coeffs.as_ref(),
+            ctx_ciphertext,
+            false,
+        )?);
+        let sk_switched_up = Zeroizing::new(sk_poly.switch(&switcher_up)?);
+
+        let (ksk_r_to_s, errors_d0) = KeySwitchingKey::new_with_c1_extended(
+            sk,
+            &r_switched_up,
+            d1_polys,
+            ciphertext_level,
+            key_level,
+            rng,
+        )?;
+
+        let mut neg_r = Zeroizing::new((*r).clone());
+        neg_r
+            .coeffs
+            .iter_mut()
+            .for_each(|coefficient| *coefficient = coefficient.wrapping_neg());
+        let (ksk_s_to_r, errors_d2) = KeySwitchingKey::new_with_c1_extended(
+            &neg_r,
+            &sk_switched_up,
+            a_polys,
+            ciphertext_level,
+            key_level,
+            rng,
+        )?;
+
+        Ok((ksk_r_to_s, ksk_s_to_r, r, errors_d0, errors_d2))
+    }
+
     /// Build a relinearization key from pre-computed components.
     ///
     /// Validates that the two KSKs are structurally consistent and that

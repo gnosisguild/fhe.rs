@@ -41,4 +41,4 @@ pub use aggregate::{
 };
 pub use binding::{ContributionBinding, ParticipantSet};
 pub use public_key_share::PublicKeyShare;
-pub use relin_key_share::RelinKeyShare;
+pub use relin_key_share::{RelinKeyShare, RlkWitness};

@@ -83,6 +83,7 @@ Canonical detailed guidance in `.rules/` — read the full file when relevant:
 - [`.rules/codegen.md`](.rules/codegen.md) — protoc/prost feature-gated build flow
 - [`.rules/harness.md`](.rules/harness.md) — this scaffolding's invariants
 - [`.rules/changelog.md`](.rules/changelog.md) — when to edit changelog, version alignment
+- [`.rules/zk-witness.md`](.rules/zk-witness.md) — ZK witness API for encryption and RLK proof generation
 
 ## Keeping rules up to date
 

@@ -217,6 +217,101 @@ impl KeySwitchingKey {
         }
     }
 
+    /// Like [`new_with_c1`](Self::new_with_c1) but also returns the per-row error
+    /// polynomials sampled during `c0` generation.
+    ///
+    /// Each `errors[i]` is the small error `eᵢ` such that
+    /// `c0[i] = eᵢ − c1[i]·sk + gᵢ·from`.  The errors are returned in
+    /// `NttShoup` form for consistency with `c0`.  They are needed by ZK
+    /// witness-generation routines that must prove knowledge of the noise.
+    pub fn new_with_c1_extended<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        from: &Poly<PowerBasis>,
+        c1: Vec<Poly<NttShoup>>,
+        ciphertext_level: usize,
+        ksk_level: usize,
+        rng: &mut R,
+    ) -> Result<(Self, Vec<Poly<NttShoup>>)> {
+        if ciphertext_level < ksk_level {
+            return Err(Error::DefaultError(format!(
+                "ciphertext_level ({ciphertext_level}) must be >= ksk_level ({ksk_level})"
+            )));
+        }
+
+        let params = sk.params.clone();
+        let ctx_ksk = params.context_at_level(ksk_level)?.clone();
+        let ctx_ciphertext = params.context_at_level(ciphertext_level)?.clone();
+
+        if from.ctx() != &ctx_ksk {
+            return Err(Error::DefaultError(
+                "Incorrect context for polynomial from".to_string(),
+            ));
+        }
+
+        for (i, c1i) in c1.iter().enumerate() {
+            if c1i.ctx().as_ref() != ctx_ksk.as_ref() {
+                return Err(Error::DefaultError(format!(
+                    "c1[{i}] has wrong context: expected ksk-level context"
+                )));
+            }
+        }
+
+        if ctx_ksk.moduli().len() == 1 {
+            let modulus = ctx_ksk
+                .moduli()
+                .first()
+                .ok_or_else(|| Error::DefaultError("Empty modulus list in ctx_ksk".to_string()))?;
+            let log_modulus = modulus.next_power_of_two().ilog2() as usize;
+            let log_base = log_modulus / 2;
+            let expected_len = log_modulus.div_ceil(log_base);
+            if c1.len() != expected_len {
+                return Err(Error::DefaultError(format!(
+                    "Expected {expected_len} c1 polynomials for single-modulus context, got {}",
+                    c1.len()
+                )));
+            }
+            let (c0, errors) =
+                Self::generate_c0_decomposition_with_errors(sk, from, &c1, rng, log_base)?;
+            Ok((
+                Self {
+                    params,
+                    seed: None,
+                    c0: c0.into_boxed_slice(),
+                    c1: c1.into_boxed_slice(),
+                    ciphertext_level,
+                    ctx_ciphertext,
+                    ksk_level,
+                    ctx_ksk,
+                    log_base,
+                },
+                errors,
+            ))
+        } else {
+            let expected_len = ctx_ciphertext.moduli().len();
+            if c1.len() != expected_len {
+                return Err(Error::DefaultError(format!(
+                    "Expected {expected_len} c1 polynomials, got {}",
+                    c1.len()
+                )));
+            }
+            let (c0, errors) = Self::generate_c0_with_errors(sk, from, &c1, rng)?;
+            Ok((
+                Self {
+                    params,
+                    seed: None,
+                    c0: c0.into_boxed_slice(),
+                    c1: c1.into_boxed_slice(),
+                    ciphertext_level,
+                    ctx_ciphertext,
+                    ksk_level,
+                    ctx_ksk,
+                    log_base: 0,
+                },
+                errors,
+            ))
+        }
+    }
+
     /// Deterministically generate `c1` polynomials from a seed and context.
     ///
     /// This is the reusable helper for sharing `d1`/`a` material across
@@ -344,6 +439,109 @@ impl KeySwitchingKey {
             .collect::<Result<Vec<Poly<NttShoup>>>>()?;
 
         Ok(c0)
+    }
+
+    /// Like [`generate_c0`](Self::generate_c0) but also returns the per-row
+    /// error polynomials `eᵢ` captured before they are folded into `c0`.
+    #[allow(clippy::type_complexity)]
+    fn generate_c0_with_errors<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        from: &Poly<PowerBasis>,
+        c1: &[Poly<NttShoup>],
+        rng: &mut R,
+    ) -> Result<(Vec<Poly<NttShoup>>, Vec<Poly<NttShoup>>)> {
+        if c1.is_empty() {
+            return Err(Error::DefaultError("Empty number of c1's".to_string()));
+        }
+
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c1[0].ctx(), false)?
+                .into_ntt(),
+        );
+
+        let rns = RnsContext::new(&sk.params.moduli[..c1.len()])?;
+
+        let pairs: Vec<(Poly<NttShoup>, Poly<NttShoup>)> = c1
+            .iter()
+            .enumerate()
+            .map(|(i, c1i)| {
+                let mut a_s = Zeroizing::new(c1i.clone().into_ntt());
+                a_s.disallow_variable_time_computations();
+                *a_s.as_mut() *= s.as_ref();
+                let ctx = a_s.ctx().clone();
+                let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
+                let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis());
+
+                let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
+
+                let mut error_i = b.clone();
+                unsafe { error_i.allow_variable_time_computations() }
+                let error_ntt = error_i.into_ntt_shoup();
+
+                b -= a_s_pb.as_ref();
+
+                let gi = rns.get_garner(i).ok_or_else(|| {
+                    Error::DefaultError(format!("Garner coefficient {i} not found"))
+                })?;
+                let g_i_from = Zeroizing::new(gi * from);
+                b += &g_i_from;
+
+                unsafe { b.allow_variable_time_computations() }
+                Ok((b.into_ntt_shoup(), error_ntt))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(pairs.into_iter().unzip())
+    }
+
+    /// Like [`generate_c0_decomposition`](Self::generate_c0_decomposition) but
+    /// also returns per-row errors.
+    #[allow(clippy::type_complexity)]
+    fn generate_c0_decomposition_with_errors<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        from: &Poly<PowerBasis>,
+        c1: &[Poly<NttShoup>],
+        rng: &mut R,
+        log_base: usize,
+    ) -> Result<(Vec<Poly<NttShoup>>, Vec<Poly<NttShoup>>)> {
+        if c1.is_empty() {
+            return Err(Error::DefaultError("Empty number of c1's".to_string()));
+        }
+
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c1[0].ctx(), false)?
+                .into_ntt(),
+        );
+
+        let pairs: Vec<(Poly<NttShoup>, Poly<NttShoup>)> = c1
+            .iter()
+            .enumerate()
+            .map(|(i, c1i)| {
+                let mut a_s = Zeroizing::new(c1i.clone().into_ntt());
+                a_s.disallow_variable_time_computations();
+                *a_s.as_mut() *= s.as_ref();
+                let ctx = a_s.ctx().clone();
+                let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
+                let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis());
+
+                let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
+
+                let mut error_i = b.clone();
+                unsafe { error_i.allow_variable_time_computations() }
+                let error_ntt = error_i.into_ntt_shoup();
+
+                b -= a_s_pb.as_ref();
+
+                let power = BigUint::from(1u64 << (i * log_base));
+                let from_power = Zeroizing::new(from * &power);
+                b += from_power.as_ref();
+
+                unsafe { b.allow_variable_time_computations() }
+                Ok((b.into_ntt_shoup(), error_ntt))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(pairs.into_iter().unzip())
     }
 
     /// Key switch a polynomial.
