@@ -39,10 +39,10 @@ use std::{env, error::Error, process::exit, sync::Arc};
 
 use console::style;
 use fhe::{
-    bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
+    bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{
-        LBFVCommonReferenceString, LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey,
-        LBFVRelinKeyShare, LBFVRelinearizationKey,
+        LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey, LBFVRelinKeyShare,
+        LBFVRelinearizationKey,
     },
     trbfv::{Lambda, ShareManager, TRBFV},
 };
@@ -188,11 +188,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  threshold   = {threshold}");
     println!("  lambda      = {lambda}");
 
-    // ── Shared strings ───────────────────────────────────────────────────────
-    // crs_a:  shared string for a = (a₀,...,a_{l-1}) — used in both pk and RLK d₂.
-    // crs_d1: shared string for d₁ — used in RLK d₀.
-    let crs_a = LBFVCommonReferenceString::new(&params_trbfv, &mut rng)?;
-    let crs_d1 = LBFVCommonReferenceString::new(&params_trbfv, &mut rng)?;
+    // ── Shared CRP vectors ───────────────────────────────────────────────────
+    // crp_a:  shared CRP vector for a = (a₀,...,a_{l-1}) — used in both pk and RLK d₂.
+    // crp_d1: shared CRP vector for d₁ — used in RLK d₀.
+    let crp_a = CommonRandomPolyVec::new(&params_trbfv, &mut rng)?;
+    let crp_d1 = CommonRandomPolyVec::new(&params_trbfv, &mut rng)?;
 
     // Canonical participant set — one common session ID covering all parties.
     let lbfv_session_id: [u8; 32] = rand::random();
@@ -235,19 +235,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let lbfv_binding =
                     LBFVContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32)
                         .unwrap();
-                let pk_lbfv_share = LBFVPublicKey::new_with_seed_and_binding(
+                let pk_lbfv_share = LBFVPublicKey::contribute_with_crp_and_binding(
                     &sk_share,
-                    crs_a.seed(),
+                    &crp_a,
                     lbfv_binding.clone(),
                     &mut rng,
                 )
                 .unwrap();
 
-                // RLK share: d₀_i uses crs_d1, d₂_i uses crs_a (must match pk's crs_a).
-                let rlk_share = LBFVRelinKeyShare::contribution_with_binding(
+                // RLK share: d₀_i uses crp_d1, d₂_i uses crp_a (must match pk's crp_a).
+                let rlk_share = LBFVRelinKeyShare::contribution_with_crp_and_binding(
                     &sk_share,
-                    crs_d1.seed(),
-                    crs_a.seed(),
+                    &crp_d1,
+                    &crp_a,
                     lbfv_binding,
                     0,
                     0,

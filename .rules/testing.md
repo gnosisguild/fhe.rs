@@ -37,6 +37,29 @@ cargo bench --bench rq
 
 Do not leave benchmark results or criterion target directories in the worktree.
 
+## CRP vectors and l-BFV key tests
+
+When adding or modifying `CommonRandomPoly` / `CommonRandomPolyVec` or l-BFV key generation / aggregation:
+
+- **CommonRandomPolyVec tests:**
+  - Deterministic seed reconstruction produces identical concrete polynomials.
+  - Seedless random vectors differ (with overwhelming probability).
+  - `from_polys` validates length (equal to modulus count) and polynomial context.
+  - `from_polys` rejects a seed that does not reproduce the supplied polynomials.
+  - `from_polys` with `None` seed produces a seedless vector with correct concrete content.
+
+- **l-BFV `a` / `d1` consumption tests:**
+  - Seedless public-key constructors (`new_with_crp`, `contribute_with_crp`) use the supplied concrete polynomials and do not populate `pk.seed` (or carry the CRP seed when present).
+  - `contribution_with_crp` for relinearization shares converts CRP entries to NttShoup and passes them to the concrete-contribution path.
+  - Mismatched-vector-length or incorrect-context CRP vectors are rejected.
+  - `new_leveled_with_crp` and `new_with_crp` produce functional relinearization keys that pass a multiplication-and-decrypt round-trip.
+  - Concrete `a`/`d1` equality across contributions is verified (aggregation rejects divergent polys).
+  - Seeded-key tampering (contradictory seed) is rejected at construction.
+
+- **Migrated consumers:**
+  - Every example, benchmark, and integration test that previously imported legacy scheme-local CRP/CRS types is updated to use `bfv::CommonRandomPoly` / `bfv::CommonRandomPolyVec`.
+  - No stale re-export or alias remains for removed CRP/CRS paths.
+
 ## Smudging and threshold E2E
 
 When modifying trBFV smudging, noise accounting, or threshold decryption:

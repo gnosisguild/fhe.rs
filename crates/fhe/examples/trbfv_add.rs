@@ -13,8 +13,8 @@ use std::{env, error::Error, process::exit, sync::Arc};
 
 use console::style;
 use fhe::{
-    bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
-    mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
+    bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
+    mbfv::{AggregateIter, PublicKeyShare},
     trbfv::{Lambda, ShareManager, TRBFV},
 };
 

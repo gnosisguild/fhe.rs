@@ -37,6 +37,7 @@ Treat changes to the following as security-sensitive. Review them with extra car
 ### l-BFV and trBFV
 
 - l-BFV's public relinearization key is linear in the secret key and has the paper form `(d0, d1, d2)`, implemented as two related key-switching keys plus the public-key `b` vector. Preserve the signs and directions `r -> s` and `s -> r`; the implementation negates `r` to represent the paper's `-a` component.
+- **CRP vectors.** The shared polynomials for `a` (CRS) and `d1` (URS) are supplied as [`CommonRandomPolyVec`](crate::bfv::CommonRandomPolyVec) values — vectors of `l` concrete random polynomials with optional seed metadata. The concrete polynomials are authoritative for equality checks; seeds are reconstruction metadata, not authentication. Two independent vectors (for `a` and `d1`) must be agreed upon by all parties before key generation, and the same `a` vector must be used for both the public key and the relinearization key.
 - The public random values corresponding to `a` and `d1` must be common across contributions. Replacing them with independently sampled per-party values breaks additivity.
 - Distributed encryption-key, relinearization-key, secret-key-share, and pre-shared-noise contributions must use the same accepted participant set `S`. Mixing participant sets produces incompatible keys or noise shares and invalidates the robustness argument.
 - **l-BFV aggregation binding.** `LBFVPublicKey::aggregate` and `LBFVRelinearizationKey::aggregate` enforce exact participant-set/session equality through [`LBFVParticipantSet`] and [`LBFVContributionBinding`] metadata. Every accepted participant ID must appear exactly once; contributions from different sessions or with duplicate IDs are rejected. The explicit `a` (CRS) and `d1` (URS) polynomials are compared by concrete polynomial equality across contributions. Component linearity (`Σ d0_i`, `Σ d2_i`, unchanged `d1`/`a`) is verified by dedicated tests.
@@ -58,8 +59,8 @@ Treat changes to the following as security-sensitive. Review them with extra car
 ### MBFV
 
 - MBFV implements the semi-honest N-out-of-N construction in <https://eprint.iacr.org/2020/304>; it is not the robust `(t + 1)`-out-of-`n` trBFV protocol.
-- The ideal secret key and collective public key are additive sums of party contributions. Aggregation must include each intended contribution exactly once and use the same common random polynomial.
-- MBFV relinearization key generation is a two-round protocol. Every round-2 share must be bound to the same exact round-1 aggregate; reject missing, duplicated, or cross-session contributions. Valid share order is irrelevant because aggregation is additive.
+- The ideal secret key and collective public key are additive sums of party contributions. Aggregation must include each intended contribution exactly once and use the same common random polynomial ([`CommonRandomPoly`](crate::bfv::CommonRandomPoly)).
+- MBFV relinearization key generation is a two-round protocol that uses a [`CommonRandomPolyVec`](crate::bfv::CommonRandomPolyVec) (one CRP per RNS modulus). Every round-2 share must be bound to the same exact round-1 aggregate; reject missing, duplicated, or cross-session contributions. Valid share order is irrelevant because aggregation is additive.
 - Collective key switching and decryption reveal ciphertext noise unless fresh smudging noise dominates the current ciphertext noise. The paper's protocol requires the smudging distribution to be selected from a bound or variance for that ciphertext, not merely the fresh-encryption error distribution. Treat any code path that lacks this accounting as incomplete, not as paper-level security.
 
 ### PIR examples

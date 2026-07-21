@@ -16,8 +16,8 @@ mod util;
 use std::{error::Error, sync::Arc};
 
 use fhe::{
-    bfv::{self, Encoding, Plaintext, SecretKey},
-    lbfv::{LBFVCommonReferenceString, LBFVPublicKey, LBFVRelinearizationKey},
+    bfv::{self, CommonRandomPolyVec, Encoding, Plaintext, SecretKey},
+    lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use util::timeit::timeit;
@@ -63,16 +63,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let sk = SecretKey::random(&params, &mut rng);
 
-    let crs_a = LBFVCommonReferenceString::new(&params, &mut rng)?;
-    let crs_d1 = LBFVCommonReferenceString::new(&params, &mut rng)?;
+    // Shared CRP vectors: crp_a (CRS a) and crp_d1 (URS d1), established via
+    // coin-tossing.  Both are ConcreteRandomPolyVectors with independent seeds.
+    let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
+    let crp_d1 = CommonRandomPolyVec::new(&params, &mut rng)?;
     let pk_lbfv = timeit!(
         "l-BFV public key",
-        LBFVPublicKey::new_from_crs(&sk, &crs_a, &mut rng)?
+        LBFVPublicKey::new_with_crp(&sk, &crp_a, &mut rng)?
     );
 
     let rlk = timeit!(
         "Relinearization key generation",
-        LBFVRelinearizationKey::new(&sk, &pk_lbfv, Some(crs_d1.seed()), &mut rng)?
+        LBFVRelinearizationKey::new_with_crp(&sk, &pk_lbfv, &crp_d1, &mut rng)?
     );
     println!("l = {}", rlk.l()?);
 

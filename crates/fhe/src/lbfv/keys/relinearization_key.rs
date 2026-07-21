@@ -51,7 +51,7 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 use super::{LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey};
-use crate::lbfv::crs::LBFVCommonReferenceString;
+use crate::bfv::CommonRandomPolyVec;
 
 /// A relinearization key for the l-BFV scheme, consisting of two key switching
 /// keys: one from r to s and another from s to r. This enables single-round
@@ -355,33 +355,73 @@ impl LBFVRelinKeyShare {
         Ok(share)
     }
 
-    /// Compute this party's contribution using explicit [`LBFVCommonReferenceString`]s.
+    /// Compute this party's contribution using explicit [`CommonRandomPolyVec`]
+    /// vectors for the URS `d1` and CRS `a`.
     ///
-    /// Preferred over [`contribution`](Self::contribution) when following the paper's
-    /// protocol: both shared strings are named first-class objects, making it clear
-    /// that `crs_d1` (for `d₀`) and `crs_a` (for `d₂` and the public key) are
-    /// independent and agreed upon separately via coin-tossing.
+    /// This is the on-chain-URS relinearization path: the caller provides the
+    /// shared `d1` and `a` vectors (as `CommonRandomPolyVec`). The concrete
+    /// polynomials are extracted and converted to `NttShoup` for use as KSK
+    /// `c1` material.
     ///
     /// # Arguments
-    /// * `crs_d1` — shared string for `d₁` (used in `ksk_r_to_s`, RLK `d₀`)
-    /// * `crs_a`  — shared string for `a`  (used in `ksk_s_to_r`, RLK `d₂`; must
-    ///   match the `crs_a` passed to [`LBFVPublicKey::new_from_crs`])
-    pub fn contribution_from_crs<R: RngCore + CryptoRng>(
+    /// * `crp_d1` — shared URS vector for `d₁` (used in `ksk_r_to_s`, RLK `d₀`).
+    /// * `crp_a`  — shared CRS vector for `a`  (used in `ksk_s_to_r`, RLK `d₂`;
+    ///   must match the vector passed to [`LBFVPublicKey::new_with_crp`]).
+    pub fn contribution_with_crp<R: RngCore + CryptoRng>(
         sk_i: &SecretKey,
-        crs_d1: &LBFVCommonReferenceString,
-        crs_a: &LBFVCommonReferenceString,
+        crp_d1: &CommonRandomPolyVec,
+        crp_a: &CommonRandomPolyVec,
         ciphertext_level: usize,
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        Self::contribution(
+        // Convert concrete NTT polynomials to NttShoup for the KSK c1 path.
+        let d1_polys: Vec<Poly<NttShoup>> = crp_d1
+            .to_polys()
+            .into_iter()
+            .map(|p| p.into_ntt_shoup())
+            .collect();
+        let a_polys: Vec<Poly<NttShoup>> = crp_a
+            .to_polys()
+            .into_iter()
+            .map(|p| p.into_ntt_shoup())
+            .collect();
+
+        let mut share = Self::contribution_with_polys(
             sk_i,
-            crs_d1.seed,
-            crs_a.seed,
+            d1_polys,
+            a_polys,
             ciphertext_level,
             key_level,
             rng,
-        )
+        )?;
+
+        // Preserve the CRP master seeds as KSK metadata when present.
+        // The KSK seed field records the derivation seed for its c1 polynomials;
+        // a CRP master seed is informational metadata, not a per-KSK derivation seed.
+        share.ksk_r_to_s.seed = crp_d1.seed();
+        share.ksk_s_to_r.seed = crp_a.seed();
+
+        Ok(share)
+    }
+
+    /// Compute this party's contribution using explicit [`CommonRandomPolyVec`]
+    /// vectors with participant binding metadata.
+    ///
+    /// This is the bound version of [`contribution_with_crp`](Self::contribution_with_crp).
+    pub fn contribution_with_crp_and_binding<R: RngCore + CryptoRng>(
+        sk_i: &SecretKey,
+        crp_d1: &CommonRandomPolyVec,
+        crp_a: &CommonRandomPolyVec,
+        binding: LBFVContributionBinding,
+        ciphertext_level: usize,
+        key_level: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let mut share =
+            Self::contribution_with_crp(sk_i, crp_d1, crp_a, ciphertext_level, key_level, rng)?;
+        share.binding = Some(binding);
+        Ok(share)
     }
 }
 
@@ -484,20 +524,46 @@ impl LBFVRelinearizationKey {
             seed
         });
 
-        // When the public key carries a seed we can derive both a and d1 from
-        // seeds deterministically (fast seed-only path). When the public key is
-        // seedless we must extract its concrete a polynomials and build explicit
-        // d1 polynomials from the d1 seed.
+        // The seeded path is gated on pk.seed:
+        //  - pk.seed == Some(s) and s matches concrete a_j → fast seed-only path.
+        //  - pk.seed == None                                   → explicit polynomial path.
+        //  - pk.seed == Some(s) but s does NOT match a_j       → error (contradictory metadata).
         let share = match pk.seed {
-            Some(a_seed) => LBFVRelinKeyShare::contribution(
-                sk,
-                d1_seed,
-                a_seed,
-                ciphertext_level,
-                key_level,
-                rng,
-            )?,
+            Some(a_seed) => {
+                // Validate that the concrete a_j stored in the PK actually
+                // match the seed. A tampered PK (c[1] changed but seed left
+                // alone) must be rejected immediately, not silently fixed.
+                let ctx0 = pk.params.context_at_level(key_level)?;
+                let mut seed_rng = ChaCha8Rng::from_seed(a_seed);
+                let new_l = pk.l.checked_sub(ciphertext_level).ok_or_else(|| {
+                    Error::DefaultError("ciphertext_level exceeds public-key l".to_string())
+                })?;
+                for j in 0..new_l {
+                    let mut seed_j = <ChaCha8Rng as SeedableRng>::Seed::default();
+                    seed_rng.fill(&mut seed_j);
+                    let expected_a = Poly::<Ntt>::random_from_seed(ctx0, seed_j);
+                    let actual_a = pk.c.get(j).and_then(|ct| ct.c.get(1)).ok_or_else(|| {
+                        Error::DefaultError("Public key is missing its a_j polynomial".to_string())
+                    })?;
+                    if expected_a != *actual_a {
+                        return Err(Error::DefaultError(format!(
+                            "Public-key a_j at index {j} does not match its stored seed"
+                        )));
+                    }
+                }
+                // Seed matches — use the fast seed-only path.
+                LBFVRelinKeyShare::contribution(
+                    sk,
+                    d1_seed,
+                    a_seed,
+                    ciphertext_level,
+                    key_level,
+                    rng,
+                )?
+            }
             None => {
+                // Seedless PK — extract concrete a from the PK and build
+                // explicit d1 polynomials from the d1 seed.
                 let a_polys = pk.a_polynomials_for_level(ciphertext_level, key_level)?;
                 let d1_context = pk.params.context_at_level(key_level)?;
                 let d1_polys = KeySwitchingKey::c1_from_seed(d1_context, d1_seed, a_polys.len());
@@ -547,6 +613,51 @@ impl LBFVRelinearizationKey {
             rng,
         )?;
         Self::aggregate_single_unbound(&[share], pk)
+    }
+
+    /// Generate a new leveled relinearization key using a [`CommonRandomPolyVec`]
+    /// for the URS `d1` polynomials.
+    ///
+    /// This is the CRP-vector variant of [`new_leveled_with_polys`](Self::new_leveled_with_polys).
+    /// The `d1` polynomials are extracted from `crp_d1` and converted to
+    /// `NttShoup`; the `a` (CRS) polynomials are extracted from the public key
+    /// as usual. The optional seed from `crp_d1` is recorded in the result key's
+    /// KSK seed metadata when present.
+    ///
+    /// # Arguments
+    /// * `sk` - The secret key for key generation.
+    /// * `pk` - The l-BFV public key whose concrete `a` polynomials are used as
+    ///   CRS material.
+    /// * `crp_d1` - A [`CommonRandomPolyVec`] providing the URS `d1` polynomials.
+    /// * `ciphertext_level` / `key_level` - Levels (currently restricted to 0).
+    /// * `rng` - RNG for ephemeral `r` and the errors.
+    pub fn new_leveled_with_crp<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        pk: &LBFVPublicKey,
+        crp_d1: &CommonRandomPolyVec,
+        ciphertext_level: usize,
+        key_level: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let d1_polys: Vec<Poly<NttShoup>> = crp_d1
+            .to_polys()
+            .into_iter()
+            .map(|p| p.into_ntt_shoup())
+            .collect();
+        Self::new_leveled_with_polys(sk, pk, d1_polys, ciphertext_level, key_level, rng)
+    }
+
+    /// Generate a new relinearization key using a [`CommonRandomPolyVec`] for the
+    /// URS `d1` at level 0.
+    ///
+    /// Convenience wrapper around [`new_leveled_with_crp`](Self::new_leveled_with_crp).
+    pub fn new_with_crp<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        pk: &LBFVPublicKey,
+        crp_d1: &CommonRandomPolyVec,
+        rng: &mut R,
+    ) -> Result<Self> {
+        Self::new_leveled_with_crp(sk, pk, crp_d1, 0, 0, rng)
     }
 
     /// Aggregate per-node contributions into a distributed relinearization key,
@@ -2727,6 +2838,85 @@ mod tests {
         assert!(
             LBFVRelinearizationKey::aggregate_single_unbound(&[malformed3], &pk).is_err(),
             "aggregate_single_unbound should reject share with mismatched KSK parameters"
+        );
+
+        Ok(())
+    }
+
+    /// `contribution_with_crp` uses the concrete `d1` and `a` polynomials
+    /// from the CRP vectors and preserves seed metadata in the KSKs.
+    #[test]
+    fn contribution_with_crp_preserves_seed_metadata() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let mut d1_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut d1_seed);
+        let mut a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut a_seed);
+
+        let crp_d1 = CommonRandomPolyVec::from_seed(&params, d1_seed)?;
+        let crp_a = CommonRandomPolyVec::from_seed(&params, a_seed)?;
+
+        let share = LBFVRelinKeyShare::contribution_with_crp(&sk, &crp_d1, &crp_a, 0, 0, &mut rng)?;
+
+        // Seed metadata is preserved in the KSKs.
+        assert_eq!(share.ksk_r_to_s.seed, Some(d1_seed));
+        assert_eq!(share.ksk_s_to_r.seed, Some(a_seed));
+
+        // The functional correctness is verified by building a relin key
+        // and performing a multiplication roundtrip.
+        let pk = LBFVPublicKey::new_with_crp(&sk, &crp_a, &mut rng)?;
+        let rlk = LBFVRelinearizationKey::new_with_crp(&sk, &pk, &crp_d1, &mut rng)?;
+        let pt = Plaintext::try_encode(&[3u64], Encoding::poly(), &params)?;
+        let ct = pk.try_encrypt(&pt, &mut rng)?;
+        let mut ct_sq = &ct * &ct;
+        rlk.relinearizes(&mut ct_sq)?;
+        assert_eq!(
+            Vec::<u64>::try_decode(&sk.try_decrypt(&ct_sq)?, Encoding::poly())?[0],
+            9
+        );
+
+        Ok(())
+    }
+
+    /// A tampered public key where the concrete `a` polynomials have been
+    /// changed but `pk.seed` is left unchanged must be rejected immediately
+    /// by the seeded RLK path — contradictory seed metadata is an error.
+    #[test]
+    fn tampered_pk_concrete_a_rejected_by_seeded_rlk_path() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut seed);
+
+        // Build a valid PK from the seed.
+        let valid_pk = LBFVPublicKey::new_with_seed(&sk, seed, &mut rng)?;
+
+        // Tamper: replace one of the concrete a_j polynomials with a random one,
+        // but leave pk.seed unchanged.
+        let ctx0 = params.context_at_level(0)?;
+        let mut tampered_cts = valid_pk.c.clone();
+        let original_a0 = tampered_cts[0].c[1].clone();
+        tampered_cts[0].c[1] = Poly::<Ntt>::small(ctx0, params.variance, &mut rng)?;
+        let mut tampered_pk = valid_pk.clone();
+        tampered_pk.c = tampered_cts;
+
+        // The tampered PK should still have seed = Some(seed).
+        assert_eq!(tampered_pk.seed, Some(seed));
+        // But the concrete a0 no longer matches the seed.
+        assert_ne!(tampered_pk.c[0].c[1], original_a0);
+
+        // The seeded RLK path must reject the contradictory seed immediately.
+        let d1_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        let result =
+            LBFVRelinearizationKey::new_leveled(&sk, &tampered_pk, Some(d1_seed), 0, 0, &mut rng);
+        assert!(
+            result.is_err(),
+            "Seeded RLK path must reject a PK whose concrete a_j contradict its stored seed"
         );
 
         Ok(())

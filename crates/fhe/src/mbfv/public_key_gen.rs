@@ -7,7 +7,9 @@ use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 //use serde::{Serialize, Deserialize};
 
-use super::{Aggregate, CommonRandomPoly};
+use crate::bfv::CommonRandomPoly;
+
+use super::Aggregate;
 
 /// A party's share in public key generation protocol.
 ///
@@ -209,8 +211,8 @@ mod tests {
     use rand::rng;
 
     use crate::{
-        bfv::{BfvParameters, Encoding, Plaintext, PublicKey, SecretKey},
-        mbfv::{Aggregate as _, CommonRandomPoly},
+        bfv::{BfvParameters, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
+        mbfv::Aggregate as _,
     };
 
     use super::PublicKeyShare;

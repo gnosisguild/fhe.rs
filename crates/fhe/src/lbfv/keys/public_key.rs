@@ -47,8 +47,7 @@ use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
 use super::{LBFVContributionBinding, LBFVKeyBinding, LBFVParticipantSet};
-use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
-use crate::lbfv::crs::LBFVCommonReferenceString;
+use crate::bfv::{BfvParameters, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, SecretKey};
 use fhe_math::rq::{
     Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher, traits::TryConvertFrom,
 };
@@ -465,19 +464,56 @@ impl LBFVPublicKey {
         Ok(key)
     }
 
-    /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using an explicit
-    /// [`LBFVCommonReferenceString`].
+    /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using explicit
+    /// CRS polynomials supplied as a [`CommonRandomPolyVec`].
     ///
-    /// This is the preferred constructor when following the paper's protocol:
-    /// the CRS `a = (a₀,...,a_{l-1})` is a first-class shared object established
-    /// by coin-tossing, and the same `crs` is passed to every party and to
-    /// [`LBFVRelinKeyShare::contribution_from_crs`].
-    pub fn new_from_crs<R: RngCore + CryptoRng>(
+    /// The concrete `a_j` polynomials are extracted from `crp` and used as the
+    /// shared CRS; the optional seed is copied into the key as compression
+    /// metadata. This is the preferred on-chain-URS constructor: the same
+    /// `crp` must be passed to every party and to
+    /// [`LBFVRelinKeyShare::contribution_with_crp`].
+    ///
+    /// Internally delegates to [`contribute`](Self::contribute) so the result is
+    /// a valid single-party public key with seed metadata.
+    pub fn new_with_crp<R: RngCore + CryptoRng>(
         sk: &SecretKey,
-        crs: &LBFVCommonReferenceString,
+        crp: &CommonRandomPolyVec,
         rng: &mut R,
     ) -> Result<Self> {
-        Self::new_with_seed(sk, crs.seed, rng)
+        let a_polys = crp.to_polys();
+        let mut key = Self::contribute(sk, &a_polys, rng)?;
+        key.seed = crp.seed();
+        key.validate_structure()?;
+        Ok(key)
+    }
+
+    /// Compute one party's public-key contribution using the concrete CRS
+    /// polynomials from a [`CommonRandomPolyVec`].
+    ///
+    /// Delegates to [`contribute`](Self::contribute) and copies the optional
+    /// seed as metadata.
+    pub fn contribute_with_crp<R: RngCore + CryptoRng>(
+        sk_i: &SecretKey,
+        crp: &CommonRandomPolyVec,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let mut key = Self::contribute(sk_i, &crp.to_polys(), rng)?;
+        key.seed = crp.seed();
+        Ok(key)
+    }
+
+    /// Compute one party's public-key contribution using a [`CommonRandomPolyVec`]
+    /// and a participant binding.
+    pub fn contribute_with_crp_and_binding<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        crp: &CommonRandomPolyVec,
+        binding: LBFVContributionBinding,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let mut key = Self::contribute_with_crp(sk, crp, rng)?;
+        key.binding = Some(LBFVKeyBinding::Contribution(binding));
+        key.validate_structure()?;
+        Ok(key)
     }
 
     // ---------------------------------------------------------------------------
@@ -977,7 +1013,7 @@ mod tests {
     use super::super::{LBFVContributionBinding, LBFVParticipantSet};
     use super::super::{LBFVRelinKeyShare, LBFVRelinearizationKey};
     use super::LBFVPublicKey;
-    use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
+    use crate::bfv::{BfvParameters, CommonRandomPolyVec, Encoding, Plaintext, SecretKey};
     use fhe_math::rq::{Ntt, Poly, Representation};
     use fhe_math::zq::Modulus;
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -1731,6 +1767,104 @@ mod tests {
         let pt_result = sk_joint.try_decrypt(&ct_product)?;
         let result = Vec::<u64>::try_decode(&pt_result, Encoding::poly())?;
         assert_eq!(result[0], 15);
+
+        Ok(())
+    }
+
+    /// `new_with_crp` uses the supplied concrete `a` polynomials from a
+    /// seedless CRP vector, and the resulting key carries no seed.
+    #[test]
+    fn new_with_crp_uses_concrete_a_from_seedless_vector() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let crp = CommonRandomPolyVec::new(&params, &mut rng)?;
+        assert!(crp.seed().is_none());
+
+        let pk = LBFVPublicKey::new_with_crp(&sk, &crp, &mut rng)?;
+
+        // The seed should be absent (seedless CRP).
+        assert!(pk.seed.is_none());
+
+        // The concrete a polynomials must match the CRP.
+        let expected_a = crp.to_polys();
+        for (j, ct) in pk.c.iter().enumerate() {
+            assert_eq!(ct.c[1], expected_a[j]);
+        }
+
+        // Encrypt/decrypt roundtrip works.
+        let pt = Plaintext::try_encode(&[42u64], Encoding::poly(), &params)?;
+        let ct = pk.try_encrypt(&pt, &mut rng)?;
+        assert_eq!(sk.try_decrypt(&ct)?, pt);
+
+        Ok(())
+    }
+
+    /// `contribute_with_crp` uses the concrete `a` polynomials from the CRP
+    /// and copies the optional seed as metadata.
+    #[test]
+    fn contribute_with_crp_preserves_seed_metadata() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        // Seeded CRP → seed should be copied.
+        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut seed);
+        let crp = CommonRandomPolyVec::from_seed(&params, seed)?;
+
+        let pk = LBFVPublicKey::contribute_with_crp(&sk, &crp, &mut rng)?;
+        assert_eq!(pk.seed, Some(seed));
+
+        // Concrete a polynomials must match.
+        let expected_a = crp.to_polys();
+        for (j, ct) in pk.c.iter().enumerate() {
+            assert_eq!(ct.c[1], expected_a[j]);
+        }
+
+        Ok(())
+    }
+
+    /// Aggregation must reject contributions built from different CRP vectors
+    /// (different concrete `a` polynomials), even if both are seedless.
+    #[test]
+    fn aggregation_rejects_mismatched_crp_vectors() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let n = 2;
+
+        let participant_set = LBFVParticipantSet::new([92u8; 32], (1..=n as u32).collect())?;
+        let sk_shares: Vec<SecretKey> = (0..n)
+            .map(|_| SecretKey::random(&params, &mut rng))
+            .collect();
+
+        let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
+        let crp_b = CommonRandomPolyVec::new(&params, &mut rng)?;
+
+        let c1 = {
+            let binding = LBFVContributionBinding::new(participant_set.clone(), 1)?;
+            LBFVPublicKey::contribute_with_crp_and_binding(
+                &sk_shares[0],
+                &crp_a,
+                binding,
+                &mut rng,
+            )?
+        };
+        let c2 = {
+            let binding = LBFVContributionBinding::new(participant_set, 2)?;
+            LBFVPublicKey::contribute_with_crp_and_binding(
+                &sk_shares[1],
+                &crp_b,
+                binding,
+                &mut rng,
+            )?
+        };
+
+        assert!(
+            LBFVPublicKey::aggregate(&[c1, c2]).is_err(),
+            "Aggregation must reject contributions from different CRP vectors"
+        );
 
         Ok(())
     }
