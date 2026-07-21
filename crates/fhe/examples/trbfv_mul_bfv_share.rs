@@ -17,13 +17,13 @@
 //              BFV decrypt is correct because k ≈ 2^61 < q₀/2 ≈ 2^61.9999  ✓
 //
 // Protocol:
-//  1. Each party generates: trBFV key share, Shamir shares of sk and smudging error,
-//     an l-BFV RLK share, and a share-encryption BFV key pair (second set).
+//  1. Each party generates: an l-BFV pk share, an l-BFV RLK share, Shamir shares of
+//     sk and smudging error, and a share-encryption BFV key pair (second set).
 //  2. Share-encryption public keys are published. Each party BFV-encrypts its Shamir
 //     shares for every receiver under the receiver's share-encryption key.
 //  3. Each receiver decrypts and aggregates the collected shares to reconstruct
 //     its Lagrange evaluation point of the combined secret key SK = Σ sk_j.
-//  4. Two values are encrypted under the combined mbfv PublicKey, multiplied and
+//  4. Two values are encrypted under the aggregated l-BFV pk, multiplied and
 //     relinearized using the aggregated RLK, then threshold-decrypted by t+1 parties.
 
 #![allow(clippy::indexing_slicing, missing_docs)]
