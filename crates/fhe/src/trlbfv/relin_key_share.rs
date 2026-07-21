@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
