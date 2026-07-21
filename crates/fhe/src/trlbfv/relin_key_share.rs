@@ -166,6 +166,8 @@ impl RelinKeyShare {
 
 #[cfg(feature = "protobuf")]
 mod protobuf {
+    use std::sync::Arc;
+
     use super::*;
     use crate::SerializationError;
     use crate::bfv::traits::TryConvertFrom;
