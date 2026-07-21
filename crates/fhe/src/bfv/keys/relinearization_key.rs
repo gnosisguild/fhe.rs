@@ -83,8 +83,8 @@ impl RelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx_relin_key = sk.params.context_at_level(key_level)?;
-        let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
+        let ctx_relin_key = sk.par.context_at_level(key_level)?;
+        let ctx_ciphertext = sk.par.context_at_level(ciphertext_level)?;
 
         if ctx_relin_key.moduli().len() == 1 {
             return Err(Error::DefaultError(
@@ -141,7 +141,7 @@ impl RelinearizationKey {
     /// Get the parameters of the relinearization key
     #[must_use]
     pub fn parameters(&self) -> Arc<BfvParameters> {
-        self.ksk.params.clone()
+        self.ksk.par.clone()
     }
 
     /// Get the ciphertext level of the relinearization key
