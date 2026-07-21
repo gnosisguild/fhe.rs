@@ -35,11 +35,13 @@ use std::{env, error::Error, process::exit, sync::Arc};
 use console::style;
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
-    lbfv::{
-        LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey, LBFVRelinKeyShare,
-        LBFVRelinearizationKey,
-    },
+    lbfv::LBFVRelinearizationKey,
+    mbfv::AggregateIter,
     trbfv::{Lambda, ShareManager, TRBFV},
+    trlbfv::{
+        AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
+        aggregate_relinearization_key,
+    },
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -202,7 +204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Canonical participant set — one common session ID covering all parties.
     let lbfv_session_id: [u8; 32] = rand::random();
     let lbfv_participant_set =
-        LBFVParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
+        ParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
 
     struct Party {
         sk_sss: Vec<Array2<u64>>,           // sk_sss[m]: shape (num_parties, degree)
@@ -212,8 +214,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         sk_poly_sum: Poly<PowerBasis>,
         es_poly_sum: Poly<PowerBasis>,
         d_share_poly: Poly<PowerBasis>,
-        pk_lbfv_share: LBFVPublicKey, // l-BFV PK contribution (shared crs_a)
-        rlk_share: LBFVRelinKeyShare,
+        pk_lbfv_share: PublicKeyShare, // l-BFV PK contribution (shared crs_a)
+        rlk_share: RelinKeyShare,
         // Share-encryption key pair (second BFV parameter set).
         sk_share_enc: SecretKey,
         pk_share_enc: PublicKey,
@@ -259,9 +261,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // l-BFV PK contribution (shared crp_a, same a_j across all parties).
                 let lbfv_binding =
-                    LBFVContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32)
-                        .unwrap();
-                let pk_lbfv_share = LBFVPublicKey::contribute_with_crp_and_binding(
+                    ContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32).unwrap();
+                let pk_lbfv_share = PublicKeyShare::contribute_with_crp_and_binding(
                     &sk_share,
                     &crp_a,
                     lbfv_binding.clone(),
@@ -270,7 +271,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
-                let rlk_share = LBFVRelinKeyShare::contribution_with_crp_and_binding(
+                let rlk_share = RelinKeyShare::contribution_with_crp_and_binding(
                     &sk_share,
                     &crp_d1,
                     &crp_a,
@@ -305,15 +306,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // ── Distributed pk + RLK aggregation ─────────────────────────────────────
     // pk_lbfv is used for both RLK (b_vec) and encryption (c[0]).
-    let pk_lbfv: LBFVPublicKey;
+    let aggregated_pk: AggregatedPublicKey;
     let rlk: LBFVRelinearizationKey = timeit!("Distributed pk + RLK aggregation", {
-        let pk_lbfv_shares: Vec<LBFVPublicKey> =
+        let pk_lbfv_shares: Vec<PublicKeyShare> =
             parties.iter().map(|p| p.pk_lbfv_share.clone()).collect();
-        pk_lbfv = LBFVPublicKey::aggregate(&pk_lbfv_shares)?;
-        let rlk_shares: Vec<LBFVRelinKeyShare> =
-            parties.iter().map(|p| p.rlk_share.clone()).collect();
-        LBFVRelinearizationKey::aggregate(&rlk_shares, &pk_lbfv)?
+        aggregated_pk = pk_lbfv_shares
+            .into_iter()
+            .aggregate::<AggregatedPublicKey>()?;
+        let rlk_shares: Vec<RelinKeyShare> = parties.iter().map(|p| p.rlk_share.clone()).collect();
+        aggregate_relinearization_key(&rlk_shares, &aggregated_pk)?
     });
+    let pk_lbfv = aggregated_pk.operational();
     println!("✓ pk_lbfv and RLK aggregated (l = {})", rlk.l()?);
 
     // ── Share encryption and transmission ─────────────────────────────────────

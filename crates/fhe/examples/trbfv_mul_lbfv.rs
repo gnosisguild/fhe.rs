@@ -40,11 +40,13 @@ use std::{env, error::Error, process::exit, sync::Arc};
 use console::style;
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
-    lbfv::{
-        LBFVContributionBinding, LBFVParticipantSet, LBFVPublicKey, LBFVRelinKeyShare,
-        LBFVRelinearizationKey,
-    },
+    lbfv::LBFVRelinearizationKey,
+    mbfv::AggregateIter,
     trbfv::{Lambda, ShareManager, TRBFV},
+    trlbfv::{
+        AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
+        aggregate_relinearization_key,
+    },
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -197,7 +199,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Canonical participant set — one common session ID covering all parties.
     let lbfv_session_id: [u8; 32] = rand::random();
     let lbfv_participant_set =
-        LBFVParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
+        ParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
 
     // ── Party struct ──────────────────────────────────────────────────────────
     // Each party holds one l-BFV pk share (used for both RLK and encryption).
@@ -210,8 +212,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         sk_poly_sum: Poly<PowerBasis>,
         es_poly_sum: Poly<PowerBasis>,
         d_share_poly: Poly<PowerBasis>,
-        pk_lbfv_share: LBFVPublicKey,
-        rlk_share: LBFVRelinKeyShare,
+        pk_lbfv_share: PublicKeyShare,
+        rlk_share: RelinKeyShare,
         // Share-encryption key pair (second BFV parameter set).
         sk_share_enc: SecretKey,
         pk_share_enc: PublicKey,
@@ -233,9 +235,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // where b_{j,i} = −a_j · sk_i + e_{j,i}. All parties use the same crs_a → same a_j.
                 // c[0] = (b₀, a₀) is used for encryption (paper §3.1, B[0]/a[0]).
                 let lbfv_binding =
-                    LBFVContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32)
-                        .unwrap();
-                let pk_lbfv_share = LBFVPublicKey::contribute_with_crp_and_binding(
+                    ContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32).unwrap();
+                let pk_lbfv_share = PublicKeyShare::contribute_with_crp_and_binding(
                     &sk_share,
                     &crp_a,
                     lbfv_binding.clone(),
@@ -244,7 +245,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap();
 
                 // RLK share: d₀_i uses crp_d1, d₂_i uses crp_a (must match pk's crp_a).
-                let rlk_share = LBFVRelinKeyShare::contribution_with_crp_and_binding(
+                let rlk_share = RelinKeyShare::contribution_with_crp_and_binding(
                     &sk_share,
                     &crp_d1,
                     &crp_a,
@@ -297,15 +298,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // ── Distributed RLK + pk aggregation ─────────────────────────────────────
     // The same pk_lbfv serves both purposes: b_vec for RLK and c[0] for encryption.
-    let pk_lbfv: LBFVPublicKey;
+    let aggregated_pk: AggregatedPublicKey;
     let rlk: LBFVRelinearizationKey = timeit!("Distributed pk + RLK aggregation", {
-        let pk_lbfv_shares: Vec<LBFVPublicKey> =
+        let pk_lbfv_shares: Vec<PublicKeyShare> =
             parties.iter().map(|p| p.pk_lbfv_share.clone()).collect();
-        pk_lbfv = LBFVPublicKey::aggregate(&pk_lbfv_shares)?;
-        let rlk_shares: Vec<LBFVRelinKeyShare> =
-            parties.iter().map(|p| p.rlk_share.clone()).collect();
-        LBFVRelinearizationKey::aggregate(&rlk_shares, &pk_lbfv)?
+        aggregated_pk = pk_lbfv_shares
+            .into_iter()
+            .aggregate::<AggregatedPublicKey>()?;
+        let rlk_shares: Vec<RelinKeyShare> = parties.iter().map(|p| p.rlk_share.clone()).collect();
+        aggregate_relinearization_key(&rlk_shares, &aggregated_pk)?
     });
+    let pk_lbfv = aggregated_pk.operational();
     println!("✓ pk_lbfv and RLK aggregated (l = {})", rlk.l()?);
 
     // ── Share encryption and transmission ─────────────────────────────────────

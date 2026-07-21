@@ -246,7 +246,7 @@ mod tests {
         BfvParameters, Ciphertext, Encoding, Plaintext, RelinearizationKey, SecretKey,
     };
     use crate::lbfv::LBFVPublicKey;
-    use crate::lbfv::keys::LBFVRelinearizationKey;
+    use crate::lbfv::LBFVRelinearizationKey;
     use fhe_math::{
         rns::{RnsContext, ScalingFactor},
         zq::primes::generate_prime,

@@ -5,8 +5,7 @@
  *
  * Every public key holds `l` ciphertexts `(b_j, a_j)`.  The **concrete**
  * `a_j` polynomials are the authoritative shared reference string (CRS):
- * equality checks throughout aggregation and relinearization-key binding
- * compare the actual polynomial coefficients, never seeds alone.
+ * equality checks compare the actual polynomial coefficients, never seeds alone.
  *
  * The [`seed`](LBFVPublicKey::seed) field is optional compression
  * metadata: it records the seed that *would* regenerate the same `a_j`
@@ -15,54 +14,27 @@
  * deserialization time (see [`from_parts`](LBFVPublicKey::from_parts)).
  * A seed that contradicts the concrete polynomials is rejected.
  *
- * # Bound vs. unbound construction
+ * # Single-party operational key
  *
- * Constructors come in two forms:
- *
- * - **Unbound** (`new`, `new_with_seed`, `contribute`, `from_parts`) —
- *   produce standalone keys without participant metadata.  These are intended
- *   for single-party use and backward compatibility.  They cannot be used
- *   with the strict distributed aggregation path.
- *
- * - **Bound** (`new_with_seed_and_binding`, `contribute_with_binding`,
- *   `from_parts_with_binding`) — attach an [`LBFVContributionBinding`] so
- *   that distributed aggregation can enforce exact participant-set/session
- *   equality and reject duplicate or missing contributions.
- *
- * Unbound keys remain usable for standalone encryption/decryption and can
- * still be serialized/deserialized.  Only bound contributions are accepted
- * by [`LBFVPublicKey::aggregate`].
- *
- * Participant bindings are **consistency metadata**, not authentication.
- * No signatures, broadcast protocol, or full DKG orchestration is provided
- * by this module.  See Urban–Rambaud (2024, §5) for the robust-DKG
- * adversarial model.
+ * This module provides a strictly single-party operational public key.
+ * There is no distributed aggregation, participant bindings, or
+ * threshold construction.  All threshold/multiparty utilities live in
+ * [`crate::trlbfv`]; use [`crate::trlbfv::PublicKeyShare`] and
+ * [`crate::trlbfv::AggregatedPublicKey`] for distributed-key workflows.
  */
 
-use crate::{Error, Result, SerializationError};
+use crate::{Error, Result};
 use std::sync::Arc;
 
-use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
-use super::{LBFVContributionBinding, LBFVKeyBinding, LBFVParticipantSet};
-use crate::bfv::{
-    BfvParameters, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, SecretKey,
-    traits::TryConvertFrom,
-};
+use crate::bfv::{BfvParameters, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, SecretKey};
 use fhe_math::rq::{
-    Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher,
-    traits::TryConvertFrom as RqTryConvertFrom,
+    Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher, traits::TryConvertFrom,
 };
-use crate::lbfv::crs::LBFVCommonReferenceString;
-use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
-use fhe_math::rq::{
-    Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher,
-    traits::TryConvertFrom as RqTryConvertFrom,
-};
-use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
+use fhe_traits::{FheEncrypter, FheParametrized};
 
 /// Public key for the L-BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -82,8 +54,6 @@ pub struct LBFVPublicKey {
     /// comparison is the sole consistency mechanism. When present, it is
     /// verified against the concrete polynomials at construction time.
     pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
-    /// Optional key binding for distributed aggregation.
-    pub(crate) binding: Option<LBFVKeyBinding>,
 }
 
 impl LBFVPublicKey {
@@ -140,7 +110,6 @@ impl LBFVPublicKey {
             c,
             l: sk.params.moduli().len(),
             seed: Some(seed),
-            binding: None,
         })
     }
 
@@ -150,6 +119,77 @@ impl LBFVPublicKey {
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
         Self::new_with_seed(sk, seed, rng)
+    }
+
+    /// Build a public key from a [`SecretKey`] and explicit CRS polynomials `a_j`.
+    ///
+    /// This is the core operational constructor: the caller supplies the shared
+    /// `a_j` CRS polynomials (as a slice of NTT polynomials) and an optional
+    /// compression seed, and the helper computes `b_j = -a_j·sk + e_j` for each
+    /// `j`, then delegates to [`from_parts`](Self::from_parts).
+    ///
+    /// # Arguments
+    /// * `sk` - The secret key.
+    /// * `a_polynomials` - The `l` shared CRS polynomials `a_j`.
+    /// * `seed` - Optional compression metadata seed. When `None`, the key
+    ///   carries no seed.
+    /// * `rng` - RNG for sampling the error polynomials `e_j`.
+    pub(crate) fn from_crs<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        a_polynomials: &[Poly<Ntt>],
+        seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
+        rng: &mut R,
+    ) -> Result<Self> {
+        if sk.coeffs.len() != sk.params.degree() {
+            return Err(Error::DefaultError(format!(
+                "Secret key has {} coefficients, expected {}",
+                sk.coeffs.len(),
+                sk.params.degree()
+            )));
+        }
+
+        let l = sk.params.moduli().len();
+        if a_polynomials.len() != l {
+            return Err(Error::DefaultError(format!(
+                "Expected {l} a_polynomials (one per modulus), got {}",
+                a_polynomials.len()
+            )));
+        }
+
+        let ctx = sk.params.context_at_level(0)?;
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)?.into_ntt(),
+        );
+
+        let mut b_polys: Vec<Poly<Ntt>> = Vec::with_capacity(l);
+        for a_j in a_polynomials {
+            if a_j.ctx() != ctx {
+                return Err(Error::DefaultError(
+                    "a polynomial has incorrect context".to_string(),
+                ));
+            }
+
+            let a_s = Zeroizing::new(a_j * s.as_ref());
+            let mut b = Poly::<Ntt>::small(ctx, sk.params.variance, rng)?;
+            b -= a_s.as_ref();
+            b_polys.push(b);
+        }
+
+        Self::from_parts(b_polys, a_polynomials.to_vec(), sk.params.clone(), seed)
+    }
+
+    /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using explicit
+    /// CRS polynomials supplied as a [`CommonRandomPolyVec`].
+    ///
+    /// The concrete `a_j` polynomials are extracted from `crp` and used as the
+    /// shared CRS; the optional seed is copied into the key as compression
+    /// metadata.
+    pub fn new_with_crp<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        crp: &CommonRandomPolyVec,
+        rng: &mut R,
+    ) -> Result<Self> {
+        Self::from_crs(sk, &crp.to_polys(), crp.seed(), rng)
     }
 
     /// Build an [`LBFVPublicKey`] from explicit `b` and `a` polynomials.
@@ -228,73 +268,7 @@ impl LBFVPublicKey {
             }
         }
 
-        Ok(Self {
-            params,
-            c,
-            l,
-            seed,
-            binding: None,
-        })
-    }
-
-    /// Compute one party's public-key contribution using explicit CRS
-    /// polynomials `a_j` from the on-chain URS.
-    ///
-    /// Each party encrypts zero under their `sk_i` using the shared `a_j`:
-    /// `b_j = -a_j·sk_i + e_j`, producing `l` ciphertexts `(b_j, a_j)`.
-    /// The result is an [`LBFVPublicKey`] contribution meant to be fed into
-    /// [`aggregate`](Self::aggregate).
-    ///
-    /// This mirrors [`new_with_seed`](Self::new_with_seed) but uses explicit
-    /// polynomials instead of a seed, so `seed` is `None`.
-    pub fn contribute<R: RngCore + CryptoRng>(
-        sk_i: &SecretKey,
-        a_polynomials: &[Poly<Ntt>],
-        rng: &mut R,
-    ) -> Result<Self> {
-        let l = sk_i.params.moduli().len();
-        if a_polynomials.len() != l {
-            return Err(Error::DefaultError(format!(
-                "Expected {l} a_polynomials (one per modulus), got {}",
-                a_polynomials.len()
-            )));
-        }
-
-        let ctx = sk_i.params.context_at_level(0)?;
-        let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk_i.coeffs.as_ref(), ctx, false)?.into_ntt(),
-        );
-
-        let mut c: Vec<Ciphertext> = Vec::with_capacity(l);
-        for a_j in a_polynomials {
-            if a_j.ctx() != ctx {
-                return Err(Error::DefaultError(
-                    "a polynomial has incorrect context".to_string(),
-                ));
-            }
-
-            let a_s = Zeroizing::new(a_j * s.as_ref());
-            let mut b = Poly::<Ntt>::small(ctx, sk_i.params.variance, rng)?;
-            b -= a_s.as_ref();
-
-            let mut ct = Ciphertext {
-                params: sk_i.params.clone(),
-                seed: None,
-                c: vec![b, a_j.clone()],
-                level: 0,
-            };
-            ct.c.iter_mut()
-                .for_each(|p| p.disallow_variable_time_computations());
-            c.push(ct);
-        }
-
-        Ok(Self {
-            params: sk_i.params.clone(),
-            c,
-            l,
-            seed: None,
-            binding: None,
-        })
+        Ok(Self { params, c, l, seed })
     }
 
     // ---------------------------------------------------------------------------
@@ -346,28 +320,6 @@ impl LBFVPublicKey {
         Ok(())
     }
 
-    /// Returns the contribution binding for this key, or an error if the key
-    /// is not a bound contribution.
-    pub(crate) fn contribution_binding(&self) -> Result<&LBFVContributionBinding> {
-        match self.binding.as_ref() {
-            Some(LBFVKeyBinding::Contribution(binding)) => Ok(binding),
-            _ => Err(Error::DefaultError(
-                "LBFV public-key contribution is missing participant binding".to_string(),
-            )),
-        }
-    }
-
-    /// Returns the participant set for an aggregated bound key, or an error if
-    /// the key is not an aggregate.
-    pub(crate) fn aggregate_binding(&self) -> Result<&LBFVParticipantSet> {
-        match self.binding.as_ref() {
-            Some(LBFVKeyBinding::Aggregate(set)) => Ok(set),
-            _ => Err(Error::DefaultError(
-                "LBFV public key is not an aggregated bound key".to_string(),
-            )),
-        }
-    }
-
     /// Extract the `a` polynomials from the first `ciphertext_level` ciphertexts
     /// for use as explicit CRS material.
     ///
@@ -415,255 +367,6 @@ impl LBFVPublicKey {
             .collect()
     }
 
-    /// The participant set for this key, if any binding metadata is present.
-    #[must_use]
-    pub fn participant_set(&self) -> Option<&LBFVParticipantSet> {
-        match self.binding.as_ref() {
-            Some(LBFVKeyBinding::Contribution(binding)) => Some(binding.participant_set()),
-            Some(LBFVKeyBinding::Aggregate(set)) => Some(set),
-            None => None,
-        }
-    }
-
-    // ---------------------------------------------------------------------------
-    // Bound constructors
-    // ---------------------------------------------------------------------------
-
-    /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a provided
-    /// seed and participant binding.
-    ///
-    /// Uses the fallible inner path so that a malformed `SecretKey` (coefficient
-    /// count ≠ parameter degree) produces an `Err` instead of a panic.
-    pub fn new_with_seed_and_binding<R: RngCore + CryptoRng>(
-        sk: &SecretKey,
-        seed: <ChaCha8Rng as SeedableRng>::Seed,
-        binding: LBFVContributionBinding,
-        rng: &mut R,
-    ) -> Result<Self> {
-        let mut key = Self::new_with_seed_inner(sk, seed, rng)?;
-        key.binding = Some(LBFVKeyBinding::Contribution(binding));
-        key.validate_structure()?;
-        Ok(key)
-    }
-
-    /// Compute one party's public-key contribution using explicit CRS
-    /// polynomials `a_j` and a participant binding.
-    pub fn contribute_with_binding<R: RngCore + CryptoRng>(
-        sk: &SecretKey,
-        a_polynomials: &[Poly<Ntt>],
-        binding: LBFVContributionBinding,
-        rng: &mut R,
-    ) -> Result<Self> {
-        let mut key = Self::contribute(sk, a_polynomials, rng)?;
-        key.binding = Some(LBFVKeyBinding::Contribution(binding));
-        key.validate_structure()?;
-        Ok(key)
-    }
-
-    /// Build an [`LBFVPublicKey`] from explicit `b` and `a` polynomials with a
-    /// participant binding.
-    pub fn from_parts_with_binding(
-        b_polynomials: Vec<Poly<Ntt>>,
-        a_polynomials: Vec<Poly<Ntt>>,
-        params: Arc<BfvParameters>,
-        seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
-        binding: LBFVContributionBinding,
-    ) -> Result<Self> {
-        let mut key = Self::from_parts(b_polynomials, a_polynomials, params, seed)?;
-        key.binding = Some(LBFVKeyBinding::Contribution(binding));
-        key.validate_structure()?;
-        Ok(key)
-    }
-
-    /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using explicit
-    /// CRS polynomials supplied as a [`CommonRandomPolyVec`].
-    ///
-    /// The concrete `a_j` polynomials are extracted from `crp` and used as the
-    /// shared CRS; the optional seed is copied into the key as compression
-    /// metadata. This is the preferred on-chain-URS constructor: the same
-    /// `crp` must be passed to every party and to
-    /// [`LBFVRelinKeyShare::contribution_with_crp`].
-    ///
-    /// Internally delegates to [`contribute`](Self::contribute) so the result is
-    /// a valid single-party public key with seed metadata.
-    pub fn new_with_crp<R: RngCore + CryptoRng>(
-        sk: &SecretKey,
-        crp: &CommonRandomPolyVec,
-        rng: &mut R,
-    ) -> Result<Self> {
-        let a_polys = crp.to_polys();
-        let mut key = Self::contribute(sk, &a_polys, rng)?;
-        key.seed = crp.seed();
-        key.validate_structure()?;
-        Ok(key)
-    }
-
-    /// Compute one party's public-key contribution using the concrete CRS
-    /// polynomials from a [`CommonRandomPolyVec`].
-    ///
-    /// Delegates to [`contribute`](Self::contribute) and copies the optional
-    /// seed as metadata.
-    pub fn contribute_with_crp<R: RngCore + CryptoRng>(
-        sk_i: &SecretKey,
-        crp: &CommonRandomPolyVec,
-        rng: &mut R,
-    ) -> Result<Self> {
-        let mut key = Self::contribute(sk_i, &crp.to_polys(), rng)?;
-        key.seed = crp.seed();
-        Ok(key)
-    }
-
-    /// Compute one party's public-key contribution using a [`CommonRandomPolyVec`]
-    /// and a participant binding.
-    pub fn contribute_with_crp_and_binding<R: RngCore + CryptoRng>(
-        sk: &SecretKey,
-        crp: &CommonRandomPolyVec,
-        binding: LBFVContributionBinding,
-        rng: &mut R,
-    ) -> Result<Self> {
-        let mut key = Self::contribute_with_crp(sk, crp, rng)?;
-        key.binding = Some(LBFVKeyBinding::Contribution(binding));
-        key.validate_structure()?;
-        Ok(key)
-    }
-
-    // ---------------------------------------------------------------------------
-    // Aggregation
-    // ---------------------------------------------------------------------------
-
-    /// Aggregate per-node public-key contributions into the threshold public key
-    /// (DKG aggregation, Eq. (3) of §5.1 of
-    /// [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf)).
-    ///
-    /// Each contribution is itself an [`LBFVPublicKey`] built by a single node
-    /// from its secret-key contribution `sk_i` and the common CRS seed, i.e.
-    /// `LBFVPublicKey::new_with_seed(sk_i, shared_seed, rng)`. A contribution is
-    /// therefore `l` encryptions of zero `(b_{i,j}, a_j) = (-a_j·sk_i + e_{i,j},
-    /// a_j)`, all sharing the CRS `a_j` derived from `shared_seed`.
-    ///
-    /// Aggregation sums the `b` components coordinate-wise and keeps the shared
-    /// `a`:
-    /// ```text
-    ///   b_j = Σ_i b_{i,j} = -a_j·(Σ_i sk_i) + Σ_i e_{i,j} = -a_j·sk + e_j
-    /// ```
-    /// so the result is `l` encryptions of zero under the joint key
-    /// `sk = Σ_i sk_i`, sharing the same CRS `a`. Component `[0]` doubles as the
-    /// encryption key `(b_0, a_0)`, while the `b`-polynomials of all `l`
-    /// components form the relinearization `b_vec` (via
-    /// [`extract_b_polynomials`](Self::extract_b_polynomials)). Crucially, `sk`
-    /// is never assembled: each node only ever holds its own `sk_i`.
-    ///
-    /// The shared seed is carried over to the result, so the same CRS `a` is
-    /// reused when building the relinearization key's `d2` (it must match! see
-    /// [`LBFVRelinKeyShare`](super::LBFVRelinKeyShare)).
-    ///
-    /// # Participant binding requirement
-    ///
-    /// Every contribution must carry an [`LBFVContributionBinding`] metadata
-    /// created with the same [`LBFVParticipantSet`].  All participant IDs in
-    /// the set must appear exactly once (no duplicates, no missing IDs), and
-    /// all contributions must share the same concrete CRS polynomials `a_j`.
-    /// The resulting key carries `LBFVKeyBinding::Aggregate`.
-    ///
-    /// # Errors
-    /// Returns an error if `contributions` is empty, if any contribution is
-    /// structurally malformed, if bindings are missing/inconsistent, or if the
-    /// CRS polynomials do not match.
-    pub fn aggregate(contributions: &[LBFVPublicKey]) -> Result<Self> {
-        let (first, rest) = contributions.split_first().ok_or_else(|| {
-            Error::DefaultError("Cannot aggregate zero public-key contributions".to_string())
-        })?;
-
-        first.validate_structure()?;
-        for contribution in rest {
-            contribution.validate_structure()?;
-        }
-
-        let bindings = contributions
-            .iter()
-            .map(LBFVPublicKey::contribution_binding)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let first_binding = bindings.first().ok_or_else(|| {
-            Error::DefaultError("Cannot aggregate zero public-key contributions".to_string())
-        })?;
-        let participant_set = first_binding.participant_set().clone();
-        participant_set.validate_contributions(bindings.iter().copied())?;
-
-        if rest.iter().any(|key| key.params != first.params) {
-            return Err(Error::DefaultError(
-                "LBFV public-key contributions use different parameters".to_string(),
-            ));
-        }
-
-        // Verify that the actual a_j (c[1]) polynomials match across all
-        // contributions.  This is the concrete CRS check that seed equality
-        // alone cannot guarantee (e.g. seedless deserialized keys).
-        for (j, first_ct) in first.c.iter().enumerate() {
-            let a_first = first_ct.c.get(1).ok_or_else(|| {
-                Error::DefaultError("LBFV public-key ciphertext is missing a".to_string())
-            })?;
-            for contribution in rest {
-                let ct_j = contribution.c.get(j).ok_or_else(|| {
-                    Error::DefaultError("LBFV public-key ciphertext count changed".to_string())
-                })?;
-                let a_other = ct_j.c.get(1).ok_or_else(|| {
-                    Error::DefaultError("LBFV public-key ciphertext is missing a".to_string())
-                })?;
-                if a_first != a_other {
-                    return Err(Error::DefaultError(
-                        "LBFV public-key contributions use different CRS polynomials".to_string(),
-                    ));
-                }
-            }
-        }
-
-        let mut ciphertexts = Vec::with_capacity(first.c.len());
-        for (index, first_ciphertext) in first.c.iter().enumerate() {
-            let mut b = first_ciphertext.c.first().cloned().ok_or_else(|| {
-                Error::DefaultError("LBFV public-key ciphertext is missing b".to_string())
-            })?;
-            let a = first_ciphertext.c.get(1).cloned().ok_or_else(|| {
-                Error::DefaultError("LBFV public-key ciphertext is missing a".to_string())
-            })?;
-
-            for contribution in rest {
-                let contribution_ciphertext = contribution.c.get(index).ok_or_else(|| {
-                    Error::DefaultError("LBFV public-key ciphertext count changed".to_string())
-                })?;
-                let contribution_b = contribution_ciphertext.c.first().ok_or_else(|| {
-                    Error::DefaultError("LBFV public-key ciphertext is missing b".to_string())
-                })?;
-                b += contribution_b;
-            }
-
-            let mut ciphertext = Ciphertext {
-                params: first.params.clone(),
-                seed: None,
-                c: vec![b, a],
-                level: 0,
-            };
-            ciphertext
-                .c
-                .iter_mut()
-                .for_each(|polynomial| polynomial.disallow_variable_time_computations());
-            ciphertexts.push(ciphertext);
-        }
-
-        let shared_seed = first.seed.filter(|seed| {
-            contributions
-                .iter()
-                .all(|contribution| contribution.seed == Some(*seed))
-        });
-
-        Ok(Self {
-            params: first.params.clone(),
-            c: ciphertexts,
-            l: first.l,
-            seed: shared_seed,
-            binding: Some(LBFVKeyBinding::Aggregate(participant_set)),
-        })
-    }
-
     /// Encrypt a plaintext with the public key.
     /// The encryption is done in the same level as the plaintext.
     /// Returns the ciphertext and the noise polynomials.
@@ -680,7 +383,7 @@ impl LBFVPublicKey {
         let mut ct = self.c.first().cloned().ok_or_else(|| {
             Error::DefaultError("Public key has no ciphertexts available".to_string())
         })?;
-        while ct.level != pt.level() {
+        while ct.level != pt.level {
             ct.switch_down()?;
         }
 
@@ -828,7 +531,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         let mut ct = self.c.first().cloned().ok_or_else(|| {
             Error::DefaultError("Public key has no ciphertexts available".to_string())
         })?;
-        while ct.level != pt.level() {
+        while ct.level != pt.level {
             ct.switch_down()?;
         }
 
@@ -867,19 +570,19 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
     }
 }
 
-use super::*;
 use crate::SerializationError;
-use crate::bfv::traits::TryConvertFrom;
+use crate::bfv::traits::TryConvertFrom as BfvTryConvertFrom;
+use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
+use fhe_traits::{DeserializeParametrized, Serialize};
+use prost::Message;
+
 impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
     fn from(pk: &LBFVPublicKey) -> Self {
         LBFVPublicKeyProto {
             c: pk.c.iter().map(CiphertextProto::from).collect(),
             l: pk.l as u32,
             seed: pk.seed.map_or_else(Vec::new, |s| s.to_vec()),
-            binding: pk
-                .binding
-                .as_ref()
-                .map(crate::lbfv::keys::binding::proto_helpers::key_binding_to_proto),
+            binding: None,
         }
     }
 }
@@ -934,6 +637,18 @@ impl DeserializeParametrized for LBFVPublicKey {
             ));
         }
 
+        // Reject protos that carry a binding — callers should use
+        // trlbfv::PublicKeyShare or trlbfv::AggregatedPublicKey instead.
+        if proto.binding.is_some() {
+            return Err(Error::SerializationError(
+                SerializationError::InvalidFormat {
+                    reason: "LBFVPublicKey carries a binding field; use \
+                             trlbfv::PublicKeyShare or trlbfv::AggregatedPublicKey instead"
+                        .to_string(),
+                },
+            ));
+        }
+
         let mut c: Vec<Ciphertext> = Vec::with_capacity(proto.c.len());
         for ct_proto in proto.c {
             let mut ct = Ciphertext::try_convert_from(&ct_proto, params)?;
@@ -967,17 +682,11 @@ impl DeserializeParametrized for LBFVPublicKey {
             None
         };
 
-        // Decode the binding, preserving backward compatibility
-        let binding = crate::lbfv::keys::binding::proto_helpers::key_binding_from_proto(
-            proto.binding.as_ref(),
-        )?;
-
         let key = Self {
             params: params.clone(),
             c,
             l: proto.l as usize,
             seed,
-            binding,
         };
 
         // Validate that the seed, when present, reproduces the concrete a
@@ -1010,97 +719,17 @@ impl DeserializeParametrized for LBFVPublicKey {
         Ok(key)
     }
 }
-
 #[cfg(test)]
 #[allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::super::{LBFVContributionBinding, LBFVParticipantSet};
-    use super::super::{LBFVRelinKeyShare, LBFVRelinearizationKey};
     use super::LBFVPublicKey;
     use crate::bfv::{BfvParameters, CommonRandomPolyVec, Encoding, Plaintext, SecretKey};
     use fhe_math::rq::{Ntt, Poly, Representation};
     use fhe_math::zq::Modulus;
-    use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
+    use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{Rng, SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::error::Error;
-
-    #[test]
-    fn test_aggregate_public_key() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let n = 3;
-
-        // Common participant set and session.
-        let participant_set = LBFVParticipantSet::new([7u8; 32], (1..=n as u32).collect())?;
-
-        // Common CRS seed shared by all nodes.
-        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        rng.fill(&mut seed);
-
-        // Per-node secret-key contributions, and the matching public-key
-        // contributions (l zero-encryptions under sk_i with the shared seed).
-        let sk_shares: Vec<SecretKey> = (0..n)
-            .map(|_| SecretKey::random(&params, &mut rng))
-            .collect();
-        let contributions: Vec<LBFVPublicKey> = sk_shares
-            .iter()
-            .enumerate()
-            .map(|(i, sk_i)| {
-                let binding =
-                    LBFVContributionBinding::new(participant_set.clone(), (i + 1) as u32)?;
-                LBFVPublicKey::new_with_seed_and_binding(sk_i, seed, binding, &mut rng)
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        // Joint secret key, assembled only to check decryption in this test.
-        let mut sum_coeffs = vec![0i64; params.degree()];
-        for sk in &sk_shares {
-            for (acc, c) in sum_coeffs.iter_mut().zip(sk.coeffs.iter()) {
-                *acc = acc.wrapping_add(*c);
-            }
-        }
-        let sk_joint = SecretKey::new(sum_coeffs, &params);
-
-        let pk = LBFVPublicKey::aggregate(&contributions)?;
-
-        // The aggregated key carries the shared CRS seed and the right l.
-        assert_eq!(pk.seed, Some(seed));
-        assert_eq!(pk.l, params.moduli().len());
-        assert_eq!(pk.c.len(), params.moduli().len());
-
-        // All l zero-encryptions decrypt to zero under the joint key.
-        for ct in pk.c.iter() {
-            assert_eq!(
-                sk_joint.try_decrypt(ct)?,
-                Plaintext::zero(Encoding::poly(), &params)?
-            );
-        }
-
-        // Encrypt/decrypt roundtrip under the aggregated public key.
-        let pt = Plaintext::try_encode(
-            &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
-            Encoding::poly(),
-            &params,
-        )?;
-        let ct = pk.try_encrypt(&pt, &mut rng)?;
-        assert_eq!(sk_joint.try_decrypt(&ct)?, pt);
-
-        // A contribution under a different CRS seed must be rejected.
-        let mut other_seed = seed;
-        other_seed[0] ^= 0xff;
-        let bad_binding = LBFVContributionBinding::new(participant_set.clone(), 1)?;
-        let bad = LBFVPublicKey::new_with_seed_and_binding(
-            &sk_shares[0],
-            other_seed,
-            bad_binding,
-            &mut rng,
-        )?;
-        // Duplicate participant ID (both have ID 1) should be rejected.
-        assert!(LBFVPublicKey::aggregate(&[contributions[0].clone(), bad]).is_err());
-
-        Ok(())
-    }
 
     #[test]
     fn keygen() -> Result<(), Box<dyn Error>> {
@@ -1151,6 +780,10 @@ mod tests {
     }
 
 use super::*;
+use crate::proto::bfv::LbfvPublicKey as LBFVPublicKeyProto;
+use fhe_traits::{DeserializeParametrized, Serialize};
+use prost::Message;
+
 #[test]
 fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = rng();
@@ -1163,20 +796,6 @@ fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = pk.to_bytes();
         assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
     }
-    Ok(())
-}
-
-#[test]
-fn test_bound_public_key_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rng = rng();
-    let params = BfvParameters::default_arc(6, 8);
-    let sk = SecretKey::random(&params, &mut rng);
-    let set = LBFVParticipantSet::new([70u8; 32], vec![1, 2])?;
-    let binding = LBFVContributionBinding::new(set, 1)?;
-    let pk = LBFVPublicKey::new_with_seed_and_binding(&sk, [71u8; 32], binding, &mut rng)?;
-    let bytes = pk.to_bytes();
-    let decoded = LBFVPublicKey::from_bytes(&bytes, &params)?;
-    assert_eq!(pk, decoded);
     Ok(())
 }
 
@@ -1197,35 +816,6 @@ fn test_malformed_l_rejected() -> Result<(), Box<dyn std::error::Error>> {
     proto2.c.pop(); // Remove one ciphertext but leave l unchanged
     let bytes2 = proto2.encode_to_vec();
     assert!(LBFVPublicKey::from_bytes(&bytes2, &params).is_err());
-
-    Ok(())
-}
-
-#[test]
-fn test_aggregate_binding_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rng = rng();
-    let params = BfvParameters::default_arc(6, 8);
-    let set = LBFVParticipantSet::new([72u8; 32], vec![1, 2])?;
-    let keys: Vec<SecretKey> = (0..2)
-        .map(|_| SecretKey::random(&params, &mut rng))
-        .collect();
-
-    let contributions: Vec<LBFVPublicKey> = keys
-        .iter()
-        .enumerate()
-        .map(|(i, sk)| {
-            let binding = LBFVContributionBinding::new(set.clone(), (i + 1) as u32)?;
-            LBFVPublicKey::new_with_seed_and_binding(sk, [73u8; 32], binding, &mut rng)
-        })
-        .collect::<std::result::Result<_, _>>()?;
-
-    let pk = LBFVPublicKey::aggregate(&contributions)?;
-    let bytes = pk.to_bytes();
-    let decoded = LBFVPublicKey::from_bytes(&bytes, &params)?;
-    assert_eq!(pk, decoded);
-
-    // Verify the participant set is preserved.
-    assert_eq!(decoded.participant_set(), Some(&set));
 
     Ok(())
 }
@@ -1260,94 +850,28 @@ fn test_tampered_seed_rejected() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// A truly seedless bound public key built via `from_parts_with_binding`
-/// (seed `None`, `a` carried inline) must round-trip with its binding.
+/// A serialized PK carrying a binding must be rejected — single-party
+/// LBFVPublicKey does not carry bindings.
 #[test]
-fn test_seedless_from_parts_with_binding_roundtrip()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_binding_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = rng();
     let params = BfvParameters::default_arc(6, 8);
     let sk = SecretKey::random(&params, &mut rng);
+    let pk = LBFVPublicKey::new(&sk, &mut rng)?;
 
-    let pk_seeded = LBFVPublicKey::new(&sk, &mut rng)?;
-    let b_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[0].clone()).collect();
-    let a_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[1].clone()).collect();
+    let mut proto: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
+    // Inject a binding field (any non-empty binding should be rejected).
+    proto.binding = Some(Default::default());
 
-    let set = LBFVParticipantSet::new([80u8; 32], vec![1, 2])?;
-    let binding = LBFVContributionBinding::new(set.clone(), 1)?;
-    let pk = LBFVPublicKey::from_parts_with_binding(
-        b_polys,
-        a_polys,
-        params.clone(),
-        None,
-        binding,
-    )?;
+    let bytes = proto.encode_to_vec();
     assert!(
-        pk.seed.is_none(),
-        "from_parts_with_binding(None) must be seedless"
-    );
-
-    let bytes = pk.to_bytes();
-    let decoded = LBFVPublicKey::from_bytes(&bytes, &params)?;
-    assert_eq!(pk, decoded);
-    assert!(
-        decoded.seed.is_none(),
-        "decoded seedless PK must carry no seed"
+        LBFVPublicKey::from_bytes(&bytes, &params).is_err(),
+        "PK deserialization must reject a binding field"
     );
 
     Ok(())
 }
 
-/// Malformed binding metadata carried by a serialized public key must be
-/// rejected at deserialization: bad session length, duplicate IDs, an
-/// empty participant set, and an aggregate/participant_id inconsistency.
-#[test]
-fn test_malformed_binding_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rng = rng();
-    let params = BfvParameters::default_arc(6, 8);
-    let sk = SecretKey::random(&params, &mut rng);
-    let set = LBFVParticipantSet::new([81u8; 32], vec![1, 2])?;
-    let binding = LBFVContributionBinding::new(set, 1)?;
-    let pk = LBFVPublicKey::new_with_seed_and_binding(&sk, [82u8; 32], binding, &mut rng)?;
-
-    // Wrong session_id length.
-    let mut p = LBFVPublicKeyProto::from(&pk);
-    p.binding.as_mut().unwrap().session_id = vec![0u8; 31];
-    assert!(
-        LBFVPublicKey::from_bytes(&p.encode_to_vec(), &params).is_err(),
-        "31-byte session_id must be rejected"
-    );
-
-    // Duplicate participant IDs.
-    let mut p = LBFVPublicKeyProto::from(&pk);
-    p.binding.as_mut().unwrap().participant_ids = vec![1, 1];
-    assert!(
-        LBFVPublicKey::from_bytes(&p.encode_to_vec(), &params).is_err(),
-        "duplicate participant IDs must be rejected"
-    );
-
-    // Empty participant set.
-    let mut p = LBFVPublicKeyProto::from(&pk);
-    p.binding.as_mut().unwrap().participant_ids = vec![];
-    assert!(
-        LBFVPublicKey::from_bytes(&p.encode_to_vec(), &params).is_err(),
-        "empty participant set must be rejected"
-    );
-
-    // Aggregate flag set but participant_id nonzero.
-    let mut p = LBFVPublicKeyProto::from(&pk);
-    {
-        let b = p.binding.as_mut().unwrap();
-        b.aggregate = true;
-        b.participant_id = 1;
-    }
-    assert!(
-        LBFVPublicKey::from_bytes(&p.encode_to_vec(), &params).is_err(),
-        "aggregate binding with nonzero participant_id must be rejected"
-    );
-
-    Ok(())
-}
     #[test]
     fn test_from_parts_roundtrip() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
@@ -1417,95 +941,6 @@ fn test_malformed_binding_rejected() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[test]
-    fn test_contribute_and_aggregate() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let n = 3;
-
-        let participant_set = LBFVParticipantSet::new([11u8; 32], (1..=n as u32).collect())?;
-
-        // Generate shared CRS a polynomials from a seed (simulating on-chain URS).
-        let a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        let pk_ref =
-            LBFVPublicKey::new_with_seed(&SecretKey::random(&params, &mut rng), a_seed, &mut rng)?;
-        let a_polys: Vec<Poly<Ntt>> = pk_ref.c.iter().map(|ct| ct.c[1].clone()).collect();
-
-        // Each party contributes using the shared a_polys.
-        let sk_shares: Vec<SecretKey> = (0..n)
-            .map(|_| SecretKey::random(&params, &mut rng))
-            .collect();
-        let contributions: Vec<LBFVPublicKey> = sk_shares
-            .iter()
-            .enumerate()
-            .map(|(i, sk_i)| {
-                let binding =
-                    LBFVContributionBinding::new(participant_set.clone(), (i + 1) as u32)?;
-                LBFVPublicKey::contribute_with_binding(sk_i, &a_polys, binding, &mut rng)
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        let pk = LBFVPublicKey::aggregate(&contributions)?;
-
-        // Verify: seed is None (from explicit polynomials) and a_j match the reference.
-        assert!(pk.seed.is_none());
-        for (j, ct) in pk.c.iter().enumerate() {
-            assert_eq!(ct.c[1], a_polys[j]);
-        }
-
-        // Joint secret key for decryption.
-        let mut sum_coeffs = vec![0i64; params.degree()];
-        for sk in &sk_shares {
-            for (acc, c) in sum_coeffs.iter_mut().zip(sk.coeffs.iter()) {
-                *acc = acc.wrapping_add(*c);
-            }
-        }
-        let sk_joint = SecretKey::new(sum_coeffs, &params);
-
-        let pt = Plaintext::try_encode(&[7u64], Encoding::poly(), &params)?;
-        let ct = pk.try_encrypt(&pt, &mut rng)?;
-        assert_eq!(sk_joint.try_decrypt(&ct)?, pt);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_aggregate_rejects_inconsistent_a_polys() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let n = 2;
-
-        let participant_set = LBFVParticipantSet::new([13u8; 32], (1..=n as u32).collect())?;
-
-        let a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        let pk_ref =
-            LBFVPublicKey::new_with_seed(&SecretKey::random(&params, &mut rng), a_seed, &mut rng)?;
-        let a_polys: Vec<Poly<Ntt>> = pk_ref.c.iter().map(|ct| ct.c[1].clone()).collect();
-
-        let sk = SecretKey::random(&params, &mut rng);
-        let binding1 = LBFVContributionBinding::new(participant_set.clone(), 1)?;
-        let c1 = LBFVPublicKey::contribute_with_binding(&sk, &a_polys, binding1, &mut rng)?;
-
-        // Create a contribution with a tampered a polynomial.
-        let mut bad_a = a_polys.to_vec();
-        let ctx0 = params.context_at_level(0)?;
-        bad_a[0] = Poly::<Ntt>::small(ctx0, params.variance, &mut rng)?; // random replacement
-        let mut bad_cts = c1.c.clone();
-        bad_cts[0].c[1] = bad_a[0].clone();
-        let binding2 = LBFVContributionBinding::new(participant_set, 2)?;
-        let c_bad = LBFVPublicKey::from_parts_with_binding(
-            bad_cts.iter().map(|ct| ct.c[0].clone()).collect(),
-            bad_a,
-            params.clone(),
-            None,
-            binding2,
-        )?;
-
-        assert!(LBFVPublicKey::aggregate(&[c1, c_bad]).is_err());
-
-        Ok(())
-    }
-
-    #[test]
     fn test_deterministic_public_key() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(6, 8);
@@ -1534,71 +969,6 @@ fn test_malformed_binding_rejected() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(pt1, Plaintext::zero(Encoding::poly(), &params)?);
             assert_eq!(pt2, Plaintext::zero(Encoding::poly(), &params)?);
         }
-
-        Ok(())
-    }
-
-    #[test]
-    fn aggregate_requires_bound_complete_public_key_set() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let set = LBFVParticipantSet::new([9u8; 32], vec![1, 2, 3])?;
-        let keys: Vec<SecretKey> = (0..3)
-            .map(|_| SecretKey::random(&params, &mut rng))
-            .collect();
-
-        let contributions: Vec<LBFVPublicKey> = keys
-            .iter()
-            .enumerate()
-            .map(|(index, sk)| {
-                let binding = LBFVContributionBinding::new(set.clone(), (index + 1) as u32)?;
-                LBFVPublicKey::new_with_seed_and_binding(sk, [4u8; 32], binding, &mut rng)
-            })
-            .collect::<std::result::Result<_, _>>()?;
-
-        let aggregate = LBFVPublicKey::aggregate(&contributions)?;
-        assert_eq!(aggregate.participant_set(), Some(&set));
-
-        assert!(LBFVPublicKey::aggregate(&contributions[..2]).is_err());
-
-        let mut duplicate = contributions.clone();
-        let replacement_binding = LBFVContributionBinding::new(set.clone(), 1)?;
-        duplicate[1] = LBFVPublicKey::new_with_seed_and_binding(
-            &keys[1],
-            [4u8; 32],
-            replacement_binding,
-            &mut rng,
-        )?;
-        assert!(LBFVPublicKey::aggregate(&duplicate).is_err());
-
-        let mut malformed = aggregate.clone();
-        malformed.l = 1;
-        assert!(LBFVPublicKey::aggregate(&[malformed]).is_err());
-
-        Ok(())
-    }
-
-    /// `new_with_seed_and_binding` must not panic on a malformed secret key
-    /// whose coefficient length does not match the parameter degree.
-    #[test]
-    fn new_with_seed_and_binding_rejects_malformed_secret_key() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-
-        // A secret key with only 17 coefficients instead of degree().
-        let bad_coeffs = vec![1i64, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1];
-        assert_ne!(bad_coeffs.len(), params.degree());
-        let bad_sk = SecretKey::new(bad_coeffs, &params);
-
-        let set = LBFVParticipantSet::new([80u8; 32], vec![1])?;
-        let binding = LBFVContributionBinding::new(set, 1)?;
-        let seed = [0u8; 32];
-
-        let result = LBFVPublicKey::new_with_seed_and_binding(&bad_sk, seed, binding, &mut rng);
-        assert!(
-            result.is_err(),
-            "Malformed secret key must produce an error, not a panic"
-        );
 
         Ok(())
     }
@@ -1658,115 +1028,6 @@ fn test_malformed_binding_rejected() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 
-    /// Mixed seeded/explicit PK contributions with identical concrete `a`
-    /// polynomials must aggregate successfully. The aggregate seed must be
-    /// `None`, and the resulting key must support encryption/decryption and
-    /// RLK construction.
-    #[test]
-    fn test_mixed_seeded_explicit_pk_aggregation() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let n = 3;
-
-        let participant_set = LBFVParticipantSet::new([81u8; 32], (1..=n as u32).collect())?;
-
-        // Common CRS seed shared by all nodes.
-        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        rng.fill(&mut seed);
-
-        // Per-node secret-key contributions.
-        let sk_shares: Vec<SecretKey> = (0..n)
-            .map(|_| SecretKey::random(&params, &mut rng))
-            .collect();
-
-        // Extract the concrete a polynomials from a single seeded PK built from
-        // sk_shares[0] — these will be the reference a_j we verify against.
-        let pk_ref = LBFVPublicKey::new_with_seed(&sk_shares[0], seed, &mut rng)?;
-        let a_polys: Vec<Poly<fhe_math::rq::Ntt>> =
-            pk_ref.c.iter().map(|ct| ct.c[1].clone()).collect();
-
-        // Two seeded contributions (parties 1 and 2).
-        let c1 = {
-            let binding = LBFVContributionBinding::new(participant_set.clone(), 1)?;
-            LBFVPublicKey::new_with_seed_and_binding(&sk_shares[0], seed, binding, &mut rng)?
-        };
-        let c2 = {
-            let binding = LBFVContributionBinding::new(participant_set.clone(), 2)?;
-            LBFVPublicKey::new_with_seed_and_binding(&sk_shares[1], seed, binding, &mut rng)?
-        };
-
-        // One explicit contribution (party 3), using the same concrete a_j.
-        let c3 = {
-            let binding = LBFVContributionBinding::new(participant_set.clone(), 3)?;
-            LBFVPublicKey::contribute_with_binding(&sk_shares[2], &a_polys, binding, &mut rng)?
-        };
-
-        // Aggregate all three.
-        let pk = LBFVPublicKey::aggregate(&[c1, c2, c3])?;
-
-        // The aggregate seed must be None — mixed representations.
-        assert!(
-            pk.seed.is_none(),
-            "Aggregate PK with mixed seeded/explicit contributions must have seed=None"
-        );
-
-        // The concrete a_j in the aggregate must match the reference.
-        assert_eq!(pk.c.len(), a_polys.len());
-        for (j, ct) in pk.c.iter().enumerate() {
-            assert_eq!(
-                ct.c[1], a_polys[j],
-                "Aggregate a_j[{j}] must match the reference"
-            );
-        }
-
-        // Joint secret key for decryption.
-        let mut sum_coeffs = vec![0i64; params.degree()];
-        for sk in &sk_shares {
-            for (acc, c) in sum_coeffs.iter_mut().zip(sk.coeffs.iter()) {
-                *acc = acc.wrapping_add(*c);
-            }
-        }
-        let sk_joint = SecretKey::new(sum_coeffs, &params);
-
-        // Encrypt/decrypt roundtrip.
-        let pt = Plaintext::try_encode(
-            &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
-            Encoding::poly(),
-            &params,
-        )?;
-        let ct = pk.try_encrypt(&pt, &mut rng)?;
-        assert_eq!(sk_joint.try_decrypt(&ct)?, pt);
-
-        // Verify RLK construction works with the mixed-aggregated PK.
-        let mut d1_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        rng.fill(&mut d1_seed);
-        let rlk_shares: Vec<LBFVRelinKeyShare> = sk_shares
-            .iter()
-            .enumerate()
-            .map(|(i, sk_i)| {
-                let binding =
-                    LBFVContributionBinding::new(participant_set.clone(), (i + 1) as u32)?;
-                LBFVRelinKeyShare::contribution_with_binding(
-                    sk_i, d1_seed, seed, binding, 0, 0, &mut rng,
-                )
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let rlk = LBFVRelinearizationKey::aggregate(&rlk_shares, &pk)?;
-
-        // Relinearization roundtrip: multiply, relinearize, decrypt.
-        let pt3 = Plaintext::try_encode(&[3u64], Encoding::poly(), &params)?;
-        let pt5 = Plaintext::try_encode(&[5u64], Encoding::poly(), &params)?;
-        let ct3 = pk.try_encrypt(&pt3, &mut rng)?;
-        let ct5 = pk.try_encrypt(&pt5, &mut rng)?;
-        let mut ct_product = &ct3 * &ct5;
-        rlk.relinearizes(&mut ct_product)?;
-        let pt_result = sk_joint.try_decrypt(&ct_product)?;
-        let result = Vec::<u64>::try_decode(&pt_result, Encoding::poly())?;
-        assert_eq!(result[0], 15);
-
-        Ok(())
-    }
-
     /// `new_with_crp` uses the supplied concrete `a` polynomials from a
     /// seedless CRP vector, and the resulting key carries no seed.
     #[test]
@@ -1793,74 +1054,6 @@ fn test_malformed_binding_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let pt = Plaintext::try_encode(&[42u64], Encoding::poly(), &params)?;
         let ct = pk.try_encrypt(&pt, &mut rng)?;
         assert_eq!(sk.try_decrypt(&ct)?, pt);
-
-        Ok(())
-    }
-
-    /// `contribute_with_crp` uses the concrete `a` polynomials from the CRP
-    /// and copies the optional seed as metadata.
-    #[test]
-    fn contribute_with_crp_preserves_seed_metadata() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let sk = SecretKey::random(&params, &mut rng);
-
-        // Seeded CRP → seed should be copied.
-        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        rng.fill(&mut seed);
-        let crp = CommonRandomPolyVec::from_seed(&params, seed)?;
-
-        let pk = LBFVPublicKey::contribute_with_crp(&sk, &crp, &mut rng)?;
-        assert_eq!(pk.seed, Some(seed));
-
-        // Concrete a polynomials must match.
-        let expected_a = crp.to_polys();
-        for (j, ct) in pk.c.iter().enumerate() {
-            assert_eq!(ct.c[1], expected_a[j]);
-        }
-
-        Ok(())
-    }
-
-    /// Aggregation must reject contributions built from different CRP vectors
-    /// (different concrete `a` polynomials), even if both are seedless.
-    #[test]
-    fn aggregation_rejects_mismatched_crp_vectors() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let n = 2;
-
-        let participant_set = LBFVParticipantSet::new([92u8; 32], (1..=n as u32).collect())?;
-        let sk_shares: Vec<SecretKey> = (0..n)
-            .map(|_| SecretKey::random(&params, &mut rng))
-            .collect();
-
-        let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
-        let crp_b = CommonRandomPolyVec::new(&params, &mut rng)?;
-
-        let c1 = {
-            let binding = LBFVContributionBinding::new(participant_set.clone(), 1)?;
-            LBFVPublicKey::contribute_with_crp_and_binding(
-                &sk_shares[0],
-                &crp_a,
-                binding,
-                &mut rng,
-            )?
-        };
-        let c2 = {
-            let binding = LBFVContributionBinding::new(participant_set, 2)?;
-            LBFVPublicKey::contribute_with_crp_and_binding(
-                &sk_shares[1],
-                &crp_b,
-                binding,
-                &mut rng,
-            )?
-        };
-
-        assert!(
-            LBFVPublicKey::aggregate(&[c1, c2]).is_err(),
-            "Aggregation must reject contributions from different CRP vectors"
-        );
 
         Ok(())
     }
