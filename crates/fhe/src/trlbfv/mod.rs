@@ -16,6 +16,18 @@
 //! delivery, noise-budget policy, and threshold decryption remain caller or
 //! protocol responsibilities. Participant/session bindings provide
 //! consistency checks only; they are not authentication.
+//!
+//! # Two aggregation paths
+//!
+//! - **Bound** — aggregate into [`AggregatedPublicKey`] for participant-set
+//!   enforcement. Use [`aggregate_relinearization_key`] with the
+//!   [`AggregatedPublicKey`] argument.
+//!
+//! - **Unbound** — aggregate directly into [`LBFVPublicKey`] (CRS-only
+//!   validation). Use
+//!   [`aggregate_relinearization_key_unbound`] with the
+//!   [`LBFVPublicKey`] argument. This path is appropriate when ZK proofs
+//!   handle authentication and contribution validity externally.
 
 mod aggregate;
 pub mod binding;
@@ -24,7 +36,9 @@ mod relin_key_share;
 
 pub use crate::lbfv::{LBFVPublicKey, LBFVRelinearizationKey};
 pub use crate::mbfv::{Aggregate, AggregateIter};
-pub use aggregate::{AggregatedPublicKey, aggregate_relinearization_key};
+pub use aggregate::{
+    AggregatedPublicKey, aggregate_relinearization_key, aggregate_relinearization_key_unbound,
+};
 pub use binding::{ContributionBinding, ParticipantSet};
 pub use public_key_share::PublicKeyShare;
 pub use relin_key_share::RelinKeyShare;
