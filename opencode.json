@@ -7,28 +7,6 @@
     }
   },
   "instructions": ["AGENTS.md"],
-  "agent": {
-    "fhe-architect": {
-      "model": "openai/gpt-5.6-luna",
-      "reasoningEffort": "max"
-    },
-    "fhe-implementer": {
-      "model": "opencode-go/deepseek-v4-pro",
-      "variant": "max"
-    },
-    "fhe-crypto-reviewer": {
-      "model": "openai/gpt-5.6-sol",
-      "reasoningEffort": "high"
-    },
-    "fhe-math-reviewer": {
-      "model": "openai/gpt-5.6-sol",
-      "reasoningEffort": "high"
-    },
-    "fhe-reviewer": {
-      "model": "openai/gpt-5.6-sol",
-      "reasoningEffort": "high"
-    }
-  },
   "permission": {
     "external_directory": "deny",
     "bash": {
@@ -49,35 +27,37 @@
   },
   "agent": {
     "work": {
-      "model": "openai/gpt-5.6-luna",
-      "reasoningEffort": "xhigh",
-      "variant": "xhigh"
+      "model": "openai/gpt-5.6-sol",
+      "reasoningEffort": "low",
+      "variant": "low"
     },
     "architect": {
-      "model": "openai/gpt-5.6-luna",
-      "reasoningEffort": "xhigh",
-      "variant": "xhigh"
+      "model": "openai/gpt-5.6-sol",
+      "reasoningEffort": "high",
+      "variant": "high"
     },
     "fix": {
-      "model": "openai/gpt-5.6-luna",
-      "reasoningEffort": "xhigh",
-      "variant": "xhigh"
+      "model": "openai/gpt-5.6-sol",
+      "reasoningEffort": "high",
+      "variant": "high"
     },
     "plan": {
-      "model": "openai/gpt-5.6-luna",
-      "reasoningEffort": "max",
-      "variant": "max"
+      "model": "openai/gpt-5.6-sol",
+      "reasoningEffort": "low",
+      "variant": "low"
     },
     "implementer": {
       "model": "opencode-go/deepseek-v4-pro",
       "variant": "high"
     },
     "guard-review": {
-      "model": "opencode-go/deepseek-v4-pro",
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "high",
       "variant": "high"
     },
     "quality-review": {
-      "model": "opencode-go/deepseek-v4-pro",
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "high",
       "variant": "high"
     },
     "crypto-reviewer": {
@@ -91,11 +71,12 @@
       "variant": "xhigh"
     },
     "reviewer": {
-      "model": "opencode-go/deepseek-v4-pro",
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "high",
       "variant": "high"
     },
     "harness": {
-      "model": "openai/gpt-5.6-luna",
+      "model": "opencode-go/deepseek-v4-pro",
       "reasoningEffort": "high",
       "variant": "high"
     }
