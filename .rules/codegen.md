@@ -31,8 +31,6 @@ The following are only available with `--features protobuf`:
 
 Core BFV encryption, homomorphic operations, and threshold protocols (TRBFV, MBFV) work without the feature.
 
-The `LbfvBinding` message and the `LBFVRelinKeyShare` message (including binding fields on `LBFVPublicKey` and `LBFVRelinearizationKey`) are generated from `crates/fhe/src/proto/bfv/bfv.proto`. Generated Rust code lives in `OUT_DIR` and is never committed.
-
 ## When changing .proto files
 
 1. Edit the `.proto` file

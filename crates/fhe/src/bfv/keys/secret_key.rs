@@ -18,22 +18,12 @@ use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Secret key for the BFV encryption scheme.
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct SecretKey {
     /// The BFV parameters
-    pub(crate) params: Arc<BfvParameters>,
+    pub(crate) par: Arc<BfvParameters>,
     /// The secret key coefficients
     pub coeffs: Box<[i64]>,
-}
-
-// Redacted `Debug` so that `{:?}` never leaks the secret coefficients.
-impl std::fmt::Debug for SecretKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SecretKey")
-            .field("params", &self.params)
-            .field("coeffs", &"<redacted>")
-            .finish()
-    }
 }
 
 impl Zeroize for SecretKey {
@@ -60,16 +50,16 @@ impl SecretKey {
 
     /// Generate a random [`SecretKey`].
     #[must_use]
-    pub fn random<R: RngCore + CryptoRng>(params: &Arc<BfvParameters>, rng: &mut R) -> Self {
-        let s_coefficients = sample_vec_cbd_f32(params.degree(), Self::SK_VARIANCE, rng).unwrap();
-        Self::new(s_coefficients, params)
+    pub fn random<R: RngCore + CryptoRng>(par: &Arc<BfvParameters>, rng: &mut R) -> Self {
+        let s_coefficients = sample_vec_cbd_f32(par.degree(), Self::SK_VARIANCE, rng).unwrap();
+        Self::new(s_coefficients, par)
     }
 
     /// Generate a [`SecretKey`] from its coefficients.
     #[must_use]
-    pub fn new(coeffs: Vec<i64>, params: &Arc<BfvParameters>) -> Self {
+    pub fn new(coeffs: Vec<i64>, par: &Arc<BfvParameters>) -> Self {
         Self {
-            params: params.to_owned(),
+            par: par.to_owned(),
             coeffs: coeffs.into_boxed_slice(),
         }
     }
@@ -125,7 +115,7 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        let level = self.params.level_of_context(p.ctx())?;
+        let level = self.par.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), p.ctx(), false)?.into_ntt(),
@@ -135,7 +125,7 @@ impl SecretKey {
         let a_s = Zeroizing::new(&a * s.as_ref());
 
         let mut b =
-            Poly::<Ntt>::small(p.ctx(), self.params.variance, rng).map_err(Error::MathError)?;
+            Poly::<Ntt>::small(p.ctx(), self.par.variance, rng).map_err(Error::MathError)?;
         b -= &a_s;
         b += p;
 
@@ -145,7 +135,7 @@ impl SecretKey {
         }
 
         Ok(Ciphertext {
-            params: self.params.clone(),
+            par: self.par.clone(),
             seed: Some(seed),
             c: vec![b, a],
             level,
@@ -159,7 +149,7 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>)> {
-        let level = self.params.level_of_context(p.ctx())?;
+        let level = self.par.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), p.ctx(), false)?.into_ntt(),
@@ -168,7 +158,7 @@ impl SecretKey {
         let mut a = Poly::<Ntt>::random_from_seed(p.ctx(), seed);
         let a_s = Zeroizing::new(&a * s.as_ref());
 
-        let e = Poly::<Ntt>::small(p.ctx(), self.params.variance, rng).map_err(Error::MathError)?;
+        let e = Poly::<Ntt>::small(p.ctx(), self.par.variance, rng).map_err(Error::MathError)?;
 
         let a_copy = a.clone();
         let e_copy = e.clone();
@@ -183,7 +173,7 @@ impl SecretKey {
         }
 
         let ct = Ciphertext {
-            params: self.params.clone(),
+            par: self.par.clone(),
             seed: Some(seed),
             c: vec![b, a],
             level,
@@ -225,7 +215,7 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        assert_eq!(self.params, pt.params);
+        assert_eq!(self.par, pt.par);
         let m = Zeroizing::new(pt.to_poly());
         self.encrypt_poly_with_seed(m.as_ref(), seed, rng)
     }
@@ -272,7 +262,7 @@ mod protobuf {
             }
 
             Ok(Self {
-                params: par.clone(),
+                par: par.clone(),
                 coeffs: proto.coeffs.into_boxed_slice(),
             })
         }
@@ -291,7 +281,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for SecretKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        assert!(Arc::ptr_eq(&self.params, &pt.params));
+        assert!(Arc::ptr_eq(&self.par, &pt.par));
         let m = Zeroizing::new(pt.to_poly());
         self.encrypt_poly(m.as_ref(), rng)
     }
@@ -301,7 +291,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
     type Error = Error;
 
     fn try_decrypt(&self, ct: &Ciphertext) -> Result<Plaintext> {
-        if !Arc::ptr_eq(&self.params, &ct.params) {
+        if !Arc::ptr_eq(&self.par, &ct.par) {
             Err(Error::DefaultError(
                 "Incompatible BFV parameters".to_string(),
             ))
@@ -324,22 +314,22 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
                     *si.as_mut() *= s.as_ref();
                 }
             }
-            let ctx_lvl = self.params.context_level_at(ct.level).unwrap();
+            let ctx_lvl = self.par.context_level_at(ct.level).unwrap();
             let ctx = c.ctx().clone();
             let c_inner = std::mem::replace(c.as_mut(), Poly::<Ntt>::zero(&ctx));
             let c_pb = Zeroizing::new(c_inner.into_power_basis());
             let d = Zeroizing::new(c_pb.as_ref().scale(&ctx_lvl.cipher_plain_context.scaler)?);
 
-            let value = match self.params.plaintext {
+            let value = match self.par.plaintext {
                 PlaintextModulus::Small { .. } => {
                     let mut v = Vec::<u64>::try_from(d.as_ref())?;
-                    let plaintext_modulus = self.params.plaintext();
+                    let plaintext_modulus = self.par.plaintext();
                     v.iter_mut().for_each(|vi| *vi += plaintext_modulus);
-                    let mut w = v[..self.params.degree()].to_vec();
+                    let mut w = v[..self.par.degree()].to_vec();
 
-                    let q = Modulus::new(self.params.moduli[0]).map_err(Error::MathError)?;
+                    let q = Modulus::new(self.par.moduli[0]).map_err(Error::MathError)?;
                     q.reduce_vec(&mut w);
-                    if let PlaintextModulus::Small { modulus: m, .. } = &self.params.plaintext {
+                    if let PlaintextModulus::Small { modulus: m, .. } = &self.par.plaintext {
                         m.reduce_vec(&mut w);
                     }
                     PlaintextValues::Small(w.into_boxed_slice())
@@ -347,14 +337,14 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
                 PlaintextModulus::Large(_) => {
                     let v: Vec<BigUint> = Vec::<BigUint>::from(d.as_ref())
                         .into_iter()
-                        .map(|vi| vi + self.params.plaintext_big())
+                        .map(|vi| vi + self.par.plaintext_big())
                         .collect_vec();
 
-                    let mut w = v[..self.params.degree()].to_vec();
+                    let mut w = v[..self.par.degree()].to_vec();
                     let q_poly = d.as_ref().ctx().modulus();
                     w.iter_mut().for_each(|wi| *wi %= q_poly);
 
-                    self.params.plaintext.reduce_vec(&mut w);
+                    self.par.plaintext.reduce_vec(&mut w);
                     PlaintextValues::Large(w.into_boxed_slice())
                 }
             };
@@ -370,7 +360,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
             .into_ntt();
 
             let pt = Plaintext {
-                params: self.params.clone(),
+                par: self.par.clone(),
                 value,
                 encoding: None,
                 poly_ntt: poly,
@@ -396,25 +386,12 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 16);
         let sk = SecretKey::random(&params, &mut rng);
-        assert_eq!(sk.params, params);
+        assert_eq!(sk.par, params);
 
         sk.coeffs.iter().for_each(|ci: &i64| {
             let sk_variance = params.variance as f32 / 20.0;
             assert!((*ci).abs() as f32 <= 2.0 * sk_variance)
         })
-    }
-
-    #[test]
-    fn debug_does_not_leak_coefficients() {
-        // Use a distinctive sentinel value that will not appear in the params.
-        let params = BfvParameters::default_arc(1, 16);
-        let sk = SecretKey::new(vec![987654321i64; params.degree()], &params);
-        let debug = format!("{sk:?}");
-        assert!(debug.contains("<redacted>"));
-        assert!(
-            !debug.contains("987654321"),
-            "debug output leaked coefficients: {debug}"
-        );
     }
 
     #[test]

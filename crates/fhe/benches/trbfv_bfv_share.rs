@@ -109,7 +109,7 @@ fn bench_data_sizes(c: &mut Criterion) {
 
         // Generate smudging error shares
         let esi_coeffs = trbfv
-            .generate_smudging_error(100, 0, Lambda::secure(80).unwrap(), &mut rng)
+            .generate_smudging_error(100, Lambda::secure(80).unwrap(), &mut rng)
             .unwrap();
         let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
         let esi_sss = share_manager

@@ -16,6 +16,5 @@ proptest-regressions/
 # tmuxp project config
 .tmuxp.yaml
 
-# AI harness
+# Claude Code local settings
 .claude/settings.local.json
-.plans

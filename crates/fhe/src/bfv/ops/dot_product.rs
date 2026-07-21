@@ -68,9 +68,7 @@ where
     let ctx = ct_first[0].ctx();
 
     if izip!(ct.clone(), pt.clone()).any(|(cti, pti)| {
-        cti.params != ct_first.params
-            || pti.params != ct_first.params
-            || cti.len() != ct_first.len()
+        cti.par != ct_first.par || pti.par != ct_first.par || cti.len() != ct_first.len()
     }) {
         return Err(Error::DefaultError("Mismatched parameters".to_string()));
     }
@@ -101,13 +99,13 @@ where
             .collect::<Result<Vec<Poly<Ntt>>>>()?;
 
         Ok(Ciphertext {
-            params: ct_first.params.clone(),
+            par: ct_first.par.clone(),
             seed: None,
             c,
             level: ct_first.level,
         })
     } else {
-        let mut acc = Array::zeros((ct_first.len(), ctx.moduli().len(), ct_first.params.degree()));
+        let mut acc = Array::zeros((ct_first.len(), ctx.moduli().len(), ct_first.par.degree()));
         for (ciphertext, plaintext) in izip!(ct, pt) {
             let pt_coefficients = plaintext.poly_ntt.coefficients();
             for (mut acci, ci) in izip!(acc.outer_iter_mut(), ciphertext.iter()) {
@@ -131,7 +129,7 @@ where
         // Reduce
         let mut c = Vec::with_capacity(ct_first.len());
         for acci in acc.outer_iter() {
-            let mut coeffs = Array2::zeros((ctx.moduli().len(), ct_first.params.degree()));
+            let mut coeffs = Array2::zeros((ctx.moduli().len(), ct_first.par.degree()));
             for (mut outij, accij, q) in izip!(
                 coeffs.outer_iter_mut(),
                 acci.outer_iter(),
@@ -145,7 +143,7 @@ where
         }
 
         Ok(Ciphertext {
-            params: ct_first.params.clone(),
+            par: ct_first.par.clone(),
             seed: None,
             c,
             level: ct_first.level,
