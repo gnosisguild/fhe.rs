@@ -220,7 +220,11 @@ impl RelinKeyShare {
                 ksk_s_to_r,
                 binding: None,
             },
-            RlkWitness { r, errors_d0, errors_d2 },
+            RlkWitness {
+                r,
+                errors_d0,
+                errors_d2,
+            },
         ))
     }
 
@@ -235,8 +239,14 @@ impl RelinKeyShare {
         key_level: usize,
         rng: &mut R,
     ) -> Result<(Self, RlkWitness)> {
-        let (mut share, witness) =
-            Self::contribution_with_crp_extended(sk, crp_d1, crp_a, ciphertext_level, key_level, rng)?;
+        let (mut share, witness) = Self::contribution_with_crp_extended(
+            sk,
+            crp_d1,
+            crp_a,
+            ciphertext_level,
+            key_level,
+            rng,
+        )?;
         share.binding = Some(binding);
         Ok((share, witness))
     }
