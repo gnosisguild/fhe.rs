@@ -221,7 +221,7 @@ impl KeySwitchingKey {
     /// polynomials sampled during `c0` generation.
     ///
     /// Each `errors[i]` is the small error `eᵢ` such that
-    /// `c0[i] = eᵢ − c1[i]·sk + gᵢ·from`.  The errors are returned in
+    /// `c0[i] = eᵢ − c1[i]·sk + gᵢ·from` (paper notation: `d0ᵢ = eᵢ − sk·d1ᵢ + gᵢ·r`).  The errors are returned in
     /// `NttShoup` form for consistency with `c0`.  They are needed by ZK
     /// witness-generation routines that must prove knowledge of the noise.
     pub fn new_with_c1_extended<R: RngCore + CryptoRng>(
@@ -358,16 +358,19 @@ impl KeySwitchingKey {
         c1: &[Poly<NttShoup>],
         rng: &mut R,
     ) -> Result<Vec<Poly<NttShoup>>> {
-        if c1.is_empty() {
-            return Err(Error::DefaultError("Empty number of c1's".to_string()));
-        }
-
+        let ctx0 = c1
+            .first()
+            .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
+            .ctx();
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c1[0].ctx(), false)?
-                .into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
         );
 
-        let rns = RnsContext::new(&sk.params.moduli[..c1.len()])?;
+        let moduli_slice =
+            sk.params.moduli.get(..c1.len()).ok_or_else(|| {
+                Error::DefaultError("c1 length exceeds modulus count".to_string())
+            })?;
+        let rns = RnsContext::new(moduli_slice)?;
 
         let c0 = c1
             .iter()
@@ -407,12 +410,12 @@ impl KeySwitchingKey {
         rng: &mut R,
         log_base: usize,
     ) -> Result<Vec<Poly<NttShoup>>> {
-        if c1.is_empty() {
-            return Err(Error::DefaultError("Empty number of c1's".to_string()));
-        }
+        let ctx0 = c1
+            .first()
+            .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
+            .ctx();
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c1[0].ctx(), false)?
-                .into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
         );
 
         let c0 = c1
@@ -450,16 +453,19 @@ impl KeySwitchingKey {
         c1: &[Poly<NttShoup>],
         rng: &mut R,
     ) -> Result<(Vec<Poly<NttShoup>>, Vec<Poly<NttShoup>>)> {
-        if c1.is_empty() {
-            return Err(Error::DefaultError("Empty number of c1's".to_string()));
-        }
-
+        let ctx0 = c1
+            .first()
+            .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
+            .ctx();
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c1[0].ctx(), false)?
-                .into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
         );
 
-        let rns = RnsContext::new(&sk.params.moduli[..c1.len()])?;
+        let moduli_slice =
+            sk.params.moduli.get(..c1.len()).ok_or_else(|| {
+                Error::DefaultError("c1 length exceeds modulus count".to_string())
+            })?;
+        let rns = RnsContext::new(moduli_slice)?;
 
         let pairs: Vec<(Poly<NttShoup>, Poly<NttShoup>)> = c1
             .iter()
@@ -504,13 +510,12 @@ impl KeySwitchingKey {
         rng: &mut R,
         log_base: usize,
     ) -> Result<(Vec<Poly<NttShoup>>, Vec<Poly<NttShoup>>)> {
-        if c1.is_empty() {
-            return Err(Error::DefaultError("Empty number of c1's".to_string()));
-        }
-
+        let ctx0 = c1
+            .first()
+            .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
+            .ctx();
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c1[0].ctx(), false)?
-                .into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
         );
 
         let pairs: Vec<(Poly<NttShoup>, Poly<NttShoup>)> = c1
@@ -1064,6 +1069,40 @@ mod tests {
             for (c1_1, c1_2) in ksk1.c1.iter().zip(ksk2.c1.iter()) {
                 assert_eq!(c1_1, c1_2);
             }
+        }
+        Ok(())
+    }
+
+    /// Verify `c0[i] + c1[i]·sk = eᵢ + gᵢ·from` (paper: `d0ᵢ = eᵢ − sk·d1ᵢ + gᵢ·r`).
+    #[test]
+    fn new_with_c1_extended_witness_equations() -> Result<(), Box<dyn Error>> {
+        use fhe_math::rns::RnsContext;
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+
+        let c1 = KeySwitchingKey::c1_from_seed(ctx, [42u8; 32], params.moduli().len());
+        let (ksk, errors) = KeySwitchingKey::new_with_c1_extended(&sk, &from, c1, 0, 0, &mut rng)?;
+
+        let sk_ntt = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)
+            .map_err(crate::Error::MathError)?
+            .into_ntt();
+        let rns = RnsContext::new(&params.moduli)?;
+
+        for (i, ((c0_i, c1_i), e_i)) in ksk
+            .c0
+            .iter()
+            .zip(ksk.c1.iter())
+            .zip(errors.iter())
+            .enumerate()
+        {
+            let lhs = (&c0_i.clone().into_ntt() + &(&c1_i.clone().into_ntt() * &sk_ntt))
+                .into_power_basis();
+            let gi = rns.get_garner(i).expect("garner");
+            let rhs = (&e_i.clone().into_ntt() + &(gi * &from).into_ntt()).into_power_basis();
+            assert_eq!(lhs, rhs, "witness equation failed at row {i}");
         }
         Ok(())
     }
