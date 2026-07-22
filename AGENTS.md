@@ -1,6 +1,6 @@
 # fhe.rs
 
-Ring-LWE-based fully homomorphic encryption library in Rust. Workspace with 4 crates under `crates/`: `fhe` (BFV, TRBFV, LBFV, MBFV scheme implementations), `fhe-math` (RNS, NTT, modular and polynomial arithmetic), `fhe-traits` (shared HE traits), `fhe-util` (utilities).
+Ring-LWE-based fully homomorphic encryption library in Rust. Workspace with 4 crates under `crates/`: `fhe` (BFV, TRBFV, TRLBFV, LBFV, MBFV scheme implementations), `fhe-math` (RNS, NTT, modular and polynomial arithmetic), `fhe-traits` (shared HE traits), `fhe-util` (utilities).
 
 > Area rules live in [`.rules/`](.rules). Load the relevant rule before changing code in that area — see **Touch → update** below. OpenCode agents and skills live in [`.opencode/`](.opencode); see **Development workflow**.
 
@@ -8,6 +8,7 @@ Ring-LWE-based fully homomorphic encryption library in Rust. Workspace with 4 cr
 
 - **BFV** — Brakerski-Fan-Vercauteren fully homomorphic encryption with HPS/RNS optimizations (`crates/fhe/src/bfv/`). Supports key generation, encryption, decryption, homomorphic addition, multiplication, and relinearization.
 - **TRBFV** — Threshold BFV (`crates/fhe/src/trbfv/`). Semi-malicious honest-majority threshold sharing, smudging, and decryption components. Paper: `n = 2t + 1`, static corruption ≤ `t`. Current implementation covers sharing, smudging, and decryption — not the complete DKG/broadcast orchestration.
+- **TRLBFV** — Threshold l-BFV key-generation and aggregation (`crates/fhe/src/trlbfv/`). Produces operational LBFV keys from bound additive contributions; DKG orchestration, ZK proofs, and threshold decryption remain external or in TRBFV components.
 - **LBFV** — BFV with linear relinearization key (`crates/fhe/src/lbfv/`). Public relinearization key that is linear in the secret key.
 - **MBFV** — Multiparty BFV (`crates/fhe/src/mbfv/`). Semi-honest N-out-of-N construction with two-round relinearization.
 - **RNS** — Residue Number System arithmetic (`crates/fhe-math/src/rns/`). Basis representation, conversion, Chinese Remainder Theorem.
@@ -29,7 +30,7 @@ cargo fmt --all                        # formatting
 
 ## Architecture
 
-- `crates/fhe/src/{bfv,trbfv,lbfv,mbfv}/` — HE scheme implementations
+- `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/` — HE scheme implementations
 - `crates/fhe-math/src/{rns,ntt,rq}/` — core math operations
 - `crates/fhe-traits/` — traits for HE schemes
 - `crates/fhe-util/` — utilities
@@ -82,6 +83,7 @@ Canonical detailed guidance in `.rules/` — read the full file when relevant:
 - [`.rules/codegen.md`](.rules/codegen.md) — protoc/prost feature-gated build flow
 - [`.rules/harness.md`](.rules/harness.md) — this scaffolding's invariants
 - [`.rules/changelog.md`](.rules/changelog.md) — when to edit changelog, version alignment
+- [`.rules/zk-witness.md`](.rules/zk-witness.md) — ZK witness API for encryption and RLK proof generation
 
 ## Keeping rules up to date
 
@@ -91,7 +93,7 @@ Update the canonical `.rules/*.md` in the same change when your edit makes a rul
 
 - `workflow.md` — any edit (applies project-wide)
 - `conventions.md` — `**/*.rs` (only when conventions change, not every edit)
-- `crypto.md` — `crates/fhe/src/{bfv,trbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`
+- `crypto.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`
 - `math.md` — `crates/fhe-math/src/**`
 - `codegen.md` — `**/build.rs`, `**/*.proto`, `**/src/proto/**`
 - `testing.md` — `**/tests/**`, `**/benches/**`, `.github/workflows/**`

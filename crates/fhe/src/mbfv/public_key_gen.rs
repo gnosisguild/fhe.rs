@@ -7,14 +7,16 @@ use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 //use serde::{Serialize, Deserialize};
 
-use super::{Aggregate, CommonRandomPoly};
+use crate::bfv::CommonRandomPoly;
+
+use super::Aggregate;
 
 /// A party's share in public key generation protocol.
 ///
 /// Each party uses the `PublicKeyShare` to generate their share of the public key and participate in the in the "Protocol 1: EncKeyGen", as detailed in [Multiparty BFV](https://eprint.iacr.org/2020/304.pdf) (p6). Use the [`Aggregate`] impl to combine the shares into a [`PublicKey`].
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PublicKeyShare {
-    pub(crate) par: Arc<BfvParameters>,
+    pub(crate) params: Arc<BfvParameters>,
     pub(crate) crp: CommonRandomPoly,
     pub(crate) p0_share: Poly<Ntt>,
 }
@@ -35,8 +37,8 @@ impl PublicKeyShare {
         crp: CommonRandomPoly,
         rng: &mut R,
     ) -> Result<Self> {
-        let par = sk_share.par.clone();
-        let ctx = par.context_at_level(0)?;
+        let params = sk_share.params.clone();
+        let ctx = params.context_at_level(0)?;
 
         // Convert secret key to usable polynomial
         let s = Zeroizing::new(
@@ -44,7 +46,7 @@ impl PublicKeyShare {
         );
 
         // Sample error
-        let e = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
+        let e = Zeroizing::new(Poly::<Ntt>::small(ctx, params.variance, rng)?);
         // Create p0_i share
         let mut p0_share = -crp.poly.clone();
         p0_share.disallow_variable_time_computations();
@@ -52,7 +54,11 @@ impl PublicKeyShare {
         p0_share += e.as_ref();
         unsafe { p0_share.allow_variable_time_computations() }
 
-        Ok(Self { par, crp, p0_share })
+        Ok(Self {
+            params,
+            crp,
+            p0_share,
+        })
     }
 
     /// Extended version of `new` that returns intermediate values for debugging/testing.
@@ -68,13 +74,13 @@ impl PublicKeyShare {
         crp: CommonRandomPoly,
         rng: &mut R,
     ) -> Result<(Poly<Ntt>, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
-        let par = sk_share.par.clone();
-        let ctx = par.context_at_level(0)?;
+        let params = sk_share.params.clone();
+        let ctx = params.context_at_level(0)?;
 
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
         );
-        let e = Zeroizing::new(Poly::<Ntt>::small(ctx, par.variance, rng)?);
+        let e = Zeroizing::new(Poly::<Ntt>::small(ctx, params.variance, rng)?);
 
         let mut pk_0 = -crp.poly.clone();
         pk_0.disallow_variable_time_computations();
@@ -96,9 +102,9 @@ impl PublicKeyShare {
     //     Ok(PublicKey {
     //         c: Ciphertext::new(
     //             vec![self.p0_share.clone(), self.crp.poly.clone()],
-    //             &self.par,
+    //             &self.params,
     //         )?,
-    //         par: self.par.clone(),
+    //         params: self.params.clone(),
     //     })
     // }
     pub fn to_public_key(&self) -> Result<PublicKey> {
@@ -109,8 +115,8 @@ impl PublicKeyShare {
         p1.disallow_variable_time_computations();
 
         Ok(PublicKey {
-            c: Ciphertext::new(vec![p0, p1], &self.par)?,
-            par: self.par.clone(),
+            c: Ciphertext::new(vec![p0, p1], &self.params)?,
+            params: self.params.clone(),
         })
     }
 
@@ -143,8 +149,8 @@ impl Aggregate<PublicKeyShare> for PublicKey {
         }
 
         Ok(PublicKey {
-            c: Ciphertext::new(vec![p0, share.crp.poly], &share.par)?,
-            par: share.par,
+            c: Ciphertext::new(vec![p0, share.crp.poly], &share.params)?,
+            params: share.params,
         })
     }
 }
@@ -160,9 +166,9 @@ impl Aggregate<PublicKeyShare> for PublicKey {
 // impl DeserializeWithCRP for PublicKeyShare {
 //     type Error = Error;
 
-//     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>, crp:
+//     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>, crp:
 // CommonRandomPoly) -> Result<Self> {         Ok(Self {
-//             par: par.clone(),
+//             params: params.clone(),
 //             crp: crp.clone(),
 //             p0_share,
 //         })
@@ -185,7 +191,7 @@ mod protobuf {
             let ctx = par.context_at_level(0)?;
             let p0_share = Poly::<Ntt>::from_bytes(bytes, ctx)?;
             Ok(Self {
-                par: par.clone(),
+                params: par.clone(),
                 crp,
                 p0_share,
             })
@@ -205,8 +211,8 @@ mod tests {
     use rand::rng;
 
     use crate::{
-        bfv::{BfvParameters, Encoding, Plaintext, PublicKey, SecretKey},
-        mbfv::{Aggregate as _, CommonRandomPoly},
+        bfv::{BfvParameters, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
+        mbfv::Aggregate as _,
     };
 
     use super::PublicKeyShare;
@@ -219,19 +225,19 @@ mod tests {
     // `secret_key_switch`.
     fn protocol_creates_valid_pk() {
         let mut rng = rng();
-        for par in [
+        for params in [
             BfvParameters::default_arc(1, 16),
             BfvParameters::default_arc(6, 32),
         ] {
-            for level in 0..=par.max_level() {
+            for level in 0..=params.max_level() {
                 for _ in 0..20 {
-                    let crp = CommonRandomPoly::new(&par, &mut rng).unwrap();
+                    let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
 
                     let mut pk_shares: Vec<PublicKeyShare> = vec![];
 
                     // Parties collectively generate public key
                     for _ in 0..NUM_PARTIES {
-                        let sk_share = SecretKey::random(&par, &mut rng);
+                        let sk_share = SecretKey::random(&params, &mut rng);
                         let pk_share =
                             PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
                         pk_shares.push(pk_share);
@@ -240,11 +246,11 @@ mod tests {
 
                     // Use it to encrypt a random polynomial
                     let pt = Plaintext::try_encode(
-                        &fhe_math::zq::Modulus::new(par.plaintext())
+                        &fhe_math::zq::Modulus::new(params.plaintext())
                             .unwrap()
-                            .random_vec(par.degree(), &mut rng),
+                            .random_vec(params.degree(), &mut rng),
                         Encoding::poly_at_level(level),
-                        &par,
+                        &params,
                     )
                     .unwrap();
                     let _ct = public_key.try_encrypt(&pt, &mut rng).unwrap();
@@ -258,12 +264,12 @@ mod tests {
         let mut rng = rng();
 
         // Test with different parameter configurations
-        for par in [
+        for params in [
             BfvParameters::default_arc(1, 8),
             BfvParameters::default_arc(6, 8),
         ] {
-            let sk_share = SecretKey::random(&par, &mut rng);
-            let crp = CommonRandomPoly::new(&par, &mut rng).unwrap();
+            let sk_share = SecretKey::random(&params, &mut rng);
+            let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
 
             // Call new_extended
             let (pk_0, pk_1, s, e) =
@@ -293,13 +299,13 @@ mod tests {
         let mut rng = rng();
         const NUM_PARTIES: usize = 5;
 
-        let par = BfvParameters::default_arc(1, 8);
-        let crp = CommonRandomPoly::new(&par, &mut rng).unwrap();
+        let params = BfvParameters::default_arc(1, 8);
+        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
 
         // Generate extended data for multiple parties
         let mut extended_data = vec![];
         for _ in 0..NUM_PARTIES {
-            let sk_share = SecretKey::random(&par, &mut rng);
+            let sk_share = SecretKey::random(&params, &mut rng);
             let (pk_0, pk_1, s, e) =
                 PublicKeyShare::new_extended(&sk_share, crp.clone(), &mut rng).unwrap();
             extended_data.push((pk_0, pk_1, s, e));
@@ -328,9 +334,9 @@ mod tests {
     fn test_new_extended_consistency_with_new() {
         let mut rng = rng();
 
-        let par = BfvParameters::default_arc(1, 8);
-        let sk_share = SecretKey::random(&par, &mut rng);
-        let crp = CommonRandomPoly::new(&par, &mut rng).unwrap();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk_share = SecretKey::random(&params, &mut rng);
+        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
 
         // Create PublicKeyShare using original new()
         let pks = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();

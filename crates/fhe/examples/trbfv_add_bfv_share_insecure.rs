@@ -12,8 +12,8 @@ use std::{env, error::Error, process::exit, sync::Arc};
 
 use console::style;
 use fhe::{
-    bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
-    mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
+    bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
+    mbfv::{AggregateIter, PublicKeyShare},
     trbfv::{Lambda, ShareManager, TRBFV},
 };
 
@@ -205,7 +205,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
 
                 let esi_coeffs = trbfv
-                    .generate_smudging_error(num_summed, security, &mut rng)
+                    .generate_smudging_error(num_summed, 0, security, &mut rng)
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager

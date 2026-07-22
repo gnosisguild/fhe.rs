@@ -1,6 +1,6 @@
 ---
 name: crypto-change-review
-description: Use when modifying BFV, TRBFV, LBFV, MBFV, key material, noise sampling, parameters, serialization, decryption, or threshold logic. Provides a review checklist for cryptographic correctness without claiming a formal security audit.
+description: Use when modifying BFV, TRBFV, TRLBFV, LBFV, MBFV, key material, noise sampling, parameters, serialization, decryption, or threshold logic. Provides a review checklist for cryptographic correctness without claiming a formal security audit.
 ---
 
 # Cryptographic change review
@@ -12,6 +12,7 @@ Use this skill when reviewing changes to cryptographic code in fhe.rs. It provid
 Determine which scheme is affected:
 - **BFV** (`crates/fhe/src/bfv/`) — Brakerski-Fan-Vercauteren
 - **TRBFV** (`crates/fhe/src/trbfv/`) — threshold sharing, smudging, and decryption components derived from the trBFV paper; not the complete robust protocol
+- **TRLBFV** (`crates/fhe/src/trlbfv/`) — Threshold l-BFV key generation, participant binding, and public-key/relinearization-key aggregation
 - **LBFV** (`crates/fhe/src/lbfv/`) — BFV with linear relinearization-key generation
 - **MBFV** (`crates/fhe/src/mbfv/`) — semi-honest N-out-of-N multiparty BFV
 

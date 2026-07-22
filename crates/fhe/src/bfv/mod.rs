@@ -9,6 +9,7 @@
 
 mod ciphertext;
 mod context;
+mod crp;
 mod encoding;
 mod keys;
 mod ops;
@@ -20,6 +21,7 @@ mod rgsw_ciphertext;
 pub mod traits;
 pub use ciphertext::Ciphertext;
 pub use context::{CipherPlainContext, ContextLevel};
+pub use crp::{CommonRandomPoly, CommonRandomPolyVec};
 pub use encoding::Encoding;
 pub use keys::{
     EvaluationKey, EvaluationKeyBuilder, KeySwitchingKey, PublicKey, RelinearizationKey, SecretKey,
