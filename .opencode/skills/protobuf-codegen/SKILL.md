@@ -1,25 +1,13 @@
+---
+name: protobuf-codegen
+description: Use this skill when working with protobuf definitions or generated code in fhe.rs.
+---
+
 # Protobuf code generation
 
 Use this skill when working with protobuf definitions or generated code in fhe.rs.
 
-## Build flow
-
-Protobuf serialization is feature-gated behind the `protobuf` feature (disabled by default). Two `build.rs` scripts drive code generation via `prost`:
-
-### fhe-math (`crates/fhe-math/build.rs`)
-- When `--features protobuf` is enabled: compiles `src/proto/rq.proto` into `OUT_DIR` via `prost-build`
-- When disabled: does nothing (no `protoc` required)
-
-### fhe (`crates/fhe/build.rs`)
-- When `--features protobuf` is enabled: compiles `src/proto/bfv/bfv.proto` and `src/proto/trbfv/trbfv.proto` into `OUT_DIR`
-- BFV is compiled first because TRBFV imports from it
-- When disabled: does nothing (no `protoc` required)
-
-## Generated files
-
-Generated code is produced in `OUT_DIR` at build time. No generated `.rs` files are committed to the repository.
-
-The `proto` modules use `include!(concat!(env!("OUT_DIR"), "/fhers.*.rs"))` to pull in the generated code.
+The build flow, feature-gating, and what's covered by `--features protobuf` live in [`.rules/codegen.md`](../../../.rules/codegen.md) — the source of truth. Read it before touching `.proto` files, `build.rs`, or generated code; do not restate it here.
 
 ## When changing .proto files
 

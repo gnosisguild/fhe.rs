@@ -26,13 +26,15 @@ The canonical rules under [`.rules/`](.) are the single source of truth. OpenCod
 
 ### Skills and subagents
 
-Skills live at `.opencode/skills/<name>/SKILL.md`; subagents at `.opencode/agents/<name>.md`. Each carries valid frontmatter. A skill and a subagent may cover related ground — that is composition, not duplication. Primary agents (e.g. `architect`, `fix`, `harness`, `work`) are also defined in `.opencode/agents/`.
+Skills live at `.opencode/skills/<name>/SKILL.md`; subagents at `.opencode/agents/<name>.md`. Each carries valid frontmatter. A skill and a subagent may cover related ground — that is composition, not duplication. Primary agents (e.g. `architect`, `triage`, `harness`, `orchestrator`) are also defined in `.opencode/agents/`.
 
 When creating or editing a skill or an agent, follow the structure of the existing files under `.opencode/` and the **Construct selection** table above. Match the frontmatter shape (skills: `name` + `description`; agents: `mode` + `permission` + `description`) and keep each file to a single, well-scoped responsibility.
 
+**Name collisions.** OpenCode ships built-in agents named `build`, `plan`, `general`, `explore`, and `scout`. A custom agent file under `.opencode/agents/` that reuses one of these names shadows the built-in silently — this has happened before (`plan.md` collided with the built-in `plan` agent) and is a functional bug, not a style nit. Check new or renamed agent files against this list.
+
 ### Permissions match intent
 
-Review, architecture, and planning agents are read-only (`edit: deny`). `implementer` and `harness` may edit. `work` may only edit `.plans/*` files.
+Review, architecture, and planning agents are read-only (`edit: deny`). `implementer` and `harness` may edit. `orchestrator` may only edit `.plans/*` files.
 
 ### OpenCode config is declared in `opencode.json`
 

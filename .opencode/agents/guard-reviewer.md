@@ -1,5 +1,5 @@
 ---
-description: Semantic constraint guard for fhe.rs. Read the diff against AGENTS.md Constraints + .rules/ conventions + cross-cutting obligations. Read-only — reports findings, does not edit. Dispatched by the review skill alongside quality-review.
+description: Semantic constraint guard for fhe.rs. Read the diff against AGENTS.md Constraints + .rules/ conventions + cross-cutting obligations. Read-only — reports findings, does not edit. Dispatched by the review skill alongside quality-reviewer.
 mode: subagent
 permission:
   read: allow
@@ -32,7 +32,7 @@ Do not load rules for areas the diff does not touch. The files you loaded are th
 
 ## Gather the diff
 
-Use `git diff`, `git diff origin/main...HEAD`, and read changed files as needed. Stay within the changed surface.
+Use `git diff`, `git diff origin/main...HEAD`, and read changed files as needed. Report only on the changed hunks, plus anything outside the diff that the diff itself could break (a caller relying on a changed signature, an invariant a changed function no longer upholds, a test that now exercises stale behavior). Do not report pre-existing issues in code the diff does not touch and that the diff does not put at risk.
 
 ## What the automated gates already cover — don't re-litigate
 

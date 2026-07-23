@@ -11,6 +11,8 @@ permission:
     '*': allow
     git commit *: deny
     git push *: deny
+    git checkout -b *: deny
+    git branch *: deny
     rm *: deny
   edit: allow
   task: deny
@@ -94,5 +96,6 @@ When TDD doesn't apply, still verify manually and run `cargo test --release --al
 ## What to avoid
 
 - Do not commit, amend, or push unless the user explicitly asks.
+- Do not create, switch, or delete branches — always work on the current branch. Branching is the user's responsibility.
 - Do not manually edit generated protobuf files (see `.rules/codegen.md`).
 - Do not make security claims without evidence (see `.rules/crypto.md`).

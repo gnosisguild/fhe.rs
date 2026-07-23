@@ -29,6 +29,8 @@ Review changes that touch:
 - Polynomial arithmetic: multiplication, division, centering, degree management (`crates/fhe-math/src/rq/`)
 - Conversions between RNS and coefficient form, between scalar and polynomial representations
 
+Use `git diff` and `git diff origin/main...HEAD` to find the changed hunks; read surrounding files for context. Report only on the changed hunks, plus anything outside the diff that the diff itself could break (a caller relying on a changed signature, a bound or invariant a changed function no longer upholds). Do not report pre-existing issues in code the diff does not touch and does not put at risk.
+
 ## What to check
 
 - **NTT round-trip** — forward then inverse must recover the original within modular arithmetic.

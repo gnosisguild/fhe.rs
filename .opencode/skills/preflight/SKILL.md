@@ -7,44 +7,7 @@ description: Use before push or commit to catch a red CI early. Run the same che
 
 Use this skill when you need to test, lint, format, or verify changes in fhe.rs.
 
-## Focused verification
-
-Run the narrowest check that covers the change first.
-
-### Single crate
-
-```bash
-cargo test --release -p fhe-math
-cargo test --release -p fhe
-```
-
-### Single test
-
-```bash
-cargo test --release -p fhe -- <test_name>
-cargo test --release -p fhe-math -- <test_name>
-```
-
-### Clippy on a single crate
-
-```bash
-cargo clippy -p fhe-math -- -D warnings
-cargo clippy -p fhe -- -D warnings
-```
-
-## Full CI-equivalent verification
-
-Run all three before declaring work complete:
-
-```bash
-cargo test --release --all-features
-cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt --all
-```
-
-## Release mode
-
-Always use `--release`. The trbfv secure-preset e2e tests (`crates/fhe/tests/trbfv_secure_e2e.rs`) take minutes in debug and seconds in release. CI runs `cargo test --release --all-features`.
+The commands to run (focused and full CI-equivalent verification) and the release-mode requirement live in [`.rules/testing.md`](../../../.rules/testing.md) — the source of truth. Read it for the exact commands and for test-coverage invariants (proptest, criterion, CRP/l-BFV, smudging/threshold E2E) when the change touches those areas.
 
 ## Debugging failures
 

@@ -51,21 +51,20 @@ At the start of each agent session, run `git rev-parse --show-toplevel` and use 
 
 ## Development workflow
 
-For any non-trivial task, switch to the **`work`** agent — it orchestrates the full flow (plan → build → review → verify) and enforces fhe.rs constraints. Starting points: `architect` for designs, `fix` for bugs, then `work` for everything else.
+For any non-trivial task, switch to the **`orchestrator`** agent — it orchestrates the full flow (plan → build → verify → review, review only on explicit user go-ahead) and enforces fhe.rs constraints. Starting points: `architect` for designs, `triage` for bugs, then `orchestrator` for everything else. `orchestrator` always operates on the current branch — it never creates or switches branches.
 
 The agent set:
 
-1. `work` — orchestrator. Routes plan → build → review → verification, asks user at gates. Never writes production code directly.
+1. `orchestrator` — routes plan → build → verification → review (review only on explicit user go-ahead), asks user at gates. Always works on the current branch. Never writes production code directly.
 2. `architect` — brainstorm designs and tradeoffs (read-only).
-3. `fix` — bug root-cause analysis. Reproduce, trace, explain root cause, propose fix direction. Never patches.
-4. `plan` — subagent. Produces bite-sized implementation plans with exact file paths, code, and verification (read-only).
-5. `implementer` — implements approved plans using TDD cycle (can edit).
-6. `guard-review` — checks diff against hard constraints and conventions (read-only).
-7. `quality-review` — universal Rust code quality review (read-only).
-8. `reviewer` — general correctness, conventions, and test review (read-only).
-9. `crypto-reviewer` — specialist review for scheme implementations, key handling, noise, parameters, serialization, decryption, threshold logic, and PIR examples (read-only).
-10. `math-reviewer` — specialist review for RNS, NTT, modular arithmetic, polynomial operations, scaling, bounds, conversions, and property tests (read-only).
-11. `harness` — harness lifecycle: coherence sweeps, restructuring, rule maintenance.
+3. `triage` — bug root-cause analysis. Reproduce, trace, explain root cause, propose fix direction. Never patches.
+4. `planner` — subagent. Produces bite-sized implementation plans with exact file paths, code, and verification (read-only).
+5. `implementer` — implements approved plan tasks using TDD cycle (can edit).
+6. `guard-reviewer` — checks diff against hard constraints and conventions (read-only).
+7. `quality-reviewer` — universal Rust code quality review (read-only).
+8. `crypto-reviewer` — specialist review for scheme implementations, key handling, noise, parameters, serialization, decryption, threshold logic, and PIR examples (read-only).
+9. `math-reviewer` — specialist review for RNS, NTT, modular arithmetic, polynomial operations, scaling, bounds, conversions, and property tests (read-only).
+10. `harness` — harness lifecycle: coherence sweeps, restructuring, rule maintenance.
 
 Reusable procedures live as skills under [`.opencode/skills/`](.opencode/skills): `review` (orchestrates all reviewers), `preflight`, `crypto-change-review`, `protobuf-codegen`, `benchmarking`.
 

@@ -30,6 +30,8 @@ Review changes that touch:
 - Decryption, share aggregation, or threshold reconstruction
 - Serialization of keys, ciphertexts, or plaintexts
 
+Use `git diff` and `git diff origin/main...HEAD` to find the changed hunks; read surrounding files for context. Report only on the changed hunks, plus anything outside the diff that the diff itself could break (a caller relying on a changed signature, an invariant a changed function no longer upholds, a participant-set or noise assumption a downstream component now violates). Do not report pre-existing issues in code the diff does not touch and does not put at risk.
+
 ## What to check
 
 - **Construction identity** — identify BFV, l-BFV/trBFV, or MBFV before applying a paper invariant. Do not transfer robustness or threshold claims between them.

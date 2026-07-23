@@ -99,8 +99,8 @@ Fix issues inline before presenting to the user.
 ## Handoff
 
 1. Present the approved design to the user and ask: "Ready to proceed with implementation?"
-2. After approval → the user switches to the `work` agent, which picks up from this design.
-3. The `work` agent dispatches `plan` for detailed implementation planning, then `implementer` for execution.
+2. After approval → the user switches to the `orchestrator` agent, which picks up from this design.
+3. The `orchestrator` agent dispatches `planner` for detailed implementation planning, then `implementer` for execution.
 
 ## Key Principles
 

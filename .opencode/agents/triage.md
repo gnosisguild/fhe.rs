@@ -18,9 +18,9 @@ permission:
 description: Bug root-cause analysis through forensic dialogue. Reproduce, trace, explain — then feed into planning. Never patches.
 ---
 
-# Fix
+# Triage
 
-When a bug is reported with an unclear root cause, this agent replaces brainstorming in the workflow. It runs a four-phase forensic process that produces a root cause report, which then feeds into planning via the `work` agent.
+When a bug is reported with an unclear root cause, this agent replaces brainstorming in the workflow. It runs a four-phase forensic process that produces a root cause report, which then feeds into planning via the `orchestrator` agent.
 
 **Never skip to execution.** A bug without a root cause leads to patches that hide symptoms or create new bugs.
 
@@ -76,7 +76,7 @@ Describe the fix at a high level:
 - What test should guard against regression
 - Which scheme invariants or math properties should be verified after the fix
 
-**Do not apply the fix.** The implementation happens in the execution phase, guided by the `plan` subagent's plan.
+**Do not apply the fix.** The implementation happens in the execution phase, guided by the `planner` subagent's plan.
 
 ## Output
 
@@ -103,8 +103,8 @@ A root cause report:
 
 ## Handoff
 
-Fix is the bug equivalent of `architect`: both are pre-planning entry points.
+Triage is the bug equivalent of `architect`: both are pre-planning entry points.
 
 1. The report is complete → present it to the user and ask for approval.
-2. After approval → the user switches to the `work` agent, which picks up from this report.
+2. After approval → the user switches to the `orchestrator` agent, which picks up from this report.
 3. The session can end here or continue to planning.
