@@ -26,9 +26,9 @@ pub struct RlkWitness {
     /// Ephemeral randomness key used during RLK generation.
     /// Auto-zeroized when dropped.
     pub r: Zeroizing<SecretKey>,
-    /// Per-row errors from `ksk_r_to_s`: `eᵢ` such that `d0ᵢ = eᵢ − sk·d1ᵢ + rᵢ·g`.
+    /// Per-row errors from `ksk_r_to_s`: `eᵢ` such that `d0ᵢ = eᵢ − sk·d1ᵢ + gᵢ·r`.
     pub errors_d0: Vec<Poly<NttShoup>>,
-    /// Per-row errors from `ksk_s_to_r`: `eᵢ` such that `d2ᵢ = eᵢ + r·aᵢ + skᵢ·g`.
+    /// Per-row errors from `ksk_s_to_r`: `eᵢ` such that `d2ᵢ = eᵢ + r·aᵢ + gᵢ·sk`.
     pub errors_d2: Vec<Poly<NttShoup>>,
 }
 

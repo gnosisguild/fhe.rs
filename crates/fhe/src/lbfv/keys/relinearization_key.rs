@@ -206,8 +206,8 @@ impl LBFVRelinearizationKey {
     ///
     /// Returns `(ksk_r_to_s, ksk_s_to_r, r, errors_d0, errors_d2)` where:
     /// - `r` is the ephemeral `SecretKey`; auto-zeroized when dropped.
-    /// - `errors_d0[i]` is the small error `eᵢ` such that `d0ᵢ = eᵢ − sk·d1ᵢ + rᵢ·g`.
-    /// - `errors_d2[i]` is the small error `eᵢ` such that `d2ᵢ = eᵢ + r·aᵢ + skᵢ·g`.
+    /// - `errors_d0[i]` is the small error `eᵢ` such that `d0ᵢ = eᵢ − sk·d1ᵢ + gᵢ·r`.
+    /// - `errors_d2[i]` is the small error `eᵢ` such that `d2ᵢ = eᵢ + r·aᵢ + gᵢ·sk`.
     #[allow(clippy::type_complexity)]
     pub(crate) fn generate_components_with_polys_extended<R: RngCore + CryptoRng>(
         sk: &SecretKey,
@@ -519,7 +519,16 @@ impl LBFVRelinearizationKey {
     /// * `Err` if the number of moduli in the ciphertext context is not equal
     ///   to the number of polynomials in `b_vec`, which should be equal to "l".
     pub fn l(&self) -> Result<usize> {
-        if self.ksk_r_to_s.params.max_level() + 1 - self.ciphertext_level() != self.b_vec.len() {
+        let expected = self
+            .ksk_r_to_s
+            .params
+            .max_level()
+            .checked_add(1)
+            .and_then(|v| v.checked_sub(self.ciphertext_level()))
+            .ok_or_else(|| {
+                Error::DefaultError("ciphertext_level exceeds max_level in l()".to_string())
+            })?;
+        if expected != self.b_vec.len() {
             return Err(Error::DefaultError("'l' is not consistent.".to_string()));
         }
         Ok(self.b_vec.len())
@@ -998,6 +1007,81 @@ mod tests {
             Vec::<u64>::try_decode(&sk.try_decrypt(&explicit_product)?, Encoding::poly())?[0],
             9
         );
+
+        Ok(())
+    }
+
+    /// Verify per-row KSK equations from the paper for `generate_components_with_polys_extended`:
+    /// - `d0ᵢ + sk·d1ᵢ = e0ᵢ + gᵢ·r`  (ksk_r_to_s)
+    /// - `d2ᵢ − r·aᵢ = e2ᵢ + gᵢ·sk`   (ksk_s_to_r, using neg_r so sign cancels)
+    #[test]
+    fn generate_components_extended_witness_equations() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::bfv::KeySwitchingKey;
+        use fhe_math::rns::RnsContext;
+        use fhe_math::rq::traits::TryConvertFrom as TryConvertFromPoly;
+
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+
+        let d1_polys = KeySwitchingKey::c1_from_seed(ctx, [11u8; 32], params.moduli().len());
+        let a_polys = KeySwitchingKey::c1_from_seed(ctx, [22u8; 32], params.moduli().len());
+
+        let (ksk_r_to_s, ksk_s_to_r, r, errors_d0, errors_d2) =
+            LBFVRelinearizationKey::generate_components_with_polys_extended(
+                &sk,
+                d1_polys.clone(),
+                a_polys.clone(),
+                0,
+                0,
+                &mut rng,
+            )?;
+
+        let rns = RnsContext::new(&params.moduli)?;
+
+        let sk_ntt =
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)?.into_ntt();
+        let r_pb = Poly::<PowerBasis>::try_convert_from(r.coeffs.as_ref(), ctx, false)?;
+        let sk_pb = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)?;
+
+        // d0ᵢ + sk·d1ᵢ = e0ᵢ + gᵢ·r
+        for (i, ((d0_i, d1_i), e0_i)) in ksk_r_to_s
+            .c0
+            .iter()
+            .zip(ksk_r_to_s.c1.iter())
+            .zip(errors_d0.iter())
+            .enumerate()
+        {
+            let lhs = (&d0_i.clone().into_ntt() + &(&d1_i.clone().into_ntt() * &sk_ntt))
+                .into_power_basis();
+            let gi = rns.get_garner(i).expect("garner");
+            let rhs = (&e0_i.clone().into_ntt() + &(gi * &r_pb).into_ntt()).into_power_basis();
+            assert_eq!(lhs, rhs, "d0 witness equation failed at row {i}");
+        }
+
+        // ksk_s_to_r was built with neg_r = −r as the "sk" argument.
+        // KSK invariant: c0ᵢ + c1ᵢ·(encrypting_key) = eᵢ + gᵢ·(from_key)
+        // Here encrypting_key = neg_r, from_key = sk, so: d2ᵢ + aᵢ·(−r) = e2ᵢ + gᵢ·sk
+        // Rearranged (paper form):  d2ᵢ = e2ᵢ + r·aᵢ + gᵢ·sk  ✓
+        let mut neg_r_coeffs = r.coeffs.clone();
+        neg_r_coeffs.iter_mut().for_each(|c| *c = c.wrapping_neg());
+        let neg_r_pb = Poly::<PowerBasis>::try_convert_from(neg_r_coeffs.as_ref(), ctx, false)?;
+        let neg_r_ntt = neg_r_pb.into_ntt();
+
+        for (i, ((d2_i, a_i), e2_i)) in ksk_s_to_r
+            .c0
+            .iter()
+            .zip(ksk_s_to_r.c1.iter())
+            .zip(errors_d2.iter())
+            .enumerate()
+        {
+            let lhs = (&d2_i.clone().into_ntt() + &(&a_i.clone().into_ntt() * &neg_r_ntt))
+                .into_power_basis();
+            let gi = rns.get_garner(i).expect("garner");
+            let rhs = (&e2_i.clone().into_ntt() + &(gi * &sk_pb).into_ntt()).into_power_basis();
+            assert_eq!(lhs, rhs, "d2 witness equation failed at row {i}");
+        }
 
         Ok(())
     }
