@@ -105,8 +105,15 @@ impl SmudgingBoundCalculatorConfig {
     pub fn new(params: Arc<BfvParameters>, n: usize, m: usize, lambda: Lambda) -> Self {
         let variance = params.variance();
         let error1_variance = params.get_error1_variance().clone();
-        // B_enc ≈ sqrt(3 * error1_variance)
-        let b_enc = (BigUint::from(3u32) * error1_variance).sqrt();
+        // Must match the branch in `Poly::conditional_error`
+        // (fhe-math/src/rq/mod.rs): below 16, e1 is sampled via centered
+        // binomial with support [-2v, 2v]; at or above 16, via uniform
+        // sampling with support [-sqrt(3v), sqrt(3v)].
+        let b_enc = if error1_variance < BigUint::from(16u32) {
+            BigUint::from(2u32) * error1_variance
+        } else {
+            (BigUint::from(3u32) * error1_variance).sqrt()
+        };
 
         Self {
             params,
@@ -286,10 +293,11 @@ mod tests {
         assert_eq!(config.n, 5);
         assert_eq!(config.m, 2);
         assert_eq!(config.lambda.value(), 80);
-        // b_enc is now BigUint
+        // b_enc is now BigUint; test_params() defaults error1_variance to 10 (< 16),
+        // so this takes the centered-binomial branch: b_enc = 2 * variance.
         assert_eq!(
             config.b_enc,
-            (BigUint::from(3u32) * params.get_error1_variance()).sqrt()
+            BigUint::from(2u32) * params.get_error1_variance()
         );
         // b_e is u64
         assert_eq!(config.b_e, (params.variance() * 2) as u64);
