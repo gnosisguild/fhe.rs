@@ -77,7 +77,8 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                 NUM_PARTIES,
                 NUM_SUMMED,
                 Lambda::secure(LAMBDA).unwrap(),
-            );
+            )
+            .unwrap();
             let bound = SmudgingBoundCalculator::new(config)
                 .calculate_sm_bound()
                 .expect("secure_8192 parameters must admit a smudging bound");
@@ -302,7 +303,8 @@ fn trbfv_smudging_bound_matches_paper_formula() {
         NUM_PARTIES,
         NUM_SUMMED,
         Lambda::secure(LAMBDA).unwrap(),
-    );
+    )
+    .unwrap();
     let calculator = SmudgingBoundCalculator::new(config.clone());
     let bound = calculator.calculate_sm_bound().unwrap();
 

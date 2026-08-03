@@ -128,7 +128,7 @@ impl TRBFV {
             self.n,
             num_ciphertexts,
             lambda,
-        );
+        )?;
         let calculator = SmudgingBoundCalculator::new(config);
         let generator = SmudgingNoiseGenerator::from_bound_calculator(calculator)?;
 

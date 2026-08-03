@@ -12,6 +12,7 @@ use crate::Error;
 /// - No precision loss in calculations while maintaining performance
 use crate::bfv::BfvParameters;
 
+use fhe_math::rq::variance_to_uniform_bound;
 use num_bigint::{BigInt, BigUint};
 use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
@@ -101,21 +102,34 @@ impl SmudgingBoundCalculatorConfig {
     /// * `n` - Number of parties in threshold scheme
     /// * `m` - Number of ciphertexts to process
     /// * `lambda` - Statistical security level
-    #[must_use]
-    pub fn new(params: Arc<BfvParameters>, n: usize, m: usize, lambda: Lambda) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error if the encryption error bound cannot be computed
+    /// from `error1_variance` (see [`fhe_math::rq::variance_to_uniform_bound`]).
+    pub fn new(
+        params: Arc<BfvParameters>,
+        n: usize,
+        m: usize,
+        lambda: Lambda,
+    ) -> Result<Self, Error> {
         let variance = params.variance();
         let error1_variance = params.get_error1_variance().clone();
-        // Must match the branch in `Poly::conditional_error`
-        // (fhe-math/src/rq/mod.rs): below 16, e1 is sampled via centered
-        // binomial with support [-2v, 2v]; at or above 16, via uniform
-        // sampling with support [-sqrt(3v), sqrt(3v)].
-        let b_enc = if error1_variance < BigUint::from(16u32) {
+        // Must match the branch in `Poly::conditional_error` (fhe-math/src/rq/mod.rs):
+        // at or below 16, e1 is sampled via centered binomial with support
+        // [-2v, 2v]; above 16, via the uniform sampler, whose exact bound is
+        // computed by `variance_to_uniform_bound` (shared with the sampler
+        // so the two can't drift apart again).
+        let b_enc = if error1_variance <= BigUint::from(16u32) {
             BigUint::from(2u32) * error1_variance
         } else {
-            (BigUint::from(3u32) * error1_variance).sqrt()
+            variance_to_uniform_bound(&error1_variance)?
+                .to_biguint()
+                .ok_or_else(|| {
+                    Error::smudging_bound_infeasible("computed encryption bound is negative")
+                })?
         };
 
-        Self {
+        Ok(Self {
             params,
             n,
             m,
@@ -124,7 +138,7 @@ impl SmudgingBoundCalculatorConfig {
             public_key_error: (n as u64) * (2 * variance) as u64,
             secret_key_bound: n as u64,
             lambda,
-        }
+        })
     }
 }
 
@@ -287,7 +301,8 @@ mod tests {
     fn test_smudging_bound_calculator_config() {
         let params = test_params();
         let config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2, Lambda::secure(80).unwrap());
+            SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2, Lambda::secure(80).unwrap())
+                .unwrap();
 
         assert_eq!(config.params, params);
         assert_eq!(config.n, 5);
@@ -313,7 +328,8 @@ mod tests {
     fn test_smudging_bound_calculator_minimal_case() {
         let params = test_params();
         let config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::secure(80).unwrap());
+            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::secure(80).unwrap())
+                .unwrap();
         let calculator = SmudgingBoundCalculator::new(config);
 
         let result = calculator.calculate_sm_bound();
@@ -351,7 +367,8 @@ mod tests {
     fn test_smudging_noise_generator_from_calculator() {
         let params = test_params();
         let config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::secure(80).unwrap());
+            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::secure(80).unwrap())
+                .unwrap();
         let calculator = SmudgingBoundCalculator::new(config);
 
         let result = SmudgingNoiseGenerator::from_bound_calculator(calculator);
@@ -429,7 +446,8 @@ mod tests {
 
         // Try the complete workflow
         let config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), n, m, Lambda::secure(80).unwrap());
+            SmudgingBoundCalculatorConfig::new(params.clone(), n, m, Lambda::secure(80).unwrap())
+                .unwrap();
         let calculator = SmudgingBoundCalculator::new(config);
 
         let bound_result = calculator.calculate_sm_bound();
