@@ -382,7 +382,7 @@ impl EvaluationKeyBuilder {
 impl From<&EvaluationKey> for EvaluationKeyProto {
     fn from(ek: &EvaluationKey) -> Self {
         let mut proto = EvaluationKeyProto::default();
-        for (_, gk) in ek.gk.iter() {
+        for gk in ek.gk.values() {
             proto.gk.push(GaloisKeyProto::from(gk))
         }
         proto.ciphertext_level = ek.ciphertext_level as u32;
