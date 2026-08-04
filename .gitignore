@@ -15,3 +15,7 @@ proptest-regressions/
 .vscode
 # tmuxp project config
 .tmuxp.yaml
+
+# AI harness
+.claude/settings.local.json
+.plans

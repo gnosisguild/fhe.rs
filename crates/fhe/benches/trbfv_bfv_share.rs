@@ -1,7 +1,7 @@
 //! Benchmarks for threshold BFV share operations.
 use criterion::{Criterion, criterion_group, criterion_main};
-use fhe::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::mbfv::{CommonRandomPoly, PublicKeyShare};
+use fhe::bfv::{BfvParametersBuilder, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey};
+use fhe::mbfv::PublicKeyShare;
 use fhe::trbfv::{Lambda, ShareManager, TRBFV};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
@@ -109,7 +109,7 @@ fn bench_data_sizes(c: &mut Criterion) {
 
         // Generate smudging error shares
         let esi_coeffs = trbfv
-            .generate_smudging_error(100, Lambda::secure(80).unwrap(), &mut rng)
+            .generate_smudging_error(100, 0, Lambda::secure(80).unwrap(), &mut rng)
             .unwrap();
         let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
         let esi_sss = share_manager

@@ -3,29 +3,37 @@
 use crate::bfv::{
     BfvParameters, Ciphertext, Plaintext, parameters::PlaintextModulus, plaintext::PlaintextValues,
 };
-use crate::proto::bfv::SecretKey as SecretKeyProto;
-use crate::{Error, Result, SerializationError};
+use crate::{Error, Result};
 use fhe_math::{
     rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom},
     zq::Modulus,
 };
-use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncrypter, FheParametrized, Serialize};
+use fhe_traits::{FheDecrypter, FheEncrypter, FheParametrized};
 use fhe_util::sample_vec_cbd_f32;
 use itertools::Itertools;
 use num_bigint::BigUint;
-use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Secret key for the BFV encryption scheme.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct SecretKey {
     /// The BFV parameters
-    pub(crate) par: Arc<BfvParameters>,
+    pub(crate) params: Arc<BfvParameters>,
     /// The secret key coefficients
     pub coeffs: Box<[i64]>,
+}
+
+// Redacted `Debug` so that `{:?}` never leaks the secret coefficients.
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretKey")
+            .field("params", &self.params)
+            .field("coeffs", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Zeroize for SecretKey {
@@ -52,16 +60,16 @@ impl SecretKey {
 
     /// Generate a random [`SecretKey`].
     #[must_use]
-    pub fn random<R: RngCore + CryptoRng>(par: &Arc<BfvParameters>, rng: &mut R) -> Self {
-        let s_coefficients = sample_vec_cbd_f32(par.degree(), Self::SK_VARIANCE, rng).unwrap();
-        Self::new(s_coefficients, par)
+    pub fn random<R: RngCore + CryptoRng>(params: &Arc<BfvParameters>, rng: &mut R) -> Self {
+        let s_coefficients = sample_vec_cbd_f32(params.degree(), Self::SK_VARIANCE, rng).unwrap();
+        Self::new(s_coefficients, params)
     }
 
     /// Generate a [`SecretKey`] from its coefficients.
     #[must_use]
-    pub fn new(coeffs: Vec<i64>, par: &Arc<BfvParameters>) -> Self {
+    pub fn new(coeffs: Vec<i64>, params: &Arc<BfvParameters>) -> Self {
         Self {
-            par: par.to_owned(),
+            params: params.to_owned(),
             coeffs: coeffs.into_boxed_slice(),
         }
     }
@@ -117,7 +125,7 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        let level = self.par.level_of_context(p.ctx())?;
+        let level = self.params.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), p.ctx(), false)?.into_ntt(),
@@ -127,7 +135,7 @@ impl SecretKey {
         let a_s = Zeroizing::new(&a * s.as_ref());
 
         let mut b =
-            Poly::<Ntt>::small(p.ctx(), self.par.variance, rng).map_err(Error::MathError)?;
+            Poly::<Ntt>::small(p.ctx(), self.params.variance, rng).map_err(Error::MathError)?;
         b -= &a_s;
         b += p;
 
@@ -137,7 +145,7 @@ impl SecretKey {
         }
 
         Ok(Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: Some(seed),
             c: vec![b, a],
             level,
@@ -151,7 +159,7 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>)> {
-        let level = self.par.level_of_context(p.ctx())?;
+        let level = self.params.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), p.ctx(), false)?.into_ntt(),
@@ -160,7 +168,7 @@ impl SecretKey {
         let mut a = Poly::<Ntt>::random_from_seed(p.ctx(), seed);
         let a_s = Zeroizing::new(&a * s.as_ref());
 
-        let e = Poly::<Ntt>::small(p.ctx(), self.par.variance, rng).map_err(Error::MathError)?;
+        let e = Poly::<Ntt>::small(p.ctx(), self.params.variance, rng).map_err(Error::MathError)?;
 
         let a_copy = a.clone();
         let e_copy = e.clone();
@@ -175,7 +183,7 @@ impl SecretKey {
         }
 
         let ct = Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: Some(seed),
             c: vec![b, a],
             level,
@@ -217,48 +225,57 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        assert_eq!(self.par, pt.par);
+        assert_eq!(self.params, pt.params);
         let m = Zeroizing::new(pt.to_poly());
         self.encrypt_poly_with_seed(m.as_ref(), seed, rng)
     }
 }
 
-impl From<&SecretKey> for SecretKeyProto {
-    fn from(sk: &SecretKey) -> Self {
-        Self {
-            coeffs: sk.coeffs.to_vec(),
+#[cfg(feature = "protobuf")]
+mod protobuf {
+    use super::*;
+    use crate::SerializationError;
+    use crate::proto::bfv::SecretKey as SecretKeyProto;
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use prost::Message;
+
+    impl From<&SecretKey> for SecretKeyProto {
+        fn from(sk: &SecretKey) -> Self {
+            Self {
+                coeffs: sk.coeffs.to_vec(),
+            }
         }
     }
-}
 
-impl Serialize for SecretKey {
-    fn to_bytes(&self) -> Vec<u8> {
-        SecretKeyProto::from(self).encode_to_vec()
+    impl Serialize for SecretKey {
+        fn to_bytes(&self) -> Vec<u8> {
+            SecretKeyProto::from(self).encode_to_vec()
+        }
     }
-}
 
-impl DeserializeParametrized for SecretKey {
-    type Error = Error;
+    impl DeserializeParametrized for SecretKey {
+        type Error = Error;
 
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: SecretKeyProto = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: "SecretKey decode".into(),
+        fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+            let proto: SecretKeyProto = Message::decode(bytes).map_err(|_| {
+                Error::SerializationError(SerializationError::ProtobufError {
+                    message: "SecretKey decode".into(),
+                })
+            })?;
+
+            if proto.coeffs.len() != par.degree() {
+                return Err(Error::SerializationError(
+                    SerializationError::InvalidFormat {
+                        reason: "SecretKey coeffs length and parameters degree mismatch".into(),
+                    },
+                ));
+            }
+
+            Ok(Self {
+                params: par.clone(),
+                coeffs: proto.coeffs.into_boxed_slice(),
             })
-        })?;
-
-        if proto.coeffs.len() != par.degree() {
-            return Err(Error::SerializationError(
-                SerializationError::InvalidFormat {
-                    reason: "SecretKey coeffs length and parameters degree mismatch".into(),
-                },
-            ));
         }
-
-        Ok(Self {
-            par: par.clone(),
-            coeffs: proto.coeffs.into_boxed_slice(),
-        })
     }
 }
 
@@ -274,7 +291,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for SecretKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        assert!(Arc::ptr_eq(&self.par, &pt.par));
+        assert!(Arc::ptr_eq(&self.params, &pt.params));
         let m = Zeroizing::new(pt.to_poly());
         self.encrypt_poly(m.as_ref(), rng)
     }
@@ -284,7 +301,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
     type Error = Error;
 
     fn try_decrypt(&self, ct: &Ciphertext) -> Result<Plaintext> {
-        if !Arc::ptr_eq(&self.par, &ct.par) {
+        if !Arc::ptr_eq(&self.params, &ct.params) {
             Err(Error::DefaultError(
                 "Incompatible BFV parameters".to_string(),
             ))
@@ -307,22 +324,22 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
                     *si.as_mut() *= s.as_ref();
                 }
             }
-            let ctx_lvl = self.par.context_level_at(ct.level).unwrap();
+            let ctx_lvl = self.params.context_level_at(ct.level).unwrap();
             let ctx = c.ctx().clone();
             let c_inner = std::mem::replace(c.as_mut(), Poly::<Ntt>::zero(&ctx));
             let c_pb = Zeroizing::new(c_inner.into_power_basis());
             let d = Zeroizing::new(c_pb.as_ref().scale(&ctx_lvl.cipher_plain_context.scaler)?);
 
-            let value = match self.par.plaintext {
+            let value = match self.params.plaintext {
                 PlaintextModulus::Small { .. } => {
                     let mut v = Vec::<u64>::try_from(d.as_ref())?;
-                    let plaintext_modulus = self.par.plaintext();
+                    let plaintext_modulus = self.params.plaintext();
                     v.iter_mut().for_each(|vi| *vi += plaintext_modulus);
-                    let mut w = v[..self.par.degree()].to_vec();
+                    let mut w = v[..self.params.degree()].to_vec();
 
-                    let q = Modulus::new(self.par.moduli[0]).map_err(Error::MathError)?;
+                    let q = Modulus::new(self.params.moduli[0]).map_err(Error::MathError)?;
                     q.reduce_vec(&mut w);
-                    if let PlaintextModulus::Small { modulus: m, .. } = &self.par.plaintext {
+                    if let PlaintextModulus::Small { modulus: m, .. } = &self.params.plaintext {
                         m.reduce_vec(&mut w);
                     }
                     PlaintextValues::Small(w.into_boxed_slice())
@@ -330,14 +347,14 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
                 PlaintextModulus::Large(_) => {
                     let v: Vec<BigUint> = Vec::<BigUint>::from(d.as_ref())
                         .into_iter()
-                        .map(|vi| vi + self.par.plaintext_big())
+                        .map(|vi| vi + self.params.plaintext_big())
                         .collect_vec();
 
-                    let mut w = v[..self.par.degree()].to_vec();
+                    let mut w = v[..self.params.degree()].to_vec();
                     let q_poly = d.as_ref().ctx().modulus();
                     w.iter_mut().for_each(|wi| *wi %= q_poly);
 
-                    self.par.plaintext.reduce_vec(&mut w);
+                    self.params.plaintext.reduce_vec(&mut w);
                     PlaintextValues::Large(w.into_boxed_slice())
                 }
             };
@@ -353,7 +370,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
             .into_ntt();
 
             let pt = Plaintext {
-                par: self.par.clone(),
+                params: self.params.clone(),
                 value,
                 encoding: None,
                 poly_ntt: poly,
@@ -369,9 +386,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
 mod tests {
     use super::SecretKey;
     use crate::bfv::{Encoding, Plaintext, parameters::BfvParameters};
-    use crate::proto::bfv::SecretKey as SecretKeyProto;
-    use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
-    use prost::Message;
+    use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::error::Error;
@@ -381,12 +396,25 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 16);
         let sk = SecretKey::random(&params, &mut rng);
-        assert_eq!(sk.par, params);
+        assert_eq!(sk.params, params);
 
         sk.coeffs.iter().for_each(|ci: &i64| {
             let sk_variance = params.variance as f32 / 20.0;
             assert!((*ci).abs() as f32 <= 2.0 * sk_variance)
         })
+    }
+
+    #[test]
+    fn debug_does_not_leak_coefficients() {
+        // Use a distinctive sentinel value that will not appear in the params.
+        let params = BfvParameters::default_arc(1, 16);
+        let sk = SecretKey::new(vec![987654321i64; params.degree()], &params);
+        let debug = format!("{sk:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(
+            !debug.contains("987654321"),
+            "debug output leaked coefficients: {debug}"
+        );
     }
 
     #[test]
@@ -468,33 +496,41 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn serialize_roundtrip() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(2, 16);
-        let sk = SecretKey::random(&params, &mut rng);
+    #[cfg(feature = "protobuf")]
+    mod protobuf {
+        use super::*;
+        use crate::proto::bfv::SecretKey as SecretKeyProto;
+        use fhe_traits::{DeserializeParametrized, Serialize};
+        use prost::Message;
 
-        let bytes = sk.to_bytes();
-        let decoded = SecretKey::from_bytes(&bytes, &params)?;
+        #[test]
+        fn serialize_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            let params = BfvParameters::default_arc(2, 16);
+            let sk = SecretKey::random(&params, &mut rng);
 
-        assert_eq!(decoded, sk);
-        Ok(())
-    }
+            let bytes = sk.to_bytes();
+            let decoded = SecretKey::from_bytes(&bytes, &params)?;
 
-    #[test]
-    fn deserialize_invalid_length() {
-        let params = BfvParameters::default_arc(1, 16);
-        let mut proto = SecretKeyProto {
-            coeffs: vec![0; params.degree()],
-        };
-        proto.coeffs.pop();
+            assert_eq!(decoded, sk);
+            Ok(())
+        }
 
-        let bytes = proto.encode_to_vec();
-        let err = SecretKey::from_bytes(&bytes, &params).unwrap_err();
+        #[test]
+        fn deserialize_invalid_length() {
+            let params = BfvParameters::default_arc(1, 16);
+            let mut proto = SecretKeyProto {
+                coeffs: vec![0; params.degree()],
+            };
+            proto.coeffs.pop();
 
-        assert!(matches!(
-            err,
-            crate::Error::SerializationError(crate::SerializationError::InvalidFormat { .. })
-        ));
+            let bytes = proto.encode_to_vec();
+            let err = SecretKey::from_bytes(&bytes, &params).unwrap_err();
+
+            assert!(matches!(
+                err,
+                crate::Error::SerializationError(crate::SerializationError::InvalidFormat { .. })
+            ));
+        }
     }
 }

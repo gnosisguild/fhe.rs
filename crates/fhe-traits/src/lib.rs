@@ -59,7 +59,7 @@ where
     fn try_encode(
         value: V,
         encoding: Self::Encoding,
-        par: &Arc<Self::Parameters>,
+        params: &Arc<Self::Parameters>,
     ) -> Result<Self, Self::Error>;
 }
 
@@ -78,7 +78,7 @@ where
     unsafe fn try_encode_vt(
         value: V,
         encoding: Self::Encoding,
-        par: &Arc<Self::Parameters>,
+        params: &Arc<Self::Parameters>,
     ) -> Result<Self, Self::Error>;
 }
 
@@ -98,9 +98,13 @@ where
 }
 
 /// A ciphertext which will encrypt a plaintext.
+///
+/// Serialization is not required by this trait; implementations that support
+/// (de)serialization do so via the [`Serialize`], [`DeserializeParametrized`],
+/// and [`DeserializeWithContext`] traits, which may be feature-gated.
 pub trait FheCiphertext
 where
-    Self: Sized + Serialize + FheParametrized + DeserializeParametrized,
+    Self: Sized + FheParametrized,
 {
 }
 
@@ -146,7 +150,7 @@ where
     type Error;
 
     /// Attempt to deserialize from a vector of bytes
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self, Self::Error>;
+    fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self, Self::Error>;
 }
 
 /// Deserialization setting an explicit context.
@@ -191,7 +195,7 @@ where
     /// Attempt to deserialize from a vector of bytes
     fn from_bytes(
         bytes: &[u8],
-        par: &Arc<Self::Parameters>,
+        params: &Arc<Self::Parameters>,
         crp: Self::CommonRandomPoly,
     ) -> Result<Self, Self::Error>;
 }
