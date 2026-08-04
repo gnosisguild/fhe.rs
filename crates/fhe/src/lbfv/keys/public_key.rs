@@ -1,27 +1,46 @@
 /*!
- * This module contains the public key for the l-BFV encryption scheme.
+ * Public key for the l-BFV encryption scheme.
+ *
+ * # Concrete vs. seed-derived polynomials
+ *
+ * Every public key holds `l` ciphertexts `(b_j, a_j)`.  The **concrete**
+ * `a_j` polynomials are the authoritative shared reference string (CRS):
+ * equality checks compare the actual polynomial coefficients, never seeds alone.
+ *
+ * The [`seed`](LBFVPublicKey::seed) field is optional compression
+ * metadata: it records the seed that *would* regenerate the same `a_j`
+ * polynomials, making serialization smaller.  When present, it is
+ * verified against the concrete polynomials at construction and
+ * deserialization time (see [`from_parts`](LBFVPublicKey::from_parts)).
+ * A seed that contradicts the concrete polynomials is rejected.
+ *
+ * # Single-party operational key
+ *
+ * This module provides a strictly single-party operational public key.
+ * There is no distributed aggregation, participant bindings, or
+ * threshold construction.  All threshold/multiparty utilities live in
+ * [`crate::trlbfv`]; use [`crate::trlbfv::PublicKeyShare`] and
+ * [`crate::trlbfv::AggregatedPublicKey`] for distributed-key workflows.
  */
 
-use crate::{Error, Result, SerializationError};
+use crate::{Error, Result};
 use std::sync::Arc;
 
-use prost::Message;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
-use crate::bfv::{
-    BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
+use crate::bfv::{BfvParameters, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, SecretKey};
+use fhe_math::rq::{
+    Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher, traits::TryConvertFrom,
 };
-use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
-use fhe_math::rq::{Ntt, NttShoup, Poly, Representation, switcher::Switcher};
-use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
+use fhe_traits::{FheEncrypter, FheParametrized};
 
 /// Public key for the L-BFV encryption scheme.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct LBFVPublicKey {
     /// The BFV parameters
-    pub par: Arc<BfvParameters>,
+    pub params: Arc<BfvParameters>,
     /// The public key ciphertexts, one for each RNS modulus
     pub c: Vec<Ciphertext>,
     /// The decomposition size which is the number of RNS moduli (the l in lBFV).
@@ -29,7 +48,11 @@ pub struct LBFVPublicKey {
     /// chosen of the Gadget vector, here it is equal the number of RNS moduli
     /// as the library uses the optimization of https://eprint.iacr.org/2018/117.pdf
     pub l: usize,
-    /// The seed used to generate all ciphertexts deterministically
+    /// Optional compression metadata: the seed that generates the same
+    /// concrete `a_j` CRS polynomials as those stored in `c`. When absent
+    /// (e.g. seedless deserialized or contributed keys), polynomial-level
+    /// comparison is the sole consistency mechanism. When present, it is
+    /// verified against the concrete polynomials at construction time.
     pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
 }
 
@@ -42,18 +65,39 @@ impl LBFVPublicKey {
         sk: &SecretKey,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
-    ) -> Self {
-        let zero = Plaintext::zero(Encoding::poly(), &sk.par).unwrap();
-        let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.par.moduli().len());
-        let mut seed_rng = ChaCha8Rng::from_seed(seed); // This is used to generate the seeds for the ciphertexts by creating a new
-        // ChaCha8Rng from the input seed
+    ) -> Result<Self> {
+        Self::new_with_seed_inner(sk, seed, rng)
+    }
+
+    /// Fallible version of [`new_with_seed`](Self::new_with_seed).
+    ///
+    /// Validates that the secret key's coefficient count matches the parameter
+    /// degree before delegating.  Callers that should never panic (e.g.
+    /// bound distributed-construction paths) must use this instead of the
+    /// infallible [`new_with_seed`](Self::new_with_seed).
+    fn new_with_seed_inner<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+        rng: &mut R,
+    ) -> Result<Self> {
+        if sk.coeffs.len() != sk.params.degree() {
+            return Err(Error::DefaultError(format!(
+                "Secret key has {} coefficients, expected {}",
+                sk.coeffs.len(),
+                sk.params.degree()
+            )));
+        }
+
+        let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
+        let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.params.moduli().len());
+        let mut seed_rng = ChaCha8Rng::from_seed(seed);
 
         // Create a vector of ciphertexts, each encrypting zero, for each RNS modulus
         // [(b₁, a₁), ..., (bₗ, aₗ)].
-        for _ in 0..sk.par.moduli().len() {
+        for _ in 0..sk.params.moduli().len() {
             let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
             seed_rng.fill(&mut seed_i);
-            let mut ct = sk.try_encrypt_with_seed(&zero, seed_i, rng).unwrap();
+            let mut ct = sk.try_encrypt_with_seed(&zero, seed_i, rng)?;
             // The polynomials of a public key should not allow for variable time
             // computation.
             ct.c.iter_mut()
@@ -61,53 +105,306 @@ impl LBFVPublicKey {
             c.push(ct);
         }
 
-        Self {
-            par: sk.par.clone(),
+        Ok(Self {
+            params: sk.params.clone(),
             c,
-            l: sk.par.moduli().len(),
+            l: sk.params.moduli().len(),
             seed: Some(seed),
-        }
+        })
     }
 
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a random
     /// seed.
-    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Self {
+    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
         Self::new_with_seed(sk, seed, rng)
     }
 
+    /// Build a public key from a [`SecretKey`] and explicit CRS polynomials `a_j`.
+    ///
+    /// This is the core operational constructor: the caller supplies the shared
+    /// `a_j` CRS polynomials (as a slice of NTT polynomials) and an optional
+    /// compression seed, and the helper computes `b_j = -a_j·sk + e_j` for each
+    /// `j`, then delegates to [`from_parts`](Self::from_parts).
+    ///
+    /// # Arguments
+    /// * `sk` - The secret key.
+    /// * `a_polynomials` - The `l` shared CRS polynomials `a_j`.
+    /// * `seed` - Optional compression metadata seed. When `None`, the key
+    ///   carries no seed.
+    /// * `rng` - RNG for sampling the error polynomials `e_j`.
+    pub(crate) fn from_crs<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        a_polynomials: &[Poly<Ntt>],
+        seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
+        rng: &mut R,
+    ) -> Result<Self> {
+        if sk.coeffs.len() != sk.params.degree() {
+            return Err(Error::DefaultError(format!(
+                "Secret key has {} coefficients, expected {}",
+                sk.coeffs.len(),
+                sk.params.degree()
+            )));
+        }
+
+        let l = sk.params.moduli().len();
+        if a_polynomials.len() != l {
+            return Err(Error::DefaultError(format!(
+                "Expected {l} a_polynomials (one per modulus), got {}",
+                a_polynomials.len()
+            )));
+        }
+
+        let ctx = sk.params.context_at_level(0)?;
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)?.into_ntt(),
+        );
+
+        let mut b_polys: Vec<Poly<Ntt>> = Vec::with_capacity(l);
+        for a_j in a_polynomials {
+            if a_j.ctx() != ctx {
+                return Err(Error::DefaultError(
+                    "a polynomial has incorrect context".to_string(),
+                ));
+            }
+
+            let a_s = Zeroizing::new(a_j * s.as_ref());
+            let mut b = Poly::<Ntt>::small(ctx, sk.params.variance, rng)?;
+            b -= a_s.as_ref();
+            b_polys.push(b);
+        }
+
+        Self::from_parts(b_polys, a_polynomials.to_vec(), sk.params.clone(), seed)
+    }
+
+    /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using explicit
+    /// CRS polynomials supplied as a [`CommonRandomPolyVec`].
+    ///
+    /// The concrete `a_j` polynomials are extracted from `crp` and used as the
+    /// shared CRS; the optional seed is copied into the key as compression
+    /// metadata.
+    pub fn new_with_crp<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        crp: &CommonRandomPolyVec,
+        rng: &mut R,
+    ) -> Result<Self> {
+        Self::from_crs(sk, &crp.to_polys(), crp.seed(), rng)
+    }
+
+    /// Build an [`LBFVPublicKey`] from explicit `b` and `a` polynomials.
+    ///
+    /// This is the on-chain URS constructor: the caller supplies the
+    /// polynomials directly rather than deriving them from a seed.
+    ///
+    /// # Arguments
+    /// * `b_polynomials` - The `l` b-polynomials `(b₀, …, bₗ₋₁)` where
+    ///   `bⱼ = -aⱼ·sk + eⱼ`.
+    /// * `a_polynomials` - The `l` shared CRS polynomials `(a₀, …, aₗ₋₁)`.
+    ///   These are the *concrete* shared-input polynomials whose equality must
+    ///   be verifiable across all contributions and between the public key and
+    ///   the relinearization key. Must be at the same context as the
+    ///   `b_polynomials`.
+    /// * `seed` - Optional CRS seed for backwards compatibility. When `None`,
+    ///   the key carries no seed and polynomial-level comparisons are the sole
+    ///   consistency check.
+    pub fn from_parts(
+        b_polynomials: Vec<Poly<Ntt>>,
+        a_polynomials: Vec<Poly<Ntt>>,
+        params: Arc<BfvParameters>,
+        seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
+    ) -> Result<Self> {
+        if b_polynomials.len() != a_polynomials.len() {
+            return Err(Error::DefaultError(
+                "b and a polynomial vectors have different lengths".to_string(),
+            ));
+        }
+        let l = b_polynomials.len();
+        if l != params.moduli().len() {
+            return Err(Error::DefaultError(format!(
+                "Expected {} polynomial pairs (one per modulus), got {l}",
+                params.moduli().len()
+            )));
+        }
+
+        let ctx0 = params.context_at_level(0)?;
+        let mut c: Vec<Ciphertext> = Vec::with_capacity(l);
+        for (b_poly, a_poly) in b_polynomials.into_iter().zip(a_polynomials.into_iter()) {
+            if b_poly.ctx() != ctx0 || a_poly.ctx() != ctx0 {
+                return Err(Error::DefaultError(
+                    "Public-key polynomials must be at level 0".to_string(),
+                ));
+            }
+            let mut ct = Ciphertext {
+                params: params.clone(),
+                seed: None,
+                c: vec![b_poly, a_poly],
+                level: 0,
+            };
+            ct.c.iter_mut()
+                .for_each(|p| p.disallow_variable_time_computations());
+            c.push(ct);
+        }
+
+        // When a seed is provided, verify that the supplied a polynomials
+        // match the concrete polynomials the seed would produce. A seed that
+        // is inconsistent with the actual a polynomials would break CRS
+        // consistency downstream (the b_vec and d2 cancellation in the
+        // relinearization key relies on the same CRS a being used).
+        if let Some(ref seed) = seed {
+            let mut seed_rng = ChaCha8Rng::from_seed(*seed);
+            for (j, ct) in c.iter().enumerate() {
+                let mut seed_j = <ChaCha8Rng as SeedableRng>::Seed::default();
+                seed_rng.fill(&mut seed_j);
+                let expected_a = Poly::<Ntt>::random_from_seed(ctx0, seed_j);
+                let actual_a = ct.c.get(1).ok_or_else(|| {
+                    Error::DefaultError("Ciphertext is missing a component".to_string())
+                })?;
+                if expected_a != *actual_a {
+                    return Err(Error::DefaultError(format!(
+                        "Supplied seed does not match the concrete a polynomial at index {j}"
+                    )));
+                }
+            }
+        }
+
+        Ok(Self { params, c, l, seed })
+    }
+
+    // ---------------------------------------------------------------------------
+    // Structural validation and safe accessors
+    // ---------------------------------------------------------------------------
+
+    /// Validate that the public-key structure is consistent: `l` matches the
+    /// parameter modulus count, every ciphertext has exactly two components at
+    /// level 0, and all polynomial contexts match the parameter's level-0 context.
+    pub(crate) fn validate_structure(&self) -> Result<()> {
+        let expected_l = self.params.moduli().len();
+        if self.l != expected_l {
+            return Err(Error::DefaultError(
+                "LBFV public-key l does not match the parameter modulus count".to_string(),
+            ));
+        }
+        if self.c.len() != expected_l {
+            return Err(Error::DefaultError(
+                "LBFV public-key ciphertext count does not match l".to_string(),
+            ));
+        }
+
+        let ctx0 = self.params.context_at_level(0)?;
+        for (index, ciphertext) in self.c.iter().enumerate() {
+            if ciphertext.params != self.params {
+                return Err(Error::DefaultError(format!(
+                    "LBFV public-key ciphertext {index} has incompatible parameters"
+                )));
+            }
+            if ciphertext.level != 0 {
+                return Err(Error::DefaultError(format!(
+                    "LBFV public-key ciphertext {index} is not at level 0"
+                )));
+            }
+            if ciphertext.c.len() != 2 {
+                return Err(Error::DefaultError(format!(
+                    "LBFV public-key ciphertext {index} must have exactly two components"
+                )));
+            }
+            for polynomial in &ciphertext.c {
+                if polynomial.ctx() != ctx0 {
+                    return Err(Error::DefaultError(format!(
+                        "LBFV public-key ciphertext {index} has an incorrect polynomial context"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Extract the `a` polynomials from the first `ciphertext_level` ciphertexts
+    /// for use as explicit CRS material.
+    ///
+    /// Currently requires `key_level == 0`.
+    pub(crate) fn a_polynomials_for_level(
+        &self,
+        ciphertext_level: usize,
+        key_level: usize,
+    ) -> Result<Vec<Poly<NttShoup>>> {
+        self.validate_structure()?;
+
+        if key_level != 0 {
+            return Err(Error::DefaultError(
+                "Explicit l-BFV CRS extraction currently requires key level 0".to_string(),
+            ));
+        }
+        if ciphertext_level > self.params.max_level() {
+            return Err(Error::InvalidLevel {
+                level: ciphertext_level,
+                min_level: 0,
+                max_level: self.params.max_level(),
+            });
+        }
+
+        let count = self
+            .l
+            .checked_sub(ciphertext_level)
+            .ok_or_else(|| Error::DefaultError("Invalid l-BFV ciphertext level".to_string()))?;
+
+        self.c
+            .iter()
+            .take(count)
+            .map(|ciphertext| {
+                ciphertext
+                    .c
+                    .get(1)
+                    .cloned()
+                    .map(Poly::<Ntt>::into_ntt_shoup)
+                    .ok_or_else(|| {
+                        Error::DefaultError(
+                            "LBFV public-key ciphertext is missing its a polynomial".to_string(),
+                        )
+                    })
+            })
+            .collect()
+    }
+
     /// Encrypt a plaintext with the public key.
     /// The encryption is done in the same level as the plaintext.
     /// Returns the ciphertext and the noise polynomials.
-    #[allow(clippy::indexing_slicing, clippy::type_complexity)] // ct.c always has exactly 2 components (BFV invariant)
+    #[allow(clippy::type_complexity)]
     pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
-        if self.c.is_empty() {
-            return Err(Error::DefaultError(
-                "Public key has no ciphertexts available".to_string(),
-            ));
-        }
+        // Validate public-key structure before using it for encryption.
+        self.validate_structure()?;
 
         // Use only the first ciphertext from the array
-        let mut ct = self.c[0].clone();
+        let mut ct = self.c.first().cloned().ok_or_else(|| {
+            Error::DefaultError("Public key has no ciphertexts available".to_string())
+        })?;
         while ct.level != pt.level {
             ct.switch_down()?;
         }
 
-        let ctx = self.par.context_at_level(ct.level)?;
-        let u = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
-        let e1 = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
-        let e2 = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
+        let ctx = self.params.context_at_level(ct.level)?;
+        let u = Poly::<Ntt>::small(ctx, self.params.variance, rng)?;
+        let e1 = Poly::<Ntt>::small(ctx, self.params.variance, rng)?;
+        let e2 = Poly::<Ntt>::small(ctx, self.params.variance, rng)?;
 
         let m = Zeroizing::new(pt.to_poly());
-        let mut c0 = u.as_ref() * &ct.c[0];
+        let b = ct
+            .c
+            .first()
+            .ok_or_else(|| Error::DefaultError("Ciphertext is missing b component".to_string()))?;
+        let a = ct
+            .c
+            .get(1)
+            .ok_or_else(|| Error::DefaultError("Ciphertext is missing a component".to_string()))?;
+        let mut c0 = u.as_ref() * b;
         c0 += &e1;
         c0 += &m;
-        let mut c1 = u.as_ref() * &ct.c[1];
+        let mut c1 = u.as_ref() * a;
         c1 += &e2;
 
         // It is now safe to enable variable time computations.
@@ -117,7 +414,7 @@ impl LBFVPublicKey {
         }
 
         let ciphertext = Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: None,
             c: vec![c0, c1],
             level: ct.level,
@@ -144,15 +441,17 @@ impl LBFVPublicKey {
     ///   - The public key is not at level 0
     ///   - Any polynomial operations fail during mod switching or representation changes
     // self.c[0..new_l] is always valid (self.c has self.l elements, new_l <= self.l)
-    #[allow(clippy::indexing_slicing)]
     pub fn extract_b_polynomials(
         &self,
         ciphertext_level: usize,
         key_level: usize,
         rep: Representation,
     ) -> Result<Vec<Poly<NttShoup>>> {
+        // Validate public-key structure before accessing ciphertexts.
+        self.validate_structure()?;
+
         // Necessary checks
-        if ciphertext_level > self.par.max_level() {
+        if ciphertext_level > self.params.max_level() {
             return Err(Error::DefaultError(
                 "Level is greater than the maximum level".to_string(),
             ));
@@ -164,8 +463,15 @@ impl LBFVPublicKey {
             return Err(Error::DefaultError("Key level must be 0".to_string()));
         }
 
-        let key_ctx = self.par.context_at_level(key_level)?;
-        if self.c[0].c[0].ctx() != key_ctx {
+        let key_ctx = self.params.context_at_level(key_level)?;
+        let first_ct = self
+            .c
+            .first()
+            .ok_or_else(|| Error::DefaultError("Public key has no ciphertexts".to_string()))?;
+        let first_b = first_ct.c.first().ok_or_else(|| {
+            Error::DefaultError("Public-key ciphertext is missing b component".to_string())
+        })?;
+        if first_b.ctx() != key_ctx {
             return Err(Error::DefaultError(
                 "Public key is not at level 0".to_string(),
             ));
@@ -173,14 +479,22 @@ impl LBFVPublicKey {
 
         // Note: key switching is redundant for now.
         // Create switcher to mod switch from initial to final context (for when public key is at different level than ciphertext)
-        let ciphertext_ctx = self.par.context_at_level(ciphertext_level)?;
+        let ciphertext_ctx = self.params.context_at_level(ciphertext_level)?;
         let switcher = Switcher::new(ciphertext_ctx, key_ctx)?;
 
         // Extract (l - level) b polynomials and change representation accordingly
-        let new_l = self.l - ciphertext_level;
+        let new_l = self
+            .l
+            .checked_sub(ciphertext_level)
+            .ok_or_else(|| Error::DefaultError("Invalid l-BFV ciphertext level".to_string()))?;
         let mut b_polynomials = Vec::with_capacity(new_l);
         for i in 0..new_l {
-            let mut poly = self.c[i].c[0].clone();
+            let ct = self.c.get(i).ok_or_else(|| {
+                Error::DefaultError("Public-key ciphertext index out of bounds".to_string())
+            })?;
+            let mut poly = ct.c.first().cloned().ok_or_else(|| {
+                Error::DefaultError("Public-key ciphertext is missing b component".to_string())
+            })?;
             if poly.ctx() != key_ctx {
                 poly = poly.switch(&switcher)?;
             }
@@ -205,34 +519,40 @@ impl FheParametrized for LBFVPublicKey {
 impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
     type Error = Error;
 
-    #[allow(clippy::indexing_slicing)] // ct.c always has exactly 2 components (BFV invariant)
     fn try_encrypt<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        if self.c.is_empty() {
-            return Err(Error::DefaultError(
-                "Public key has no ciphertexts available".to_string(),
-            ));
-        }
+        // Validate public-key structure before using it for encryption.
+        self.validate_structure()?;
 
         // Use only the first ciphertext from the array
-        let mut ct = self.c[0].clone();
+        let mut ct = self.c.first().cloned().ok_or_else(|| {
+            Error::DefaultError("Public key has no ciphertexts available".to_string())
+        })?;
         while ct.level != pt.level {
             ct.switch_down()?;
         }
 
-        let ctx = self.par.context_at_level(ct.level)?;
-        let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
-        let e1 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
-        let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
+        let ctx = self.params.context_at_level(ct.level)?;
+        let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
+        let e1 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
+        let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
 
         let m = Zeroizing::new(pt.to_poly());
-        let mut c0 = u.as_ref() * &ct.c[0];
+        let b = ct
+            .c
+            .first()
+            .ok_or_else(|| Error::DefaultError("Ciphertext is missing b component".to_string()))?;
+        let a = ct
+            .c
+            .get(1)
+            .ok_or_else(|| Error::DefaultError("Ciphertext is missing a component".to_string()))?;
+        let mut c0 = u.as_ref() * b;
         c0 += &e1;
         c0 += &m;
-        let mut c1 = u.as_ref() * &ct.c[1];
+        let mut c1 = u.as_ref() * a;
         c1 += &e2;
 
         // It is now safe to enable variable time computations.
@@ -242,7 +562,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         }
 
         Ok(Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: None,
             c: vec![c0, c1],
             level: ct.level,
@@ -250,79 +570,157 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
     }
 }
 
-impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
-    fn from(pk: &LBFVPublicKey) -> Self {
-        LBFVPublicKeyProto {
-            c: pk.c.iter().map(CiphertextProto::from).collect(),
-            l: pk.l as u32,
-            seed: pk.seed.map_or_else(Vec::new, |s| s.to_vec()),
+#[cfg(feature = "protobuf")]
+mod protobuf {
+    use super::*;
+    use crate::SerializationError;
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use prost::Message;
+
+    impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
+        fn from(pk: &LBFVPublicKey) -> Self {
+            LBFVPublicKeyProto {
+                c: pk.c.iter().map(CiphertextProto::from).collect(),
+                l: pk.l as u32,
+                seed: pk.seed.map_or_else(Vec::new, |s| s.to_vec()),
+                binding: None,
+            }
         }
     }
-}
 
-impl Serialize for LBFVPublicKey {
-    fn to_bytes(&self) -> Vec<u8> {
-        LBFVPublicKeyProto::from(self).encode_to_vec()
-    }
-}
-
-impl DeserializeParametrized for LBFVPublicKey {
-    type Error = Error;
-
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: LBFVPublicKeyProto = Message::decode(bytes).map_err(|e| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: e.to_string(),
-            })
-        })?;
-
-        if proto.c.is_empty() {
-            return Err(Error::SerializationError(
-                SerializationError::InvalidFormat {
-                    reason: "LBFV public key has no ciphertexts".to_string(),
-                },
-            ));
+    impl Serialize for LBFVPublicKey {
+        fn to_bytes(&self) -> Vec<u8> {
+            LBFVPublicKeyProto::from(self).encode_to_vec()
         }
+    }
 
-        let mut c: Vec<Ciphertext> = Vec::with_capacity(proto.c.len());
-        for ct_proto in proto.c {
-            let mut ct = Ciphertext::try_convert_from(&ct_proto, par)?;
-            if ct.level != 0 {
+    impl DeserializeParametrized for LBFVPublicKey {
+        type Error = Error;
+
+        fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
+            let proto: LBFVPublicKeyProto = Message::decode(bytes).map_err(|e| {
+                Error::SerializationError(SerializationError::ProtobufError {
+                    message: e.to_string(),
+                })
+            })?;
+
+            if proto.c.is_empty() {
                 return Err(Error::SerializationError(
                     SerializationError::InvalidFormat {
-                        reason: "LBFV public key ciphertext must be at level 0".to_string(),
+                        reason: "LBFV public key has no ciphertexts".to_string(),
                     },
                 ));
             }
-            // The polynomials of a public key should not allow for variable time
-            // computation.
-            ct.c.iter_mut()
-                .for_each(|p| p.disallow_variable_time_computations());
-            c.push(ct);
-        }
 
-        // Import the seed if it exists
-        let seed = if !proto.seed.is_empty() {
-            let mut seed_array = <ChaCha8Rng as SeedableRng>::Seed::default();
-            if proto.seed.len() != seed_array.len() {
+            let proto_l = proto.l as usize;
+            let expected_l = par.moduli().len();
+
+            // Validate that l matches the parameter modulus count
+            if proto_l != expected_l {
                 return Err(Error::SerializationError(
                     SerializationError::InvalidFormat {
-                        reason: "Invalid LBFV public key seed length".to_string(),
+                        reason: format!(
+                            "LBFV public-key l={proto_l} does not match the parameter modulus count={expected_l}"
+                        ),
                     },
                 ));
             }
-            seed_array.copy_from_slice(&proto.seed);
-            Some(seed_array)
-        } else {
-            None
-        };
 
-        Ok(Self {
-            par: par.clone(),
-            c,
-            l: proto.l as usize,
-            seed,
-        })
+            // Validate that l matches the number of ciphertexts
+            if proto.c.len() != proto_l {
+                return Err(Error::SerializationError(
+                    SerializationError::InvalidFormat {
+                        reason: format!(
+                            "LBFV public-key l={proto_l} does not match the ciphertext count={}",
+                            proto.c.len()
+                        ),
+                    },
+                ));
+            }
+
+            // Reject protos that carry a binding — callers should use
+            // trlbfv::PublicKeyShare or trlbfv::AggregatedPublicKey instead.
+            if proto.binding.is_some() {
+                return Err(Error::SerializationError(
+                    SerializationError::InvalidFormat {
+                        reason: "LBFVPublicKey carries a binding field; use \
+                                 trlbfv::PublicKeyShare or trlbfv::AggregatedPublicKey instead"
+                            .to_string(),
+                    },
+                ));
+            }
+
+            let mut c: Vec<Ciphertext> = Vec::with_capacity(proto.c.len());
+            for ct_proto in proto.c {
+                let mut ct = Ciphertext::try_convert_from(&ct_proto, par)?;
+                if ct.level != 0 {
+                    return Err(Error::SerializationError(
+                        SerializationError::InvalidFormat {
+                            reason: "LBFV public key ciphertext must be at level 0".to_string(),
+                        },
+                    ));
+                }
+                // The polynomials of a public key should not allow for variable time
+                // computation.
+                ct.c.iter_mut()
+                    .for_each(|p| p.disallow_variable_time_computations());
+                c.push(ct);
+            }
+
+            // Import the seed if it exists
+            let seed = if !proto.seed.is_empty() {
+                let mut seed_array = <ChaCha8Rng as SeedableRng>::Seed::default();
+                if proto.seed.len() != seed_array.len() {
+                    return Err(Error::SerializationError(
+                        SerializationError::InvalidFormat {
+                            reason: "Invalid LBFV public key seed length".to_string(),
+                        },
+                    ));
+                }
+                seed_array.copy_from_slice(&proto.seed);
+                Some(seed_array)
+            } else {
+                None
+            };
+
+            let key = Self {
+                params: par.clone(),
+                c,
+                l: proto.l as usize,
+                seed,
+            };
+
+            // Validate that the seed, when present, reproduces the concrete a
+            // polynomials. A mismatched seed breaks CRS consistency downstream.
+            if let Some(ref seed) = key.seed {
+                let ctx0 = key.params.context_at_level(0)?;
+                let mut seed_rng = ChaCha8Rng::from_seed(*seed);
+                for (j, ct) in key.c.iter().enumerate() {
+                    let mut seed_j = <ChaCha8Rng as SeedableRng>::Seed::default();
+                    seed_rng.fill(&mut seed_j);
+                    let expected_a = Poly::<Ntt>::random_from_seed(ctx0, seed_j);
+                    let actual_a = ct.c.get(1).ok_or_else(|| {
+                        Error::DefaultError("Ciphertext is missing a component".to_string())
+                    })?;
+                    if expected_a != *actual_a {
+                        return Err(Error::SerializationError(
+                            crate::SerializationError::InvalidFormat {
+                                reason: format!(
+                                    "Tampered seed: derived a_j does not match serialized a_j at index {j}"
+                                ),
+                            },
+                        ));
+                    }
+                }
+            }
+
+            // Structural validation before returning
+            key.validate_structure()?;
+
+            Ok(key)
+        }
     }
 }
 
@@ -330,10 +728,11 @@ impl DeserializeParametrized for LBFVPublicKey {
 #[allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::LBFVPublicKey;
-    use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
+    use crate::bfv::{BfvParameters, CommonRandomPolyVec, Encoding, Plaintext, SecretKey};
+    use fhe_math::rq::{Ntt, Poly, Representation};
     use fhe_math::zq::Modulus;
-    use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
-    use rand::{SeedableRng, rng};
+    use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
+    use rand::{Rng, SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::error::Error;
 
@@ -342,8 +741,8 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = LBFVPublicKey::new(&sk, &mut rng);
-        assert_eq!(pk.par, params);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+        assert_eq!(pk.params, params);
         // Check that l matches number of moduli
         assert_eq!(pk.l, params.moduli().len());
         // Check that all ciphertexts decrypt to zero
@@ -366,7 +765,7 @@ mod tests {
             for level in 0..params.max_level() {
                 for _ in 0..20 {
                     let sk = SecretKey::random(&params, &mut rng);
-                    let pk = LBFVPublicKey::new(&sk, &mut rng);
+                    let pk = LBFVPublicKey::new(&sk, &mut rng)?;
 
                     let pt = Plaintext::try_encode(
                         &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
@@ -385,18 +784,167 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_serialize() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
-            let pk = LBFVPublicKey::new(&sk, &mut rng);
-            let bytes = pk.to_bytes();
-            assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
+    #[cfg(feature = "protobuf")]
+    mod protobuf {
+        use super::*;
+        use crate::proto::bfv::LbfvPublicKey as LBFVPublicKeyProto;
+        use fhe_traits::{DeserializeParametrized, Serialize};
+        use prost::Message;
+
+        #[test]
+        fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            for params in [
+                BfvParameters::default_arc(1, 8),
+                BfvParameters::default_arc(6, 8),
+            ] {
+                let sk = SecretKey::random(&params, &mut rng);
+                let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+                let bytes = pk.to_bytes();
+                assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
+            }
+            Ok(())
         }
+
+        #[test]
+        fn test_malformed_l_rejected() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            let params = BfvParameters::default_arc(6, 8);
+            let sk = SecretKey::random(&params, &mut rng);
+            let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+            let mut proto: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
+            proto.l = 1; // Malformed: l should be the number of moduli
+            let bytes = proto.encode_to_vec();
+            assert!(LBFVPublicKey::from_bytes(&bytes, &params).is_err());
+
+            // Also test: l doesn't match ciphertext count
+            let mut proto2: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
+            proto2.c.pop(); // Remove one ciphertext but leave l unchanged
+            let bytes2 = proto2.encode_to_vec();
+            assert!(LBFVPublicKey::from_bytes(&bytes2, &params).is_err());
+
+            Ok(())
+        }
+
+        /// A serialized public key with a tampered seed that does not match the
+        /// concrete `a` polynomials must be rejected during deserialization.
+        #[test]
+        fn test_tampered_seed_rejected() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            let params = BfvParameters::default_arc(6, 8);
+            let sk = SecretKey::random(&params, &mut rng);
+            let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+            // Serialize the valid PK to proto, then replace the seed with a
+            // different one that does not reproduce the concrete a_j.
+            let mut proto: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
+            proto.seed = vec![0u8; 32]; // A seed that does not match the a_j
+
+            let bytes = proto.encode_to_vec();
+            assert!(
+                LBFVPublicKey::from_bytes(&bytes, &params).is_err(),
+                "PK deserialization must reject a tampered seed"
+            );
+
+            // A seedless PK with no seed must still be accepted.
+            let mut seedless_proto = LBFVPublicKeyProto::from(&pk);
+            seedless_proto.seed.clear();
+            let seedless_bytes = seedless_proto.encode_to_vec();
+            let seedless_pk = LBFVPublicKey::from_bytes(&seedless_bytes, &params)?;
+            assert!(seedless_pk.seed.is_none(), "Seedless PK must carry no seed");
+
+            Ok(())
+        }
+
+        /// A serialized PK carrying a binding must be rejected — single-party
+        /// LBFVPublicKey does not carry bindings.
+        #[test]
+        fn test_binding_rejected() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            let params = BfvParameters::default_arc(6, 8);
+            let sk = SecretKey::random(&params, &mut rng);
+            let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+            let mut proto: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
+            // Inject a binding field (any non-empty binding should be rejected).
+            proto.binding = Some(Default::default());
+
+            let bytes = proto.encode_to_vec();
+            assert!(
+                LBFVPublicKey::from_bytes(&bytes, &params).is_err(),
+                "PK deserialization must reject a binding field"
+            );
+
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_from_parts_roundtrip() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let pk_seeded = LBFVPublicKey::new(&sk, &mut rng)?;
+        let b_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[0].clone()).collect();
+        let a_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[1].clone()).collect();
+        let pk_from_parts =
+            LBFVPublicKey::from_parts(b_polys, a_polys, params.clone(), pk_seeded.seed)?;
+
+        // Roundtrip encrypt/decrypt under the from_parts key.
+        let pt = Plaintext::try_encode(&[42u64], Encoding::poly(), &params)?;
+        let ct = pk_from_parts.try_encrypt(&pt, &mut rng)?;
+        assert_eq!(sk.try_decrypt(&ct)?, pt);
+
+        // All l zero-encryptions decrypt to zero.
+        for ct in pk_from_parts.c.iter() {
+            assert_eq!(
+                sk.try_decrypt(ct)?,
+                Plaintext::zero(Encoding::poly(), &params)?
+            );
+        }
+
+        Ok(())
+    }
+
+    /// `from_parts` must reject a seed that does not reproduce the concrete `a`
+    /// polynomials — a mismatched seed breaks CRS consistency downstream.
+    #[test]
+    fn from_parts_rejects_inconsistent_seed() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let pk_seeded = LBFVPublicKey::new(&sk, &mut rng)?;
+        let b_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[0].clone()).collect();
+        let a_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[1].clone()).collect();
+
+        // A seed different from the one that produced those a_polys.
+        let mut bad_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        rng.fill(&mut bad_seed);
+        // Ensure it's actually different.
+        if Some(bad_seed) == pk_seeded.seed {
+            bad_seed[0] ^= 0xff;
+        }
+
+        let result = LBFVPublicKey::from_parts(b_polys, a_polys, params.clone(), Some(bad_seed));
+        assert!(
+            result.is_err(),
+            "from_parts must reject a seed that is inconsistent with the concrete a polynomials"
+        );
+
+        // The correct seed must still be accepted.
+        assert!(
+            LBFVPublicKey::from_parts(
+                pk_seeded.c.iter().map(|ct| ct.c[0].clone()).collect(),
+                pk_seeded.c.iter().map(|ct| ct.c[1].clone()).collect(),
+                params,
+                pk_seeded.seed,
+            )
+            .is_ok()
+        );
+
         Ok(())
     }
 
@@ -410,8 +958,8 @@ mod tests {
         let seed = <ChaCha8Rng as SeedableRng>::Seed::default();
 
         // Create two public keys with the same seed
-        let pk1 = LBFVPublicKey::new_with_seed(&sk, seed, &mut rng);
-        let pk2 = LBFVPublicKey::new_with_seed(&sk, seed, &mut rng);
+        let pk1 = LBFVPublicKey::new_with_seed(&sk, seed, &mut rng)?;
+        let pk2 = LBFVPublicKey::new_with_seed(&sk, seed, &mut rng)?;
 
         // Verify that both public keys have the same seed
         assert_eq!(pk1.seed, pk2.seed);
@@ -429,6 +977,91 @@ mod tests {
             assert_eq!(pt1, Plaintext::zero(Encoding::poly(), &params)?);
             assert_eq!(pt2, Plaintext::zero(Encoding::poly(), &params)?);
         }
+
+        Ok(())
+    }
+
+    /// Malformed in-memory public keys must be rejected by `try_encrypt`,
+    /// `try_encrypt_extended`, and `extract_b_polynomials`.
+    #[test]
+    fn malformed_pk_rejected_by_encryption_and_extraction() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+        let pt = Plaintext::try_encode(&[3u64], Encoding::poly(), &params)?;
+
+        // Normal operations succeed.
+        let _ct = pk.try_encrypt(&pt, &mut rng)?;
+        let (_ct, _u, _e1, _e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let _b = pk.extract_b_polynomials(0, 0, Representation::NttShoup)?;
+
+        // Malformed PK: wrong l value.
+        let mut bad_pk = pk.clone();
+        bad_pk.l = 1;
+        assert!(
+            bad_pk.try_encrypt(&pt, &mut rng).is_err(),
+            "try_encrypt must reject a malformed PK (wrong l)"
+        );
+        assert!(
+            bad_pk.try_encrypt_extended(&pt, &mut rng).is_err(),
+            "try_encrypt_extended must reject a malformed PK (wrong l)"
+        );
+        assert!(
+            bad_pk
+                .extract_b_polynomials(0, 0, Representation::NttShoup)
+                .is_err(),
+            "extract_b_polynomials must reject a malformed PK (wrong l)"
+        );
+
+        // Malformed PK: truncated ciphertexts.
+        let mut truncated_pk = pk.clone();
+        truncated_pk.c.pop();
+        assert!(
+            truncated_pk.try_encrypt(&pt, &mut rng).is_err(),
+            "try_encrypt must reject a PK with truncated ciphertexts"
+        );
+        assert!(
+            truncated_pk.try_encrypt_extended(&pt, &mut rng).is_err(),
+            "try_encrypt_extended must reject a PK with truncated ciphertexts"
+        );
+        assert!(
+            truncated_pk
+                .extract_b_polynomials(0, 0, Representation::NttShoup)
+                .is_err(),
+            "extract_b_polynomials must reject a PK with truncated ciphertexts"
+        );
+
+        Ok(())
+    }
+
+    /// `new_with_crp` uses the supplied concrete `a` polynomials from a
+    /// seedless CRP vector, and the resulting key carries no seed.
+    #[test]
+    fn new_with_crp_uses_concrete_a_from_seedless_vector() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let crp = CommonRandomPolyVec::new(&params, &mut rng)?;
+        assert!(crp.seed().is_none());
+
+        let pk = LBFVPublicKey::new_with_crp(&sk, &crp, &mut rng)?;
+
+        // The seed should be absent (seedless CRP).
+        assert!(pk.seed.is_none());
+
+        // The concrete a polynomials must match the CRP.
+        let expected_a = crp.to_polys();
+        for (j, ct) in pk.c.iter().enumerate() {
+            assert_eq!(ct.c[1], expected_a[j]);
+        }
+
+        // Encrypt/decrypt roundtrip works.
+        let pt = Plaintext::try_encode(&[42u64], Encoding::poly(), &params)?;
+        let ct = pk.try_encrypt(&pt, &mut rng)?;
+        assert_eq!(sk.try_decrypt(&ct)?, pt);
 
         Ok(())
     }

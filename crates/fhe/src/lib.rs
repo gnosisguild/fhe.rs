@@ -7,8 +7,10 @@ mod errors;
 pub mod bfv;
 pub mod lbfv;
 pub mod mbfv;
+#[cfg(feature = "protobuf")]
 pub mod proto;
 pub mod trbfv;
+pub mod trlbfv;
 pub use errors::{Error, ParametersError, Result, SerializationError, ThresholdError};
 
 // Test the source code included in the README.

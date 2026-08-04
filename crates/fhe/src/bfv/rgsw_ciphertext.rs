@@ -1,20 +1,12 @@
 use std::ops::Mul;
 
-use crate::proto::bfv::{
-    KeySwitchingKey as KeySwitchingKeyProto, RgswCiphertext as RGSWCiphertextProto,
-};
-use crate::{Error, Result, SerializationError};
+use crate::{Error, Result};
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom as TryConvertFromPoly};
-use fhe_traits::{
-    DeserializeParametrized, FheCiphertext, FheEncrypter, FheParametrized, Serialize,
-};
-use prost::Message;
+use fhe_traits::{FheCiphertext, FheEncrypter, FheParametrized};
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
-use super::{
-    BfvParameters, Ciphertext, Plaintext, SecretKey, keys::KeySwitchingKey, traits::TryConvertFrom,
-};
+use super::{BfvParameters, Ciphertext, Plaintext, SecretKey, keys::KeySwitchingKey};
 
 /// A RGSW ciphertext encrypting a plaintext.
 #[derive(Debug, PartialEq, Eq)]
@@ -25,70 +17,6 @@ pub struct RGSWCiphertext {
 
 impl FheParametrized for RGSWCiphertext {
     type Parameters = BfvParameters;
-}
-
-impl From<&RGSWCiphertext> for RGSWCiphertextProto {
-    fn from(ct: &RGSWCiphertext) -> Self {
-        RGSWCiphertextProto {
-            ksk0: Some(KeySwitchingKeyProto::from(&ct.ksk0)),
-            ksk1: Some(KeySwitchingKeyProto::from(&ct.ksk1)),
-        }
-    }
-}
-
-impl TryConvertFrom<&RGSWCiphertextProto> for RGSWCiphertext {
-    fn try_convert_from(
-        value: &RGSWCiphertextProto,
-        par: &std::sync::Arc<BfvParameters>,
-    ) -> Result<Self> {
-        let ksk0 = KeySwitchingKey::try_convert_from(
-            value.ksk0.as_ref().ok_or(Error::SerializationError(
-                SerializationError::MissingField {
-                    field_name: "ksk0".into(),
-                },
-            ))?,
-            par,
-        )?;
-        let ksk1 = KeySwitchingKey::try_convert_from(
-            value.ksk1.as_ref().ok_or(Error::SerializationError(
-                SerializationError::MissingField {
-                    field_name: "ksk1".into(),
-                },
-            ))?,
-            par,
-        )?;
-        if ksk0.ksk_level != ksk0.ciphertext_level
-            || ksk0.ciphertext_level != ksk1.ciphertext_level
-            || ksk1.ciphertext_level != ksk1.ksk_level
-        {
-            return Err(Error::SerializationError(
-                SerializationError::InvalidFormat {
-                    reason: "Inconsistent key switching levels".into(),
-                },
-            ));
-        }
-
-        Ok(Self { ksk0, ksk1 })
-    }
-}
-
-impl DeserializeParametrized for RGSWCiphertext {
-    type Error = Error;
-
-    fn from_bytes(bytes: &[u8], par: &std::sync::Arc<Self::Parameters>) -> Result<Self> {
-        let proto = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: "RGSW ciphertext decode".into(),
-            })
-        })?;
-        RGSWCiphertext::try_convert_from(&proto, par)
-    }
-}
-
-impl Serialize for RGSWCiphertext {
-    fn to_bytes(&self) -> Vec<u8> {
-        RGSWCiphertextProto::from(self).encode_to_vec()
-    }
 }
 
 impl FheCiphertext for RGSWCiphertext {}
@@ -102,7 +30,7 @@ impl FheEncrypter<Plaintext, RGSWCiphertext> for SecretKey {
         rng: &mut R,
     ) -> Result<RGSWCiphertext> {
         let level = pt.level;
-        let ctx = self.par.context_at_level(level)?;
+        let ctx = self.params.context_at_level(level)?;
 
         let m = Zeroizing::new(pt.poly_ntt.clone().into_power_basis());
         let mut m_s = Zeroizing::new(
@@ -125,7 +53,7 @@ impl Mul<&RGSWCiphertext> for &Ciphertext {
 
     fn mul(self, rhs: &RGSWCiphertext) -> Self::Output {
         assert_eq!(
-            self.par, rhs.ksk0.par,
+            self.params, rhs.ksk0.params,
             "Ciphertext and RGSWCiphertext must have the same parameters"
         );
         assert_eq!(
@@ -148,7 +76,7 @@ impl Mul<&RGSWCiphertext> for &Ciphertext {
             .unwrap();
 
         Ciphertext {
-            par: self.par.clone(),
+            params: self.params.clone(),
             seed: None,
             c: vec![&c0 + &c0p, &c1 + &c1p],
             level: self.level,
@@ -164,12 +92,88 @@ impl Mul<&Ciphertext> for &RGSWCiphertext {
     }
 }
 
+#[cfg(feature = "protobuf")]
+mod protobuf {
+    use super::*;
+    use crate::SerializationError;
+    use crate::bfv::traits::TryConvertFrom;
+    use crate::proto::bfv::{
+        KeySwitchingKey as KeySwitchingKeyProto, RgswCiphertext as RGSWCiphertextProto,
+    };
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use prost::Message;
+
+    impl From<&RGSWCiphertext> for RGSWCiphertextProto {
+        fn from(ct: &RGSWCiphertext) -> Self {
+            RGSWCiphertextProto {
+                ksk0: Some(KeySwitchingKeyProto::from(&ct.ksk0)),
+                ksk1: Some(KeySwitchingKeyProto::from(&ct.ksk1)),
+            }
+        }
+    }
+
+    impl TryConvertFrom<&RGSWCiphertextProto> for RGSWCiphertext {
+        fn try_convert_from(
+            value: &RGSWCiphertextProto,
+            par: &std::sync::Arc<BfvParameters>,
+        ) -> Result<Self> {
+            let ksk0 = KeySwitchingKey::try_convert_from(
+                value.ksk0.as_ref().ok_or(Error::SerializationError(
+                    SerializationError::MissingField {
+                        field_name: "ksk0".into(),
+                    },
+                ))?,
+                par,
+            )?;
+            let ksk1 = KeySwitchingKey::try_convert_from(
+                value.ksk1.as_ref().ok_or(Error::SerializationError(
+                    SerializationError::MissingField {
+                        field_name: "ksk1".into(),
+                    },
+                ))?,
+                par,
+            )?;
+            if ksk0.ksk_level != ksk0.ciphertext_level
+                || ksk0.ciphertext_level != ksk1.ciphertext_level
+                || ksk1.ciphertext_level != ksk1.ksk_level
+            {
+                return Err(Error::SerializationError(
+                    SerializationError::InvalidFormat {
+                        reason: "Inconsistent key switching levels".into(),
+                    },
+                ));
+            }
+
+            Ok(Self { ksk0, ksk1 })
+        }
+    }
+
+    impl Serialize for RGSWCiphertext {
+        fn to_bytes(&self) -> Vec<u8> {
+            RGSWCiphertextProto::from(self).encode_to_vec()
+        }
+    }
+
+    impl DeserializeParametrized for RGSWCiphertext {
+        type Error = Error;
+
+        fn from_bytes(bytes: &[u8], par: &std::sync::Arc<Self::Parameters>) -> Result<Self> {
+            let proto = Message::decode(bytes).map_err(|_| {
+                Error::SerializationError(SerializationError::ProtobufError {
+                    message: "RGSW ciphertext decode".into(),
+                })
+            })?;
+            RGSWCiphertext::try_convert_from(&proto, par)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
 
     use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
-    use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
+    use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::rng;
 
     use super::RGSWCiphertext;
@@ -210,24 +214,30 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn serialize() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(6, 16),
-            BfvParameters::default_arc(5, 16),
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
-            let v = fhe_math::zq::Modulus::new(params.plaintext())
-                .unwrap()
-                .random_vec(params.degree(), &mut rng);
-            let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
-            let ct: RGSWCiphertext = sk.try_encrypt(&pt, &mut rng)?;
+    #[cfg(feature = "protobuf")]
+    mod protobuf {
+        use super::*;
+        use fhe_traits::{DeserializeParametrized, Serialize};
 
-            let bytes = ct.to_bytes();
-            assert_eq!(RGSWCiphertext::from_bytes(&bytes, &params)?, ct);
+        #[test]
+        fn serialize() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            for params in [
+                BfvParameters::default_arc(6, 16),
+                BfvParameters::default_arc(5, 16),
+            ] {
+                let sk = SecretKey::random(&params, &mut rng);
+                let v = fhe_math::zq::Modulus::new(params.plaintext())
+                    .unwrap()
+                    .random_vec(params.degree(), &mut rng);
+                let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
+                let ct: RGSWCiphertext = sk.try_encrypt(&pt, &mut rng)?;
+
+                let bytes = ct.to_bytes();
+                assert_eq!(RGSWCiphertext::from_bytes(&bytes, &params)?, ct);
+            }
+
+            Ok(())
         }
-
-        Ok(())
     }
 }

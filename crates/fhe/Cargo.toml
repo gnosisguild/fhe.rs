@@ -16,6 +16,9 @@ bench = false # Disable default bench (we use criterion)
 
 [features]
 tfhe-ntt = ["fhe-math/tfhe-ntt"]
+## Enable protobuf-based (de)serialization via `prost`.
+## Requires `protoc` to be installed at build time.
+protobuf = ["dep:prost", "dep:prost-build", "fhe-math/protobuf"]
 
 [dependencies]
 num-bigint = { workspace = true, features = ["rand"] }
@@ -28,7 +31,7 @@ serde.workspace = true
 doc-comment.workspace = true
 itertools.workspace = true
 num-traits.workspace = true
-prost.workspace = true
+prost = { workspace = true, optional = true }
 rand.workspace = true
 rand_chacha.workspace = true
 rand_distr.workspace = true
@@ -50,7 +53,7 @@ ndarray.workspace = true
 rand.workspace = true
 
 [build-dependencies]
-prost-build.workspace = true
+prost-build = { workspace = true, optional = true }
 
 [[bench]]
 name = "bfv"
@@ -76,12 +79,15 @@ name = "bfv_ops"
 
 [[example]]
 name = "mulpir"
+required-features = ["protobuf"]
 
 [[example]]
 name = "sealpir"
+required-features = ["protobuf"]
 
 [[example]]
 name = "rgsw"
+required-features = ["protobuf"]
 
 [[example]]
 name = "voting"
