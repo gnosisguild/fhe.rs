@@ -77,7 +77,6 @@ Summary: [what changes, affected areas, open decisions, anything the developer m
    - **Testing approach** — what invariants/tests are needed at what level (unit, integration, property, bench).
    - **Scope boundaries** — what this explicitly does NOT do.
    - **Affected rules/docs** — which `.rules/*.md` and docs will need updates.
-4. **Self-review** — YAGNI, scope focus, constraint check (AGENTS.md Constraints), crypto/math flags, consistency with existing patterns. Fix issues inline.
 
 ## Key Principles
 
