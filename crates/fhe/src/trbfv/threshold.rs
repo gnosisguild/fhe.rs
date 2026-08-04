@@ -207,7 +207,7 @@ impl TRBFV {
             num_ciphertexts,
             mult_depth,
             lambda,
-        );
+        )?;
         let calculator = SmudgingBoundCalculator::new(config)
             .with_accepted_participant_count(accepted_participant_count);
         let generator = SmudgingNoiseGenerator::from_bound_calculator(calculator)?;
@@ -385,6 +385,18 @@ mod tests {
             }
         }
         assert_eq!(result.unwrap().len(), params.degree());
+    }
+
+    #[test]
+    fn smudging_error_rejects_zero_ciphertexts() {
+        let params = test_params();
+        let trbfv = TRBFV::new(3, 1, params).unwrap();
+        let mut rng = rng();
+
+        let err = trbfv
+            .generate_smudging_error(0, 0, Lambda::secure(80).unwrap(), &mut rng)
+            .unwrap_err();
+        assert!(err.to_string().contains("ciphertexts"));
     }
 
     // ── generate_smudging_error_with_participant_count tests ──────────────
