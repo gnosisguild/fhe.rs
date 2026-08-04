@@ -26,6 +26,12 @@ Treat changes to the following as security-sensitive. Review them with extra car
 
 ## Scheme-specific invariants
 
+### Key aggregation validation
+
+- Key aggregation methods (public-key, relinearization-key, key-switching-key) must validate metadata (participant bindings, session IDs, parameter consistency) and structural shape (ciphertext count, component count, polynomial contexts, levels) **before** accessing polynomial data.
+- Use fallible accessors (`first()`, `get()`, `ok_or_else`) for all key material lookups; never assume a well-formed key from serialized or external input.
+- Cross-contribution polynomial equality (`a`, `d1`) must be checked by concrete value comparison, not solely by seed equality, because seedless deserialized keys carry no seed.
+
 ### BFV and HPS/RNS
 
 - Keep plaintext scaling, ciphertext modulus, and representative conventions consistent across encryption, multiplication, key switching, and decryption. A change between `floor(q/t)`, nearest rounding, and exact rational scaling changes the noise analysis.
@@ -36,8 +42,9 @@ Treat changes to the following as security-sensitive. Review them with extra car
 
 ### l-BFV, trlBFV, and trBFV
 
+- **L-BFV / TRLBFV boundary:** `crates/fhe/src/lbfv/**` must not import `crate::trlbfv`. Threshold bindings, shares, aggregation, and threshold validation belong exclusively to `crate::trlbfv`.
 - l-BFV's public relinearization key is linear in the secret key and has the paper form `(d0, d1, d2)`, implemented as two related key-switching keys plus the public-key `b` vector. Preserve the signs and directions `r -> s` and `s -> r`; the implementation negates `r` to represent the paper's `-a` component.
-- **CRP vectors.** The shared polynomials for `a` (CRS) and `d1` (URS) are supplied as [`CommonRandomPolyVec`](crate::bfv::CommonRandomPolyVec) values — vectors of `l` concrete random polynomials with optional seed metadata. The concrete polynomials are authoritative for equality checks; seeds are reconstruction metadata, not authentication. Two independent vectors (for `a` and `d1`) must be agreed upon by all parties before key generation, and the same `a` vector must be used for both the public key and the relinearization key.
+- **CRP vectors.** The shared polynomials for `a` (CRS) and `d1` (URS) are supplied as [`CommonRandomPolyVec`](crate::bfv::CommonRandomPolyVec) values — vectors of `l` concrete random polynomials with optional seed metadata. The concrete polynomials are authoritative for equality checks; seeds are reconstruction metadata, not authentication. Two independent vectors (for `a` and `d1`) must be agreed upon by all parties before key generation, and the same `a` vector must be used for both the public key and the relinearization key. Both `CommonRandomPoly` (single polynomial) and `CommonRandomPolyVec` (vector of `l`) live in `crates/fhe/src/bfv/crp.rs`, exported from `fhe::bfv`; no scheme-specific CRP wrappers remain.
 - The public random values corresponding to `a` and `d1` must be common across contributions. Replacing them with independently sampled per-party values breaks additivity.
 - Distributed encryption-key, relinearization-key, secret-key-share, and pre-shared-noise contributions must use the same accepted participant set `S`. Mixing participant sets produces incompatible keys or noise shares and invalidates the robustness argument.
 - **trlBFV aggregation binding.** Participant-set validation and contribution binding enforcement live in `trlbfv`. `trlbfv` owns threshold shares, `ParticipantSet`, `ContributionBinding`, and aggregation into the operational `lbfv` keys. Every accepted participant ID must appear exactly once; contributions from different sessions or with duplicate IDs are rejected. The explicit `a` (CRS) and `d1` (URS) polynomials are compared by concrete polynomial equality across contributions. Component linearity (`Σ d0_i`, `Σ d2_i`, unchanged `d1`/`a`) is verified by dedicated tests.

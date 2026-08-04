@@ -28,14 +28,49 @@ cargo fmt --all
 
 ## Criterion benchmarks
 
-Benchmarks use criterion with `harness = false`. Run a single bench:
+Benchmarks use criterion with `harness = false` (criterion runs in release mode by default). `cargo bench` runs all benchmarks in a crate; run a single one with:
 
 ```bash
 cargo bench --bench bfv
 cargo bench --bench rq
 ```
 
-Do not leave benchmark results or criterion target directories in the worktree.
+### Bench locations
+
+- `crates/fhe/benches/` — `bfv`, `bfv_optimized_ops`, `bfv_rgsw`, `trbfv_bfv_share`
+- `crates/fhe-math/benches/` — `zq`, `rq`, `ntt`, `rns`
+
+### When modifying benchmarks or performance-sensitive code
+
+- Benchmarks have `harness = false` — do not add `main` functions or standard test attributes.
+- Criterion benchmarks live in `benches/`, not in `tests/`.
+- Do not leave criterion target output or benchmark results in the worktree.
+- Run the relevant benchmarks before and after the change to measure impact; report significant regressions (>10%) to the user.
+- Prefer algorithmic improvements over micro-optimizations unless the bottleneck is identified.
+
+## Preflight (local CI parity)
+
+Run preflight before push or commit to catch a red CI early — it mirrors CI exactly. The commands are the full CI-equivalent set in **Focused verification** above. When a step fails, fix and re-run it individually:
+
+| Step        | Fix                                                                                              |
+| ----------- | ------------------------------------------------------------------------------------------------ |
+| `cargo fmt` | `cargo fmt --all`                                                                                |
+| `clippy`    | `cargo clippy --all-targets --all-features -- -D warnings` — fix every warning; no suppressions  |
+| `test`      | Run the failing test in isolation: `cargo test --release -p <crate> -- <test_name>`              |
+| `build`     | `cargo build --all-features` — fix compile errors                                               |
+
+### Common failures
+
+- **Clippy `expect_used` / `panic` / `indexing_slicing`** — library code must use `?` and `Result`, not `unwrap()`/`expect()`/`panic!`, and `get()` instead of direct indexing. These are denied (not warned), so the build fails.
+- **Missing docs (`missing_docs`)** — public items need `///` doc comments. Warning, not a hard error.
+- **Unused imports (`unused_imports`)** — remove or use the import. Warning.
+- **Format** — `cargo fmt --all` fixes this deterministically.
+- **Protoc missing** — `protoc` is only required with `--features protobuf`. Without the feature, serialization is unavailable but core crypto operations work. Install `protoc` or use `--no-default-features` for core-only builds.
+- **Slow trbfv tests** — they must run in `--release`; debug mode takes minutes, release takes seconds.
+- **`fallible_impl_from`** — `From` impls must be infallible. Use `TryFrom` instead, or ensure the conversion cannot fail.
+- **`unused_must_use`** — a `Result` or `MustUse` type is being dropped. Handle it with `?` or an explicit `let _ = ...`.
+
+Do not commit or push when anything is red.
 
 ## CRP vectors and l-BFV key tests
 

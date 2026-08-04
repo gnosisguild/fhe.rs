@@ -1,6 +1,6 @@
 # Harness
 
-The **harness** is the scaffolding this repo ships to steer the AI coding agent. It spans the canonical rules, the always-on project brief (`AGENTS.md`), the OpenCode wiring (`opencode.json`), and the skills and subagents under `.opencode/`. It is project code like any other, versioned in the repo.
+The **harness** is the scaffolding this repo ships to steer the AI coding agent. It spans the canonical rules, the always-on project brief (`AGENTS.md`), the OpenCode wiring (`.opencode/opencode.json`), and the skills and subagents under `.opencode/`. It is project code like any other, versioned in the repo.
 
 This rule defines the **invariants** that keep the harness coherent: conditions that must stay true no matter how the scaffolding is moved or renamed. If an invariant is violated, the harness is out of sync. A deliberate end-to-end audit against every invariant here is a separate step you invoke (see **Enforcement** below); this file is the definition of "coherent" that such an audit checks.
 
@@ -9,7 +9,7 @@ This rule defines the **invariants** that keep the harness coherent: conditions 
 | Construct                       | When to use                                                                                                                                                                                              | When NOT to use                                                                                                  |
 | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | **Rule** (`.rules/*.md`)        | Constraints, invariants, domain knowledge that must hold across every edit in an area. Loaded on demand via the Touch → update table in AGENTS.md. Rules define "what must be true," not "how to do it." | Step-by-step procedures (→ skill), persistent personas (→ agent), deterministic checks (→ script).               |
-| **Skill** (`.opencode/skills/`) | Reusable procedure that needs AI judgment — a workflow loaded into any agent's context on demand. Portable: no own permissions or model.                                                                 | Always-on constraints (→ rule), work needing its own permissions/model (→ agent), deterministic work (→ script). |
+| **Skill** (`.opencode/skills/`) | Reusable procedure that needs AI judgment — a workflow loaded into any agent's context on demand. Portable: no own permissions or model. | Always-on constraints (→ rule), work needing its own permissions/model (→ agent), deterministic work (→ script). |
 | **Agent** (`.opencode/agents/`) | Persistent persona with its own permissions, model, and mode (`primary` / `subagent` / `all`). Primary: user selects. Subagent: dispatched by a primary.                                                 | One-off procedures (→ skill), constraints that apply everywhere (→ rule).                                        |
 
 Rules are not optional. Every harness surface is governed by a rule. When you create a new surface, you create or update the corresponding rule.
@@ -26,7 +26,16 @@ The canonical rules under [`.rules/`](.) are the single source of truth. OpenCod
 
 ### Skills and subagents
 
-Skills live at `.opencode/skills/<name>/SKILL.md`; subagents at `.opencode/agents/<name>.md`. Each carries valid frontmatter. A skill and a subagent may cover related ground — that is composition, not duplication. Primary agents (e.g. `architect`, `triage`, `harness`, `orchestrator`) are also defined in `.opencode/agents/`.
+Skills live at `.opencode/skills/<name>/SKILL.md`; subagents at `.opencode/agents/<name>.md`. Each carries valid frontmatter. A skill and a subagent may cover related ground — that is composition, not duplication.
+
+The agent set is deliberately small — one primary, three subagents:
+
+- `orchestrator` (primary) — sole entry point. Routes architect → implementer → reviewer and owns harness upkeep.
+- `architect` (subagent) — codebase-level design plan; may ask the developer clarifying questions.
+- `implementer` (subagent) — derives the implementation plan from the design and implements it.
+- `reviewer` (subagent) — reviews diffs and root-causes bugs; loads the matching `.rules/*.md` via the Touch → update routing for the diff's scope.
+
+Domain specialty lives in the canonical **rules** (`.rules/*.md`), loaded by the reviewer via the Touch → update routing — not in separate reviewer agents or pointer skills. When a specialized role would otherwise exist as its own agent, prefer routing to the matching rule.
 
 When creating or editing a skill or an agent, follow the structure of the existing files under `.opencode/` and the **Construct selection** table above. Match the frontmatter shape (skills: `name` + `description`; agents: `mode` + `permission` + `description`) and keep each file to a single, well-scoped responsibility.
 
@@ -34,11 +43,13 @@ When creating or editing a skill or an agent, follow the structure of the existi
 
 ### Permissions match intent
 
-Review, architecture, and planning agents are read-only (`edit: deny`). `implementer` and `harness` may edit. `orchestrator` may only edit `.plans/*` files.
+Architecture and review agents are read-only (`edit: deny`). `implementer` edits product code. `architect` edits only `.plans/*`. `orchestrator` edits harness surfaces (`.rules/`, `.opencode/`, `AGENTS.md`, `CLAUDE.md`) but not `.opencode/opencode.json`, which owns models and permissions — never product code or plans.
 
-### OpenCode config is declared in `opencode.json`
+Bash permissions use an explicit deny-list for destructive actions. The broad rule comes first and narrower rules come later because OpenCode applies the last matching rule. All custom agents repeat the deny-list because agent permissions are appended after project permissions.
 
-OpenCode declares MCP servers, permissions, and instruction loading under `opencode.json`. `instructions` lists `AGENTS.md` only; rules load on demand via the Touch → update table, not all upfront.
+### OpenCode config lives in `.opencode/opencode.json`
+
+OpenCode declares MCP servers and permissions under `.opencode/opencode.json`. `AGENTS.md` is auto-loaded from the project root by OpenCode; rules load on demand via the Touch → update table, not all upfront.
 
 ### Links and source references (resolution invariant)
 
@@ -48,7 +59,7 @@ OpenCode declares MCP servers, permissions, and instruction loading under `openc
 
 ## Portability to other harnesses
 
-`AGENTS.md` and `.rules/` are shared and harness-neutral. Codex loads `AGENTS.md` natively and can follow its Touch → update routing. `CLAUDE.md` is a thin adapter that points Claude Code to the same `AGENTS.md` and `.rules/`. `.opencode/` and `opencode.json` are OpenCode-specific and inert to other tools — they are tracked but unused by Codex or Claude Code.
+`AGENTS.md` and `.rules/` are shared and harness-neutral. Codex loads `AGENTS.md` natively and can follow its Touch → update routing. `CLAUDE.md` is a thin adapter that points Claude Code to the same `AGENTS.md` and `.rules/`. `.opencode/` is OpenCode-specific and inert to other tools — it is tracked but unused by Codex or Claude Code.
 
 Skill bodies under `.opencode/skills/` are portable (YAML `name`/`description` frontmatter + Markdown body matches the convention used by Codex and Claude Code). To use them in another harness, copy the `SKILL.md` content into that harness's skill directory.
 

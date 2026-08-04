@@ -37,7 +37,7 @@ cargo fmt --all                        # formatting
 
 ## Code generation
 
-Proto files compile to Rust via `prost` at build time — see [`.rules/codegen.md`](.rules/codegen.md). This is feature-gated behind `protobuf` (disabled by default).
+Proto files compile to Rust via `prost` at build time — see [`.rules/protobuf.md`](.rules/protobuf.md). This is feature-gated behind `protobuf` (disabled by default).
 
 - `fhe-math/src/proto/rq.proto` → generated into `OUT_DIR` (requires `--features protobuf`)
 - `fhe/src/proto/bfv/bfv.proto` → generated into `OUT_DIR` (requires `--features protobuf`)
@@ -51,38 +51,30 @@ At the start of each agent session, run `git rev-parse --show-toplevel` and use 
 
 ## Development workflow
 
-For any non-trivial task, switch to the **`orchestrator`** agent — it orchestrates the full flow (plan → build → verify → review, review only on explicit user go-ahead) and enforces fhe.rs constraints. Starting points: `architect` for designs, `triage` for bugs, then `orchestrator` for everything else. `orchestrator` always operates on the current branch — it never creates or switches branches.
+For any task, start with the **`orchestrator`** agent — it is the sole entry point. It decides when to run `architect` (codebase-level design plan, from an existing issue or a new request), dispatches `implementer` (which derives the detailed implementation plan and implements it), runs `reviewer` (review only on explicit user go-ahead, triage for bugs), and takes care of harness updates. `orchestrator` always operates on the current branch — it never creates or switches branches.
 
 The agent set:
 
-1. `orchestrator` — routes plan → build → verification → review (review only on explicit user go-ahead), asks user at gates. Always works on the current branch. Never writes production code directly.
-2. `architect` — brainstorm designs and tradeoffs (read-only).
-3. `triage` — bug root-cause analysis. Reproduce, trace, explain root cause, propose fix direction. Never patches.
-4. `planner` — subagent. Produces bite-sized implementation plans with exact file paths, code, and verification (read-only).
-5. `implementer` — implements approved plan tasks using TDD cycle (can edit).
-6. `guard-reviewer` — checks diff against hard constraints and conventions (read-only).
-7. `quality-reviewer` — universal Rust code quality review (read-only).
-8. `crypto-reviewer` — specialist review for scheme implementations, key handling, noise, parameters, serialization, decryption, threshold logic, and PIR examples (read-only).
-9. `math-reviewer` — specialist review for RNS, NTT, modular arithmetic, polynomial operations, scaling, bounds, conversions, and property tests (read-only).
-10. `harness` — harness lifecycle: coherence sweeps, restructuring, rule maintenance.
+1. `orchestrator` — routes the full flow (plan → build → verify → review), asks user at gates, and owns harness upkeep. Edits nothing but the harness surfaces (`.rules/`, `.opencode/`, `AGENTS.md`, `CLAUDE.md`); never writes product code or plans.
+2. `architect` — produces a codebase-level design plan (architecture, affected areas, API surface, data flow, scope) for a request or issue; may ask the developer clarifying questions. Edits only `.plans/`.
+3. `implementer` — derives the detailed implementation plan from the design, then implements it using a TDD cycle (can edit).
+4. `reviewer` — single reviewer and bug triager. Reviews diffs against constraints, correctness, crypto, and math (loading the matching domain skill); root-causes bugs without an unclear cause. Never patches.
 
-Reusable procedures live as skills under [`.opencode/skills/`](.opencode/skills): `review` (orchestrates all reviewers), `preflight`, `crypto-change-review`, `protobuf-codegen`, `benchmarking`.
+Reusable procedures live as skills under [`.opencode/skills/`](.opencode/skills): `review` (dispatches the reviewer and synthesizes a verdict). Verification/preflight, benchmark, and protobuf-codegen guidance lives in the matching rules — `.rules/testing.md` and `.rules/protobuf.md`. Domain checklists are not separate skills — the reviewer loads the matching `.rules/*.md` directly via the Touch → update routing.
 
-Other harnesses: `AGENTS.md` and `.rules/` are shared and portable. `CLAUDE.md` adapts Claude Code to this layout. `.opencode/` and `opencode.json` are OpenCode-specific and inert to other tools.
+Other harnesses: `AGENTS.md` and `.rules/` are shared and portable. `CLAUDE.md` adapts Claude Code to this layout. `.opencode/` is OpenCode-specific and inert to other tools.
 
 ## Area rules
 
 Canonical detailed guidance in `.rules/` — read the full file when relevant:
 
-- [`.rules/workflow.md`](.rules/workflow.md) — patch discipline, git, error handling
-- [`.rules/conventions.md`](.rules/conventions.md) — Rust coding conventions, naming, imports, documentation
+- [`.rules/conventions.md`](.rules/conventions.md) — Rust coding conventions, naming, imports, documentation, idiomatic Rust
 - [`.rules/testing.md`](.rules/testing.md) — release mode, focused and full verification, proptest, criterion
-- [`.rules/crypto.md`](.rules/crypto.md) — security-sensitive areas, claims policy, invariant tests
-- [`.rules/math.md`](.rules/math.md) — RNS/NTT/modular/polynomial invariants, property tests
-- [`.rules/codegen.md`](.rules/codegen.md) — protoc/prost feature-gated build flow
+- [`.rules/cryptography.md`](.rules/cryptography.md) — security-sensitive areas, claims policy, invariant tests
+- [`.rules/mathematics.md`](.rules/mathematics.md) — RNS/NTT/modular/polynomial invariants, property tests
+- [`.rules/protobuf.md`](.rules/protobuf.md) — protoc/prost feature-gated build flow
 - [`.rules/harness.md`](.rules/harness.md) — this scaffolding's invariants
-- [`.rules/changelog.md`](.rules/changelog.md) — when to edit changelog, version alignment
-- [`.rules/zk-witness.md`](.rules/zk-witness.md) — ZK witness API for encryption and RLK proof generation
+- [`.rules/witness.md`](.rules/witness.md) — ZK witness API for encryption and RLK proof generation
 
 ## Keeping rules up to date
 
@@ -90,14 +82,13 @@ Update the canonical `.rules/*.md` in the same change when your edit makes a rul
 
 **Touch → update:**
 
-- `workflow.md` — any edit (applies project-wide)
 - `conventions.md` — `**/*.rs` (only when conventions change, not every edit)
-- `crypto.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`
-- `math.md` — `crates/fhe-math/src/**`
-- `codegen.md` — `**/build.rs`, `**/*.proto`, `**/src/proto/**`
+- `cryptography.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`
+- `mathematics.md` — `crates/fhe-math/src/**`
+- `protobuf.md` — `**/build.rs`, `**/*.proto`, `**/src/proto/**`
 - `testing.md` — `**/tests/**`, `**/benches/**`, `.github/workflows/**`
-- `harness.md` — `.rules/**`, `.opencode/**`, `AGENTS.md`, `CLAUDE.md`, `opencode.json`
-- `changelog.md` — `CHANGELOG.md`
+- `harness.md` — `.rules/**`, `.opencode/**`, `AGENTS.md`, `CLAUDE.md`
+- `witness.md` — `crates/fhe/src/{lbfv,trlbfv}/**` (the `_extended` witness APIs)
 
 ## Constraints — hard rules
 
@@ -111,17 +102,19 @@ trbfv e2e tests take minutes in debug, seconds in release. Always run tests with
 
 ### Never hand-edit generated protobuf output
 
-Regenerate via the build — see [`.rules/codegen.md`](.rules/codegen.md).
+Regenerate via the build — see [`.rules/protobuf.md`](.rules/protobuf.md).
 
 ### Never make unsupported security claims
 
-This library has never been independently audited — see [`.rules/crypto.md`](.rules/crypto.md).
+This library has never been independently audited — see [`.rules/cryptography.md`](.rules/cryptography.md).
 
 ### Add or extend tests for the code you change
 
 Even if nobody asked. Follow the testing rules in [`.rules/testing.md`](.rules/testing.md).
 
 ## Git — never commit or push without explicit consent
+
+When asked to commit, follow repo style: inspect `git status`, `git diff`, and recent `git log`; stage only intended files. PR titles use the format `[agent] <Title>`.
 ## Style & lints
 
 Workspace lints are strict — code that violates them won't pass CI:

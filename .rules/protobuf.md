@@ -36,11 +36,13 @@ The `LbfvBinding` and `LBFVRelinKeyShare` protobuf messages are serialized/deser
 ## When changing .proto files
 
 1. Edit the `.proto` file
-2. Enable the feature: `cargo build --features protobuf`
-3. Verify the generated code reflects your changes
-4. Commit the `.proto` file (generated code is not committed — it is produced in `OUT_DIR` at build time)
+2. Ensure `protoc` is installed (see **Enabling protobuf** above)
+3. Enable the feature: `cargo build --features protobuf` — this triggers regeneration
+4. Verify the generated code reflects your changes
+5. Commit the `.proto` file (generated code is not committed — it is produced in `OUT_DIR` at build time)
 
 ## What not to do
 
 - Do not manually edit generated code — it is produced in `OUT_DIR` by the build script
 - Do not commit generated `.rs` files — they are build output
+- Do not change the compile order in `fhe/build.rs` — TRBFV depends on BFV being compiled first

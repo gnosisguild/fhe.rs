@@ -8,4 +8,4 @@ Before editing, use its **Touch → update** table to identify and read the rele
 
 - `AGENTS.md` and `.rules/` — shared, harness-neutral. Follow them.
 - `CLAUDE.md` (this file) — adapter only.
-- `.opencode/agents/`, `.opencode/skills/`, and `opencode.json` — OpenCode-specific. Do not assume they apply to this session; they are inert to Claude Code.
+- `.opencode/` (agents, skills, and config) — OpenCode-specific. Do not assume they apply to this session; they are inert to Claude Code.

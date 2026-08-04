@@ -29,11 +29,25 @@
 - Document panics, errors, and safety invariants where applicable.
 - For crypto code, cite the relevant ePrint paper and section.
 
+## Mathematical rigor in comments and docs
+
+- Use the exact symbol from the construction — do not alias one quantity for another. Distinct values (`B_sm` vs `B_e`, `Delta = floor(q/t)` vs `Q/(2·t)`, `variance` vs `coefficient bound`) are not interchangeable in a comment or doc.
+- Every formula, inequality, or "is negligible / is small" claim must name every symbol it uses and where it comes from. A bound is only valid against the exact quantity it bounds.
+- Copy equations verbatim from the paper where a construction is cited; if the implementation deviates, say so explicitly instead of silently rewriting the relation.
+- When a comment states an invariant (e.g. "reconstruction requires t+1 shares", "noise grows ~|S|·σ²"), it must hold for the current code — or be marked as an unproven caveat, never stated as fact.
+- Do not state an approximation as the exact bound, and do not silently swap rounding conventions (`floor`, nearest, exact rational) without calling out the switch, since the noise analysis changes.
+
 ## Rustfmt and clippy
 
 - `cargo fmt --all` is the single formatting authority. No exceptions.
 - `cargo clippy --all-targets --all-features -- -D warnings` must pass clean.
 - Do not suppress clippy lints without a comment explaining why.
+
+## Idiomatic Rust
+
+- Write idiomatic, modern Rust. Use `Result`/`?` over manual error plumbing, `Into`/`From` conversions where natural, iterators over manual loops, and the standard library's error-handling idioms. Avoid C-style patterns (raw loops with indices, manual `clone()` where a borrow suffices, `Vec` where an iterator or slice works).
+- Prefer the standard library and `crate`-internal helpers over re-inventing a common utility.
+- Follow existing patterns in the crate you are editing — match the surrounding code's idioms rather than introducing a divergent style.
 
 ## Workspace structure
 
@@ -43,6 +57,10 @@
 - `crates/fhe-util` — utilities
 
 When adding a new module or type, place it in the appropriate crate. Do not add HE scheme code to `fhe-math`, or math primitives to `fhe`.
+
+## Version alignment
+
+When bumping a version, keep `Cargo.toml` workspace version and per-crate `Cargo.toml` versions aligned. The crates in the workspace (`fhe`, `fhe-math`, `fhe-traits`, `fhe-util`) share the workspace version by default via `version.workspace = true`.
 
 ## Feature gates
 
