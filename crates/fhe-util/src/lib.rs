@@ -162,19 +162,21 @@ pub fn sample_vec_cbd<R: RngCore + CryptoRng>(
 
 /// Sample a vector of independent centered binomial distributions with f32 variance.
 /// Supports variance = 0.5 (CBD(1), support {-1,0,1}) or integer variances up to 16.
-/// Returns an error if variance is outside [0.5, 16].
+/// Returns an error if variance is not exactly 0.5 or an integer in [1, 16].
 pub fn sample_vec_cbd_f32<R: RngCore + CryptoRng>(
     vector_size: usize,
     variance: f32,
     rng: &mut R,
 ) -> Result<Vec<i64>, &'static str> {
-    if !(0.5..=16.0).contains(&variance) {
-        return Err("The variance should be between 0.5 and 16");
+    let is_half = (variance - 0.5).abs() < f32::EPSILON;
+    let is_supported_integer = variance.fract() == 0.0 && (1.0..=16.0).contains(&variance);
+    if !is_half && !is_supported_integer {
+        return Err("The variance should be 0.5 or an integer between 1 and 16");
     }
 
     let mut out = Vec::with_capacity(vector_size);
 
-    if (variance - 0.5).abs() < f32::EPSILON {
+    if is_half {
         // Special case: CBD(1) -> {-1,0,1}, variance = 0.5
         for _ in 0..vector_size {
             let b1 = rng.next_u32() & 1;
@@ -359,8 +361,8 @@ mod tests {
     use rand::{CryptoRng, RngCore};
 
     use super::{
-        get_smallest_prime_factor, inverse, is_prime, sample_vec_cbd, transcode_bidirectional,
-        transcode_from_bytes, transcode_to_bytes,
+        get_smallest_prime_factor, inverse, is_prime, sample_vec_cbd, sample_vec_cbd_f32,
+        transcode_bidirectional, transcode_from_bytes, transcode_to_bytes,
     };
     use crate::variance;
 
@@ -491,6 +493,27 @@ mod tests {
             sample_vec_cbd(VECTOR_SIZE, variance, &mut rng).unwrap();
             assert_eq!(rng.next_u64_calls, 2 * VECTOR_SIZE);
         }
+    }
+
+    #[test]
+    fn sample_cbd_f32() {
+        let mut rng = rand::rng();
+
+        // Valid: 0.5 and integers 1..=16
+        assert!(sample_vec_cbd_f32(10, 0.5, &mut rng).is_ok());
+        for var in 1..=16 {
+            assert!(sample_vec_cbd_f32(10, var as f32, &mut rng).is_ok());
+        }
+
+        // Invalid: out of range
+        assert!(sample_vec_cbd_f32(10, 0.0, &mut rng).is_err());
+        assert!(sample_vec_cbd_f32(10, 17.0, &mut rng).is_err());
+
+        // Invalid: non-half, non-integer values must be rejected rather than
+        // silently truncated (see issue #100)
+        assert!(sample_vec_cbd_f32(10, 1.9, &mut rng).is_err());
+        assert!(sample_vec_cbd_f32(10, 1.5, &mut rng).is_err());
+        assert!(sample_vec_cbd_f32(10, 0.1, &mut rng).is_err());
     }
 
     #[test]
