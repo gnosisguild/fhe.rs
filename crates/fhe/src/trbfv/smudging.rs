@@ -15,7 +15,6 @@ use crate::Error;
 /// - Sampler-aligned `B_enc` (CBD support for small variance, `sqrt(3*var)` for large)
 use crate::bfv::BfvParameters;
 
-use fhe_math::rq::variance_to_uniform_bound;
 use num_bigint::{BigInt, BigUint};
 use num_traits::ToPrimitive;
 use rand::{CryptoRng, RngCore};

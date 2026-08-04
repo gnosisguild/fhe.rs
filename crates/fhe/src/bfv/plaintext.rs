@@ -490,7 +490,7 @@ impl FheDecoder<Plaintext> for Vec<i64> {
             }
             PlaintextValues::Large(_) => {
                 let v = Vec::<BigUint>::try_decode(pt, encoding)?;
-                let modulus_big = pt.par.plaintext_big();
+                let modulus_big = pt.params.plaintext_big();
                 // Same threshold formula as `Plaintext::to_poly`'s Large branch
                 // (`center_biguint`, threshold = (p + 1) / 2): equivalent to the
                 // small-modulus convention `x > (p - 1) / 2`, but expressed with
@@ -500,7 +500,7 @@ impl FheDecoder<Plaintext> for Vec<i64> {
                 let threshold = (modulus_big + 1u32) >> 1;
                 v.iter()
                     .map(|x| {
-                        pt.par
+                        pt.params
                             .plaintext
                             .center_biguint(x, &threshold)
                             .to_i64()
