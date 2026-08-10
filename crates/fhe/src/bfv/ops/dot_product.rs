@@ -73,8 +73,8 @@ where
         .clone()
         .next()
         .ok_or(crate::DotProductError::EmptyInput)?;
-    ct_first.validate_for(&ct_first.par)?;
-    let ctx = ct_first.par.context_at_level(ct_first.level)?;
+    ct_first.validate_for(&ct_first.params)?;
+    let ctx = ct_first.params.context_at_level(ct_first.level)?;
 
     // Variable-time reductions are permitted only when every ciphertext and
     // plaintext polynomial in the dot product has been classified as public.
@@ -90,8 +90,8 @@ where
             });
 
     for (cti, pti) in ct.clone().zip(pt.clone()) {
-        cti.validate_for_context(&ct_first.par, ct_first.level, ctx)?;
-        pti.validate_for_context(&ct_first.par, ct_first.level, ctx)?;
+        cti.validate_for_context(&ct_first.params, ct_first.level, ctx)?;
+        pti.validate_for_context(&ct_first.params, ct_first.level, ctx)?;
         if cti.len() != ct_first.len() {
             return Err(crate::DotProductError::CiphertextPolynomialCountMismatch {
                 actual: cti.len(),
@@ -122,13 +122,13 @@ where
             .collect::<Result<Vec<Poly<Ntt>>>>()?;
 
         Ok(Ciphertext {
-            par: ct_first.par.clone(),
+            params: ct_first.params.clone(),
             seed: None,
             c,
             level: ct_first.level,
         })
     } else {
-        let mut acc = Array::zeros((ct_first.len(), ctx.moduli().len(), ct_first.par.degree()));
+        let mut acc = Array::zeros((ct_first.len(), ctx.moduli().len(), ct_first.params.degree()));
         for (ciphertext, plaintext) in izip!(ct, pt) {
             let pt_coefficients = plaintext.poly_ntt.coefficients();
             for (mut acci, ci) in izip!(acc.outer_iter_mut(), ciphertext.iter()) {
@@ -152,7 +152,7 @@ where
         // Reduce
         let mut c = Vec::with_capacity(ct_first.len());
         for acci in acc.outer_iter() {
-            let mut coeffs = Array2::zeros((ctx.moduli().len(), ct_first.par.degree()));
+            let mut coeffs = Array2::zeros((ctx.moduli().len(), ct_first.params.degree()));
             for (mut outij, accij, q) in izip!(
                 coeffs.outer_iter_mut(),
                 acci.outer_iter(),
@@ -174,7 +174,7 @@ where
         }
 
         Ok(Ciphertext {
-            par: ct_first.par.clone(),
+            params: ct_first.params.clone(),
             seed: None,
             c,
             level: ct_first.level,

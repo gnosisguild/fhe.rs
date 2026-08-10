@@ -38,7 +38,7 @@ impl PlaintextVec {
     fn try_encode_with<T>(
         value: &[T],
         encoding: Encoding,
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
         mut encode_chunk: impl FnMut(
             &[T],
             &Encoding,
@@ -46,19 +46,19 @@ impl PlaintextVec {
             &Arc<Context>,
         ) -> Result<Poly<Ntt>>,
     ) -> Result<Self> {
-        if encoding.encoding == EncodingEnum::Simd && par.ntt_operator.is_none() {
+        if encoding.encoding == EncodingEnum::Simd && params.ntt_operator.is_none() {
             return Err(crate::EncodingError::SimdUnavailable.into());
         }
 
-        let ctx = par.context_at_level(encoding.level)?;
-        let num_plaintexts = value.len().div_ceil(par.degree()).max(1);
+        let ctx = params.context_at_level(encoding.level)?;
+        let num_plaintexts = value.len().div_ceil(params.degree()).max(1);
         let plaintexts = (0..num_plaintexts)
             .map(|index| {
-                let start = index * par.degree();
-                let end = min(value.len(), start + par.degree());
-                let poly_ntt = encode_chunk(&value[start..end], &encoding, par, ctx)?;
+                let start = index * params.degree();
+                let end = min(value.len(), start + params.degree());
+                let poly_ntt = encode_chunk(&value[start..end], &encoding, params, ctx)?;
                 Ok(Plaintext {
-                    par: par.clone(),
+                    params: params.clone(),
                     encoding: Some(encoding.clone()),
                     poly_ntt,
                 })
@@ -71,18 +71,18 @@ impl PlaintextVec {
     fn encode_u64_chunk(
         value: &[u64],
         encoding: &Encoding,
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
         ctx: &Arc<Context>,
         variable_time: Option<VariableTime>,
     ) -> Result<Poly<Ntt>> {
-        let mut coefficients = vec![0u64; par.degree()];
+        let mut coefficients = vec![0u64; params.degree()];
         match encoding.encoding {
             EncodingEnum::Poly => coefficients[..value.len()].copy_from_slice(value),
             EncodingEnum::Simd => {
                 for (index, &coefficient) in value.iter().enumerate() {
-                    coefficients[par.matrix_reps_index_map[index]] = coefficient;
+                    coefficients[params.matrix_reps_index_map[index]] = coefficient;
                 }
-                let ntt_operator = par
+                let ntt_operator = params
                     .ntt_operator
                     .as_ref()
                     .ok_or(crate::PlaintextError::NttOperatorUnavailable)?;
@@ -105,12 +105,12 @@ impl PlaintextVec {
     fn encode_biguint_chunk(
         value: &[BigUint],
         encoding: &Encoding,
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
         ctx: &Arc<Context>,
     ) -> Result<Poly<Ntt>> {
         match encoding.encoding {
             EncodingEnum::Poly => {
-                let mut coefficients = vec![BigUint::zero(); par.degree()];
+                let mut coefficients = vec![BigUint::zero(); params.degree()];
                 coefficients[..value.len()].clone_from_slice(value);
                 Ok(
                     Poly::<PowerBasis>::try_convert_from(coefficients.as_slice(), ctx, false)?
@@ -126,7 +126,7 @@ impl PlaintextVec {
                             .ok_or(crate::PlaintextError::ValueTooLargeForU64)
                     })
                     .collect::<std::result::Result<Vec<_>, _>>()?;
-                Self::encode_u64_chunk(&values, encoding, par, ctx, None)
+                Self::encode_u64_chunk(&values, encoding, params, ctx, None)
             }
         }
     }
@@ -138,27 +138,31 @@ impl FheEncoderVariableTime<&[u64]> for PlaintextVec {
     fn try_encode_vt(
         value: &[u64],
         encoding: Encoding,
-        par: &Arc<BfvParameters>,
+        params: &Arc<BfvParameters>,
         variable_time: VariableTime,
     ) -> Result<Self> {
-        Self::try_encode_with(value, encoding, par, |value, encoding, par, ctx| {
-            Self::encode_u64_chunk(value, encoding, par, ctx, Some(variable_time))
+        Self::try_encode_with(value, encoding, params, |value, encoding, params, ctx| {
+            Self::encode_u64_chunk(value, encoding, params, ctx, Some(variable_time))
         })
     }
 }
 
 impl FheEncoder<&[BigUint]> for PlaintextVec {
     type Error = Error;
-    fn try_encode(value: &[BigUint], encoding: Encoding, par: &Arc<BfvParameters>) -> Result<Self> {
-        Self::try_encode_with(value, encoding, par, Self::encode_biguint_chunk)
+    fn try_encode(
+        value: &[BigUint],
+        encoding: Encoding,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
+        Self::try_encode_with(value, encoding, params, Self::encode_biguint_chunk)
     }
 }
 
 impl FheEncoder<&[u64]> for PlaintextVec {
     type Error = Error;
-    fn try_encode(value: &[u64], encoding: Encoding, par: &Arc<BfvParameters>) -> Result<Self> {
-        Self::try_encode_with(value, encoding, par, |value, encoding, par, ctx| {
-            Self::encode_u64_chunk(value, encoding, par, ctx, None)
+    fn try_encode(value: &[u64], encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+        Self::try_encode_with(value, encoding, params, |value, encoding, params, ctx| {
+            Self::encode_u64_chunk(value, encoding, params, ctx, None)
         })
     }
 }

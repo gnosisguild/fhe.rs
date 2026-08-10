@@ -1,3 +1,10 @@
+//! Generic aggregation traits shared by the multiparty/threshold protocols.
+//!
+//! These traits are protocol-agnostic plumbing: they define how a collection
+//! of shares combines into a full key. The cryptographic meaning of
+//! "aggregation" is defined by the [`Aggregate`] implementations in the
+//! protocol modules ([`crate::mbfv`], [`crate::trlbfv`]), not here.
+
 use crate::Result;
 
 /// Aggregate shares in an MPC protocol

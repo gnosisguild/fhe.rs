@@ -4,12 +4,14 @@
 
 mod errors;
 
+pub mod aggregate;
 pub mod bfv;
 pub mod lbfv;
 #[cfg(feature = "experimental-mbfv")]
 pub mod mbfv;
 pub mod proto;
 pub mod trbfv;
+pub mod trlbfv;
 pub use errors::{
     CiphertextError, CiphertextOperation, DotProductError, EncodingError, Error,
     EvaluationKeyComponent, EvaluationKeyError, EvaluationOperation, MultipartyError,
