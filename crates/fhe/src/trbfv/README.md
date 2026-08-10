@@ -82,6 +82,11 @@ fixed formula:
 
 This matches the branches chosen by `Poly::conditional_error` in `fhe-math`.
 
+`SmudgingBoundCalculatorConfig::new` and
+`SmudgingBoundCalculatorConfig::new_multiplicative` are fallible: they reject
+zero parties or zero ciphertexts before a calculator is created. The calculator
+also revalidates these counts before performing the bound computation.
+
 ## Known Limitations
 
 ### One-time pre-shared noise
