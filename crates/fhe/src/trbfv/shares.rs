@@ -201,6 +201,16 @@ impl ShareManager {
     /// to compute this party's share of the joint secret (the sum of the dealt
     /// secrets) needed for decryption.
     ///
+    /// # Input invariant
+    ///
+    /// Every entry of every contribution matrix must be a canonical residue in
+    /// `[0, q_i)`, where `q_i` is the modulus of the entry's row. Shares produced
+    /// by [`ShareManager::generate_secret_shares_from_poly`] already satisfy this
+    /// invariant, but aggregation re-checks it because it is an input boundary for
+    /// externally supplied matrices. Out-of-range entries are treated as malformed
+    /// and rejected with `Error::Threshold(ThresholdError::MalformedShares { .. })`;
+    /// they are never reduced or otherwise repaired.
+    ///
     /// # Arguments
     /// - `sk_sss_collected`: One share matrix per contributing party (at most `n`;
     ///   fewer is allowed, e.g. when some parties aborted during dealing).
@@ -211,7 +221,9 @@ impl ShareManager {
     ///
     /// # Errors
     /// Returns an error if no shares are provided, if more than `n` matrices are
-    /// provided, or if any matrix does not have shape `[moduli, degree]`.
+    /// provided, if any matrix does not have shape `[moduli, degree]`, or if any
+    /// coefficient is not a canonical residue below its row's modulus (`>= q_i` is
+    /// malformed, never reduced).
     pub fn aggregate_collected_shares(
         &self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
@@ -235,6 +247,34 @@ impl ShareManager {
             }
         }
         let ctx = self.params.context_at_level(0)?;
+
+        // Every coefficient of every contribution must be a canonical residue
+        // below its own row's modulus `q_i` before anything is accumulated:
+        // Modulus::add_vec below requires canonical inputs (it aborts or wraps
+        // otherwise). Reducing here would silently accept malformed share
+        // material and could change the represented share, so values `>= q_i`
+        // are rejected instead. Shape was validated above, so the fallible
+        // `moduli().get(row)` lookup is expected to succeed, but in keeping with
+        // the workspace convention it stays fallible rather than indexed.
+        for (party_idx, item) in sk_sss_collected.iter().enumerate() {
+            for (row, item_row) in item.rows().into_iter().enumerate() {
+                let q_i =
+                    self.params.moduli().get(row).copied().ok_or_else(|| {
+                        Error::DefaultError("modulus index out of range".to_string())
+                    })?;
+                for (col, &value) in item_row.iter().enumerate() {
+                    if value >= q_i {
+                        return Err(Error::malformed_shares(
+                            party_idx,
+                            format!(
+                                "share coefficient at row {row} (modulus q_i = {q_i}), column \
+                                 {col} is {value}; expected a canonical residue in [0, {q_i})"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
 
         // Sum the share matrices row-wise modulo each RNS modulus, copying
         // only once into the result polynomial (instead of cloning each
@@ -504,6 +544,7 @@ impl ShareManager {
 )]
 mod tests {
     use super::*;
+    use crate::ThresholdError;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
@@ -985,6 +1026,116 @@ mod tests {
         // Valid: between 1 and n well-formed matrices
         let ok: Vec<Array2<u64>> = (0..3).map(|_| Array2::zeros(shape)).collect();
         assert!(manager.aggregate_collected_shares(&ok).is_ok());
+    }
+
+    #[test]
+    fn test_aggregate_collected_shares_rejects_non_canonical_q_at_each_row() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let moduli = params.moduli().to_vec();
+        let shape = (moduli.len(), params.degree());
+
+        // A coefficient equal to its row's modulus q_i is not a canonical
+        // residue and must be rejected against that row's own modulus, not a
+        // global bound shared across rows.
+        for (row, &q_i) in moduli.iter().enumerate() {
+            let mut shares = Array2::zeros(shape);
+            shares[[row, 3]] = q_i;
+            let err = manager
+                .aggregate_collected_shares(std::slice::from_ref(&shares))
+                .expect_err("coefficient equal to the row modulus must be rejected");
+            let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err
+            else {
+                panic!("expected MalformedShares, got: {err}");
+            };
+            assert_eq!(*party_id, 0, "contribution index must be reported");
+            assert!(
+                reason.contains(&format!("row {row}")),
+                "row index missing from reason: {reason}"
+            );
+            assert!(
+                reason.contains("column 3"),
+                "column index missing from reason: {reason}"
+            );
+            assert!(
+                reason.contains(&q_i.to_string()),
+                "expected row modulus (and offending value) missing from reason: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_aggregate_collected_shares_rejects_u64_max() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let moduli = params.moduli().to_vec();
+        let shape = (moduli.len(), params.degree());
+
+        // u64::MAX would wrap to a small residue if reduced; it must be
+        // rejected as malformed instead of being reduced.
+        let mut shares = Array2::zeros(shape);
+        shares[[0, 0]] = u64::MAX;
+        let err = manager
+            .aggregate_collected_shares(std::slice::from_ref(&shares))
+            .expect_err("u64::MAX share entry must be rejected");
+        let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err else {
+            panic!("expected MalformedShares, got: {err}");
+        };
+        assert_eq!(*party_id, 0);
+        assert!(
+            reason.contains(&u64::MAX.to_string()),
+            "offending value missing from reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_collected_shares_accepts_q_minus_one_boundary() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let moduli = params.moduli().to_vec();
+        let shape = (moduli.len(), params.degree());
+
+        // q_i - 1 is the largest valid canonical residue for each row; all
+        // rows must be accepted against their own distinct moduli.
+        let mut shares = Array2::zeros(shape);
+        for (row, &q_i) in moduli.iter().enumerate() {
+            shares.row_mut(row).fill(q_i - 1);
+        }
+        let result = manager
+            .aggregate_collected_shares(std::slice::from_ref(&shares))
+            .expect("maximal canonical residues must be accepted");
+
+        // A single aggregate preserves the input values exactly (the sum of a
+        // single matrix is the matrix itself) and the accumulator does not
+        // reduce them beyond the canonical residues supplied.
+        assert_eq!(result.coefficients().into_owned(), shares);
+    }
+
+    #[test]
+    fn test_aggregate_collected_shares_rejects_invalid_after_valid() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let moduli = params.moduli().to_vec();
+        let shape = (moduli.len(), params.degree());
+        let q1 = moduli[1];
+
+        // A valid first contribution followed by a malformed later one must
+        // still surface the later contribution's error rather than reaching
+        // Modulus::add_vec with the bad entry.
+        let valid = Array2::zeros(shape);
+        let mut invalid = Array2::zeros(shape);
+        invalid[[1, 5]] = q1;
+        let err = manager
+            .aggregate_collected_shares(&[valid, invalid])
+            .expect_err("out-of-range entry in a later contribution must be rejected");
+        let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err else {
+            panic!("expected MalformedShares, got: {err}");
+        };
+        assert_eq!(*party_id, 1, "the invalid contribution must be identified");
+        assert!(
+            reason.contains("row 1") && reason.contains("column 5"),
+            "row/column context missing from reason: {reason}"
+        );
     }
 
     #[test]
