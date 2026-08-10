@@ -38,7 +38,7 @@ The agent set (see `AGENTS.md` → **Development workflow**):
 ## The Flow
 
 ```
-Issue / new request → decide → architect (subagent) produces codebase-level design plan → [user approves]
+Issue / new request → decide → [straightforward bypass → implementer] or [architect (subagent) produces codebase-level design plan → user approves]
                                     ↓
         implementer (subagent) derives implementation plan + implements → [tests + clippy green]
                                     ↓
@@ -66,11 +66,11 @@ Take the user's request. It is either:
 - **An issue to work** — a bug report, task, or GitHub issue. If it is a bug with an unclear root cause, dispatch `reviewer` in triage mode first: it returns a **Bug Triage Report**. If it is a clear feature or task, go straight to planning.
 - **A new request to create** — a feature or change the user wants. Go straight to planning.
 
-Then decide: does this need `architect`? The default is yes for any non-trivial work — the architect produces the codebase-level design plan. Only bypass it for changes that are already fully specified end-to-end and verified (e.g. a one-line harness typo fix), and even then ask the user first.
+Then decide: does this need `architect`? The default is yes for any non-trivial work — the architect produces the codebase-level design plan. Bypass it for a straightforward task when the requested change is fully specified end-to-end, localized, behaviorally obvious, and has no meaningful architectural, API, security, or mathematical choices (for example, a helper rename with an unchanged error variant and message). State the bypass rationale and dispatch the implementer directly; do not create a design plan or ask for design approval. If there is uncertainty about scope or impact, use the architect.
 
 ### 2. Planning — dispatch `architect`
 
-1. **Tell the user:** "I'll dispatch the `architect` subagent to produce a design plan."
+1. **Tell the user:** "I'll dispatch the `architect` subagent to produce a design plan." For an approved straightforward-task bypass, instead state that the task meets the bypass criteria and proceed directly to implementation.
 2. **Dispatch `architect`** via the task tool with the issue/request (plus any triage report). It explores the codebase, may ask the developer clarifying questions via the `question` tool, and returns a codebase-level design plan in a `DESIGN_START`/`DESIGN_END` marker block, persisting it to `.plans/<slug>.md` itself. **You never write plan files.**
 3. **Present the returned design plan** to the user and ask: "Does this look right?"
 4. If not approved → ask what to change, then resume the same `architect` task with its `task_id` and the feedback. If no `task_id` is available, dispatch a new `architect` with the design and feedback.
@@ -129,7 +129,7 @@ This applies the same Touch → update reflex to the scaffolding itself: a chang
 | "I'll just commit this"        | No commits without explicit consent.                                                                |
 | "I'll persist the plan myself" | Never write plan files — `architect` owns `.plans/*`.                                                |
 | "The subagent will handle it"  | You are the gate. Verify before proceeding.                                                         |
-| "This is too simple to plan"   | Default is always planning via `architect`; bypass only with user approval.                         |
+| "This is too simple to plan"   | Bypass `architect` only when the task is fully specified, localized, behaviorally obvious, and has no meaningful architectural, API, security, or mathematical choices; otherwise plan normally. |
 | "Silently loop on review fixes"| Always present the report, recommend a path, let the user decide.                                   |
 
 ## Flow Retrospective

@@ -236,10 +236,10 @@ impl ShareManager {
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
     ) -> Result<Poly<PowerBasis>, Error> {
         if sk_sss_collected.is_empty() {
-            return Err(Error::insufficient_shares(0, 1));
+            return Err(Error::share_count_mismatch(0, 1));
         }
         if sk_sss_collected.len() > self.n {
-            return Err(Error::insufficient_shares(sk_sss_collected.len(), self.n));
+            return Err(Error::share_count_mismatch(sk_sss_collected.len(), self.n));
         }
         let expected_shape = (self.params.moduli().len(), self.params.degree());
         for (party_idx, item) in sk_sss_collected.iter().enumerate() {
@@ -394,14 +394,14 @@ impl ShareManager {
         // exactness (rather than truncating extras) avoids silently depending
         // on the order of the provided shares.
         if d_share_polys.len() != self.threshold + 1 {
-            return Err(Error::insufficient_shares(
+            return Err(Error::share_count_mismatch(
                 d_share_polys.len(),
                 self.threshold + 1,
             ));
         }
         // The number of reconstructing parties must match the provided shares
         if reconstructing_parties.len() != d_share_polys.len() {
-            return Err(Error::insufficient_shares(
+            return Err(Error::share_count_mismatch(
                 reconstructing_parties.len(),
                 d_share_polys.len(),
             ));

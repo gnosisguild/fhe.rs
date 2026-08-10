@@ -47,6 +47,10 @@ Architecture and review agents are read-only (`edit: deny`). `implementer` edits
 
 Bash permissions use an explicit deny-list for destructive actions. The broad rule comes first and narrower rules come later because OpenCode applies the last matching rule. All custom agents repeat the deny-list because agent permissions are appended after project permissions.
 
+### Workflow selection
+
+The orchestrator may bypass the architect for a straightforward task only when the request is fully specified end-to-end, localized, behaviorally obvious, and introduces no meaningful architectural, API, security, or mathematical choice. The bypass rationale must be stated, implementation still goes through the implementer, and normal verification and review gates remain unchanged. Unclear or broader work must use the architect.
+
 ### OpenCode config lives in `.opencode/opencode.json`
 
 OpenCode declares MCP servers and permissions under `.opencode/opencode.json`. `AGENTS.md` is auto-loaded from the project root by OpenCode; rules load on demand via the Touch → update table, not all upfront.
