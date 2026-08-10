@@ -41,7 +41,6 @@ Proto files compile to Rust via `prost` at build time — see [`.rules/protobuf.
 
 - `fhe-math/src/proto/rq.proto` → generated into `OUT_DIR` (requires `--features protobuf`)
 - `fhe/src/proto/bfv/bfv.proto` → generated into `OUT_DIR` (requires `--features protobuf`)
-- `fhe/src/proto/trbfv/trbfv.proto` → generated into `OUT_DIR` (requires `--features protobuf`)
 
 Without `--features protobuf`, no `protoc` is needed and serialization is unavailable. Core crypto operations work without the feature.
 

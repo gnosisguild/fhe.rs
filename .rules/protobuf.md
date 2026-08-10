@@ -7,7 +7,7 @@ Protobuf-based serialization is feature-gated behind the `protobuf` feature, whi
 When enabled, proto files compile to Rust via `prost` at build time, driven by `build.rs` scripts:
 
 - `crates/fhe-math/build.rs` — compiles `src/proto/rq.proto` into `OUT_DIR`. Requires `protoc` to be installed.
-- `crates/fhe/build.rs` — compiles `src/proto/bfv/bfv.proto` and `src/proto/trbfv/trbfv.proto` into `OUT_DIR`. BFV is compiled first because TRBFV imports from it. Requires `protoc` to be installed.
+- `crates/fhe/build.rs` — compiles `src/proto/bfv/bfv.proto` into `OUT_DIR`. Requires `protoc` to be installed.
 
 When the `protobuf` feature is disabled, the build scripts do nothing and no `protoc` is required. Serialization implementations (`Serialize`, `DeserializeParametrized`, `DeserializeWithContext`) are not available in this mode.
 
@@ -45,4 +45,4 @@ The `LbfvBinding` and `LBFVRelinKeyShare` protobuf messages are serialized/deser
 
 - Do not manually edit generated code — it is produced in `OUT_DIR` by the build script
 - Do not commit generated `.rs` files — they are build output
-- Do not change the compile order in `fhe/build.rs` — TRBFV depends on BFV being compiled first
+- Do not regenerate protobuf output without the `protobuf` feature enabled — the build scripts no-op without it
