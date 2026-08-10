@@ -13,25 +13,6 @@ permission:
     rm *: deny
     sudo *: deny
     cargo publish *: deny
-    git commit *: deny
-    git push *: deny
-    git checkout *: deny
-    git branch *: deny
-    git reset *: deny
-    git clean *: deny
-    git stash *: deny
-    git rebase *: deny
-    git merge *: deny
-    git cherry-pick *: deny
-    git revert *: deny
-    git tag *: deny
-    git config *: deny
-    git remote *: deny
-    git submodule *: deny
-    git update-ref *: deny
-    git filter-branch *: deny
-    git am *: deny
-    git apply *: deny
   edit:
     '*': deny
     .rules/*: allow

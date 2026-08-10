@@ -25,11 +25,11 @@
       "git ls-files *": "allow",
       "git rev-parse *": "allow",
       "git grep *": "allow",
+      "git commit *": "allow",
+      "git push *": "allow",
       "rm *": "deny",
       "sudo *": "deny",
       "cargo publish *": "deny",
-      "git commit *": "deny",
-      "git push *": "deny",
       "git checkout *": "deny",
       "git branch *": "deny",
       "git reset *": "deny",
@@ -63,8 +63,8 @@
       "variant": "high"
     },
     "implementer": {
-      "model": "opencode/deepseek-v4-flash-free",
-      "reasoningEffort": "max"
+      "model": "openai/gpt-5.6-luna",
+      "reasoningEffort": "medium"
     },
     "reviewer": {
       "model": "openai/gpt-5.6-luna",
