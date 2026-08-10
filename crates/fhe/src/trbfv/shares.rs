@@ -45,6 +45,16 @@ pub struct ShareManager {
 }
 
 impl ShareManager {
+    fn validate_decryption_level(&self, ciphertext: &Ciphertext) -> Result<(), Error> {
+        if ciphertext.level != 0 {
+            return Err(Error::invalid_ciphertext(format!(
+                "threshold BFV decryption requires ciphertext level 0, got level {}",
+                ciphertext.level
+            )));
+        }
+        Ok(())
+    }
+
     /// Create a new share manager.
     ///
     /// # Arguments
@@ -314,7 +324,9 @@ impl ShareManager {
     ///   aggregated the same way from the dealt noise shares
     ///
     /// # Returns
-    /// A decryption share polynomial that contributes to the final decryption
+    /// A decryption share polynomial that contributes to the final decryption.
+    /// The ciphertext must be at level 0; non-zero levels return
+    /// [`Error::InvalidCiphertext`].
     #[allow(clippy::indexing_slicing)] // BFV ciphertext always has exactly 2 components
     pub fn decryption_share(
         &self,
@@ -327,6 +339,7 @@ impl ShareManager {
                 "ciphertext parameters do not match this ShareManager's parameters",
             ));
         }
+        self.validate_decryption_level(&ciphertext)?;
         // A degree-2 (unrelinearized) ciphertext has 3 components; silently
         // ignoring c[2] would produce a wrong plaintext.
         if ciphertext.c.len() != 2 {
@@ -361,7 +374,8 @@ impl ShareManager {
     /// - `ciphertext`: The original ciphertext being decrypted
     ///
     /// # Returns
-    /// The decrypted plaintext
+    /// The decrypted plaintext. The ciphertext must be at level 0; non-zero
+    /// levels return [`Error::InvalidCiphertext`].
     // All indexing is on vectors built with known sizes matching the index ranges
     #[allow(clippy::indexing_slicing)]
     pub fn decrypt_from_shares(
@@ -375,6 +389,7 @@ impl ShareManager {
                 "ciphertext parameters do not match this ShareManager's parameters",
             ));
         }
+        self.validate_decryption_level(&ciphertext)?;
         // Reconstruction consumes exactly threshold + 1 shares; requiring
         // exactness (rather than truncating extras) avoids silently depending
         // on the order of the provided shares.
@@ -644,6 +659,58 @@ mod tests {
             .expect("Decoding plaintext failed");
 
         assert_eq!(decoded, plaintext_data);
+    }
+
+    #[test]
+    fn test_decryption_share_rejects_nonzero_ciphertext_level() {
+        let mut rng = rng();
+        let params = test_params();
+        let manager = ShareManager::new(3, 0, params.clone()).unwrap();
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
+        ciphertext.switch_down().unwrap();
+
+        let secret_poly = manager
+            .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
+            .unwrap();
+        let context = params.context_at_level(0).unwrap();
+        let result = manager.decryption_share(
+            Arc::new(ciphertext),
+            (*secret_poly).clone().into_ntt(),
+            Poly::<PowerBasis>::zero(context),
+        );
+
+        assert_eq!(
+            result,
+            Err(Error::invalid_ciphertext(
+                "threshold BFV decryption requires ciphertext level 0, got level 1",
+            ))
+        );
+    }
+
+    #[test]
+    fn test_decrypt_from_shares_rejects_nonzero_ciphertext_level() {
+        let mut rng = rng();
+        let params = test_params();
+        let manager = ShareManager::new(3, 0, params.clone()).unwrap();
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
+        ciphertext.switch_down().unwrap();
+
+        let context = params.context_at_level(0).unwrap();
+        let shares = vec![Poly::<PowerBasis>::zero(context)];
+        let result = manager.decrypt_from_shares(shares, vec![1], Arc::new(ciphertext));
+
+        assert_eq!(
+            result,
+            Err(Error::invalid_ciphertext(
+                "threshold BFV decryption requires ciphertext level 0, got level 1",
+            ))
+        );
     }
 
     #[test]

@@ -230,7 +230,8 @@ impl TRBFV {
     ///   by the Lagrange coefficients during reconstruction and breaks correctness
     ///
     /// # Returns
-    /// Decryption share polynomial
+    /// Decryption share polynomial. The ciphertext must be at level 0;
+    /// non-zero levels return [`Error::InvalidCiphertext`].
     pub fn decryption_share(
         &self,
         ciphertext: Arc<Ciphertext>,
@@ -253,7 +254,8 @@ impl TRBFV {
     /// * `ciphertext` - The original ciphertext being decrypted
     ///
     /// # Returns
-    /// The decrypted plaintext
+    /// The decrypted plaintext. The ciphertext must be at level 0;
+    /// non-zero levels return [`Error::InvalidCiphertext`].
     pub fn decrypt(
         &self,
         d_share_polys: Vec<Poly<PowerBasis>>,
