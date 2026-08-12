@@ -229,7 +229,7 @@ impl LBFVPublicKey {
 
         let ctx0 = params.context_at_level(0)?;
         let mut c: Vec<Ciphertext> = Vec::with_capacity(l);
-        for (b_poly, a_poly) in b_polynomials.into_iter().zip(a_polynomials.into_iter()) {
+        for (b_poly, a_poly) in b_polynomials.into_iter().zip(a_polynomials) {
             if b_poly.ctx() != ctx0 || a_poly.ctx() != ctx0 {
                 return Err(Error::DefaultError(
                     "Public-key polynomials must be at level 0".to_string(),
