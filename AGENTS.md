@@ -51,7 +51,7 @@ At the start of each agent session, run `git rev-parse --show-toplevel` and use 
 
 ## Development workflow
 
-For any task, start with the **`orchestrator`** agent — it is the sole entry point. It decides when to run `architect` (codebase-level design plan, from an existing issue or a new request), dispatches `implementer` (which derives the detailed implementation plan and implements it), runs `reviewer` (review only on explicit user go-ahead, triage for bugs), and takes care of harness updates. `orchestrator` always operates on the current branch — it never creates or switches branches.
+For any task, start with the **`orchestrator`** agent — it is the sole entry point. It decides whether the task needs an `architect` design (required for non-trivial work; straightforward, fully specified tasks may bypass it), dispatches `implementer` (which derives the detailed implementation plan and implements it), runs `reviewer` (review only on explicit user go-ahead, triage for bugs), and takes care of harness updates. `orchestrator` always operates on the current branch — it never creates or switches branches.
 
 The agent set:
 
