@@ -15,7 +15,7 @@
     }
   },
   "agent": {
-    "build": { "disable": false },
+    "build": { "disable": true },
     "plan": { "disable": true },
     "orchestrator": {
       "model": "opencode-go/deepseek-v4-pro",
