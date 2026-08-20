@@ -18,9 +18,9 @@
     "build": { "disable": false },
     "plan": { "disable": true },
     "orchestrator": {
-      "model": "openai/gpt-5.6-luna",
-      "reasoningEffort": "high",
-      "variant": "high"
+      "model": "opencode-go/deepseek-v4-pro",
+      "reasoningEffort": "max",
+      "variant": "max"
     },
     "architect": {
       "model": "openai/gpt-5.6-luna",
@@ -28,13 +28,14 @@
       "variant": "high"
     },
     "implementer": {
-      "model": "openai/gpt-5.6-luna",
-      "reasoningEffort": "medium"
-    },
-    "reviewer": {
-      "model": "openai/gpt-5.6-luna",
+      "model": "opencode-go/deepseek-v4-flash",
       "reasoningEffort": "max",
       "variant": "max"
+    },
+    "reviewer": {
+      "model": "openai/gpt-5.6-sol",
+      "reasoningEffort": "xhigh",
+      "variant": "xhigh"
     }
   }
 }
