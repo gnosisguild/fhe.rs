@@ -1,48 +1,26 @@
 # Protobuf code generation
 
-## How it works
+## Scope
 
-Protobuf-based serialization is feature-gated behind the `protobuf` feature, which is **disabled by default**.
+Serialization is feature-gated behind `protobuf` (disabled by default). `crates/fhe-math/build.rs` compiles `src/proto/rq.proto`; `crates/fhe/build.rs` compiles `src/proto/bfv/bfv.proto`; both use `prost` and require `protoc` only when enabled. Generated Rust is placed in `OUT_DIR` and never committed.
 
-When enabled, proto files compile to Rust via `prost` at build time, driven by `build.rs` scripts:
+## Invariants
 
-- `crates/fhe-math/build.rs` — compiles `src/proto/rq.proto` into `OUT_DIR`. Requires `protoc` to be installed.
-- `crates/fhe/build.rs` — compiles `src/proto/bfv/bfv.proto` into `OUT_DIR`. Requires `protoc` to be installed.
+1. Build scripts compile protobuf only when the `protobuf` feature is enabled and otherwise require no `protoc`.
+2. `protoc` is installed before feature-enabled builds.
+3. The public `fhe::proto`, polynomial serialization, BFV/LBFV/MBFV serialization implementations, and serialization-dependent examples are available only with `protobuf`.
+4. Core BFV operations and TRBFV/MBFV threshold protocols work without `protobuf`.
+5. `LbfvBinding` and `LBFVRelinKeyShare` are serialized by public `trlbfv` types from `bfv.proto`, while operational l-BFV keys carry no binding metadata and reject it.
+6. Schema changes edit the `.proto`, enable the feature to regenerate, verify generated behavior, and commit only the schema.
+7. Generated code is never hand-edited, committed, or regenerated with the feature disabled.
 
-When the `protobuf` feature is disabled, the build scripts do nothing and no `protoc` is required. Serialization implementations (`Serialize`, `DeserializeParametrized`, `DeserializeWithContext`) are not available in this mode.
-
-## Enabling protobuf
+## Evidence / tests
 
 ```bash
 cargo build --features protobuf
 cargo test --release --features protobuf
 ```
 
-This requires `protoc` (the protobuf compiler) to be installed on the system.
+## Sync
 
-## What is feature-gated
-
-The following are only available with `--features protobuf`:
-
-- `fhe::proto` module (public API)
-- `fhe-math` protobuf polynomial serialization (`Poly::to_bytes`, `Poly::from_bytes`)
-- BFV/LBFV/MBFV `Serialize`, `DeserializeParametrized`, and `DeserializeWithContext` implementations
-- Serialization-dependent examples (`mulpir`, `sealpir`, `rgsw`)
-
-Core BFV encryption, homomorphic operations, and threshold protocols (TRBFV, MBFV) work without the feature.
-
-The `LbfvBinding` and `LBFVRelinKeyShare` protobuf messages are serialized/deserialized by `trlbfv` public types (not `lbfv` directly). The `LBFVRelinKeyShare` message includes binding fields on the `trlbfv::RelinKeyShare` threshold key material. Both are generated from `crates/fhe/src/proto/bfv/bfv.proto`. Generated Rust code lives in `OUT_DIR` and is never committed. Operational key protobuf types in `lbfv` carry no binding metadata and must reject it.
-
-## When changing .proto files
-
-1. Edit the `.proto` file
-2. Ensure `protoc` is installed (see **Enabling protobuf** above)
-3. Enable the feature: `cargo build --features protobuf` — this triggers regeneration
-4. Verify the generated code reflects your changes
-5. Commit the `.proto` file (generated code is not committed — it is produced in `OUT_DIR` at build time)
-
-## What not to do
-
-- Do not manually edit generated code — it is produced in `OUT_DIR` by the build script
-- Do not commit generated `.rs` files — they are build output
-- Do not regenerate protobuf output without the `protobuf` feature enabled — the build scripts no-op without it
+- Touch → update: `protobuf.md` — `**/build.rs`, `**/*.proto`, `**/src/proto/**`.

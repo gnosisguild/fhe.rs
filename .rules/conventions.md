@@ -1,81 +1,29 @@
 # Coding conventions
 
-## Error handling
+## Scope
 
-- Library code must never `panic!`, `unwrap()`, or `expect()`. Use `?`, `Result`, and fallible APIs.
-- `unwrap()` and `expect()` are acceptable only in tests and benchmarks.
-- Avoid direct slice indexing; use `get()` or pattern matching to handle bounds safely.
-- The workspace denies `expect_used`, `panic`, `indexing_slicing`, `unused_must_use`, and `fallible_impl_from` in clippy.
+Rust code in the workspace: error handling, naming, imports, documentation, mathematical comments, formatting, idioms, crate placement, versions, features, tests, and comments.
 
-## Naming
+## Invariants
 
-- Modules: `snake_case`, directory name matches module name.
-- Types, traits, enums: `PascalCase`.
-- Functions, methods: `snake_case`.
-- Constants: `SCREAMING_SNAKE_CASE` for static values, `snake_case` for `const` items.
-- Private helpers: `snake_case`, prefer descriptive names over abbreviations.
-- Type parameters: single uppercase letter (`T`, `N`, `P`) or `PascalCase` for multi-letter bounds.
+1. Library code never uses `panic!`, `unwrap()`, or `expect()`; it uses `?`, `Result`, fallible APIs, and safe access instead of direct slice indexing.
+2. The workspace denies `expect_used`, `panic`, `indexing_slicing`, `unused_must_use`, and `fallible_impl_from` in clippy.
+3. Modules and directories use `snake_case`, types/traits/enums use `PascalCase`, functions use `snake_case`, static constants use `SCREAMING_SNAKE_CASE`, const items use `snake_case`, private helpers are descriptive `snake_case`, and type parameters use a single uppercase letter or PascalCase multi-letter bound.
+4. Imports are grouped `std`/`core`, external crates, `crate`, `super`, `self`; intra-crate imports use `crate::`, types and traits are explicit, and glob imports are limited to prelude modules.
+5. Public items have `///` Markdown docs that document panics, errors, safety invariants, and cite the relevant ePrint paper and section for crypto code.
+6. Mathematical comments use exact construction symbols, name every symbol and source in formulas and bounds, copy cited equations verbatim, mark deviations and unproven caveats, and do not silently change approximations or rounding.
+7. `cargo fmt --all` is authoritative and `cargo clippy --all-targets --all-features -- -D warnings` passes without unexplained suppressions.
+8. Rust is idiomatic and follows surrounding crate patterns, using `Result`/`?`, natural conversions, iterators, borrows, and standard/internal utilities over manual or C-style plumbing.
+9. HE scheme code belongs in `crates/fhe`, math primitives in `crates/fhe-math`, shared traits in `crates/fhe-traits`, and utilities in `crates/fhe-util`.
+10. Workspace and per-crate versions remain aligned through `version.workspace = true`.
+11. Protobuf-dependent code is gated by `protobuf`, and core crypto works without that feature.
+12. Unit tests are co-located, integration tests are in `crates/<name>/tests/`, tests use `--release`, arithmetic invariants use proptest, and performance tests use criterion with `harness = false`.
+13. Code is self-documenting and comments explain only genuinely non-obvious reasons.
 
-## Imports
+## Evidence / tests
 
-- Group imports in this order: `std` / `core` → external crates → `crate` → `super` → `self`.
-- Use `use crate::...` for intra-crate imports; avoid `super::` unless the module hierarchy is shallow.
-- Prefer importing types and traits explicitly; avoid glob imports (`use foo::*`) except for prelude modules.
+Run `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings`, and the relevant release tests.
 
-## Documentation
+## Sync
 
-- All public items must have doc comments (`missing_docs` is warned at workspace level).
-- Doc comments start with `///` and use Markdown.
-- Document panics, errors, and safety invariants where applicable.
-- For crypto code, cite the relevant ePrint paper and section.
-
-## Mathematical rigor in comments and docs
-
-- Use the exact symbol from the construction — do not alias one quantity for another. Distinct values (`B_sm` vs `B_e`, `Delta = floor(q/t)` vs `Q/(2·t)`, `variance` vs `coefficient bound`) are not interchangeable in a comment or doc.
-- Every formula, inequality, or "is negligible / is small" claim must name every symbol it uses and where it comes from. A bound is only valid against the exact quantity it bounds.
-- Copy equations verbatim from the paper where a construction is cited; if the implementation deviates, say so explicitly instead of silently rewriting the relation.
-- When a comment states an invariant (e.g. "reconstruction requires t+1 shares", "noise grows ~|S|·σ²"), it must hold for the current code — or be marked as an unproven caveat, never stated as fact.
-- Do not state an approximation as the exact bound, and do not silently swap rounding conventions (`floor`, nearest, exact rational) without calling out the switch, since the noise analysis changes.
-
-## Rustfmt and clippy
-
-- `cargo fmt --all` is the single formatting authority. No exceptions.
-- `cargo clippy --all-targets --all-features -- -D warnings` must pass clean.
-- Do not suppress clippy lints without a comment explaining why.
-
-## Idiomatic Rust
-
-- Write idiomatic, modern Rust. Use `Result`/`?` over manual error plumbing, `Into`/`From` conversions where natural, iterators over manual loops, and the standard library's error-handling idioms. Avoid C-style patterns (raw loops with indices, manual `clone()` where a borrow suffices, `Vec` where an iterator or slice works).
-- Prefer the standard library and `crate`-internal helpers over re-inventing a common utility.
-- Follow existing patterns in the crate you are editing — match the surrounding code's idioms rather than introducing a divergent style.
-
-## Workspace structure
-
-- `crates/fhe` — BFV, TRBFV, TRLBFV (threshold l-BFV key generation, participant binding, and public-key/relinearization-key aggregation), LBFV, MBFV scheme implementations
-- `crates/fhe-math` — RNS, NTT, modular and polynomial arithmetic
-- `crates/fhe-traits` — shared HE traits
-- `crates/fhe-util` — utilities
-
-When adding a new module or type, place it in the appropriate crate. Do not add HE scheme code to `fhe-math`, or math primitives to `fhe`.
-
-## Version alignment
-
-When bumping a version, keep `Cargo.toml` workspace version and per-crate `Cargo.toml` versions aligned. The crates in the workspace (`fhe`, `fhe-math`, `fhe-traits`, `fhe-util`) share the workspace version by default via `version.workspace = true`.
-
-## Feature gates
-
-- Protobuf serialization is gated behind the `protobuf` feature (disabled by default).
-- When adding protobuf-dependent code, gate it with `#[cfg(feature = "protobuf")]`.
-- Core crypto operations must work without the `protobuf` feature.
-
-## Tests
-
-- Co-locate unit tests in a `#[cfg(test)] mod tests` block at the bottom of the source file.
-- Integration tests live in `crates/<name>/tests/`.
-- Use `--release` for all test runs.
-- Use proptest for arithmetic invariants in `fhe-math`.
-- Use criterion benchmarks with `harness = false` for performance tests.
-
-## Comments
-
-Prefer self-documenting code over comments. Add a comment only when the reason is genuinely non-obvious to a future reader. Identifiers should be self-describing.
+- Touch → update: `conventions.md` — `**/*.rs` (only when conventions change, not every edit).

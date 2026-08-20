@@ -50,16 +50,16 @@ At the start of each agent session, run `git rev-parse --show-toplevel` and use 
 
 ## Development workflow
 
-For any task, start with the **`orchestrator`** agent — it is the sole entry point. It decides whether the task needs an `architect` design (required for non-trivial work; straightforward, fully specified tasks may bypass it), dispatches `implementer` (which derives the detailed implementation plan and implements it), runs `reviewer` (review only on explicit user go-ahead, triage for bugs), and takes care of harness updates. `orchestrator` always operates on the current branch — it never creates or switches branches.
+For any task, start with the **`orchestrator`** agent — it is the sole entry point. It routes the `architect`, `implement`, and `review` phase skills through their matching stub subagents (`architect`, `implementer`, `reviewer`), gates design approval, verification, and review, and owns harness upkeep. It always operates on the current branch and never creates or switches branches.
 
 The agent set:
 
-1. `orchestrator` — routes the full flow (plan → build → verify → review), asks user at gates, and owns harness upkeep. Edits nothing but the harness surfaces (`.rules/`, `.opencode/`, `AGENTS.md`, `CLAUDE.md`); never writes product code or plans.
-2. `architect` — produces a codebase-level design plan (architecture, affected areas, API surface, data flow, scope) for a request or issue; may ask the developer clarifying questions. Edits only `.plans/`.
-3. `implementer` — derives the detailed implementation plan from the design, then implements it using a TDD cycle (can edit).
-4. `reviewer` — single reviewer and bug triager. Reviews diffs against constraints, correctness, crypto, and math (loading the matching domain skill); root-causes bugs without an unclear cause. Never patches.
+1. `orchestrator` — primary sole entry point. Routes phases, asks user at gates, and owns harness upkeep; edits only harness surfaces and never writes product code or plans.
+2. `architect` — minimal stub (permissions, model, short body); its detailed workflow is the `architect` skill: explores and persists a codebase-level design plan; may ask clarifying questions.
+3. `implementer` — minimal stub (permissions, model, short body); its detailed workflow is the `implement` skill: derives detailed tasks and implements an approved design with TDD.
+4. `reviewer` — minimal stub (permissions, model, short body); its detailed workflow is the `review` skill: reviews diffs and root-causes bugs; never edits.
 
-Reusable procedures live as skills under [`.opencode/skills/`](.opencode/skills): `review` (dispatches the reviewer and synthesizes a verdict). Verification/preflight, benchmark, and protobuf-codegen guidance lives in the matching rules — `.rules/testing.md` and `.rules/protobuf.md`. Domain checklists are not separate skills — the reviewer loads the matching `.rules/*.md` directly via the Touch → update routing.
+Reusable procedures live as uniformly structured skills under [`.opencode/skills/`](.opencode/skills): `architect`, `implement`, and `review`. The orchestrator dispatches the matching stub subagent with the skill content passed in the prompt. Verification/preflight, benchmark, and protobuf-codegen guidance lives in `.rules/testing.md` and `.rules/protobuf.md`; domain checklists are rules, not skills, and review loads every matching rule cumulatively via Touch → update.
 
 Other harnesses: `AGENTS.md` and `.rules/` are shared and portable. `CLAUDE.md` adapts Claude Code to this layout. `.opencode/` is OpenCode-specific and inert to other tools.
 

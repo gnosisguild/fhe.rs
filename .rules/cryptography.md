@@ -1,104 +1,84 @@
 # Cryptographic safety
 
-## Paper-to-code map
+## Scope
 
-Use the cited ePrint papers as construction references, not as blanket security proofs for the implementation. Note that ePrint enforces DoS protection that blocks automated downloads; agents should treat these as human-readable provenance links rather than fetchable resources:
+Use cited ePrint papers as construction references, not blanket security proofs; ePrint DoS protection blocks automated downloads, so links are human-readable provenance. Paper map: <https://eprint.iacr.org/2018/117> (HPS RNS BFV scaling, basis extension, and RNS decomposition), <https://eprint.iacr.org/2021/204> (modified and leveled BFV multiplication, lazy scaling, and hybrid key-switching analysis), <https://eprint.iacr.org/2024/1285> (l-BFV's linear relinearization key and the trBFV honest-majority protocol, including pre-shared smudging noise), <https://eprint.iacr.org/2020/304> (MBFV's semi-honest, dishonest-majority, N-out-of-N protocols), <https://eprint.iacr.org/2017/1142> (SealPIR's original substitution-based oblivious expansion), and <https://eprint.iacr.org/2019/1483> (MulPIR and the optimized query/expansion structure also used by the SealPIR example). Match implemented variants before importing equations; do not apply trBFV claims to MBFV or MBFV relinearization to l-BFV.
 
-- <https://eprint.iacr.org/2018/117> — HPS RNS BFV scaling, basis extension, and RNS decomposition used by BFV key switching and relinearization.
-- <https://eprint.iacr.org/2021/204> — modified and leveled BFV multiplication, lazy scaling, and hybrid key-switching analysis.
-- <https://eprint.iacr.org/2024/1285> — l-BFV's linear relinearization key and the trBFV honest-majority protocol, including pre-shared smudging noise.
-- <https://eprint.iacr.org/2020/304> — MBFV's semi-honest, dishonest-majority, N-out-of-N protocols.
-- <https://eprint.iacr.org/2017/1142> — SealPIR's original substitution-based oblivious expansion.
-- <https://eprint.iacr.org/2019/1483> — MulPIR and the optimized query/expansion structure also used by the SealPIR example.
+Security-sensitive areas are key generation/handling, noise sampling, parameters, serialization, decryption, and Shamir threshold logic.
 
-Match a change to the implemented variant before importing an equation or invariant. In particular, do not apply trBFV robustness claims to MBFV, or MBFV's two-round relinearization protocol to l-BFV.
+ZK proof generation and verification, commitments, proof aggregation, and on-chain verifiers (e.g. Interfold's Noir circuits) are external to this library; the library provides the witness values those circuits consume (see `.rules/witness.md`).
 
-## Security-sensitive areas
+## Invariants
 
-Treat changes to the following as security-sensitive. Review them with extra care and require focused tests:
+**Key aggregation validation**
 
-- **Key generation and handling** — secret keys, public keys, evaluation keys, relinearization keys
-- **Noise sampling** — error distributions, smudging noise, variance calculations
-- **Parameters** — BFV/TRBFV/LBFV/MBFV parameter selection, modulus chain, polynomial degree
-- **Serialization** — protobuf encode/decode of keys, ciphertexts, plaintexts
-- **Decryption** — BFV decryption, threshold decryption, share aggregation and combination
-- **Threshold logic** — Shamir secret sharing, share distribution, reconstruction, the `(n-1)/2` threshold invariant
+1.1. Public-key, relinearization-key, and key-switching-key aggregation validates participant/session/parameter metadata and structural shape before polynomial access.
+1.2. Key lookups use `first()`, `get()`, or `ok_or_else`, never assumptions about external or serialized keys.
+1.3. Cross-contribution `a` and `d1` equality uses concrete values, not only seeds.
 
-## Scheme-specific invariants
+**BFV and HPS/RNS**
 
-### Key aggregation validation
+2.1. Plaintext scaling, ciphertext modulus, and representative conventions stay consistent across encryption, multiplication, switching, and decryption; `floor(q/t)`, nearest, and exact rational scaling are not interchangeable.
+2.2. RNS switching decomposes in the ciphertext basis and recomposes in the matching key context with matching limbs, levels, and order.
+2.3. Basis operations are classified as exact, exact rounded, or deliberately approximate; the current scaler is exact and HPS correction is forbidden unless an explicit approximate path exists.
+2.4. The 2021/204 second strategy preserves operand `Q`→`P`, `QP` basis, final `t/P`→`Q`, initial rounding, and leveled down/up errors.
+2.5. No lazy/deferred scaling or relinearization path currently exists. If one is introduced, it is valid only while accumulated terms share compatible parameters (enlarged-basis unreduced sum for HPS; staged modulus-switch bounds and cancellation of `QP`-divisible terms for modified), performs the deferred operation exactly once, and retains its noise contribution.
+2.6. BFV encryption error sampling is asymmetric: `e1` comes from `Poly::conditional_error(error1_variance)` (CBD or uniform branch) while `e2` uses `Poly::small(params.variance)` (CBD); the l-BFV `try_encrypt_extended` witness path samples `u`, `e1`, `e2` all via `Poly::small`. Any bound depending on `B_enc` must account for the branch actually used.
+2.7. `Poly::small` requires variance in `1..=16`; an `error1_variance` above 16 selects the uniform branch of `conditional_error`.
 
-- Key aggregation methods (public-key, relinearization-key, key-switching-key) must validate metadata (participant bindings, session IDs, parameter consistency) and structural shape (ciphertext count, component count, polynomial contexts, levels) **before** accessing polynomial data.
-- Use fallible accessors (`first()`, `get()`, `ok_or_else`) for all key material lookups; never assume a well-formed key from serialized or external input.
-- Cross-contribution polynomial equality (`a`, `d1`) must be checked by concrete value comparison, not solely by seed equality, because seedless deserialized keys carry no seed.
+**l-BFV, trlBFV, and trBFV**
 
-### BFV and HPS/RNS
+3.1. `crates/fhe/src/lbfv/**` never imports `crate::trlbfv`; threshold bindings, shares, aggregation, and validation belong to `trlbfv`.
+3.2. l-BFV public RLK is linear in the secret key with `(d0,d1,d2)`, signs/directions `r -> s` and `s -> r`, and negated `r` for paper `-a`.
+3.3. `CommonRandomPoly` and `CommonRandomPolyVec` in `crates/fhe/src/bfv/crp.rs` are concrete authoritative CRS/URS values; seeds are reconstruction metadata, `a` and `d1` vectors are independently agreed, and the same `a` serves PK and RLK. Seeded vectors derive one ChaCha8 sub-seed per RNS modulus, and `from_polys` validates a supplied seed against the concrete polynomials.
+3.4. trlBFV PK/RLK aggregation and the smudging calculator use the same accepted participant set `S`; trBFV secret shares themselves carry no participant-set binding, so keeping the same `S` across contributions is caller-enforced and mixing sets invalidates the robustness argument.
+3.5. trlBFV rejects missing/duplicate/wrong-session participants, checks concrete `a`/`d1`, and verifies `Σd0_i`, `Σd2_i`, unchanged `d1`/`a`; operational LBFV keys are unbound.
+3.6. `ContributionBinding` provides consistency, not authentication; no signatures, broadcast, FLSS, GURS, or complete robust DKG is implemented.
+3.7. The trBFV paper assumes `n = 2t + 1`, static corruption at most `t`, and semi-malicious parties; this module implements sharing, smudging, and decryption components only.
+3.8. Paper configurations use `threshold = t = (n - 1) / 2`, odd `n`, and `t + 1` shares; accepted even `n` is an unproven extension and cannot support theorem claims.
+3.9. l-BFV relinearization retains the circular-security caveat inherited from the cited multi-key construction.
 
-- Keep plaintext scaling, ciphertext modulus, and representative conventions consistent across encryption, multiplication, key switching, and decryption. A change between `floor(q/t)`, nearest rounding, and exact rational scaling changes the noise analysis.
-- RNS key switching decomposes the input in the ciphertext basis and recomposes against key-switching material in the matching key context. The number and order of RNS limbs, ciphertext level, and key level are cryptographic inputs, not storage details.
-- Classify each basis operation as exact conversion, exact rounded scaling, or deliberately approximate extension. The current `fhe-math` scaler is intended to be exact; do not allow an HPS-style correction term unless a call path explicitly implements approximate `FastBaseExtension`.
-- For the second multiplication strategy from <https://eprint.iacr.org/2021/204>, preserve which operand is switched from `Q` to `P`, the `QP` tensor-product basis, and the final `t/P` scale back to `Q`. Account for the initial `Q -> P` rounding error; leveled multiplication adds down-switch and up-switch rounding errors.
-- Lazy scaling or lazy relinearization is valid only while all accumulated terms share compatible parameters. For the original HPS strategy, the enlarged basis must preserve the assumed unreduced sum; for the modified strategy, preserve the staged modulus-switch bounds and cancellation of terms divisible by `QP`. Perform the deferred operation exactly once and retain its noise contribution.
+**Smudging and threshold decryption**
 
-### l-BFV, trlBFV, and trBFV
+4.1. Independent opening-share smudging is distinguished from joint pre-shared noise.
+4.2. Implemented trBFV pre-shared joint smudging is one-time material and is not reused.
+4.3. With `B_C`, `B_sm`, and `Delta = floor(Q/t_plain)`, hiding requires `B_C / B_sm` negligible and correctness the strict `2 * (B_C + n * B_sm) < Delta`; the paper's Appendix C.5 form `B_C + n * B_sm < Delta/2` (integer `Delta`) is equivalent, but `Q/(2*t_plain)` with real division is not a substitute when `Q` is not divisible by `t_plain`. `B_sm = 2^(lambda + 1) * N * B_C` is this implementation's choice satisfying negligibility — the paper does not prescribe a formula.
+4.4. `B_enc` must be derived from the actual `Poly::conditional_error` branch: CBD iff `v <= 16` with support bound `2 * v`, otherwise uniform with `variance_to_uniform_bound` (the smallest `B` with `B(B+1)/3 >= v`).
+4.5. Distributed RLK error accounts for `|S| * B_e` (and aggregated noise grows ~`|S|·σ²`) or an explicit aggregate bound, and `accepted_participant_count` is included in smudging recursion.
+4.6. Smudging coefficients are uniform in `[-B_sm, B_sm]`; `B_sm` and `B_e` are coefficient bounds, not variances.
+4.7. Decryption-share APIs state whether they accept local noise, a Shamir joint-noise share, or reconstructed joint noise.
+4.8. `ShareManager::new` requires `n < min modulus` so the Shamir evaluation points `1..=n` are distinct units modulo every modulus.
+4.9. Threshold decryption follows the level-zero contract: `decryption_share` rejects 3-component (unrelinearized) ciphertexts, and `decrypt_from_shares` requires a u64 plaintext modulus.
 
-- **L-BFV / TRLBFV boundary:** `crates/fhe/src/lbfv/**` must not import `crate::trlbfv`. Threshold bindings, shares, aggregation, and threshold validation belong exclusively to `crate::trlbfv`.
-- l-BFV's public relinearization key is linear in the secret key and has the paper form `(d0, d1, d2)`, implemented as two related key-switching keys plus the public-key `b` vector. Preserve the signs and directions `r -> s` and `s -> r`; the implementation negates `r` to represent the paper's `-a` component.
-- **CRP vectors.** The shared polynomials for `a` (CRS) and `d1` (URS) are supplied as [`CommonRandomPolyVec`](crate::bfv::CommonRandomPolyVec) values — vectors of `l` concrete random polynomials with optional seed metadata. The concrete polynomials are authoritative for equality checks; seeds are reconstruction metadata, not authentication. Two independent vectors (for `a` and `d1`) must be agreed upon by all parties before key generation, and the same `a` vector must be used for both the public key and the relinearization key. Both `CommonRandomPoly` (single polynomial) and `CommonRandomPolyVec` (vector of `l`) live in `crates/fhe/src/bfv/crp.rs`, exported from `fhe::bfv`; no scheme-specific CRP wrappers remain.
-- The public random values corresponding to `a` and `d1` must be common across contributions. Replacing them with independently sampled per-party values breaks additivity.
-- Distributed encryption-key, relinearization-key, secret-key-share, and pre-shared-noise contributions must use the same accepted participant set `S`. Mixing participant sets produces incompatible keys or noise shares and invalidates the robustness argument.
-- **trlBFV aggregation binding.** Participant-set validation and contribution binding enforcement live in `trlbfv`. `trlbfv` owns threshold shares, `ParticipantSet`, `ContributionBinding`, and aggregation into the operational `lbfv` keys. Every accepted participant ID must appear exactly once; contributions from different sessions or with duplicate IDs are rejected. The explicit `a` (CRS) and `d1` (URS) polynomials are compared by concrete polynomial equality across contributions. Component linearity (`Σ d0_i`, `Σ d2_i`, unchanged `d1`/`a`) is verified by dedicated tests.
-- **Operational keys are unbound.** After aggregation, operational LBFV keys (`lbfv::LBFVPublicKey`, `lbfv::LBFVRelinearizationKey`) carry no threshold participant set metadata. Concrete `a` (CRS) and `d1` (URS) polynomial equality is the authoritative consistency mechanism; seed metadata alone is not.
-- **Metadata is not authentication.** [`trlbfv::ContributionBinding`](crate::trlbfv::ContributionBinding) provides consistency binding (ensuring all contributions reference the same session and participant set), not cryptographic authentication. No signatures, broadcast protocol, FLSS, GURS, or full robust DKG orchestration is implemented. Callers must supply their own transport and authentication layers.
-- The trBFV paper assumes `n = 2t + 1`, static corruption of at most `t` parties, and a semi-malicious model. The current module implements threshold sharing, smudging, and decryption components, not the paper's complete DKG/broadcast/FLSS/GURS orchestration. Do not claim the module itself realizes the end-to-end robustness theorem.
-- For paper-conforming configurations, `threshold = t = (n - 1) / 2`, `n` is odd, and reconstruction requires `t + 1` shares. Even `n` currently accepted by `trbfv/config.rs` is outside the cited theorem and must be rejected or documented as an unproven implementation-specific extension before making robustness claims.
-- The l-BFV relinearization argument relies on the circular-security assumption inherited from the cited multi-key construction. Preserve this caveat in security-facing documentation.
+**MBFV**
 
-### Smudging and threshold decryption
+5.1. MBFV is semi-honest N-out-of-N from <https://eprint.iacr.org/2020/304>, not robust `(t + 1)`-out-of-`n` trBFV.
+5.2. Additive ideal/collective keys include each intended contribution exactly once and share `CommonRandomPoly`.
+5.3. Two-round RLK uses `CommonRandomPolyVec` (one CRP per RNS modulus) and additive aggregation in which valid share order is irrelevant. Gap: aggregation reads only the first share's round-1 reference and does not yet verify that every round-2 share binds to the same round-1 aggregate or that each intended party contributed exactly once (see 7.5).
+5.4. Key-switch/decryption noise is exposed unless fresh smudging dominates current ciphertext noise; the paper prescribes `σ_smg² = 2^λ · σ_ct²` from the current ciphertext variance, so ordinary fresh-encryption error is incomplete paper-level accounting.
 
-- Distinguish the two threshold-decryption methods in <https://eprint.iacr.org/2024/1285>: independently smudging each opening share is not the same as opening the decryption result together with one pre-shared joint noise polynomial.
-- The implemented trBFV path uses pre-shared joint smudging noise. Each such noise value is one-time material and must not be reused across decryptions.
-- Let `B_C` bound evaluated-ciphertext decryption noise, `B_sm` bound each party's contribution, and `Delta = floor(Q/t_plain)`. The paper requires `B_C / B_sm` negligible for hiding and the strict integer bound `2 * (B_C + n * B_sm) < Delta` for correctness. `Q/(2*t_plain)` and `Delta/2` are looser and not conservative substitutes when `Q` is not divisible by `t_plain`; always derive the bound from the exact integer `Delta`.
-- Samplers must be aligned with `B_enc`: for CBD samplers, use `2 * error1_variance`; for the large-variance uniform branch, use `floor(sqrt(3 * error1_variance))`. These bounds must match the actual configured error sampler, not a fixed constant.
-- Distributed RLK error must account for `|S| * B_e` (the number of accepted participants times the base error bound) or an explicitly documented aggregate bound. The smudging calculator accepts an `accepted_participant_count` parameter and folds this into the recursion.
-- Smudging coefficients are sampled uniformly from `[-B_sm, B_sm]`. Do not silently replace this with a Gaussian or confuse a coefficient bound with a variance (the `B_sm` and `B_e` symbols used here are coefficient bounds, not variances).
-- A decryption share API must state whether it accepts a party's local noise contribution, a Shamir share of the joint noise, or the reconstructed joint noise. These are not interchangeable.
+**PIR examples**
 
-### MBFV
+6.1. SealPIR preserves substitution, monomial shifts, output order, and normalization.
+6.2. MulPIR preserves dimensions, depth, relinearization, final switch, and noise budget.
+6.3. PIR examples do not claim database privacy without a separate construction.
 
-- MBFV implements the semi-honest N-out-of-N construction in <https://eprint.iacr.org/2020/304>; it is not the robust `(t + 1)`-out-of-`n` trBFV protocol.
-- The ideal secret key and collective public key are additive sums of party contributions. Aggregation must include each intended contribution exactly once and use the same common random polynomial ([`CommonRandomPoly`](crate::bfv::CommonRandomPoly)).
-- MBFV relinearization key generation is a two-round protocol that uses a [`CommonRandomPolyVec`](crate::bfv::CommonRandomPolyVec) (one CRP per RNS modulus). Every round-2 share must be bound to the same exact round-1 aggregate; reject missing, duplicated, or cross-session contributions. Valid share order is irrelevant because aggregation is additive.
-- Collective key switching and decryption reveal ciphertext noise unless fresh smudging noise dominates the current ciphertext noise. The paper's protocol requires the smudging distribution to be selected from a bound or variance for that ciphertext, not merely the fresh-encryption error distribution. Treat any code path that lacks this accounting as incomplete, not as paper-level security.
+**Review priorities and claims**
 
-### PIR examples
+7.1. `crates/fhe/src/trbfv/config.rs` accepts even party counts, although the cited robustness theorem requires `n = 2t + 1`.
+7.2. `crates/fhe/src/trbfv/smudging.rs` computes the strict `2 * (B_C + n * B_sm) < Delta` bound with `Delta = floor(Q/t_plain)`; the old `Q/(2*t_plain)` approximation is replaced and the integer `Delta` branch must remain.
+7.3. trBFV APIs do not enforce one-time consumption of pre-shared smudging noise; callers must prevent reuse.
+7.4. MBFV key-switch and decryption shares sample ordinary BFV error despite the paper requiring noise flooding based on current ciphertext noise.
+7.5. MBFV final relinearization aggregation does not verify every round-2 share references the same round-1 aggregate or that each intended party contributed exactly once.
+7.6. trlBFV `ParticipantSet`/aggregation does not bound `|S|` against the BFV noise budget; aggregated RLK noise grows ~`|S|·σ²`, so callers must validate participant count against parameters.
+7.7. This library is unaudited; make no unsupported security or constant-time claims, and state threat model, corruption, setup, and robustness for protocol claims.
+7.8. Distinguish verifiable correctness from security findings and cite ePrint section when paper-dependent.
+7.9. `compute_b_enc` in `crates/fhe/src/trbfv/smudging.rs` deviates from `Poly::conditional_error`: it uses the CBD branch only for `v < 16` (sampler: `v <= 16`) and `floor(sqrt(3v))` on the uniform branch instead of `variance_to_uniform_bound` (e.g. `v = 16` reports 6 while CBD(32) has support ±32; `v = 20` reports 7 while the sampler uses 8). Align it with the sampler before relying on `B_enc` for smudging bounds (tracked in issue #167).
 
-- SealPIR query expansion is linear over the plaintext space and relies on substitution, monomial shifts, and normalization. Preserve the substitution element, output ordering, and normalization factor when changing `EvaluationKey::expands` or `examples/sealpir.rs`.
-- MulPIR replaces recursive ciphertext-as-plaintext folding with homomorphic multiplication. Keep the query dimensions, multiplicative depth, relinearization, and final modulus-switch/noise budget consistent with `examples/mulpir.rs`.
-- These are examples of query privacy in the cited threat models, not symmetric PIR. Do not claim database privacy unless a separate construction provides it.
+## Evidence / tests
 
-## Known implementation gaps
+Crypto changes add arithmetic/protocol tests. Threshold tests cover fewer than `threshold + 1`, exactly `threshold + 1`, and `(n-1)/2`; trlBFV tests reject inconsistent participant sets. Noise tests pin both sides of the smudging interval (hiding lower bound, strict `Delta` correctness upper bound) — a plaintext round-trip alone does not establish adequate smudging. One-time smudging-noise consumption and MBFV round-binding/cardinality are currently untested gaps (see 7.3, 7.5); do not present ordinary BFV error sampling as secure key-switch smudging.
 
-Treat these as review priorities, not as properties already enforced by the code:
+## Sync
 
-- `trbfv/config.rs` accepts even party counts, although the cited robustness theorem requires `n = 2t + 1`.
-- `trbfv/smudging.rs` now computes the correctness bound from the strict `2 * (B_C + n * B_sm) < Delta` with `Delta = floor(Q/t_plain)`. The old `Q/(2*t_plain)` approximation has been replaced; when touching the calculator, keep the integer `Delta` branch.
-- The trBFV APIs do not enforce one-time consumption of pre-shared smudging noise; callers must currently prevent reuse.
-- MBFV key-switch and decryption shares sample ordinary BFV error despite the paper requiring noise flooding based on current ciphertext noise.
-- MBFV final relinearization aggregation does not currently verify that every round-2 share references the same round-1 aggregate or that each intended party contributed exactly once.
-- trlBFV `ParticipantSet`/aggregation does not bound `|S|` against the BFV noise budget; aggregated RLK noise grows ~`|S|·σ²`, so callers must validate the participant count against their parameters before accepting a set for key generation.
-
-## Claims
-
-- Do not make security claims without evidence. This library has never been independently audited.
-- Do not claim code is constant-time unless you can verify it. Shamir secret sharing uses arbitrary-precision arithmetic that is not constant-time — this is a known, documented caveat.
-- When reviewing crypto changes, distinguish correctness findings (the math is wrong) from security findings (the construction leaks information). The former is verifiable from code; the latter is not, without formal analysis.
-- State the threat model with every protocol-level claim: semi-honest versus semi-malicious, corruption threshold, setup/CRS assumptions, and whether robustness or guaranteed output delivery is actually implemented.
-
-## Tests
-
-- Add or extend tests for arithmetic invariants and protocol correctness when touching crypto code.
-- Threshold tests must cover: fewer than `threshold + 1` shares fail to decrypt, exactly `threshold + 1` shares decrypt correctly, and the threshold equals `(n-1)/2`.
-- trBFV tests must also reject inconsistent participant sets and verify that pre-shared noise is consumed at most once when the API tracks consumption.
-- Noise tests must pin both sides of the smudging interval: the hiding lower bound and the decryption-correctness upper bound. A plaintext round-trip alone does not establish adequate smudging.
-- MBFV tests must preserve round binding and aggregation cardinality, and must not present ordinary BFV error sampling as secure key-switch smudging.
+- Touch → update: `cryptography.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`.

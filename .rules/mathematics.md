@@ -1,47 +1,29 @@
 # Mathematical correctness
 
-## Domain
+## Scope
 
-`fhe-math` provides the core arithmetic for all HE schemes. The key surfaces:
+`fhe-math` core arithmetic for HE: RNS basis representation/conversion/CRT, NTT transforms, modular reduction/Shoup/Barrett arithmetic, polynomial multiplication/division/centering/degree management, and scalar/coefficient conversions. The BFV implementation follows <https://eprint.iacr.org/2018/117> and <https://eprint.iacr.org/2021/204>.
 
-- **RNS** (Residue Number System) — basis representation, conversion, Chinese Remainder Theorem
-- **NTT** (Number Theoretic Transform) — forward and inverse transforms, in-place operations
-- **Modular arithmetic** — reduction, Shoup multiplication, Barrett reduction
-- **Polynomial arithmetic** — multiplication, division, centering, degree management
-- **Conversions** — between RNS and coefficient form, between scalar and polynomial representations
+## Invariants
 
-## Invariants to check
+1. NTT forward followed by inverse recovers the original within modular arithmetic.
+2. RNS conversions are lossless within modulus bounds.
+3. Polynomial degree does not silently exceed expectations after multiplication.
+4. Modular reductions produce documented canonical or centered representatives.
+5. Scalar-polynomial conversions preserve value.
+6. Source and destination RNS moduli are pairwise coprime, ordered for every precomputed table, and represent the product used by the scaling factor.
+7. RNS integer interpretation uses the documented centered representative.
+8. Each basis operation is identified as exact conversion, exact rounded scaling, or deliberately approximate extension; `RnsScaler` agrees exactly with centered big-integer scaling and only an explicitly documented approximate-extension path (the FastBaseExtension of the cited 2021/204 paper; none currently exists in `fhe-math`) may expose a bounded source-modulus correction term.
+9. Rounding preserves nearest, floor, and ceiling semantics, including `-1/2 -> 0` for the current scaler.
+10. Fixed-point CRT quotient estimates preserve specified nearest/directed rounding, `theta_garner_shift`, accumulator width, and truncation-error bounds without floating point.
+11. Each switch and rounding stage agrees with a BigInt oracle, including HPS `t/Q` and modified `Q -> P` then `t/P` scaling.
+12. Original HPS temporary `QP` contexts satisfy unreduced tensor-product bounds; modified multiplication preserves staged modulus-switch bounds and cancellation of the unwanted `QP` multiple.
+13. RNS or radix digits recompose the original polynomial modulo the source context and pair with the corresponding evaluation-key component.
 
-When reviewing or testing math changes, verify:
+## Evidence / tests
 
-- NTT round-trips: forward then inverse recovers the original (within modular arithmetic).
-- RNS conversions are lossless when the value is within the modulus bounds.
-- Polynomial degree does not silently exceed expectations after multiplication.
-- Modular reductions produce canonical or centered representatives as documented.
-- Scalar-polynomial conversions preserve value across forms.
+Use proptest for zero, one, `-1`, modulus-minus-one, full residue ranges, centering boundaries, varying/empty/full-degree polynomials, limb counts, reordered valid bases, half-points on both sides, and BigInt/BigUint oracle comparisons; approximate corrections are tested only on explicitly approximate paths and `RnsScaler` has exact oracle equality.
 
-### RNS scaling and basis conversion
+## Sync
 
-The BFV implementation follows the HPS family of RNS techniques in <https://eprint.iacr.org/2018/117> and uses multiplication strategies from <https://eprint.iacr.org/2021/204>. For changes to `rns`, `rq::scaler`, switching, or BFV multiplication support, also verify:
-
-- **Basis identity** — source and destination moduli are pairwise coprime, ordered as expected by every precomputed table, and the product represented by a context is the product used by the scaling factor.
-- **Centered input** — operations that interpret an RNS value as an integer use the documented centered representative. A residue-wise identity does not determine the intended lift without this convention.
-- **Conversion class** — identify an operation as exact conversion, exact rounded scaling, or deliberately approximate extension. `RnsScaler` is intended to agree exactly with centered big-integer scaling; only an explicit `FastBaseExtension`-style path may expose a bounded source-modulus correction term.
-- **Rounding semantics** — nearest, floor, and ceiling are not interchangeable. The current scaler rounds exact half-points toward positive infinity, including `-1/2 -> 0`; test positive and negative half-way cases against a big-integer oracle.
-- **Fixed-point correction** — the current scaler uses fixed-point CRT quotient estimates, with nearest or directed rounding as specified for each term, not floating point. Preserve `theta_garner_shift`, accumulator-width, and truncation-error bounds when changing limb count or limb width. Apply the HPS floating-point error-region argument only if a floating-point implementation is introduced.
-- **Staged scaling** — compare each switch and rounding stage with a big-integer oracle. Original HPS multiplication scales by `t/Q`; modified multiplication first rounds a `Q -> P` switch and later scales by `t/P`, so it need not equal a single direct rounding coefficient-for-coefficient.
-- **No-wrap bounds** — the original HPS strategy requires temporary `QP` contexts large enough for the assumed unreduced tensor product. The modified strategy tensors modulo `QP` and instead requires correct staged modulus-switch bounds and cancellation of the unwanted `QP` multiple.
-- **Decomposition/recomposition** — RNS or radix digits reconstruct the original polynomial modulo the source context, and each digit is paired with the corresponding evaluation-key component.
-
-## Property tests
-
-Prefer proptest for arithmetic behavior. Strategies should cover:
-
-- Edge values: zero, one, `-1` (mod p), the modulus minus one
-- Random values across the full residue range
-- Values near modulus boundaries where centering or reduction changes representation
-- Polynomials of varying degrees, including empty and full-degree
-- Multiple RNS limb counts, valid reordered-basis conversion, and rejection only where identical contexts are required
-- Positive and negative values immediately around rounding half-points
-- Comparison with a `BigInt`/`BigUint` oracle for basis extension and rational scaling
-- Approximate-extension correction terms only for paths explicitly documented as approximate; exact oracle equality for `RnsScaler`
+- Touch → update: `mathematics.md` — `crates/fhe-math/src/**`.
