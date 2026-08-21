@@ -19,3 +19,4 @@ proptest-regressions/
 # AI harness
 .claude/settings.local.json
 .plans
+.worktrees
