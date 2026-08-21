@@ -2,7 +2,7 @@
 
 ## Scope
 
-Release-mode tests, focused verification, property tests, criterion benchmarks, CI preflight, common failures, CRP/l-BFV tests, and smudging/threshold E2E tests.
+Release-mode tests, focused verification, property tests, criterion benchmarks, CI preflight, common failures, CRP/l-BFV tests, smudging/threshold E2E tests, and independent `shamir-rns` field/Shamir coverage.
 
 ## Invariants
 
@@ -18,6 +18,7 @@ Release-mode tests, focused verification, property tests, criterion benchmarks, 
 10. Strict Delta tests reject equality `2 * (B_C + n * B_sm) == Delta` and accept one unit below; round trips alone do not establish smudging.
 11. Threshold E2E uses odd `n`, depth at least one, `threshold + 1` shares, and confirms fewer shares fail.
 12. Preset-level smudging feasibility tests pin each secure example's exact configuration (moduli, `n`, `lambda`, `m`, `mult_depth`, accepted participant count) and assert `SmudgingBoundCalculator::calculate_sm_bound` returns `Ok`. Strict-bound unit tests alone did not catch the infeasible multiplication-example presets that panicked at runtime (issue #113); retuning a preset must flip these tests from RED to GREEN.
+13. `shamir-rns` tests run in release mode and cover both Barrett and Montgomery backends, BigUint oracle edge cases including CRT recomposition, Wikipedia's `q = 1613` vector, canonical rejection, deterministic forked RNGs, party-major batch layout, and batch/single equivalence. Its Criterion benchmark uses `harness = false` and is measurement evidence only.
 
 ## Evidence / tests
 
@@ -30,10 +31,13 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all
 cargo bench --bench bfv
 cargo bench --bench rq
+cargo test --release -p shamir-rns
+cargo clippy -p shamir-rns --all-targets --all-features -- -D warnings
+cargo bench -p shamir-rns --bench shamir
 ```
 
-The full bench locations are `crates/fhe/benches/{bfv,bfv_optimized_ops,bfv_rgsw,trbfv_bfv_share}` and `crates/fhe-math/benches/{zq,rq,ntt,rns}`. Do not commit or push while anything is red.
+The full bench locations are `crates/fhe/benches/{bfv,bfv_optimized_ops,bfv_rgsw,trbfv_bfv_share}`, `crates/fhe-math/benches/{zq,rq,ntt,rns}`, and `crates/shamir-rns/benches/shamir.rs`. Do not commit or push while anything is red.
 
 ## Sync
 
-- Touch → update: `testing.md` — `**/tests/**`, `**/benches/**`, `.github/workflows/**`.
+- Touch → update: `testing.md` — `**/tests/**`, `**/benches/**`, `.github/workflows/**`, `crates/shamir-rns/**`.

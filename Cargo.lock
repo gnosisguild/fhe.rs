@@ -471,6 +471,7 @@ dependencies = [
  "rand_distr",
  "rayon",
  "serde",
+ "shamir-rns",
  "thiserror",
  "zeroize",
  "zeroize_derive",
@@ -1414,6 +1415,19 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "shamir-rns"
+version = "0.2.1"
+dependencies = [
+ "criterion",
+ "num-bigint",
+ "proptest",
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.5",
+ "rayon",
+ "zeroize",
 ]
 
 [[package]]

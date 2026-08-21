@@ -1,0 +1,34 @@
+[package]
+name = "shamir-rns"
+description = "Independent prime-field Shamir secret sharing over u64 residues"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version = "0.2.1"
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+[features]
+default = []
+rayon = ["dep:rayon"]
+
+[dependencies]
+rand_core.workspace = true
+rand_chacha.workspace = true
+zeroize.workspace = true
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+num-bigint.workspace = true
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "shamir"
+harness = false

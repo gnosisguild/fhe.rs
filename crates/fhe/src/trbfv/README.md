@@ -16,7 +16,9 @@ This module enables distributed decryption between `n` parties without necessari
 
 The module follows a modular design with clear separation of concerns:
 
-- `shamir.rs` - Shamir Secret Sharing implementation with field operations and polynomial interpolation
+- `shamir-rns` - independent runtime prime-field Shamir sharing over
+  canonical RNS residues; each modulus has its own field scheme and
+  party-major batch matrix
 - `smudging.rs` - Smudging noise generation with optimal variance calculation using arbitrary precision arithmetic  
 - `shares.rs` - Share aggregation and decryption operations management
 - `threshold.rs` - Main TRBFV coordinator struct
@@ -179,16 +181,16 @@ values, and generated smudging coefficients are
 [`SmudgingCoefficients`](smudging.rs) values. The wrappers expose
 only borrowed views (e.g. `SecretShareMatrix::row` for transport) and
 representation conversions that return another protected owner; there is no
-raw-value escape. The one exception is the low-level re-exported
-[`ShamirSecretSharing`](shamir.rs) API (`split`/`recover`), which still
-returns and consumes raw `BigInt` values by design; callers who use it
-directly are responsible for cleaning up that material (best-effort guards
-are applied on the TRBFV-side call sites that convert those values). This is
-a hardening measure, not an independently audited guarantee: copies made
-outside the library (transport buffers), allocator behavior, swap, core
-dumps, and deliberate `mem::forget`/`ManuallyDrop` are outside its scope. For
-`BigInt`-backed values the cleanup is best effort: `num-bigint` does not
-expose its private limb allocations for overwriting before deallocation.
+raw-value escape. The Shamir core is supplied by the independent
+`shamir-rns` crate and accepts and returns canonical residues in `[0, q)`.
+It does not provide commitments, verifiability, authenticated transport,
+robust DKG, or complete protocol orchestration; those boundaries remain
+external. This is a hardening measure, not an independently audited
+guarantee: copies made outside the library (transport buffers), allocator
+behavior, swap, core dumps, and deliberate `mem::forget`/`ManuallyDrop` are
+outside its scope. The remaining `SmudgingCoefficients` path intentionally
+retains signed `BigInt`-backed arbitrary-size noise and its documented
+best-effort cleanup.
 Callers hold protected values, use them for transport/reconstruction, and let
 them drop; explicit `Zeroize::zeroize` is optional hygiene, never a required
 part of the API contract.
@@ -203,8 +205,8 @@ The security of the threshold scheme relies on:
 - Protection of individual secret key shares
 - Appropriate smudging noise generation
 
-Note that the Shamir secret sharing operations use arbitrary-precision integer
-arithmetic that is not constant-time. These computations are local to each
-party (shares and secrets never traverse a timing-observable boundary during
-them), so this is a low-severity caveat, but co-located attacker models should
-take it into account.
+The field kernels and fixed-exponent Fermat inversion in `shamir-rns` have a
+narrow constant-time-oriented design boundary. Rejection sampling, rayon
+scheduling, RNG internals, allocation, transport, and the complete TRBFV
+protocol are not claimed constant time. The library has not been
+independently audited.

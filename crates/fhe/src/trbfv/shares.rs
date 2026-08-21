@@ -5,7 +5,6 @@ use crate::Error;
 /// and computation of decryption shares in the threshold BFV scheme.
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
-use crate::trbfv::shamir::{ShamirSecretSharing, ZeroizingBigInts};
 use crate::trbfv::smudging::SmudgingCoefficients;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
@@ -15,15 +14,44 @@ use fhe_math::{
 };
 use itertools::Itertools;
 use ndarray::{Array2, ArrayView1};
-use num_bigint::BigInt;
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
+use shamir_rns::{BarrettField, Error as ShamirError, ShamirScheme, ShareMatrix as RnsShareMatrix};
 use std::convert::TryFrom;
 use std::sync::Arc;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+fn map_shamir_error(error: ShamirError, party_id: usize, num_shares: usize) -> Error {
+    match error {
+        ShamirError::InvalidThreshold {
+            shares_needed,
+            num_shares,
+        } => Error::invalid_threshold(shares_needed.saturating_sub(1), num_shares),
+        ShamirError::TooManyShares {
+            num_shares,
+            modulus,
+        } => Error::party_count_exceeds_modulus(num_shares, modulus),
+        ShamirError::WrongShareCount { expected, actual } => {
+            Error::share_count_mismatch(actual, expected)
+        }
+        ShamirError::InvalidPartyId { party_id } => Error::invalid_party_id(party_id, num_shares),
+        ShamirError::DuplicatePartyId { party_id } => Error::duplicate_party_id(party_id),
+        ShamirError::NonCanonicalShare { modulus, .. } => Error::malformed_shares(
+            party_id,
+            format!("non-canonical share residue for modulus {modulus}"),
+        ),
+        ShamirError::NonCanonicalSecret { modulus, .. } => Error::secret_sharing(format!(
+            "non-canonical secret residue for modulus {modulus}"
+        )),
+        ShamirError::NonInvertible => Error::non_invertible_shares(),
+        error @ (ShamirError::InvalidModulus { .. }
+        | ShamirError::CompositeModulus { .. }
+        | ShamirError::InvalidMatrixShape { .. }
+        | ShamirError::InvalidMatrixStorage) => Error::secret_sharing(error.to_string()),
+    }
+}
 
 /// Owning wrapper around a secret-share coefficient matrix (`Array2<u64>`).
 ///
@@ -307,7 +335,7 @@ impl ShareManager {
             .iter()
             .min()
             .ok_or_else(|| Error::DefaultError("parameters have no moduli".to_string()))?;
-        if n >= usize::try_from(*min_modulus).unwrap_or(usize::MAX) {
+        if (n as u128) >= *min_modulus as u128 {
             return Err(Error::party_count_exceeds_modulus(n, *min_modulus));
         }
 
@@ -366,111 +394,92 @@ impl ShareManager {
         Ok(SecretPoly::new(std::mem::take(&mut *poly)))
     }
 
-    /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
-    // seeds[i] is indexed for i in 0..moduli.len(), which equals seeds.len()
-    #[allow(clippy::indexing_slicing)]
+    /// Generate Shamir secret shares for polynomial coefficients from a
+    /// pre-converted polynomial.
     pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
         &mut self,
         poly: SecretPoly<PowerBasis>,
         rng: &mut R,
     ) -> Result<Vec<SecretShareMatrix>, Error> {
         let moduli: Vec<u64> = poly.ctx().moduli().to_vec();
+        let expected_moduli = self.params.moduli();
+        let expected_shape = (expected_moduli.len(), self.params.degree());
+        let generated_shape = (self.n, self.params.degree());
+        if poly.ctx().as_ref() != self.params.context_at_level(0)?.as_ref()
+            || moduli.as_slice() != expected_moduli
+        {
+            return Err(Error::inconsistent_moduli(
+                moduli.len(),
+                expected_moduli.len(),
+            ));
+        }
 
         let min_modulus = moduli
             .iter()
             .min()
             .ok_or_else(|| Error::DefaultError("moduli vector is empty".to_string()))?;
 
-        if self.n >= usize::try_from(*min_modulus).unwrap_or(usize::MAX) {
+        if (self.n as u128) >= *min_modulus as u128 {
             return Err(Error::party_count_exceeds_modulus(self.n, *min_modulus));
         }
 
         let coefficients = poly.coefficients();
+        if coefficients.dim() != expected_shape {
+            return Err(Error::malformed_shares(
+                0,
+                format!(
+                    "secret polynomial has shape {:?}, expected {expected_shape:?}",
+                    coefficients.dim()
+                ),
+            ));
+        }
         let coeff_rows: Vec<_> = coefficients.outer_iter().collect();
 
-        // Generate seeds deterministically from the input RNG
-        let seeds: Vec<[u8; 32]> = (0..moduli.len())
-            .map(|_| crate::trbfv::shamir::fork_seed(rng))
-            .collect();
+        // Generate one independent deterministic ChaCha20 seed per modulus.
+        // The seed owner is zeroized after all parallel tasks complete.
+        let mut seeds = Zeroizing::new(Vec::<[u8; 32]>::with_capacity(moduli.len()));
+        for _ in &moduli {
+            let mut seed = [0_u8; 32];
+            rng.fill_bytes(&mut seed);
+            seeds.push(seed);
+            seed.zeroize();
+        }
 
         let return_vec: Result<Vec<SecretShareMatrix>, Error> = moduli
             .par_iter()
             .zip(coeff_rows.par_iter())
             .enumerate()
             .map(|(i, (m, p))| -> Result<SecretShareMatrix, Error> {
-                // Get rng from seed
-                let mut rng = ChaCha20Rng::from_seed(seeds[i]);
-
-                // Create shamir object
-                let shamir = ShamirSecretSharing {
-                    threshold: self.threshold,
-                    share_amount: self.n,
-                    prime: BigInt::from(*m),
-                };
-
-                // The flat per-modulus coefficient buffer is secret once the
-                // first share is appended; it is guarded so that any error
-                // path drops it through the guard.
-                let mut m_data: Zeroizing<Vec<u64>> = Zeroizing::new(Vec::new());
-
-                // For each coeff in the polynomial p under the current modulus m
-                for c in p.iter() {
-                    // Split the coeff into n shares (u64 -> BigInt is infallible)
-                    let secret = BigInt::from(*c);
-
-                    // `split`'s sharing-polynomial scratch is guarded inside
-                    // shamir.rs, but the returned per-coefficient share BigInts
-                    // are raw (the public Shamir API returns `Vec<(usize,
-                    // BigInt)>`). They are moved into the best-effort guard
-                    // before the u64 conversion below so they are zeroized on
-                    // both the success and the error path of this iteration
-                    // (same limitation as `SmudgingCoefficients` docs).
-                    let c_shares = ZeroizingBigInts::new(
-                        shamir
-                            .split(secret, &mut rng)?
-                            .into_iter()
-                            .map(|(_, value)| value)
-                            .collect(),
-                    );
-
-                    // For each share convert to u64; shares are reduced modulo
-                    // the (u64) prime, so this only fails on malformed input
-                    let mut c_vec: Zeroizing<Vec<u64>> = Zeroizing::new(Vec::with_capacity(self.n));
-                    for c_share in c_shares.as_slice() {
-                        c_vec.push(c_share.to_u64().ok_or_else(|| {
-                            Error::DefaultError("Shamir share does not fit in u64".to_string())
-                        })?);
-                    }
-                    m_data.extend_from_slice(&c_vec);
-                }
-
-                // Convert flat vector of coeffs to array2. The raw shaped
-                // matrix must not be left to drop unzeroized once the
-                // transposed copy is made, so it is placed under the protected
-                // share-matrix wrapper BEFORE the copy: `source` zeroizes the
-                // original allocation on drop and the transposed copy is owned
-                // by the returned protected wrapper, so every owner of the
-                // secret buffer is protected. (Consuming via `reversed_axes`
-                // would avoid the copy but yields a strided matrix whose rows
-                // are not contiguous, which `aggregate_collected_shares`
-                // requires via `as_slice`.) The matrix is shaped infallibly
-                // (`Array2::zeros`) and filled from the guarded `m_data` while
-                // the guard is still alive; `Array2::from_shape_vec` would
-                // require moving the raw `Vec<u64>` out of the guard first,
-                // which would drop it unzeroized if shaping failed.
-                if m_data.len() != self.params.degree() * self.n {
-                    return Err(Error::DefaultError(
-                        "Failed to create coefficient matrix".to_string(),
+                let seed = seeds
+                    .get(i)
+                    .copied()
+                    .ok_or_else(|| Error::inconsistent_moduli(moduli.len(), seeds.len()))?;
+                let mut seed = seed;
+                let mut modulus_rng = ChaCha20Rng::from_seed(seed);
+                seed.zeroize();
+                let scheme = ShamirScheme::<BarrettField>::new(self.threshold + 1, self.n, *m)
+                    .map_err(|error| map_shamir_error(error, 0, self.n))?;
+                let coefficients = p.as_slice().ok_or_else(|| {
+                    Error::DefaultError("non-contiguous coefficient row".to_string())
+                })?;
+                let matrix = scheme
+                    .share_batch(coefficients, &mut modulus_rng)
+                    .map_err(|error| map_shamir_error(error, 0, self.n))?;
+                if (matrix.rows(), matrix.columns()) != generated_shape {
+                    return Err(Error::malformed_shares(
+                        0,
+                        format!(
+                            "generated share matrix has shape [{}, {}], expected {generated_shape:?}",
+                            matrix.rows(),
+                            matrix.columns()
+                        ),
                     ));
                 }
-                let mut matrix = Array2::zeros((self.params.degree(), self.n));
-                for (slot, value) in matrix.iter_mut().zip(m_data.iter()) {
+                let mut output = Array2::zeros((self.n, self.params.degree()));
+                for (slot, value) in output.iter_mut().zip(matrix.as_slice()) {
                     *slot = *value;
                 }
-                let source = SecretShareMatrix::new(matrix);
-                // reverse the columns and rows
-                let reversed_axes = source.matrix.t().to_owned();
-                Ok(SecretShareMatrix::new(reversed_axes))
+                Ok(SecretShareMatrix::new(output))
             })
             .collect();
 
@@ -554,7 +563,7 @@ impl ShareManager {
                             party_idx,
                             format!(
                                 "share coefficient at row {row} (modulus q_i = {q_i}), column \
-                                 {col} is {value}; expected a canonical residue in [0, {q_i})"
+                                 {col} is not canonical; expected a residue in [0, {q_i})"
                             ),
                         ));
                     }
@@ -716,10 +725,20 @@ impl ShareManager {
         // Validate share polynomial shapes before indexing into them: each
         // share must carry all RNS rows and all coefficient columns.
         let expected_shape = (self.params.moduli().len(), self.params.degree());
+        let expected_ctx = self.params.context_at_level(0)?;
         for (i, d_share_poly) in d_share_polys.iter().enumerate() {
+            let party_id = reconstructing_parties.get(i).copied().ok_or_else(|| {
+                Error::share_count_mismatch(reconstructing_parties.len(), d_share_polys.len())
+            })?;
+            if d_share_poly.ctx().as_ref() != expected_ctx.as_ref() {
+                return Err(Error::context_mismatch(
+                    &"decryption share polynomial context",
+                    &"ShareManager level-zero context",
+                ));
+            }
             if d_share_poly.coefficients().dim() != expected_shape {
                 return Err(Error::malformed_shares(
-                    reconstructing_parties[i],
+                    party_id,
                     format!(
                         "decryption share has shape {:?}, expected {expected_shape:?}",
                         d_share_poly.coefficients().dim()
@@ -730,67 +749,59 @@ impl ShareManager {
         // Each recovered row (one per modulus) holds secret coefficients; the
         // row is placed under a zeroizing guard before it is returned, so the
         // per-modulus allocations never live unguarded in the collected
-        // vector — including on error paths, where the already-collected rows
-        // zeroize when the `Result` value is dropped.
+        // vector, including error paths.
         let recovered: Result<Vec<Zeroizing<Vec<u64>>>, Error> = (0..self.params.moduli().len())
             .into_par_iter()
             .map(|m| -> Result<Zeroizing<Vec<u64>>, Error> {
-                let shamir_ss = ShamirSecretSharing::new(
-                    self.threshold,
-                    self.n,
-                    BigInt::from(self.params.moduli[m]),
-                );
-
-                // Parallelize coefficient recovery within each modulus. Every
-                // task returns its recovered coefficient under a `Zeroizing`
-                // guard so that a partial collected vector zeroizes the
-                // already-recovered coefficients if any task fails, instead of
-                // dropping a raw partial `Vec<u64>`.
-                let collected = (0..self.params.degree())
-                    .into_par_iter()
-                    .map(|i| -> Result<Zeroizing<u64>, Error> {
-                        // Recovered share values are secret; the value buffer
-                        // is guarded so error paths drop it through the guard
-                        // (the party indices are public x-coordinates).
-                        let mut shamir_indices: Vec<usize> = Vec::with_capacity(self.threshold + 1);
-                        let mut shamir_values = ZeroizingBigInts::with_capacity(self.threshold + 1);
-                        for (party_idx, d_share_poly) in
-                            reconstructing_parties.iter().zip(d_share_polys.iter())
-                        {
-                            let coeffs = d_share_poly.coefficients();
-                            let coeff_arr = coeffs.row(m);
-                            let coeff = coeff_arr[i];
-                            // Use provided party indices directly as the Shamir x-coordinates
-                            shamir_indices.push(*party_idx);
-                            shamir_values.push(BigInt::from(coeff));
-                        }
-                        // `recover_from_parts` returns the raw recovered
-                        // coefficient per the public Shamir API; it is
-                        // placed under the best-effort guard before the
-                        // u64 conversion so the BigInt is zeroized on both
-                        // the success and the error path.
-                        let shamir_result = ZeroizingBigInts::new(vec![
-                            shamir_ss
-                                .recover_from_parts(&shamir_indices, shamir_values.as_slice())?,
-                        ]);
-                        let converted = shamir_result
-                            .as_slice()
-                            .first()
-                            .and_then(|value| value.to_u64())
-                            .ok_or_else(|| {
-                                Error::DefaultError(
-                                    "recovered Shamir coefficient does not fit in u64".to_string(),
-                                )
-                            })?;
-                        Ok(Zeroizing::new(converted))
-                    })
-                    .collect::<Result<Vec<Zeroizing<u64>>, Error>>()?;
-                // The raw intermediate vec is moved straight into the guard;
-                // the per-coefficient guards above zeroize as they drop after
-                // the row is assembled.
-                Ok(Zeroizing::new(
-                    collected.iter().map(|value| **value).collect::<Vec<u64>>(),
-                ))
+                let modulus = self
+                    .params
+                    .moduli()
+                    .get(m)
+                    .copied()
+                    .ok_or_else(|| Error::inconsistent_moduli(self.params.moduli().len(), m))?;
+                let scheme = ShamirScheme::<BarrettField>::new(self.threshold + 1, self.n, modulus)
+                    .map_err(|error| map_shamir_error(error, 0, self.n))?;
+                let mut values = Zeroizing::new(Vec::with_capacity(
+                    d_share_polys.len() * self.params.degree(),
+                ));
+                for (share_index, d_share_poly) in d_share_polys.iter().enumerate() {
+                    let coefficients = d_share_poly.coefficients();
+                    let row = coefficients.outer_iter().nth(m).ok_or_else(|| {
+                        Error::malformed_shares(
+                            reconstructing_parties
+                                .get(share_index)
+                                .copied()
+                                .unwrap_or(0),
+                            "missing modulus row".to_string(),
+                        )
+                    })?;
+                    if row.iter().any(|value| *value >= modulus) {
+                        let party_id = reconstructing_parties
+                            .get(share_index)
+                            .copied()
+                            .unwrap_or(0);
+                        return Err(Error::malformed_shares(
+                            party_id,
+                            format!(
+                                "decryption share contains a non-canonical residue for modulus {modulus}"
+                            ),
+                        ));
+                    }
+                    values.extend(row.iter().copied());
+                }
+                let matrix = RnsShareMatrix::new(
+                    d_share_polys.len(),
+                    self.params.degree(),
+                    std::mem::take(&mut *values),
+                )
+                .map_err(|error| map_shamir_error(error, 0, self.n))?;
+                let reconstructed = scheme
+                    .reconstruct_batch(&matrix, &reconstructing_parties)
+                    .map_err(|error| {
+                        let party_id = reconstructing_parties.first().copied().unwrap_or(0);
+                        map_shamir_error(error, party_id, self.n)
+                    })?;
+                Ok(Zeroizing::new(reconstructed))
             })
             .collect();
         // Flat recovered-coefficient buffer is secret; guarded across the
@@ -901,7 +912,9 @@ mod tests {
     use crate::ThresholdError;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
+    use num_bigint::BigInt;
     use rand::rng;
+    use shamir_rns::{BarrettField, ShamirScheme};
 
     // Error-path reachability notes for the zeroization guards (issue #126):
     //
@@ -912,16 +925,11 @@ mod tests {
     //   the coefficient matrix always has exactly `degree` entries per modulus
     //   row, so `m_data.len()` always equals the shape product (the checks are
     //   defensive behavior preservation).
-    // - The per-coefficient recovery tasks in `decrypt_from_shares` return
-    //   `Zeroizing<u64>` so a partial collection zeroizes on task failure.
-    //   That error path is likewise unreachable through the public API:
-    //   `recover_from_parts` is always called with exactly `threshold + 1`
-    //   distinct indices (enforced by `decrypt_from_shares`), and every
-    //   recovered value is a canonical residue below a u64 prime, so the
-    //   `to_u64` conversion cannot fail.
+    // - The per-modulus reconstruction buffers in `decrypt_from_shares` are
+    //   returned under `Zeroizing` guards. The field-level batch API validates
+    //   exact rows, IDs, and canonical values before interpolation.
     // - The Shamir interpolation error path (non-invertible Lagrange
-    //   denominator) IS reachable and is covered by
-    //   `crates/fhe/src/trbfv/shamir.rs::test_recover_rejects_bad_shares`.
+    //   denominator) is validated in the independent shamir-rns crate.
 
     fn test_params() -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
@@ -939,6 +947,43 @@ mod tests {
         assert_eq!(manager.n, 5);
         assert_eq!(manager.threshold, 2);
         assert_eq!(manager.params, params);
+    }
+
+    #[test]
+    fn shamir_errors_map_to_threshold_categories() {
+        assert!(matches!(
+            map_shamir_error(
+                ShamirError::WrongShareCount {
+                    expected: 3,
+                    actual: 2,
+                },
+                1,
+                5,
+            ),
+            Error::Threshold(ThresholdError::ShareCountMismatch {
+                expected: 3,
+                actual: 2,
+            })
+        ));
+        assert!(matches!(
+            map_shamir_error(ShamirError::DuplicatePartyId { party_id: 2 }, 2, 5,),
+            Error::Threshold(ThresholdError::DuplicatePartyId { party_id: 2 })
+        ));
+        assert!(matches!(
+            map_shamir_error(
+                ShamirError::NonCanonicalShare {
+                    value: 1613,
+                    modulus: 1613,
+                },
+                2,
+                5,
+            ),
+            Error::Threshold(ThresholdError::MalformedShares { party_id: 2, .. })
+        ));
+        assert!(matches!(
+            map_shamir_error(ShamirError::NonInvertible, 2, 5),
+            Error::Threshold(ThresholdError::NonInvertibleShares)
+        ));
     }
 
     #[test]
@@ -1591,10 +1636,13 @@ mod tests {
             panic!("expected MalformedShares, got: {err}");
         };
         assert_eq!(*party_id, 0);
-        assert!(
-            reason.contains(&u64::MAX.to_string()),
-            "offending value missing from reason: {reason}"
-        );
+        assert!(reason.contains("row 0") && reason.contains("column 0"));
+        let first_modulus = moduli.first().copied().unwrap_or(0);
+        assert!(reason.contains(&first_modulus.to_string()));
+        let debug = format!("{err:?}");
+        let display = format!("{err}");
+        assert!(!debug.contains(&u64::MAX.to_string()));
+        assert!(!display.contains(&u64::MAX.to_string()));
     }
 
     #[test]
@@ -1696,6 +1744,27 @@ mod tests {
             .collect();
         let result = manager.decrypt_from_shares(two, vec![1, 2], ct);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_from_shares_rejects_same_shape_foreign_context() {
+        let mut rng = rng();
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let plaintext = Plaintext::try_encode(&[1_u64], Encoding::poly(), &params).unwrap();
+        let ciphertext = Arc::new(pk.try_encrypt(&plaintext, &mut rng).unwrap());
+        let foreign_ctx =
+            Context::new_arc(&[0xffffc4001, 0xffffee001, 0x1ffffe0001], params.degree()).unwrap();
+        let shares = (0..3)
+            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(&foreign_ctx)))
+            .collect();
+
+        let error = manager
+            .decrypt_from_shares(shares, vec![1, 2, 3], ciphertext)
+            .expect_err("same-shape decryption shares from a foreign context must be rejected");
+        assert!(matches!(error, Error::ContextMismatch { .. }));
     }
 
     // ── Protected wrapper contracts (issue #126) ─────────────────────────
@@ -1893,14 +1962,9 @@ mod tests {
 
     #[test]
     fn test_generated_shares_recover_to_secret_per_modulus() {
-        // Regression coverage for the guarded generation path (issue #126
-        // review findings 1 and 3a): each per-modulus matrix is moved under a
-        // protected owner before the transposed copy is made, and the
-        // per-coefficient share BigInts returned by the raw Shamir API are
-        // guarded during the u64 conversion. Recovering `threshold + 1`
-        // parties' rows per modulus must reproduce the dealt secret
-        // polynomial exactly, coefficient for coefficient, which pins the
-        // matrix layout the guarded transpose must produce.
+        // Regression coverage for the migrated batch path: each per-modulus
+        // matrix is party-major and reconstructs the dealt canonical
+        // polynomial coefficient vector without BigInt interpolation.
         let params = test_params();
         let mut manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let ctx = params.context_at_level(0).unwrap();
@@ -1922,19 +1986,26 @@ mod tests {
         // that party's share.
         let parties: Vec<usize> = vec![1, 2, 3];
         for (m, q) in params.moduli().iter().copied().enumerate() {
-            let shamir_ss = ShamirSecretSharing::new(manager.threshold, manager.n, BigInt::from(q));
-            for (i, &expected) in coeffs.iter().enumerate() {
-                let values: Vec<BigInt> = parties
-                    .iter()
-                    .map(|party| BigInt::from(shares[m].row(party - 1).unwrap()[i]))
-                    .collect();
-                let recovered = shamir_ss
-                    .recover_from_parts(&parties, &values)
-                    .expect("threshold + 1 distinct shares must recover");
+            let shamir_ss =
+                ShamirScheme::<BarrettField>::new(manager.threshold + 1, manager.n, q).unwrap();
+            let values = parties
+                .iter()
+                .map(|party| {
+                    let row = shares[m].row(party - 1).unwrap();
+                    row.iter().copied().collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let selected = RnsShareMatrix::new(
+                parties.len(),
+                params.degree(),
+                values.into_iter().flatten().collect(),
+            )
+            .unwrap();
+            let recovered = shamir_ss.reconstruct_batch(&selected, &parties).unwrap();
+            for (expected, actual) in coeffs.iter().zip(recovered) {
                 assert_eq!(
-                    recovered,
-                    BigInt::from(expected),
-                    "modulus {m}, coefficient {i}: recovered share must equal the dealt secret"
+                    actual, *expected as u64,
+                    "modulus {m}: recovered share must equal the dealt secret"
                 );
             }
         }

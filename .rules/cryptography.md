@@ -4,7 +4,16 @@
 
 Use cited ePrint papers as construction references, not blanket security proofs; ePrint DoS protection blocks automated downloads, so links are human-readable provenance. Paper map: <https://eprint.iacr.org/2018/117> (HPS RNS BFV scaling, basis extension, and RNS decomposition), <https://eprint.iacr.org/2021/204> (modified and leveled BFV multiplication, lazy scaling, and hybrid key-switching analysis), <https://eprint.iacr.org/2024/1285> (l-BFV's linear relinearization key and the trBFV honest-majority protocol, including pre-shared smudging noise), <https://eprint.iacr.org/2020/304> (MBFV's semi-honest, dishonest-majority, N-out-of-N protocols), <https://eprint.iacr.org/2017/1142> (SealPIR's original substitution-based oblivious expansion), and <https://eprint.iacr.org/2019/1483> (MulPIR and the optimized query/expansion structure also used by the SealPIR example). Match implemented variants before importing equations; do not apply trBFV claims to MBFV or MBFV relinearization to l-BFV.
 
-Security-sensitive areas are key generation/handling, noise sampling, parameters, serialization, decryption, and Shamir threshold logic.
+Security-sensitive areas are key generation/handling, noise sampling, parameters, serialization, decryption, and Shamir threshold logic, including `crates/shamir-rns/**`.
+
+The independent `shamir-rns` primitive accepts only canonical residues, uses
+public points `1..=n` with the secret at zero, and requires an exact
+`shares_needed` reconstruction count. Only its Barrett and Montgomery field
+kernels and fixed-schedule Fermat inversion have a bounded constant-time
+design goal;
+rejection sampling, rayon scheduling, allocation, transport, and callers are
+outside that claim. The crate is unaudited and supplies no commitments,
+verifiability, authentication, robust DKG, or complete threshold protocol.
 
 ZK proof generation and verification, commitments, proof aggregation, and on-chain verifiers (e.g. Interfold's Noir circuits) are external to this library; the library provides the witness values those circuits consume (see `.rules/witness.md`).
 
@@ -82,4 +91,4 @@ Crypto changes add arithmetic/protocol tests. Threshold tests cover fewer than `
 
 ## Sync
 
-- Touch → update: `cryptography.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`.
+- Touch → update: `cryptography.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`, `crates/shamir-rns/**`.
