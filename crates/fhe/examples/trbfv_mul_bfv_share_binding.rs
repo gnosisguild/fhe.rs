@@ -2,13 +2,16 @@
 //
 // Two BFV parameter sets:
 //
-//   First set  (computation) — n=5, z=3, k=1000, d=16384, 4×61-bit moduli, λ=40.
-//              Correctness: log₂(B_C after mult) = 187.5 < log₂(Δ) = 234.0  ✓
+//   First set  (computation) — n=19, t=9, k=1000, d=16384, 5×54-bit moduli, λ=38.
+//              Smudging feasibility for this exact preset is pinned by the
+//              `preset_smudging_feasible` test below (issue #113).
 //
-//   Second set (share encryption) — k = q[1] of first set ≈ 2^61, d=16384,
+//   Second set (share encryption) — k = largest trBFV modulus ≈ 2^54, d=16384,
 //              2×62-bit moduli. Each Shamir share value lies in [0, q_i) ⊆ [0, k),
 //              so it encodes directly as a BFV plaintext.
-//              BFV decrypt is correct because k ≈ 2^61 < q₀/2 ≈ 2^61.9999  ✓
+//              BFV decrypt rounds t·v/Q, so exact recovery needs the error to
+//              stay below Δ/2 ≈ Q/(2k), not merely below Q/2. A fresh-noise
+//              sanity check for this preset leaves ≈ 58 bits of Δ/2 headroom.
 //
 // Protocol:
 //  1. Each party generates: trBFV key share, Shamir shares of sk and smudging error,
@@ -17,8 +20,9 @@
 //     shares for every receiver under the receiver's share-encryption key.
 //  3. Each receiver decrypts and aggregates the collected shares to reconstruct
 //     its Lagrange evaluation point of the combined secret key SK = Σ sk_j.
-//  4. Two values are encrypted under the combined mbfv PublicKey, multiplied and
-//     relinearized using the aggregated RLK, then threshold-decrypted by t+1 parties.
+//  4. Four values are encrypted under the combined mbfv PublicKey, multiplied
+//     in three chained multiplications with relinearization after each, then
+//     threshold-decrypted by t+1 parties.
 #![allow(missing_docs)]
 
 mod util;
@@ -46,18 +50,44 @@ use rayon::prelude::*;
 use std::time::Instant;
 use util::timeit::timeit;
 
+// Preset parameter set for this example. The smudging feasibility of the exact
+// trBFV configuration below (degree, plaintext, moduli, n, lambda) is pinned by
+// the `preset_smudging_feasible` test in this file — see issue #113.
+// Caveat: this preset is verified consistent with the implemented noise/smudging
+// bounds (correctness), but has not been independently checked against an RLWE
+// estimator for computational security.
+const DEGREE: usize = 16384;
+const PLAINTEXT_MODULUS_TRBFV: u64 = 1_000;
+const MODULI_TRBFV: [u64; 5] = [
+    0x003fffffffef8001, // 18014398508400641 (largest)
+    0x003fffffffeb8001, // 18014398508138497
+    0x003fffffffe38001, // 18014398507614209
+    0x003fffffffdd8001, // 18014398507220993
+    0x003fffffffd78001, // 18014398506827777
+];
+const PLAINTEXT_MODULUS_SHARE_ENC: u64 = MODULI_TRBFV[0]; // largest trBFV modulus
+const MODULI_SHARE_ENC: [u64; 2] = [0x3fffffffffd78001u64, 0x3fffffffffe80001];
+const DEFAULT_NUM_PARTIES: usize = 19;
+const DEFAULT_THRESHOLD: usize = 9;
+const DEFAULT_LAMBDA: usize = 38;
+
 fn print_notice_and_exit(error: Option<String>) {
     println!(
         "{} Threshold BFV multiplication with encrypted share transport",
         style("  overview:").magenta().bold()
     );
     println!(
-        "{} trbfv_mul_bfv_share [-h] [--num_parties=N] [--threshold=T] [--lambda=L]",
+        "{} trbfv_mul_bfv_share_binding [-h] [--num_parties=N] [--threshold=T] [--lambda=L]",
         style("     usage:").magenta().bold()
     );
     println!(
-        "{} T ≤ (N-1)/2, N ≥ 1, L ≥ 1",
+        "{} T = (N-1)/2, N ≥ 3, L ≥ {}. Paper-conforming robustness requires odd N (N = 2t + 1);",
         style("constraints:").magenta().bold(),
+        fhe::trbfv::MIN_SECURE_LAMBDA,
+    );
+    println!(
+        "{} even N is accepted for compatibility but lies outside the paper's theorem.",
+        style("           ").magenta().bold(),
     );
     if let Some(error) = error {
         println!("{} {}", style("     error:").red().bold(), error);
@@ -67,15 +97,10 @@ fn print_notice_and_exit(error: Option<String>) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     // ── First BFV parameter set (threshold computation) ──────────────────────
-    // n=5, z=3, k=1000, λ=40, σ²=10. Four 61-bit NTT primes, each ≡ 1 mod 32768. ✓
-    let degree = 16384usize;
-    let plaintext_modulus_trbfv: u64 = 1_000;
-    let moduli_trbfv = [
-        0x1fffffffffe10001u64, // q[1] = 2305843009211662337
-        0x1fffffffffe00001,    // q[2] = 2305843009210613761
-        0x1fffffffffdd0001,    // q[3] = 2305843009196982273
-        0x1fffffffffd08001,    // q[4] = 2305843009177763841
-    ];
+    // n=19, t=9, k=1000, λ=38, σ²=10. Five 54-bit NTT primes, each ≡ 1 mod 32768. ✓
+    let degree = DEGREE;
+    let plaintext_modulus_trbfv = PLAINTEXT_MODULUS_TRBFV;
+    let moduli_trbfv = MODULI_TRBFV;
 
     println!("Building trBFV parameters (first set)...");
     let params_trbfv: Arc<bfv::BfvParameters> = timeit!(
@@ -85,7 +110,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
             .set_variance(10)
-            // Var(e_1) from the parameter tool: n=5, z=3, λ=40.
+            // Var(e_1) from the earlier parameter-tool design point, retained
+            // unchanged; the `preset_smudging_feasible` test pins the feasibility
+            // of this configuration.
             .set_error1_variance_str("4326914048779023023775413607683413333")?
             .build_arc()?
     );
@@ -100,11 +127,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // ── Second BFV parameter set (share encryption) ───────────────────────────
-    // Plaintext modulus = q[1] of the first set ≈ 2^61. All Shamir share values
-    // lie in [0, q_i) ⊆ [0, q[1]) = [0, k), so they fit as BFV plaintexts.
-    // Two 62-bit NTT primes (≡ 1 mod 32768). Correctness: k ≈ 2^61 < q₀/2 ≈ 2^61.0000003 ✓
-    let plaintext_modulus_share_enc: u64 = moduli_trbfv[0]; // = q[1]
-    let moduli_share_enc = [0x3fffffffffd78001u64, 0x3fffffffffe80001];
+    // Plaintext modulus = largest trBFV modulus ≈ 2^54, so every Shamir share
+    // value (each in [0, q_i) ⊆ [0, k)) encodes directly as a BFV plaintext.
+    // Two 62-bit NTT primes (≡ 1 mod 32768), coprime to the plaintext modulus.
+    // Correctness: BFV decrypt rounds t·v/Q, which recovers the message exactly
+    // iff the error stays below Δ/2 ≈ Q/(2k); a fresh-noise sanity check for
+    // this preset leaves ≈ 58 bits of Δ/2 headroom.
+    let plaintext_modulus_share_enc = PLAINTEXT_MODULUS_SHARE_ENC; // = q[0]
+    let moduli_share_enc = MODULI_SHARE_ENC;
     println!("\nBuilding share-encryption parameters (second set)...");
     let params_share_enc: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share enc)",
@@ -132,10 +162,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    // Defaults: n=5 keeps the example fast; the params are correct for n up to 20.
-    let mut num_parties = 5usize;
-    let mut threshold = 2usize;
-    let mut lambda = 40usize;
+    // Defaults: n=19 (odd, paper-conforming 2t+1) tuned to this preset; the
+    // `preset_smudging_feasible` test pins smudging feasibility for this exact
+    // configuration (issue #113).
+    let mut num_parties = DEFAULT_NUM_PARTIES;
+    let mut threshold = DEFAULT_THRESHOLD;
+    let mut lambda = DEFAULT_LAMBDA;
 
     fn parse_opt(arg: &str, prefix: &str) -> Option<usize> {
         arg.strip_prefix(prefix)
@@ -155,21 +187,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if num_parties == 0 || lambda == 0 {
-        print_notice_and_exit(Some("Party count and lambda must be nonzero".to_string()))
-    }
-    if threshold > (num_parties - 1) / 2 {
+    if num_parties < 3 || lambda == 0 {
         print_notice_and_exit(Some(
-            "Threshold must be at most (num_parties - 1) / 2".to_string(),
+            "Party count must be at least 3 and lambda must be nonzero".to_string(),
+        ))
+    }
+    if threshold != (num_parties - 1) / 2 {
+        print_notice_and_exit(Some(
+            "Threshold must be exactly (num_parties - 1) / 2: maximal corruption tolerance with honest-majority reconstruction".to_string(),
         ))
     }
 
-    // λ=40 is the design point of this parameter set (above the library's MIN_SECURE_LAMBDA=35).
-    let security = Lambda::insecure(lambda);
+    // λ=38 is the design point of this preset (≥ fhe::trbfv::MIN_SECURE_LAMBDA=35).
+    let security = Lambda::secure(lambda)?;
     let mut rng = rand::rng();
 
     println!("\n# Threshold BFV multiplication");
-    println!("  num_parties = {num_parties}  (params: n=5, k=1000, z=3, λ=40)");
+    println!("  num_parties = {num_parties}  (params: n=19, k=1000, depth=3, λ=38)");
     println!("  threshold   = {threshold}");
     println!("  lambda      = {lambda}");
 
@@ -203,7 +237,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let crp = CommonRandomPoly::new(&params_trbfv, &mut rng)?;
-    let trbfv: TRBFV = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
+    let trbfv: TRBFV = TRBFV::new(num_parties, threshold, params_trbfv.clone())?;
     let num_moduli = params_trbfv.moduli().len();
 
     println!("\n💻 Available CPU cores: {}", rayon::current_num_threads());
@@ -211,36 +245,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
         (0..num_parties)
             .into_par_iter()
-            .map(|party_idx| {
+            .map(|party_idx| -> Result<Party, fhe::Error> {
                 let mut rng = rand::rng();
                 let participant_id = (party_idx + 1) as u32;
 
                 // Unique contribution binding for this party.
                 let binding =
-                    ContributionBinding::new(participant_set_ref.clone(), participant_id).unwrap();
+                    ContributionBinding::new(participant_set_ref.clone(), participant_id)?;
 
                 // trBFV keys and Shamir shares.
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-                let pk_share = MBFVPublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
+                let pk_share = MBFVPublicKeyShare::new(&sk_share, crp.clone(), &mut rng)?;
 
                 let mut share_manager =
-                    ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
-                let sk_poly = share_manager
-                    .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
-                    .unwrap();
+                    ShareManager::new(num_parties, threshold, params_trbfv.clone())?;
+                let sk_poly =
+                    share_manager.coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())?;
 
-                let sk_sss = trbfv
-                    .generate_secret_shares_from_poly(sk_poly, &mut rng)
-                    .unwrap();
+                let sk_sss = trbfv.generate_secret_shares_from_poly(sk_poly, &mut rng)?;
 
                 // Smudging noise shares (m=1 ciphertext, depth=3 multiplications).
-                let esi_coeffs = trbfv
-                    .generate_smudging_error(1, 3, security, &mut rng)
-                    .unwrap();
-                let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
-                let esi_sss = share_manager
-                    .generate_secret_shares_from_poly(esi_poly, &mut rng)
-                    .unwrap();
+                // An infeasible configuration is propagated out of main (issue
+                // #113) rather than panicking inside the Rayon worker.
+                let esi_coeffs = trbfv.generate_smudging_error(1, 3, security, &mut rng)?;
+                let esi_poly = share_manager.bigints_to_poly(&esi_coeffs)?;
+                let esi_sss = share_manager.generate_secret_shares_from_poly(esi_poly, &mut rng)?;
 
                 // l-BFV PK contribution (CRS seed = pk_seed, shared by all parties).
                 let pk_lbfv_share = PublicKeyShare::new_with_seed_and_binding(
@@ -248,22 +277,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                     pk_seed,
                     binding.clone(),
                     &mut rng,
-                )
-                .unwrap();
+                )?;
 
                 // l-BFV RLK share for SK = Σ sk_j.
                 let rlk_share = RelinKeyShare::contribution_with_binding(
                     &sk_share, d1_seed, pk_seed, // a_seed must match pk_lbfv_share's CRS seed
                     binding, 0, 0, &mut rng,
-                )
-                .unwrap();
+                )?;
 
                 // Share-encryption key pair under the second parameter set.
                 let sk_share_enc = SecretKey::random(&params_share_enc, &mut rng);
                 let pk_share_enc = PublicKey::new(&sk_share_enc, &mut rng);
 
-                let ctx0 = params_trbfv.context_at_level(0).unwrap();
-                Party {
+                let ctx0 = params_trbfv.context_at_level(0)?;
+                Ok(Party {
                     pk_share,
                     sk_sss,
                     esi_sss,
@@ -276,9 +303,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     rlk_share,
                     sk_share_enc,
                     pk_share_enc,
-                }
+                })
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?
     });
 
     // ── Distributed RLK aggregation ───────────────────────────────────────────
@@ -296,8 +323,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Share encryption and transmission ─────────────────────────────────────
     // Each sender BFV-encrypts the share row it owes to each receiver under that
     // receiver's share-encryption public key (second parameter set). This is safe:
-    //   • k = q[1] ≥ q_i for all i → share values ∈ [0, q_i) ⊆ [0, k)
-    //   • k ≈ 2^57 < q₀/2 ≈ 2^59  → BFV decrypt is algebraically exact
+    //   • k = largest trBFV modulus ≥ q_i for all i → share values ∈ [0, q_i) ⊆ [0, k)
+    //   • BFV decrypt rounds t·v/Q: exact recovery needs the error below
+    //     Δ/2 ≈ Q/(2k), not merely below Q/2 — fresh noise leaves ≈ 58 bits
+    //     of Δ/2 headroom for this preset
     //
     // encrypted_shares[sender][receiver] = (Vec<Ciphertext>, Vec<Ciphertext>)
     //   first  vec: one ciphertext per modulus for the sk share row
@@ -475,4 +504,48 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fhe::trbfv::{SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
+
+    /// The exact trBFV preset this example runs with (degree, plaintext modulus,
+    /// moduli, n = `DEFAULT_NUM_PARTIES`, lambda = `DEFAULT_LAMBDA`, one
+    /// ciphertext, three chained multiplications, all parties accepted into the
+    /// l-BFV relinearization set) must yield a feasible smudging bound.
+    ///
+    /// Regression guard for issue #113: this preset was previously infeasible and
+    /// the examples panicked inside Rayon worker closures instead of reporting the
+    /// `SmudgingBoundInfeasible` error.
+    #[test]
+    fn preset_smudging_feasible() {
+        let params = bfv::BfvParametersBuilder::new()
+            .set_degree(DEGREE)
+            .set_plaintext_modulus(PLAINTEXT_MODULUS_TRBFV)
+            .set_moduli(&MODULI_TRBFV)
+            .set_variance(10)
+            .set_error1_variance_str("4326914048779023023775413607683413333")
+            .unwrap()
+            .build_arc()
+            .unwrap();
+
+        let config = SmudgingBoundCalculatorConfig::new_multiplicative(
+            params,
+            DEFAULT_NUM_PARTIES,
+            1, // m: a single ciphertext, as in the example
+            3, // mult_depth: three chained multiplications, as in the example
+            Lambda::secure(DEFAULT_LAMBDA).unwrap(),
+        )
+        .unwrap();
+        let bound = SmudgingBoundCalculator::new(config)
+            .with_accepted_participant_count(DEFAULT_NUM_PARTIES)
+            .calculate_sm_bound();
+        assert!(
+            bound.is_ok(),
+            "the preset trBFV configuration must be smudging-feasible, got: {}",
+            bound.unwrap_err()
+        );
+    }
 }

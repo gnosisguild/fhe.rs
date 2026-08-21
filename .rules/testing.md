@@ -17,6 +17,7 @@ Release-mode tests, focused verification, property tests, criterion benchmarks, 
 9. Smudging tests cover the CBD branch (`v <= 16`, bound `2 * error1_variance`), the uniform branch (`variance_to_uniform_bound`, smallest `B` with `B(B+1)/3 >= v`), depth monotonicity at 0/1/2, accepted participant counts 0/intermediate/`n`, and default `n` behavior.
 10. Strict Delta tests reject equality `2 * (B_C + n * B_sm) == Delta` and accept one unit below; round trips alone do not establish smudging.
 11. Threshold E2E uses odd `n`, depth at least one, `threshold + 1` shares, and confirms fewer shares fail.
+12. Preset-level smudging feasibility tests pin each secure example's exact configuration (moduli, `n`, `lambda`, `m`, `mult_depth`, accepted participant count) and assert `SmudgingBoundCalculator::calculate_sm_bound` returns `Ok`. Strict-bound unit tests alone did not catch the infeasible multiplication-example presets that panicked at runtime (issue #113); retuning a preset must flip these tests from RED to GREEN.
 
 ## Evidence / tests
 
