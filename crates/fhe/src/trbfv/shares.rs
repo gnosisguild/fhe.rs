@@ -5,15 +5,16 @@ use crate::Error;
 /// and computation of decryption shares in the threshold BFV scheme.
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
-use crate::trbfv::shamir::ShamirSecretSharing;
+use crate::trbfv::shamir::{ShamirSecretSharing, ZeroizingBigInts};
+use crate::trbfv::smudging::SmudgingCoefficients;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
 use fhe_math::{
     rns::{RnsContext, ScalingFactor},
-    rq::{Context, Ntt, Poly, PowerBasis, scaler::Scaler},
+    rq::{Context, Ntt, Poly, PowerBasis, RepresentationTag, scaler::Scaler},
 };
 use itertools::Itertools;
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView1};
 use num_bigint::BigInt;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -22,7 +23,218 @@ use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use std::convert::TryFrom;
 use std::sync::Arc;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+/// Owning wrapper around a secret-share coefficient matrix (`Array2<u64>`).
+///
+/// This is the single protected matrix type for both secret-key and
+/// smudging-noise shares: generated shares, shares collected from other
+/// parties, and per-modulus share matrices are all held in this wrapper so
+/// that the secret material is erased when the value is dropped.
+///
+/// # Security semantics
+///
+/// - [`Zeroize`] overwrites every `u64` through safe mutable iteration.
+/// - The type implements [`ZeroizeOnDrop`] unconditionally (see the manual
+///   [`Drop`] impl), so ordinary `Vec<SecretShareMatrix>` storage, early
+///   returns, and unwinding all zeroize the matrix without caller action.
+/// - The inner matrix is private: callers can only borrow narrow row views
+///   (see [`SecretShareMatrix::row`]) and shape information, and `Clone`
+///   produces another protected owner. There is no raw-value escape.
+/// - [`std::mem::forget`] or [`std::mem::ManuallyDrop`] can bypass Rust
+///   destructors entirely; that language-level caveat applies to every
+///   drop-based cleanup path and is not a supported API.
+///
+/// # Limitations
+///
+/// Copies made outside this wrapper (e.g. a row converted into a transport
+/// buffer) are not erased by dropping the wrapper; external buffers, swap,
+/// core dumps, and allocator behavior are outside this guarantee.
+#[derive(Clone)]
+pub struct SecretShareMatrix {
+    matrix: Array2<u64>,
+}
+
+impl SecretShareMatrix {
+    /// Wrap an owned share matrix, placing it under automatic zeroization.
+    ///
+    /// The matrix is expected to hold canonical residues; validation of
+    /// shapes and residues happens at the aggregation boundary, not here.
+    #[must_use]
+    pub fn new(matrix: Array2<u64>) -> Self {
+        Self { matrix }
+    }
+
+    /// The matrix shape as `(rows, columns)`.
+    #[must_use]
+    pub fn dim(&self) -> (usize, usize) {
+        self.matrix.dim()
+    }
+
+    /// Number of rows in the matrix.
+    #[must_use]
+    pub fn nrows(&self) -> usize {
+        self.matrix.nrows()
+    }
+
+    /// Number of columns in the matrix.
+    #[must_use]
+    pub fn ncols(&self) -> usize {
+        self.matrix.ncols()
+    }
+
+    /// Borrow a single row of the matrix.
+    ///
+    /// This is the narrow view used for transport and collection (e.g.
+    /// encrypting the share row addressed to one party). It is fallible so
+    /// that out-of-bounds access is an error rather than a panic.
+    ///
+    /// # Errors
+    /// Returns an error if `index >= nrows()`.
+    pub fn row(&self, index: usize) -> Result<ArrayView1<'_, u64>, Error> {
+        if index >= self.nrows() {
+            return Err(Error::DefaultError(format!(
+                "share matrix row index {index} out of bounds (nrows = {})",
+                self.nrows()
+            )));
+        }
+        Ok(self.matrix.row(index))
+    }
+}
+
+// Redacted `Debug` so that `{:?}` never leaks the share values.
+impl std::fmt::Debug for SecretShareMatrix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretShareMatrix")
+            .field("dim", &self.matrix.dim())
+            .finish()
+    }
+}
+
+impl Zeroize for SecretShareMatrix {
+    fn zeroize(&mut self) {
+        for value in self.matrix.iter_mut() {
+            value.zeroize();
+        }
+    }
+}
+
+impl Drop for SecretShareMatrix {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SecretShareMatrix {}
+
+/// Owning wrapper around a secret polynomial (`Poly<R>`).
+///
+/// Used for the input to share dealing, the aggregated secret-key and
+/// smudging polynomials, and the final decryption share. The inner
+/// polynomial is erased on drop (delegating to `Poly::zeroize`), including
+/// across early returns and unwinding.
+///
+/// # Security semantics
+///
+/// - [`Zeroize`] delegates to [`Poly::zeroize`].
+/// - The type implements [`ZeroizeOnDrop`] unconditionally (see the manual
+///   [`Drop`] impl).
+/// - Only borrowed access (`inner`, `coefficients`, `ctx`) and consuming
+///   representation conversions that return another `SecretPoly`
+///   ([`SecretPoly::into_ntt`], [`SecretPoly::into_power_basis`]) are
+///   exposed. There is no public raw-polynomial extraction and no
+///   raw-owner `Deref`.
+/// - The final decryption share is a protocol message: it must remain
+///   intact until transmitted/consumed. Zeroization-on-drop is a post-use
+///   defense, not an in-flight erasure.
+///
+/// # Limitations
+///
+/// Copies made outside this wrapper, allocator behavior, swap, core dumps,
+/// and already-recorded external buffers are outside this guarantee;
+/// deliberate `std::mem::forget`/`ManuallyDrop` can bypass destructors.
+#[derive(Clone)]
+pub struct SecretPoly<R: RepresentationTag> {
+    poly: Poly<R>,
+}
+
+impl<R: RepresentationTag> SecretPoly<R> {
+    /// Wrap an owned polynomial, placing it under automatic zeroization.
+    ///
+    /// The value is immediately owned by the protected wrapper; no
+    /// unprotected access to the inner polynomial is exposed.
+    #[must_use]
+    pub fn new(poly: Poly<R>) -> Self {
+        Self { poly }
+    }
+
+    /// The context of the wrapped polynomial.
+    #[must_use]
+    pub fn ctx(&self) -> &Arc<Context> {
+        self.poly.ctx()
+    }
+
+    /// Borrow the RNS coefficient matrix of the wrapped polynomial.
+    #[must_use]
+    pub fn coefficients(&self) -> ndarray::ArrayView2<'_, u64> {
+        self.poly.coefficients()
+    }
+
+    /// Borrow the inner polynomial for protocol arithmetic.
+    ///
+    /// The borrow cannot be consumed into an ordinary secret-bearing
+    /// container; ownership always remains with the protected wrapper.
+    #[must_use]
+    pub fn inner(&self) -> &Poly<R> {
+        &self.poly
+    }
+}
+
+// Redacted `Debug` so that `{:?}` never leaks the polynomial coefficients.
+impl<R: RepresentationTag> std::fmt::Debug for SecretPoly<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretPoly")
+            .field("representation", &self.poly.representation())
+            .field("ctx", &self.poly.ctx())
+            .finish()
+    }
+}
+
+impl<R: RepresentationTag> Zeroize for SecretPoly<R> {
+    fn zeroize(&mut self) {
+        self.poly.zeroize();
+    }
+}
+
+impl<R: RepresentationTag> Drop for SecretPoly<R> {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl<R: RepresentationTag> ZeroizeOnDrop for SecretPoly<R> {}
+
+impl SecretPoly<PowerBasis> {
+    /// Consume the protected polynomial and return its NTT form, still
+    /// protected. Used to prepare the secret input to decryption without
+    /// extracting an unprotected polynomial.
+    #[must_use]
+    pub fn into_ntt(mut self) -> SecretPoly<Ntt> {
+        // The wrapper implements Drop, so the inner polynomial cannot be
+        // moved out directly; swap in an empty default that the wrapper's
+        // drop zeroizes harmlessly.
+        SecretPoly::new(std::mem::take(&mut self.poly).into_ntt())
+    }
+}
+
+impl SecretPoly<Ntt> {
+    /// Consume the protected NTT polynomial and return its PowerBasis form,
+    /// still protected.
+    #[must_use]
+    pub fn into_power_basis(mut self) -> SecretPoly<PowerBasis> {
+        SecretPoly::new(std::mem::take(&mut self.poly).into_power_basis())
+    }
+}
 
 /// Manager for threshold BFV share operations.
 ///
@@ -106,42 +318,52 @@ impl ShareManager {
         })
     }
 
-    /// Utility to create a Zeroizing<Poly> from coefficients.
+    /// Utility to create a protected polynomial from coefficients.
     ///
     /// # Arguments
     /// - `coeffs`: Coefficients that can be converted to Poly (Box<[i64]>, Array2<u64>, etc.)
     /// - `ctx`: BFV context to use for the polynomial
     ///
     /// # Returns
-    /// A Zeroizing<Poly> in PowerBasis representation
+    /// A [`SecretPoly`] in PowerBasis representation, zeroized automatically
+    /// on drop.
     pub fn coeffs_to_poly<T>(
         &self,
         coeffs: T,
         ctx: &Arc<Context>,
-    ) -> Result<Zeroizing<Poly<PowerBasis>>, Error>
+    ) -> Result<SecretPoly<PowerBasis>, Error>
     where
         Poly<PowerBasis>: TryConvertFrom<T>,
     {
         let poly = Poly::<PowerBasis>::try_convert_from(coeffs, ctx, false)?;
-        Ok(Zeroizing::new(poly))
+        Ok(SecretPoly::new(poly))
     }
 
     /// Convenience method using level 0 context from parameters.
-    pub fn coeffs_to_poly_level0<T>(&self, coeffs: T) -> Result<Zeroizing<Poly<PowerBasis>>, Error>
+    pub fn coeffs_to_poly_level0<T>(&self, coeffs: T) -> Result<SecretPoly<PowerBasis>, Error>
     where
         Poly<PowerBasis>: TryConvertFrom<T>,
     {
         let ctx = self.params.context_at_level(0)?;
         self.coeffs_to_poly(coeffs, ctx)
     }
-    /// Convert a vector of BigInt coefficients into a Poly in full RNS representation
-    /// at level 0 using the BFV context.
+    /// Convert a vector of BigInt coefficients into a protected Poly in full
+    /// RNS representation at level 0 using the BFV context.
+    ///
+    /// The coefficients are read from the protected
+    /// [`SmudgingCoefficients`] wrapper so that generated smudging material
+    /// never crosses a raw `&[BigInt]` boundary.
     pub fn bigints_to_poly(
         &self,
-        bigints: &[BigInt],
-    ) -> Result<Zeroizing<Poly<PowerBasis>>, Error> {
+        bigints: &SmudgingCoefficients,
+    ) -> Result<SecretPoly<PowerBasis>, Error> {
         let ctx = self.params.context_at_level(0)?;
-        Poly::<PowerBasis>::from_bigints(bigints, ctx).map_err(Error::from)
+        let mut poly =
+            Poly::<PowerBasis>::from_bigints(bigints.as_slice(), ctx).map_err(Error::from)?;
+        // `Zeroizing` cannot be unwrapped by value in this zeroize version;
+        // swap the polynomial out so the guard drops an empty default and the
+        // secret moves directly into the protected wrapper.
+        Ok(SecretPoly::new(std::mem::take(&mut *poly)))
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
@@ -149,9 +371,9 @@ impl ShareManager {
     #[allow(clippy::indexing_slicing)]
     pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
         &mut self,
-        poly: Zeroizing<Poly<PowerBasis>>,
+        poly: SecretPoly<PowerBasis>,
         rng: &mut R,
-    ) -> Result<Vec<Array2<u64>>, Error> {
+    ) -> Result<Vec<SecretShareMatrix>, Error> {
         let moduli: Vec<u64> = poly.ctx().moduli().to_vec();
 
         let min_modulus = moduli
@@ -171,11 +393,11 @@ impl ShareManager {
             .map(|_| crate::trbfv::shamir::fork_seed(rng))
             .collect();
 
-        let return_vec: Result<Vec<Array2<u64>>, Error> = moduli
+        let return_vec: Result<Vec<SecretShareMatrix>, Error> = moduli
             .par_iter()
             .zip(coeff_rows.par_iter())
             .enumerate()
-            .map(|(i, (m, p))| -> Result<Array2<u64>, Error> {
+            .map(|(i, (m, p))| -> Result<SecretShareMatrix, Error> {
                 // Get rng from seed
                 let mut rng = ChaCha20Rng::from_seed(seeds[i]);
 
@@ -186,19 +408,35 @@ impl ShareManager {
                     prime: BigInt::from(*m),
                 };
 
-                let mut m_data: Vec<u64> = Vec::new();
+                // The flat per-modulus coefficient buffer is secret once the
+                // first share is appended; it is guarded so that any error
+                // path drops it through the guard.
+                let mut m_data: Zeroizing<Vec<u64>> = Zeroizing::new(Vec::new());
 
                 // For each coeff in the polynomial p under the current modulus m
                 for c in p.iter() {
                     // Split the coeff into n shares (u64 -> BigInt is infallible)
                     let secret = BigInt::from(*c);
 
-                    let c_shares = shamir.split(secret, &mut rng)?;
+                    // `split`'s sharing-polynomial scratch is guarded inside
+                    // shamir.rs, but the returned per-coefficient share BigInts
+                    // are raw (the public Shamir API returns `Vec<(usize,
+                    // BigInt)>`). They are moved into the best-effort guard
+                    // before the u64 conversion below so they are zeroized on
+                    // both the success and the error path of this iteration
+                    // (same limitation as `SmudgingCoefficients` docs).
+                    let c_shares = ZeroizingBigInts::new(
+                        shamir
+                            .split(secret, &mut rng)?
+                            .into_iter()
+                            .map(|(_, value)| value)
+                            .collect(),
+                    );
 
                     // For each share convert to u64; shares are reduced modulo
                     // the (u64) prime, so this only fails on malformed input
-                    let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
-                    for (_, c_share) in c_shares.iter() {
+                    let mut c_vec: Zeroizing<Vec<u64>> = Zeroizing::new(Vec::with_capacity(self.n));
+                    for c_share in c_shares.as_slice() {
                         c_vec.push(c_share.to_u64().ok_or_else(|| {
                             Error::DefaultError("Shamir share does not fit in u64".to_string())
                         })?);
@@ -206,14 +444,33 @@ impl ShareManager {
                     m_data.extend_from_slice(&c_vec);
                 }
 
-                // convert flat vector of coeffs to array2
-                let arr_matrix = Array2::from_shape_vec((self.params.degree(), self.n), m_data)
-                    .map_err(|_| {
-                        Error::DefaultError("Failed to create coefficient matrix".to_string())
-                    })?;
+                // Convert flat vector of coeffs to array2. The raw shaped
+                // matrix must not be left to drop unzeroized once the
+                // transposed copy is made, so it is placed under the protected
+                // share-matrix wrapper BEFORE the copy: `source` zeroizes the
+                // original allocation on drop and the transposed copy is owned
+                // by the returned protected wrapper, so every owner of the
+                // secret buffer is protected. (Consuming via `reversed_axes`
+                // would avoid the copy but yields a strided matrix whose rows
+                // are not contiguous, which `aggregate_collected_shares`
+                // requires via `as_slice`.) The matrix is shaped infallibly
+                // (`Array2::zeros`) and filled from the guarded `m_data` while
+                // the guard is still alive; `Array2::from_shape_vec` would
+                // require moving the raw `Vec<u64>` out of the guard first,
+                // which would drop it unzeroized if shaping failed.
+                if m_data.len() != self.params.degree() * self.n {
+                    return Err(Error::DefaultError(
+                        "Failed to create coefficient matrix".to_string(),
+                    ));
+                }
+                let mut matrix = Array2::zeros((self.params.degree(), self.n));
+                for (slot, value) in matrix.iter_mut().zip(m_data.iter()) {
+                    *slot = *value;
+                }
+                let source = SecretShareMatrix::new(matrix);
                 // reverse the columns and rows
-                let reversed_axes = arr_matrix.t();
-                Ok(reversed_axes.to_owned())
+                let reversed_axes = source.matrix.t().to_owned();
+                Ok(SecretShareMatrix::new(reversed_axes))
             })
             .collect();
 
@@ -239,10 +496,13 @@ impl ShareManager {
     /// # Arguments
     /// - `sk_sss_collected`: One share matrix per contributing party (at most `n`;
     ///   fewer is allowed, e.g. when some parties aborted during dealing).
-    ///   Each Array2<u64> has one row per modulus and one column per coefficient.
+    ///   Each [`SecretShareMatrix`] has one row per modulus and one column per
+    ///   coefficient. The same API is used for secret-key and smudging-noise
+    ///   shares; both are sensitive material and are zeroized automatically
+    ///   on drop.
     ///
     /// # Returns
-    /// A polynomial representing the aggregated secret key material
+    /// A protected polynomial representing the aggregated secret key material
     ///
     /// # Errors
     /// Returns an error if no shares are provided, if more than `n` matrices are
@@ -251,8 +511,8 @@ impl ShareManager {
     /// malformed, never reduced).
     pub fn aggregate_collected_shares(
         &self,
-        sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
-    ) -> Result<Poly<PowerBasis>, Error> {
+        sk_sss_collected: &[SecretShareMatrix], // collected sk sss shares from other parties
+    ) -> Result<SecretPoly<PowerBasis>, Error> {
         if sk_sss_collected.is_empty() {
             return Err(Error::share_count_mismatch(0, 1));
         }
@@ -282,11 +542,12 @@ impl ShareManager {
         // `moduli().get(row)` lookup is expected to succeed, but in keeping with
         // the workspace convention it stays fallible rather than indexed.
         for (party_idx, item) in sk_sss_collected.iter().enumerate() {
-            for (row, item_row) in item.rows().into_iter().enumerate() {
+            for row in 0..item.nrows() {
                 let q_i =
                     self.params.moduli().get(row).copied().ok_or_else(|| {
                         Error::DefaultError("modulus index out of range".to_string())
                     })?;
+                let item_row = item.row(row)?;
                 for (col, &value) in item_row.iter().enumerate() {
                     if value >= q_i {
                         return Err(Error::malformed_shares(
@@ -303,9 +564,12 @@ impl ShareManager {
 
         // Sum the share matrices row-wise modulo each RNS modulus, copying
         // only once into the result polynomial (instead of cloning each
-        // contribution into its own Poly and adding those).
-        let mut sum = Array2::<u64>::zeros(expected_shape);
-        for (row, mut acc_row) in sum.outer_iter_mut().enumerate() {
+        // contribution into its own Poly and adding those). The accumulator
+        // holds secret material as soon as the first row is added, so it is
+        // held in the protected share-matrix wrapper until it is moved into
+        // the protected result polynomial.
+        let mut sum = SecretShareMatrix::new(Array2::<u64>::zeros(expected_shape));
+        for (row, mut acc_row) in sum.matrix.outer_iter_mut().enumerate() {
             let &modulus = self
                 .params
                 .moduli()
@@ -316,7 +580,7 @@ impl ShareManager {
                 .as_slice_mut()
                 .ok_or_else(|| Error::DefaultError("non-contiguous row".to_string()))?;
             for item in sk_sss_collected {
-                let item_row = item.row(row);
+                let item_row = item.row(row)?;
                 let share = item_row
                     .as_slice()
                     .ok_or_else(|| Error::DefaultError("non-contiguous row".to_string()))?;
@@ -325,8 +589,8 @@ impl ShareManager {
         }
 
         let mut sum_poly = Poly::<PowerBasis>::zero(ctx);
-        sum_poly.set_coefficients(sum);
-        Ok(sum_poly)
+        sum_poly.set_coefficients(std::mem::take(&mut sum.matrix));
+        Ok(SecretPoly::new(sum_poly))
     }
 
     /// Compute decryption share from ciphertext and secret/smudging polynomials.
@@ -342,16 +606,18 @@ impl ShareManager {
     ///   aggregated the same way from the dealt noise shares
     ///
     /// # Returns
-    /// A decryption share polynomial that contributes to the final decryption.
-    /// The ciphertext must be at level 0; non-zero levels return
-    /// [`Error::InvalidCiphertext`].
+    /// A protected decryption share polynomial that contributes to the final
+    /// decryption. The ciphertext must be at level 0; non-zero levels return
+    /// [`Error::InvalidCiphertext`]. The returned share remains protected
+    /// (it is not erased before transmission or reconstruction) and is
+    /// zeroized automatically once dropped after use.
     #[allow(clippy::indexing_slicing)] // BFV ciphertext always has exactly 2 components
     pub fn decryption_share(
         &self,
         ciphertext: Arc<Ciphertext>,
-        sk_i: Poly<Ntt>,
-        es_i: Poly<PowerBasis>,
-    ) -> Result<Poly<PowerBasis>, Error> {
+        sk_i: SecretPoly<Ntt>,
+        es_i: SecretPoly<PowerBasis>,
+    ) -> Result<SecretPoly<PowerBasis>, Error> {
         if ciphertext.params != self.params {
             return Err(Error::invalid_ciphertext(
                 "ciphertext parameters do not match this ShareManager's parameters",
@@ -375,9 +641,19 @@ impl ShareManager {
                 &"ciphertext context",
             ));
         }
-        let c1sk = (&c1 * &sk_i).into_power_basis();
-        let d_share_poly = c0 + c1sk + es_i;
-        Ok(d_share_poly)
+        // c1sk = c1 * sk_i is the secret part of the decryption share; it is
+        // computed from the borrowed inner polynomial and guarded immediately.
+        let mut c1sk = Zeroizing::new((&c1 * sk_i.inner()).into_power_basis());
+        // `&c0 + &*c1sk` would clone the left operand into a fresh allocation
+        // (fhe-math/src/rq/ops.rs `impl Add<&Poly> for &Poly`), leaving an
+        // abandoned unzeroized copy behind. Instead the guarded `c1sk` buffer
+        // is moved into the result (`std::mem::take` swaps in a default the
+        // guard zeroizes harmlessly) and `c0` is added in place, so the secret
+        // polynomial keeps exactly one owner under its guard throughout.
+        let mut d_share = Zeroizing::new(std::mem::take(&mut *c1sk));
+        *d_share += &c0;
+        *d_share += es_i.inner();
+        Ok(SecretPoly::new(std::mem::take(&mut *d_share)))
     }
 
     /// Decrypt ciphertext from collected decryption shares.
@@ -386,7 +662,7 @@ impl ShareManager {
     /// decryption shares from exactly `threshold + 1` parties to reconstruct the plaintext.
     ///
     /// # Arguments
-    /// - `d_share_polys`: Exactly `threshold + 1` decryption shares
+    /// - `d_share_polys`: Exactly `threshold + 1` protected decryption shares
     /// - `reconstructing_parties`: The 1-based party indices the shares came from, in
     ///   the same order as `d_share_polys`; indices must be distinct and in `1..=n`
     /// - `ciphertext`: The original ciphertext being decrypted
@@ -398,7 +674,7 @@ impl ShareManager {
     #[allow(clippy::indexing_slicing)]
     pub fn decrypt_from_shares(
         &self,
-        d_share_polys: Vec<Poly<PowerBasis>>,
+        d_share_polys: Vec<SecretPoly<PowerBasis>>,
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
@@ -451,21 +727,33 @@ impl ShareManager {
                 ));
             }
         }
-        let recovered: Result<Vec<Vec<u64>>, Error> = (0..self.params.moduli().len())
+        // Each recovered row (one per modulus) holds secret coefficients; the
+        // row is placed under a zeroizing guard before it is returned, so the
+        // per-modulus allocations never live unguarded in the collected
+        // vector — including on error paths, where the already-collected rows
+        // zeroize when the `Result` value is dropped.
+        let recovered: Result<Vec<Zeroizing<Vec<u64>>>, Error> = (0..self.params.moduli().len())
             .into_par_iter()
-            .map(|m| {
+            .map(|m| -> Result<Zeroizing<Vec<u64>>, Error> {
                 let shamir_ss = ShamirSecretSharing::new(
                     self.threshold,
                     self.n,
                     BigInt::from(self.params.moduli[m]),
                 );
 
-                // Parallelize coefficient recovery within each modulus
-                (0..self.params.degree())
+                // Parallelize coefficient recovery within each modulus. Every
+                // task returns its recovered coefficient under a `Zeroizing`
+                // guard so that a partial collected vector zeroizes the
+                // already-recovered coefficients if any task fails, instead of
+                // dropping a raw partial `Vec<u64>`.
+                let collected = (0..self.params.degree())
                     .into_par_iter()
-                    .map(|i| -> Result<u64, Error> {
-                        let mut shamir_open_vec_mod: Vec<(usize, BigInt)> =
-                            Vec::with_capacity(self.threshold + 1);
+                    .map(|i| -> Result<Zeroizing<u64>, Error> {
+                        // Recovered share values are secret; the value buffer
+                        // is guarded so error paths drop it through the guard
+                        // (the party indices are public x-coordinates).
+                        let mut shamir_indices: Vec<usize> = Vec::with_capacity(self.threshold + 1);
+                        let mut shamir_values = ZeroizingBigInts::with_capacity(self.threshold + 1);
                         for (party_idx, d_share_poly) in
                             reconstructing_parties.iter().zip(d_share_polys.iter())
                         {
@@ -473,30 +761,69 @@ impl ShareManager {
                             let coeff_arr = coeffs.row(m);
                             let coeff = coeff_arr[i];
                             // Use provided party indices directly as the Shamir x-coordinates
-                            let coeff_formatted = (*party_idx, BigInt::from(coeff));
-                            shamir_open_vec_mod.push(coeff_formatted);
+                            shamir_indices.push(*party_idx);
+                            shamir_values.push(BigInt::from(coeff));
                         }
-                        let shamir_result = shamir_ss.recover(&shamir_open_vec_mod)?;
-                        shamir_result.to_u64().ok_or_else(|| {
-                            Error::DefaultError(
-                                "recovered Shamir coefficient does not fit in u64".to_string(),
-                            )
-                        })
+                        // `recover_from_parts` returns the raw recovered
+                        // coefficient per the public Shamir API; it is
+                        // placed under the best-effort guard before the
+                        // u64 conversion so the BigInt is zeroized on both
+                        // the success and the error path.
+                        let shamir_result = ZeroizingBigInts::new(vec![
+                            shamir_ss
+                                .recover_from_parts(&shamir_indices, shamir_values.as_slice())?,
+                        ]);
+                        let converted = shamir_result
+                            .as_slice()
+                            .first()
+                            .and_then(|value| value.to_u64())
+                            .ok_or_else(|| {
+                                Error::DefaultError(
+                                    "recovered Shamir coefficient does not fit in u64".to_string(),
+                                )
+                            })?;
+                        Ok(Zeroizing::new(converted))
                     })
-                    .collect::<Result<Vec<u64>, Error>>()
+                    .collect::<Result<Vec<Zeroizing<u64>>, Error>>()?;
+                // The raw intermediate vec is moved straight into the guard;
+                // the per-coefficient guards above zeroize as they drop after
+                // the row is assembled.
+                Ok(Zeroizing::new(
+                    collected.iter().map(|value| **value).collect::<Vec<u64>>(),
+                ))
             })
             .collect();
-        let m_data: Vec<u64> = recovered?.into_iter().flatten().collect();
+        // Flat recovered-coefficient buffer is secret; guarded across the
+        // assembly into the result polynomial. The rows are copied in while
+        // their guards are still active and are zeroized when `recovered`
+        // drops.
+        let mut m_data = Zeroizing::new(Vec::with_capacity(
+            self.params.moduli().len() * self.params.degree(),
+        ));
+        for row in recovered? {
+            m_data.extend_from_slice(&row);
+        }
 
-        // scale result poly
-        let arr_matrix =
-            Array2::from_shape_vec((self.params.moduli().len(), self.params.degree()), m_data)
-                .map_err(|_| {
-                    Error::DefaultError("Failed to assemble recovered coefficients".to_string())
-                })?;
+        // scale result poly: the shaped recovered-coefficient matrix is secret
+        // and is held in the protected wrapper until it is moved into the
+        // result polynomial, so error paths drop it through the guard. The
+        // matrix is shaped infallibly (`Array2::zeros`) and filled from the
+        // guarded `m_data` while the guard is still alive;
+        // `Array2::from_shape_vec` would require moving the raw `Vec<u64>` out
+        // of the guard first, which would drop it unzeroized if shaping failed.
+        if m_data.len() != self.params.moduli().len() * self.params.degree() {
+            return Err(Error::DefaultError(
+                "Failed to assemble recovered coefficients".to_string(),
+            ));
+        }
+        let mut matrix = Array2::zeros((self.params.moduli().len(), self.params.degree()));
+        for (slot, value) in matrix.iter_mut().zip(m_data.iter()) {
+            *slot = *value;
+        }
+        let mut arr_matrix = SecretShareMatrix::new(matrix);
         let ctx = self.params.context_at_level(0)?;
-        let mut result_poly = Poly::<PowerBasis>::zero(ctx);
-        result_poly.set_coefficients(arr_matrix);
+        let mut result_poly = Zeroizing::new(Poly::<PowerBasis>::zero(ctx));
+        result_poly.set_coefficients(std::mem::take(&mut arr_matrix.matrix));
 
         let plaintext_ctx = Context::new_arc(&self.params.moduli()[..1], self.params.degree())
             .map_err(Error::MathError)?;
@@ -540,7 +867,7 @@ impl ShareManager {
                 .map(|vi| vi + ptxt_u64)
                 .collect_vec(),
         );
-        let mut w = v[..params.degree()].to_vec();
+        let mut w = Zeroizing::new(v[..params.degree()].to_vec());
         let q = Modulus::new(params.moduli()[0]).map_err(Error::MathError)?;
         q.reduce_vec(&mut w);
         Modulus::new(ptxt_u64)
@@ -548,11 +875,12 @@ impl ShareManager {
             .reduce_vec(&mut w);
 
         let poly =
-            Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt();
+            Poly::<PowerBasis>::try_convert_from(w.as_slice(), ciphertext.c[0].ctx(), false)?
+                .into_ntt();
 
         let pt = Plaintext {
             params: params.clone(),
-            value: crate::bfv::PlaintextValues::Small(w.into_boxed_slice()),
+            value: crate::bfv::PlaintextValues::Small(std::mem::take(&mut *w).into_boxed_slice()),
             encoding: None,
             poly_ntt: poly,
             level: ciphertext.level,
@@ -574,6 +902,26 @@ mod tests {
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
+
+    // Error-path reachability notes for the zeroization guards (issue #126):
+    //
+    // - The infallible `Array2::zeros` + guarded-copy matrix assembly in
+    //   `generate_secret_shares_from_poly` and `decrypt_from_shares` keeps the
+    //   flat `Zeroizing<Vec<u64>>` buffer guarded until after shaping. The
+    //   preserved length-mismatch error is unreachable through the public API:
+    //   the coefficient matrix always has exactly `degree` entries per modulus
+    //   row, so `m_data.len()` always equals the shape product (the checks are
+    //   defensive behavior preservation).
+    // - The per-coefficient recovery tasks in `decrypt_from_shares` return
+    //   `Zeroizing<u64>` so a partial collection zeroizes on task failure.
+    //   That error path is likewise unreachable through the public API:
+    //   `recover_from_parts` is always called with exactly `threshold + 1`
+    //   distinct indices (enforced by `decrypt_from_shares`), and every
+    //   recovered value is a canonical residue below a u64 prime, so the
+    //   `to_u64` conversion cannot fail.
+    // - The Shamir interpolation error path (non-invertible Lagrange
+    //   denominator) IS reachable and is covered by
+    //   `crates/fhe/src/trbfv/shamir.rs::test_recover_rejects_bad_shares`.
 
     fn test_params() -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
@@ -692,7 +1040,9 @@ mod tests {
         let degree = params.degree();
         let bigints: Vec<BigInt> = (0..degree).map(|i| BigInt::from(i as i64)).collect();
 
-        let poly = manager.bigints_to_poly(&bigints).unwrap();
+        let poly = manager
+            .bigints_to_poly(&SmudgingCoefficients::new(bigints))
+            .unwrap();
         assert_eq!(poly.coefficients().ncols(), degree);
         assert_eq!(poly.coefficients().nrows(), params.moduli().len());
     }
@@ -704,7 +1054,7 @@ mod tests {
 
         // Wrong number of coefficients
         let bigints = vec![BigInt::from(1), BigInt::from(2)]; // Too few
-        let result = manager.bigints_to_poly(&bigints);
+        let result = manager.bigints_to_poly(&SmudgingCoefficients::new(bigints));
         assert!(result.is_err());
     }
 
@@ -731,11 +1081,11 @@ mod tests {
         let sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
         let ctx = params.context_at_level(0).unwrap();
         //Setting smuding noise to be zero in this test
-        let es_poly = Poly::<PowerBasis>::zero(ctx);
+        let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
 
         // Compute decryption share
         let decryption_share = manager
-            .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
+            .decryption_share(ct.clone(), sk_poly.clone().into_ntt(), es_poly)
             .unwrap();
 
         // This unit test uses the full secret as the "aggregate" for both
@@ -772,15 +1122,16 @@ mod tests {
         let context = params.context_at_level(0).unwrap();
         let result = manager.decryption_share(
             Arc::new(ciphertext),
-            (*secret_poly).clone().into_ntt(),
-            Poly::<PowerBasis>::zero(context),
+            secret_poly.clone().into_ntt(),
+            SecretPoly::new(Poly::<PowerBasis>::zero(context)),
         );
 
         assert_eq!(
-            result,
-            Err(Error::invalid_ciphertext(
+            result.unwrap_err().to_string(),
+            Error::invalid_ciphertext(
                 "threshold BFV decryption requires ciphertext level 0, got level 1",
-            ))
+            )
+            .to_string()
         );
     }
 
@@ -796,14 +1147,15 @@ mod tests {
         ciphertext.switch_down().unwrap();
 
         let context = params.context_at_level(0).unwrap();
-        let shares = vec![Poly::<PowerBasis>::zero(context)];
+        let shares = vec![SecretPoly::new(Poly::<PowerBasis>::zero(context))];
         let result = manager.decrypt_from_shares(shares, vec![1], Arc::new(ciphertext));
 
         assert_eq!(
-            result,
-            Err(Error::invalid_ciphertext(
+            result.unwrap_err().to_string(),
+            Error::invalid_ciphertext(
                 "threshold BFV decryption requires ciphertext level 0, got level 1",
-            ))
+            )
+            .to_string()
         );
     }
 
@@ -832,21 +1184,20 @@ mod tests {
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = vec![vec![], vec![], vec![]];
+        let mut sk_sss_collected: Vec<Vec<SecretShareMatrix>> = vec![vec![], vec![], vec![]];
 
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let mut sk_poly_sums: Vec<SecretPoly<PowerBasis>> = (0..n)
+            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
+            .collect();
 
         for i in 0..n {
             let mut node_share_m = Array2::zeros((0, params.degree()));
             for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
-                    .unwrap();
+                node_share_m.push_row(sk_sss_m.row(i).unwrap()).unwrap();
             }
-            sk_sss_collected[i].push(node_share_m);
+            sk_sss_collected[i].push(SecretShareMatrix::new(node_share_m));
 
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
+            let share_slice: &[SecretShareMatrix] = &sk_sss_collected[i];
             sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
         }
 
@@ -865,7 +1216,7 @@ mod tests {
         for i in 0..(threshold + 1) {
             let ctx = params.context_at_level(0).unwrap();
             //Setting smuding noise to be zero in this test
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
 
             let share = managers[i]
                 .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
@@ -915,22 +1266,21 @@ mod tests {
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> =
+        let mut sk_sss_collected: Vec<Vec<SecretShareMatrix>> =
             vec![vec![], vec![], vec![], vec![], vec![]];
 
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let mut sk_poly_sums: Vec<SecretPoly<PowerBasis>> = (0..n)
+            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
+            .collect();
 
         for i in 0..n {
             let mut node_share_m = Array2::zeros((0, params.degree()));
             for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
-                    .unwrap();
+                node_share_m.push_row(sk_sss_m.row(i).unwrap()).unwrap();
             }
-            sk_sss_collected[i].push(node_share_m);
+            sk_sss_collected[i].push(SecretShareMatrix::new(node_share_m));
 
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
+            let share_slice: &[SecretShareMatrix] = &sk_sss_collected[i];
             sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
         }
 
@@ -950,7 +1300,7 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
                 .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
                 .unwrap();
@@ -997,21 +1347,20 @@ mod tests {
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
+        let mut sk_sss_collected: Vec<Vec<SecretShareMatrix>> = (0..n).map(|_| vec![]).collect();
 
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let mut sk_poly_sums: Vec<SecretPoly<PowerBasis>> = (0..n)
+            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
+            .collect();
 
         for i in 0..n {
             let mut node_share_m = Array2::zeros((0, params.degree()));
             for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
-                    .unwrap();
+                node_share_m.push_row(sk_sss_m.row(i).unwrap()).unwrap();
             }
-            sk_sss_collected[i].push(node_share_m);
+            sk_sss_collected[i].push(SecretShareMatrix::new(node_share_m));
 
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
+            let share_slice: &[SecretShareMatrix] = &sk_sss_collected[i];
             sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
         }
 
@@ -1033,7 +1382,7 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
                 .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
                 .unwrap();
@@ -1080,21 +1429,20 @@ mod tests {
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
+        let mut sk_sss_collected: Vec<Vec<SecretShareMatrix>> = (0..n).map(|_| vec![]).collect();
 
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let mut sk_poly_sums: Vec<SecretPoly<PowerBasis>> = (0..n)
+            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
+            .collect();
 
         for i in 0..n {
             let mut node_share_m = Array2::zeros((0, params.degree()));
             for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
-                    .unwrap();
+                node_share_m.push_row(sk_sss_m.row(i).unwrap()).unwrap();
             }
-            sk_sss_collected[i].push(node_share_m);
+            sk_sss_collected[i].push(SecretShareMatrix::new(node_share_m));
 
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
+            let share_slice: &[SecretShareMatrix] = &sk_sss_collected[i];
             sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
         }
 
@@ -1113,7 +1461,7 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
                 .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
                 .unwrap();
@@ -1170,15 +1518,22 @@ mod tests {
         assert!(manager.aggregate_collected_shares(&[]).is_err());
 
         // More matrices than parties
-        let matrices: Vec<Array2<u64>> = (0..6).map(|_| Array2::zeros(shape)).collect();
+        let matrices: Vec<SecretShareMatrix> = (0..6)
+            .map(|_| SecretShareMatrix::new(Array2::zeros(shape)))
+            .collect();
         assert!(manager.aggregate_collected_shares(&matrices).is_err());
 
         // Wrong shape (rows and columns swapped)
-        let bad = vec![Array2::zeros((params.degree(), params.moduli().len()))];
+        let bad = vec![SecretShareMatrix::new(Array2::zeros((
+            params.degree(),
+            params.moduli().len(),
+        )))];
         assert!(manager.aggregate_collected_shares(&bad).is_err());
 
         // Valid: between 1 and n well-formed matrices
-        let ok: Vec<Array2<u64>> = (0..3).map(|_| Array2::zeros(shape)).collect();
+        let ok: Vec<SecretShareMatrix> = (0..3)
+            .map(|_| SecretShareMatrix::new(Array2::zeros(shape)))
+            .collect();
         assert!(manager.aggregate_collected_shares(&ok).is_ok());
     }
 
@@ -1196,7 +1551,7 @@ mod tests {
             let mut shares = Array2::zeros(shape);
             shares[[row, 3]] = q_i;
             let err = manager
-                .aggregate_collected_shares(std::slice::from_ref(&shares))
+                .aggregate_collected_shares(std::slice::from_ref(&SecretShareMatrix::new(shares)))
                 .expect_err("coefficient equal to the row modulus must be rejected");
             let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err
             else {
@@ -1230,7 +1585,7 @@ mod tests {
         let mut shares = Array2::zeros(shape);
         shares[[0, 0]] = u64::MAX;
         let err = manager
-            .aggregate_collected_shares(std::slice::from_ref(&shares))
+            .aggregate_collected_shares(std::slice::from_ref(&SecretShareMatrix::new(shares)))
             .expect_err("u64::MAX share entry must be rejected");
         let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err else {
             panic!("expected MalformedShares, got: {err}");
@@ -1255,14 +1610,17 @@ mod tests {
         for (row, &q_i) in moduli.iter().enumerate() {
             shares.row_mut(row).fill(q_i - 1);
         }
+        // Keep a test-only copy for the equality assertion; the wrapped
+        // matrix moves into the protected wrapper for aggregation.
+        let expected = shares.clone();
         let result = manager
-            .aggregate_collected_shares(std::slice::from_ref(&shares))
+            .aggregate_collected_shares(std::slice::from_ref(&SecretShareMatrix::new(shares)))
             .expect("maximal canonical residues must be accepted");
 
         // A single aggregate preserves the input values exactly (the sum of a
         // single matrix is the matrix itself) and the accumulator does not
         // reduce them beyond the canonical residues supplied.
-        assert_eq!(result.coefficients().into_owned(), shares);
+        assert_eq!(result.coefficients().into_owned(), expected);
     }
 
     #[test]
@@ -1280,7 +1638,10 @@ mod tests {
         let mut invalid = Array2::zeros(shape);
         invalid[[1, 5]] = q1;
         let err = manager
-            .aggregate_collected_shares(&[valid, invalid])
+            .aggregate_collected_shares(&[
+                SecretShareMatrix::new(valid),
+                SecretShareMatrix::new(invalid),
+            ])
             .expect_err("out-of-range entry in a later contribution must be rejected");
         let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err else {
             panic!("expected MalformedShares, got: {err}");
@@ -1306,7 +1667,9 @@ mod tests {
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
         let ctx = params.context_at_level(0).unwrap();
-        let shares: Vec<Poly<PowerBasis>> = (0..3).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let shares: Vec<SecretPoly<PowerBasis>> = (0..3)
+            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
+            .collect();
 
         // Duplicate index
         let result = manager.decrypt_from_shares(shares.clone(), vec![1, 2, 2], ct.clone());
@@ -1321,14 +1684,129 @@ mod tests {
         assert!(result.is_err());
 
         // Wrong share count: more than threshold + 1 is rejected
-        let four: Vec<Poly<PowerBasis>> = (0..4).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let four: Vec<SecretPoly<PowerBasis>> = (0..4)
+            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
+            .collect();
         let result = manager.decrypt_from_shares(four, vec![1, 2, 3, 4], ct.clone());
         assert!(result.is_err());
 
         // Fewer than threshold + 1 is rejected
-        let two: Vec<Poly<PowerBasis>> = (0..2).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let two: Vec<SecretPoly<PowerBasis>> = (0..2)
+            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
+            .collect();
         let result = manager.decrypt_from_shares(two, vec![1, 2], ct);
         assert!(result.is_err());
+    }
+
+    // ── Protected wrapper contracts (issue #126) ─────────────────────────
+
+    /// Compile-time assertion that a type implements the unconditional
+    /// `ZeroizeOnDrop` contract (normal drops, early returns, and unwinding).
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+    #[test]
+    fn secret_share_matrix_zeroize_clears_every_entry() {
+        // The wrapper must overwrite every u64 through safe mutable iteration.
+        let matrix = Array2::from_shape_vec((2, 3), (1u64..=6).collect()).unwrap();
+        let mut wrapper = SecretShareMatrix::new(matrix);
+        wrapper.zeroize();
+        for row in 0..wrapper.nrows() {
+            let row_view = wrapper.row(row).unwrap();
+            assert!(
+                row_view.iter().all(|&value| value == 0),
+                "zeroize must clear every matrix entry, row {row} still holds secrets"
+            );
+        }
+        // Drop always runs zeroization; the in-place test above covers the
+        // buffer contents while owned because the backing allocation cannot
+        // be inspected after release (reading freed memory is forbidden).
+        assert_zeroize_on_drop::<SecretShareMatrix>();
+    }
+
+    #[test]
+    fn secret_share_matrix_clone_is_an_independent_protected_owner() {
+        let matrix = Array2::from_shape_vec((2, 2), vec![7, 8, 9, 10]).unwrap();
+        let original = SecretShareMatrix::new(matrix);
+        let mut clone = original.clone();
+        clone.zeroize();
+        // Zeroizing the clone must not affect the original owner.
+        for row in 0..original.nrows() {
+            let row_view = original.row(row).unwrap();
+            let expected = [7 + row as u64 * 2, 8 + row as u64 * 2];
+            assert_eq!(row_view.to_vec(), expected);
+        }
+    }
+
+    #[test]
+    fn secret_share_matrix_row_access_is_fallible() {
+        let matrix = Array2::from_shape_vec((2, 2), vec![1, 2, 3, 4]).unwrap();
+        let wrapper = SecretShareMatrix::new(matrix);
+        assert_eq!(wrapper.dim(), (2, 2));
+        assert_eq!(wrapper.row(1).unwrap().to_vec(), vec![3, 4]);
+        assert!(
+            wrapper.row(2).is_err(),
+            "out-of-bounds row must be an error, not a panic"
+        );
+        assert!(wrapper.row(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn secret_share_matrix_debug_is_redacted() {
+        let matrix = Array2::from_shape_vec((2, 2), vec![123456, 654321, 111111, 222222]).unwrap();
+        let wrapper = SecretShareMatrix::new(matrix);
+        let debug = format!("{wrapper:?}");
+        assert!(
+            !debug.contains("123456") && !debug.contains("654321"),
+            "Debug must not leak matrix values: {debug}"
+        );
+    }
+
+    #[test]
+    fn secret_poly_zeroize_clears_coefficients() {
+        let params = test_params();
+        let ctx = params.context_at_level(0).unwrap();
+        let coeffs: Vec<i64> = (1..=params.degree() as i64).collect();
+        let poly = Poly::<PowerBasis>::try_convert_from(&coeffs, ctx, false).unwrap();
+        let mut wrapper = SecretPoly::new(poly);
+        wrapper.zeroize();
+        assert!(
+            wrapper.coefficients().iter().all(|&value| value == 0),
+            "zeroize must clear every RNS coefficient"
+        );
+        assert_zeroize_on_drop::<SecretPoly<PowerBasis>>();
+    }
+
+    #[test]
+    fn secret_poly_representation_conversions_stay_protected() {
+        let params = test_params();
+        let ctx = params.context_at_level(0).unwrap();
+        let coeffs: Vec<i64> = (1..=params.degree() as i64).collect();
+        let poly = Poly::<PowerBasis>::try_convert_from(&coeffs, ctx, false).unwrap();
+        let wrapper = SecretPoly::new(poly);
+
+        // into_ntt must return another protected owner, never a raw Poly.
+        let ntt: SecretPoly<Ntt> = wrapper.into_ntt();
+        assert_eq!(
+            ntt.coefficients().dim(),
+            (params.moduli().len(), params.degree())
+        );
+        let power_basis: SecretPoly<PowerBasis> = ntt.into_power_basis();
+        assert_eq!(power_basis.ctx(), ctx);
+        assert_zeroize_on_drop::<SecretPoly<Ntt>>();
+    }
+
+    #[test]
+    fn secret_poly_debug_is_redacted() {
+        let params = test_params();
+        let ctx = params.context_at_level(0).unwrap();
+        let coeffs: Vec<i64> = (1..=params.degree() as i64).collect();
+        let poly = Poly::<PowerBasis>::try_convert_from(&coeffs, ctx, false).unwrap();
+        let wrapper = SecretPoly::new(poly);
+        let debug = format!("{wrapper:?}");
+        assert!(
+            !debug.contains("32767") && !debug.contains("coeff"),
+            "Debug must not leak polynomial coefficients: {debug}"
+        );
     }
 
     #[test]
@@ -1356,21 +1834,20 @@ mod tests {
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
+        let mut sk_sss_collected: Vec<Vec<SecretShareMatrix>> = (0..n).map(|_| vec![]).collect();
 
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let mut sk_poly_sums: Vec<SecretPoly<PowerBasis>> = (0..n)
+            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
+            .collect();
 
         for i in 0..n {
             let mut node_share_m = Array2::zeros((0, params.degree()));
             for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
-                    .unwrap();
+                node_share_m.push_row(sk_sss_m.row(i).unwrap()).unwrap();
             }
-            sk_sss_collected[i].push(node_share_m);
+            sk_sss_collected[i].push(SecretShareMatrix::new(node_share_m));
 
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
+            let share_slice: &[SecretShareMatrix] = &sk_sss_collected[i];
             sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
         }
 
@@ -1392,7 +1869,7 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
                 .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
                 .unwrap();
@@ -1412,5 +1889,54 @@ mod tests {
         let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
             .expect("Decoding plaintext failed");
         assert_eq!(decoded, plaintext_data);
+    }
+
+    #[test]
+    fn test_generated_shares_recover_to_secret_per_modulus() {
+        // Regression coverage for the guarded generation path (issue #126
+        // review findings 1 and 3a): each per-modulus matrix is moved under a
+        // protected owner before the transposed copy is made, and the
+        // per-coefficient share BigInts returned by the raw Shamir API are
+        // guarded during the u64 conversion. Recovering `threshold + 1`
+        // parties' rows per modulus must reproduce the dealt secret
+        // polynomial exactly, coefficient for coefficient, which pins the
+        // matrix layout the guarded transpose must produce.
+        let params = test_params();
+        let mut manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
+        let coeffs: Vec<i64> = (0..params.degree() as i64).map(|i| i % 7).collect();
+        let secret_poly =
+            SecretPoly::new(Poly::<PowerBasis>::try_convert_from(&coeffs, ctx, false).unwrap());
+
+        let shares = manager
+            .generate_secret_shares_from_poly(secret_poly, &mut rng())
+            .unwrap();
+        assert_eq!(shares.len(), params.moduli().len());
+        for share in &shares {
+            assert_eq!(share.dim(), (manager.n, params.degree()));
+        }
+
+        // Recover the dealt secret per modulus from the rows of
+        // `threshold + 1` distinct parties. The 1-based party ids are the
+        // Shamir x-coordinates; row `party - 1` of each per-modulus matrix is
+        // that party's share.
+        let parties: Vec<usize> = vec![1, 2, 3];
+        for (m, q) in params.moduli().iter().copied().enumerate() {
+            let shamir_ss = ShamirSecretSharing::new(manager.threshold, manager.n, BigInt::from(q));
+            for (i, &expected) in coeffs.iter().enumerate() {
+                let values: Vec<BigInt> = parties
+                    .iter()
+                    .map(|party| BigInt::from(shares[m].row(party - 1).unwrap()[i]))
+                    .collect();
+                let recovered = shamir_ss
+                    .recover_from_parts(&parties, &values)
+                    .expect("threshold + 1 distinct shares must recover");
+                assert_eq!(
+                    recovered,
+                    BigInt::from(expected),
+                    "modulus {m}, coefficient {i}: recovered share must equal the dealt secret"
+                );
+            }
+        }
     }
 }

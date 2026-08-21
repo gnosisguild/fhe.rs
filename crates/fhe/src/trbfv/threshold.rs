@@ -42,16 +42,14 @@ use crate::Error;
 ///    - Combine threshold shares to recover plaintext
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
-use crate::trbfv::shares::ShareManager;
+use crate::trbfv::shares::{SecretPoly, SecretShareMatrix, ShareManager};
 use crate::trbfv::smudging::{
-    Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
+    Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingCoefficients,
+    SmudgingNoiseGenerator,
 };
-use fhe_math::rq::{Ntt, Poly, PowerBasis};
+use fhe_math::rq::{Ntt, PowerBasis};
 use fhe_traits::FheParametrized;
-use ndarray::Array2;
-use num_bigint::BigInt;
 use rand::{CryptoRng, RngCore};
-use zeroize::Zeroizing;
 
 /// Threshold BFV configuration and operations.
 /// This struct serves as the main coordinator for threshold BFV operations, managing
@@ -90,15 +88,17 @@ impl TRBFV {
     /// Each party will receive one share for each polynomial coefficient.
     ///
     /// # Arguments
-    /// * `poly` - Polynomial to be shared (typically secret key polynomial)
+    /// * `poly` - Polynomial to be shared (typically secret key polynomial), in
+    ///   the protected [`SecretPoly`] wrapper
     ///
     /// # Returns
-    /// Vector of share matrices, one per BFV modulus. Each matrix has dimensions [n, degree].
+    /// Protected share matrices, one per BFV modulus. Each matrix has
+    /// dimensions [n, degree] and is zeroized automatically on drop.
     pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
         &self,
-        poly: Zeroizing<Poly<PowerBasis>>,
+        poly: SecretPoly<PowerBasis>,
         rng: &mut R,
-    ) -> Result<Vec<Array2<u64>>, Error> {
+    ) -> Result<Vec<SecretShareMatrix>, Error> {
         let mut share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.generate_secret_shares_from_poly(poly, rng)
     }
@@ -109,14 +109,16 @@ impl TRBFV {
     /// secret key material needed for decryption.
     ///
     /// # Arguments
-    /// * `sk_sss_collected` - Shares collected from other parties
+    /// * `sk_sss_collected` - Shares collected from other parties, as protected
+    ///   [`SecretShareMatrix`] values
     ///
     /// # Returns
-    /// Aggregated polynomial representing the combined secret key material
+    /// Aggregated protected polynomial representing the combined secret key
+    /// material, zeroized automatically on drop
     pub fn aggregate_collected_shares(
         &self,
-        sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
-    ) -> Result<Poly<PowerBasis>, Error> {
+        sk_sss_collected: &[SecretShareMatrix], // collected sk sss shares from other parties
+    ) -> Result<SecretPoly<PowerBasis>, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.aggregate_collected_shares(sk_sss_collected)
     }
@@ -144,14 +146,15 @@ impl TRBFV {
     /// * `rng` - Cryptographically secure random number generator
     ///
     /// # Returns
-    /// Vector of smudging error coefficients
+    /// The smudging error coefficients in the protected [`SmudgingCoefficients`]
+    /// wrapper (best-effort BigInt cleanup on drop)
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         num_ciphertexts: usize,
         mult_depth: u32,
         lambda: Lambda,
         rng: &mut R,
-    ) -> Result<Vec<BigInt>, Error> {
+    ) -> Result<SmudgingCoefficients, Error> {
         // Forward to the explicit API using all n parties as the accepted set.
         self.generate_smudging_error_with_participant_count(
             num_ciphertexts,
@@ -187,7 +190,8 @@ impl TRBFV {
     /// * `rng` - Cryptographically secure random number generator
     ///
     /// # Returns
-    /// Vector of smudging error coefficients
+    /// The smudging error coefficients in the protected [`SmudgingCoefficients`]
+    /// wrapper (best-effort BigInt cleanup on drop)
     ///
     /// # Errors
     /// Returns error if:
@@ -200,7 +204,7 @@ impl TRBFV {
         accepted_participant_count: usize,
         lambda: Lambda,
         rng: &mut R,
-    ) -> Result<Vec<BigInt>, Error> {
+    ) -> Result<SmudgingCoefficients, Error> {
         let config = SmudgingBoundCalculatorConfig::new_multiplicative(
             self.params.clone(),
             self.n,
@@ -230,14 +234,15 @@ impl TRBFV {
     ///   by the Lagrange coefficients during reconstruction and breaks correctness
     ///
     /// # Returns
-    /// Decryption share polynomial. The ciphertext must be at level 0;
+    /// Protected decryption share polynomial (zeroized automatically on drop
+    /// after use). The ciphertext must be at level 0;
     /// non-zero levels return [`Error::InvalidCiphertext`].
     pub fn decryption_share(
         &self,
         ciphertext: Arc<Ciphertext>,
-        sk_i: Poly<Ntt>,
-        es_i: Poly<PowerBasis>,
-    ) -> Result<Poly<PowerBasis>, Error> {
+        sk_i: SecretPoly<Ntt>,
+        es_i: SecretPoly<PowerBasis>,
+    ) -> Result<SecretPoly<PowerBasis>, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.decryption_share(ciphertext, sk_i, es_i)
     }
@@ -248,7 +253,7 @@ impl TRBFV {
     /// decryption shares from exactly `threshold + 1` parties.
     ///
     /// # Arguments
-    /// * `d_share_polys` - Exactly `threshold + 1` decryption shares
+    /// * `d_share_polys` - Exactly `threshold + 1` protected decryption shares
     /// * `reconstructing_parties` - The 1-based party indices the shares came from,
     ///   in the same order as `d_share_polys`; indices must be distinct and in `1..=n`
     /// * `ciphertext` - The original ciphertext being decrypted
@@ -258,7 +263,7 @@ impl TRBFV {
     /// non-zero levels return [`Error::InvalidCiphertext`].
     pub fn decrypt(
         &self,
-        d_share_polys: Vec<Poly<PowerBasis>>,
+        d_share_polys: Vec<SecretPoly<PowerBasis>>,
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
@@ -358,7 +363,7 @@ mod tests {
         //TODO: add a test that calculates the empirical variance from the coefficients, so as to
         //compare with the variance used when generating the coefficients.
         for (poly_idx, poly) in result.iter().enumerate() {
-            for (coeff_idx, coeff) in poly.iter().enumerate() {
+            for (coeff_idx, coeff) in poly.as_slice().iter().enumerate() {
                 assert!(
                     !coeff.is_zero(),
                     "Zero coefficient at poly[{poly_idx}][{coeff_idx}] used as smudging noise"
@@ -379,7 +384,7 @@ mod tests {
         let result = trbfv.generate_smudging_error(10, 0, Lambda::secure(80).unwrap(), &mut rng);
 
         for (poly_idx, poly) in result.iter().enumerate() {
-            for (coeff_idx, coeff) in poly.iter().enumerate() {
+            for (coeff_idx, coeff) in poly.as_slice().iter().enumerate() {
                 assert!(
                     !coeff.is_zero(),
                     "Zero coefficient at poly[{poly_idx}][{coeff_idx}], this is hardly likely to happen"
@@ -421,7 +426,7 @@ mod tests {
         assert!(result.is_ok(), "valid participant count should succeed");
         let coeffs = result.unwrap();
         assert_eq!(coeffs.len(), params.degree());
-        assert!(coeffs.iter().any(|c| !c.is_zero()));
+        assert!(coeffs.as_slice().iter().any(|c| !c.is_zero()));
     }
 
     #[test]
@@ -523,10 +528,10 @@ mod tests {
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();
         let ctx = params.context_at_level(0).unwrap();
-        let es_poly = Poly::<PowerBasis>::zero(ctx);
+        let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
 
         let decryption_share = trbfv
-            .decryption_share(ct, (*sk_poly).clone().into_ntt(), es_poly)
+            .decryption_share(ct, sk_poly.clone().into_ntt(), es_poly)
             .unwrap();
 
         assert_eq!(decryption_share.coefficients().ncols(), params.degree());
@@ -567,10 +572,10 @@ mod tests {
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
                 .unwrap();
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
 
             let share = trbfv_instances[i]
-                .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
+                .decryption_share(ct.clone(), sk_poly.clone().into_ntt(), es_poly)
                 .unwrap();
             decryption_shares.push(share);
         }

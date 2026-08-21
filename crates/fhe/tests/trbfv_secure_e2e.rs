@@ -10,11 +10,12 @@ use fhe::bfv::{
 use fhe::mbfv::{AggregateIter, PublicKeyShare};
 use fhe::trbfv::smudging::SmudgingNoiseGenerator;
 use fhe::trbfv::{
-    Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, TRBFV,
+    Lambda, SecretPoly, SecretShareMatrix, ShareManager, SmudgingBoundCalculator,
+    SmudgingBoundCalculatorConfig, SmudgingCoefficients, TRBFV,
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use ndarray::{Array, Array2, ArrayView};
+use ndarray::{Array, ArrayView};
 use num_bigint::BigInt;
 use rayon::prelude::*;
 
@@ -90,12 +91,12 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
 
     struct Party {
         pk_share: PublicKeyShare,
-        sk_sss: Vec<Array2<u64>>,
-        esi_sss: Vec<Array2<u64>>,
-        sk_sss_collected: Vec<Array2<u64>>,
-        es_sss_collected: Vec<Array2<u64>>,
-        sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
+        sk_sss: Vec<SecretShareMatrix>,
+        esi_sss: Vec<SecretShareMatrix>,
+        sk_sss_collected: Vec<SecretShareMatrix>,
+        es_sss_collected: Vec<SecretShareMatrix>,
+        sk_poly_sum: SecretPoly<PowerBasis>,
+        es_poly_sum: SecretPoly<PowerBasis>,
         // Per-party BFV keys (DKG preset) for encrypted share transport.
         sk_dkg: SecretKey,
         pk_dkg: PublicKey,
@@ -121,7 +122,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                 .generate_secret_shares_from_poly(sk_poly, &mut rng)
                 .unwrap();
 
-            let esi_coeffs: Vec<BigInt> = match &smudging_bound {
+            let esi_coeffs: SmudgingCoefficients = match &smudging_bound {
                 None => trbfv
                     .generate_smudging_error(
                         NUM_SUMMED,
@@ -130,7 +131,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                         &mut rng,
                     )
                     .unwrap(),
-                Some(bound) => vec![bound.clone(); DEGREE],
+                Some(bound) => SmudgingCoefficients::new(vec![bound.clone(); DEGREE]),
             };
             let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
             let esi_sss = share_manager
@@ -147,8 +148,8 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                 esi_sss,
                 sk_sss_collected: Vec::with_capacity(NUM_PARTIES),
                 es_sss_collected: Vec::with_capacity(NUM_PARTIES),
-                sk_poly_sum: Poly::<PowerBasis>::zero(ctx),
-                es_poly_sum: Poly::<PowerBasis>::zero(ctx),
+                sk_poly_sum: SecretPoly::new(Poly::<PowerBasis>::zero(ctx)),
+                es_poly_sum: SecretPoly::new(Poly::<PowerBasis>::zero(ctx)),
                 sk_dkg,
                 pk_dkg,
             }
@@ -168,10 +169,11 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                 .enumerate()
                 .map(|(receiver_idx, receiver_pk)| {
                     let mut rng = rand::rng();
-                    let mut encrypt_rows = |sss: &[Array2<u64>]| -> Vec<Ciphertext> {
+                    let mut encrypt_rows = |sss: &[SecretShareMatrix]| -> Vec<Ciphertext> {
                         sss.iter()
                             .map(|share_matrix| {
-                                let share_vec: Vec<u64> = share_matrix.row(receiver_idx).to_vec();
+                                let share_vec: Vec<u64> =
+                                    share_matrix.row(receiver_idx).unwrap().to_vec();
                                 let pt = Plaintext::try_encode(
                                     &share_vec,
                                     Encoding::poly(),
@@ -196,7 +198,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
             for sender_encrypted in encrypted_shares.iter() {
                 let (encrypted_sk_shares, encrypted_esi_shares) = &sender_encrypted[receiver_idx];
 
-                let decrypt_rows = |cts: &[Ciphertext], sk: &SecretKey| -> Array2<u64> {
+                let decrypt_rows = |cts: &[Ciphertext], sk: &SecretKey| -> SecretShareMatrix {
                     let mut rows = Array::zeros((0, DEGREE));
                     for ct in cts {
                         let pt = sk.try_decrypt(ct).unwrap();
@@ -204,7 +206,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                             Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         rows.push_row(ArrayView::from(&decrypted)).unwrap();
                     }
-                    rows
+                    SecretShareMatrix::new(rows)
                 };
 
                 let sk_rows = decrypt_rows(encrypted_sk_shares, &party.sk_dkg);
@@ -250,7 +252,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
     let reconstructing: Vec<usize> = (1..=NUM_PARTIES).filter(|i| i % 2 == 0).collect();
     assert_eq!(reconstructing.len(), THRESHOLD + 1);
 
-    let d_share_polys: Vec<Poly<PowerBasis>> = reconstructing
+    let d_share_polys: Vec<SecretPoly<PowerBasis>> = reconstructing
         .iter()
         .map(|&party_id| {
             let party = &parties[party_id - 1];

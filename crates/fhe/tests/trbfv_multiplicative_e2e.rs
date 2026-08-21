@@ -13,15 +13,16 @@ use std::sync::Arc;
 
 use fhe::bfv::{BfvParameters, BfvParametersBuilder, Ciphertext, Encoding, Plaintext, SecretKey};
 use fhe::mbfv::AggregateIter;
-use fhe::trbfv::{Lambda, ShareManager, TRBFV};
+use fhe::trbfv::{
+    Lambda, SecretPoly, SecretShareMatrix, ShareManager, SmudgingCoefficients, TRBFV,
+};
 use fhe::trlbfv::{
     AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
     aggregate_relinearization_key,
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
-use ndarray::{Array, Array2};
-use num_bigint::BigInt;
+use ndarray::Array;
 use rand::{Rng, SeedableRng, rng};
 use rand_chacha::ChaCha8Rng;
 
@@ -113,7 +114,7 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
         aggregate_relinearization_key(&rlk_shares, &aggregated_pk).expect("RLK aggregation");
 
     // ── Smudging noise (pre-shared, one‑time per party) ╌─────────────
-    let smudging_noises: Vec<Vec<BigInt>> = (0..N)
+    let smudging_noises: Vec<SmudgingCoefficients> = (0..N)
         .map(|_| {
             trbfv
                 .generate_smudging_error_with_participant_count(
@@ -129,12 +130,12 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
 
     // ── Shamir share deal / collect / aggregate (SK + noise) ╌─────────
     struct Party {
-        sk_sss: Vec<Array2<u64>>,
-        esi_sss: Vec<Array2<u64>>,
-        sk_sss_collected: Vec<Array2<u64>>,
-        es_sss_collected: Vec<Array2<u64>>,
-        sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
+        sk_sss: Vec<SecretShareMatrix>,
+        esi_sss: Vec<SecretShareMatrix>,
+        sk_sss_collected: Vec<SecretShareMatrix>,
+        es_sss_collected: Vec<SecretShareMatrix>,
+        sk_poly_sum: SecretPoly<PowerBasis>,
+        es_poly_sum: SecretPoly<PowerBasis>,
     }
 
     let ctx_level0 = params.context_at_level(0).expect("level-0 context");
@@ -164,8 +165,8 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
                 esi_sss,
                 sk_sss_collected: Vec::with_capacity(N),
                 es_sss_collected: Vec::with_capacity(N),
-                sk_poly_sum: Poly::<PowerBasis>::zero(ctx_level0),
-                es_poly_sum: Poly::<PowerBasis>::zero(ctx_level0),
+                sk_poly_sum: SecretPoly::new(Poly::<PowerBasis>::zero(ctx_level0)),
+                es_poly_sum: SecretPoly::new(Poly::<PowerBasis>::zero(ctx_level0)),
             }
         })
         .collect();
@@ -174,16 +175,16 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
     // share matrix (simulated as local access — no encrypted transport).
     // Collect all rows before pushing to avoid double borrows.
     for receiver_idx in 0..N {
-        let mut sk_rows: Vec<Array2<u64>> = Vec::with_capacity(N);
-        let mut es_rows: Vec<Array2<u64>> = Vec::with_capacity(N);
+        let mut sk_rows: Vec<SecretShareMatrix> = Vec::with_capacity(N);
+        let mut es_rows: Vec<SecretShareMatrix> = Vec::with_capacity(N);
         for sender in parties.iter() {
-            let collect_row = |sss: &[Array2<u64>]| -> Array2<u64> {
+            let collect_row = |sss: &[SecretShareMatrix]| -> SecretShareMatrix {
                 let mut rows = Array::zeros((0, params.degree()));
                 for share_matrix in sss {
-                    let row = share_matrix.row(receiver_idx);
+                    let row = share_matrix.row(receiver_idx).expect("valid share row");
                     rows.push_row(row).expect("append share row");
                 }
-                rows
+                SecretShareMatrix::new(rows)
             };
             sk_rows.push(collect_row(&sender.sk_sss));
             es_rows.push(collect_row(&sender.esi_sss));
@@ -228,7 +229,7 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
     let reconstructing: Vec<usize> = vec![1, 2]; // threshold + 1 = 2
     assert_eq!(reconstructing.len(), THRESHOLD + 1);
 
-    let d_share_polys: Vec<Poly<PowerBasis>> = reconstructing
+    let d_share_polys: Vec<SecretPoly<PowerBasis>> = reconstructing
         .iter()
         .map(|&party_id| {
             let party = &parties[party_id - 1];

@@ -146,22 +146,52 @@ use fhe::trbfv::TRBFV;
 // Setup threshold scheme
 let trbfv = TRBFV::new(n_parties, threshold, params.clone())?;
 
-// Each party: deal secret shares of its key and smudging noise contributions
+// Each party: deal secret shares of its key and smudging noise contributions.
+// `sk_shares` is a `Vec<SecretShareMatrix>` and `es_coeffs` a
+// `SmudgingCoefficients`; both are zeroized automatically on drop.
 let sk_shares = trbfv.generate_secret_shares_from_poly(sk_poly, &mut rng)?;
 let es_coeffs = trbfv.generate_smudging_error(num_ciphertexts, mult_depth, lambda, &mut rng)?;
 
 // Each party: aggregate the share matrices received from the other parties
-// into its share of the joint secret key (and likewise for the noise)
+// into its share of the joint secret key (and likewise for the noise).
+// The results are protected `SecretPoly<PowerBasis>` values.
 let sk_poly_sum = trbfv.aggregate_collected_shares(&collected_sk_shares)?;
 let es_poly_sum = trbfv.aggregate_collected_shares(&collected_es_shares)?;
 
-// Each decrypting party: compute a decryption share from its aggregated shares
+// Each decrypting party: compute a decryption share from its aggregated
+// shares. The returned share is a protected `SecretPoly<PowerBasis>`: it
+// stays intact until transmitted/reconstructed and is zeroized on drop.
 let d_share = trbfv.decryption_share(ciphertext.clone(), sk_poly_sum.into_ntt(), es_poly_sum)?;
 
 // Combine exactly threshold + 1 decryption shares; reconstructing_parties
 // holds the 1-based indices of the parties the shares came from
 let plaintext = trbfv.decrypt(d_share_polys, reconstructing_parties, ciphertext)?;
 ```
+
+### Protected (zeroizing) wrappers
+
+Secret material crossing the `TRBFV`/`ShareManager` flow is held in owning
+wrappers that zeroize automatically on drop (`ZeroizeOnDrop`, including early
+returns and unwinding): generated and collected share matrices are
+[`SecretShareMatrix`](shares.rs) values, aggregated key/noise
+polynomials and decryption shares are [`SecretPoly`](shares.rs)
+values, and generated smudging coefficients are
+[`SmudgingCoefficients`](smudging.rs) values. The wrappers expose
+only borrowed views (e.g. `SecretShareMatrix::row` for transport) and
+representation conversions that return another protected owner; there is no
+raw-value escape. The one exception is the low-level re-exported
+[`ShamirSecretSharing`](shamir.rs) API (`split`/`recover`), which still
+returns and consumes raw `BigInt` values by design; callers who use it
+directly are responsible for cleaning up that material (best-effort guards
+are applied on the TRBFV-side call sites that convert those values). This is
+a hardening measure, not an independently audited guarantee: copies made
+outside the library (transport buffers), allocator behavior, swap, core
+dumps, and deliberate `mem::forget`/`ManuallyDrop` are outside its scope. For
+`BigInt`-backed values the cleanup is best effort: `num-bigint` does not
+expose its private limb allocations for overwriting before deallocation.
+Callers hold protected values, use them for transport/reconstruction, and let
+them drop; explicit `Zeroize::zeroize` is optional hygiene, never a required
+part of the API contract.
 
 ## Security Considerations
 
