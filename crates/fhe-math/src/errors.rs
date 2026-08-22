@@ -29,6 +29,21 @@ pub enum Error {
     #[error("Incorrect representation: got {0:?}, expected {1:?}.")]
     IncorrectRepresentation(Representation, Representation),
 
+    /// Indicates that a polynomial coefficient matrix has the wrong shape.
+    #[error(
+        "Invalid polynomial dimensions: expected ({expected_rows}, {expected_columns}), got ({actual_rows}, {actual_columns})."
+    )]
+    InvalidPolynomialDimensions {
+        /// Expected number of coefficient rows.
+        expected_rows: usize,
+        /// Expected number of coefficients per row.
+        expected_columns: usize,
+        /// Actual number of coefficient rows.
+        actual_rows: usize,
+        /// Actual number of coefficients per row.
+        actual_columns: usize,
+    },
+
     /// Indicates that the seed size is incorrect.
     #[error("Invalid seed: got {0} bytes, expected {1} bytes.")]
     InvalidSeedSize(usize, usize),

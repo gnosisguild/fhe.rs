@@ -1,6 +1,6 @@
 # fhe.rs
 
-Ring-LWE-based fully homomorphic encryption library in Rust. Workspace with 4 crates under `crates/`: `fhe` (BFV, TRBFV, TRLBFV, LBFV, MBFV scheme implementations), `fhe-math` (RNS, NTT, modular and polynomial arithmetic), `fhe-traits` (shared HE traits), `fhe-util` (utilities).
+Ring-LWE-based fully homomorphic encryption library in Rust. Workspace with 5 crates under `crates/`: `fhe` (BFV, TRBFV, TRLBFV, LBFV, MBFV scheme implementations), `fhe-math` (RNS, NTT, modular and polynomial arithmetic), `fhe-traits` (shared HE traits), `fhe-util` (utilities), and `shamir-rns` (independent prime-field Shamir sharing over u64 residues).
 
 > Area rules live in [`.rules/`](.rules). Load the relevant rule before changing code in that area — see **Touch → update** below. OpenCode agents and skills live in [`.opencode/`](.opencode); see **Development workflow**.
 
@@ -34,6 +34,7 @@ cargo fmt --all                        # formatting
 - `crates/fhe-math/src/{rns,ntt,rq}/` — core math operations
 - `crates/fhe-traits/` — traits for HE schemes
 - `crates/fhe-util/` — utilities
+- `crates/shamir-rns/` — runtime prime fields and core Shamir sharing; no fhe* dependencies
 
 ## Code generation
 
@@ -82,10 +83,10 @@ Update the canonical `.rules/*.md` in the same change when your edit makes a rul
 **Touch → update:**
 
 - `conventions.md` — `**/*.rs` (only when conventions change, not every edit)
-- `cryptography.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`
-- `mathematics.md` — `crates/fhe-math/src/**`
+- `cryptography.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`, `crates/shamir-rns/**`
+- `mathematics.md` — `crates/fhe-math/src/**`, `crates/shamir-rns/**`
 - `protobuf.md` — `**/build.rs`, `**/*.proto`, `**/src/proto/**`
-- `testing.md` — `**/tests/**`, `**/benches/**`, `.github/workflows/**`
+- `testing.md` — `**/tests/**`, `**/benches/**`, `.github/workflows/**`, `crates/shamir-rns/**`
 - `harness.md` — `.rules/**`, `.opencode/**`, `AGENTS.md`, `CLAUDE.md`
 - `witness.md` — `crates/fhe/src/{lbfv,trlbfv}/**` (the `_extended` witness APIs)
 

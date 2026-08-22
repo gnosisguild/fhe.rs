@@ -160,11 +160,155 @@ pub struct PolyRaw {
 
 impl<R: RepresentationTag> Zeroize for Poly<R> {
     fn zeroize(&mut self) {
-        if let Some(coeffs) = self.coefficients.as_slice_mut() {
-            coeffs.zeroize()
+        for coefficient in self.coefficients.iter_mut() {
+            coefficient.zeroize();
         }
         self.zeroize_shoup()
     }
+}
+
+/// Zeroizes a coefficient slice if an in-place transform unwinds.
+pub(crate) struct UnwindGuard<'a> {
+    slice: &'a mut [u64],
+    armed: bool,
+}
+
+impl<'a> UnwindGuard<'a> {
+    pub(crate) fn new(slice: &'a mut [u64]) -> Self {
+        Self { slice, armed: true }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u64] {
+        self.slice
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u64] {
+        self.slice
+    }
+
+    pub(crate) fn defuse(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UnwindGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.slice.zeroize();
+        }
+    }
+}
+
+/// Zeroizes a freshly-built Shoup coefficient matrix if construction unwinds.
+pub(crate) struct Array2UnwindGuard<'a> {
+    array: &'a mut Array2<u64>,
+    armed: bool,
+}
+
+impl<'a> Array2UnwindGuard<'a> {
+    pub(crate) fn new(array: &'a mut Array2<u64>) -> Self {
+        Self { array, armed: true }
+    }
+
+    pub(crate) fn as_mut_array(&mut self) -> &mut Array2<u64> {
+        self.array
+    }
+
+    pub(crate) fn as_array(&self) -> &Array2<u64> {
+        self.array
+    }
+
+    pub(crate) fn defuse(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Array2UnwindGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            for value in self.array.iter_mut() {
+                value.zeroize();
+            }
+        }
+    }
+}
+
+fn ntt_forward_array(coefficients: &mut Array2<u64>, ctx: &Context, variable_time: bool) {
+    if ctx.degree == 0 {
+        return;
+    }
+    for (mut row, op) in coefficients.outer_iter_mut().zip(ctx.ops.iter()) {
+        if let Some(slice) = row.as_slice_mut() {
+            if variable_time {
+                unsafe { op.forward_vt(slice.as_mut_ptr()) }
+            } else {
+                op.forward(slice)
+            }
+        } else {
+            let mut temporary = Zeroizing::new(Vec::with_capacity(row.len()));
+            temporary.extend(row.iter().copied());
+            let mut temporary_guard = UnwindGuard::new(temporary.as_mut_slice());
+            if variable_time {
+                unsafe { op.forward_vt(temporary_guard.as_mut_slice().as_mut_ptr()) }
+            } else {
+                op.forward(temporary_guard.as_mut_slice())
+            }
+            row.iter_mut()
+                .zip(temporary_guard.as_slice())
+                .for_each(|(destination, source)| *destination = *source);
+            temporary_guard.defuse();
+        }
+    }
+}
+
+fn ntt_backward_array(coefficients: &mut Array2<u64>, ctx: &Context, variable_time: bool) {
+    if ctx.degree == 0 {
+        return;
+    }
+    for (mut row, op) in coefficients.outer_iter_mut().zip(ctx.ops.iter()) {
+        if let Some(slice) = row.as_slice_mut() {
+            if variable_time {
+                unsafe { op.backward_vt(slice.as_mut_ptr()) }
+            } else {
+                op.backward(slice)
+            }
+        } else {
+            let mut temporary = Zeroizing::new(Vec::with_capacity(row.len()));
+            temporary.extend(row.iter().copied());
+            let mut temporary_guard = UnwindGuard::new(temporary.as_mut_slice());
+            if variable_time {
+                unsafe { op.backward_vt(temporary_guard.as_mut_slice().as_mut_ptr()) }
+            } else {
+                op.backward(temporary_guard.as_mut_slice())
+            }
+            row.iter_mut()
+                .zip(temporary_guard.as_slice())
+                .for_each(|(destination, source)| *destination = *source);
+            temporary_guard.defuse();
+        }
+    }
+}
+
+fn compute_coefficients_shoup_from_array(coefficients: &Array2<u64>, ctx: &Context) -> Array2<u64> {
+    let mut coefficients_shoup = Array2::zeros((ctx.q.len(), ctx.degree));
+    if ctx.degree == 0 {
+        return coefficients_shoup;
+    }
+    {
+        let mut guard = Array2UnwindGuard::new(&mut coefficients_shoup);
+        for (mut output_row, source_row, qi) in izip!(
+            guard.as_mut_array().outer_iter_mut(),
+            coefficients.outer_iter(),
+            ctx.q.iter()
+        ) {
+            output_row
+                .iter_mut()
+                .zip(source_row.iter())
+                .for_each(|(output, source)| *output = qi.shoup(*source));
+        }
+        guard.defuse();
+    }
+    coefficients_shoup
 }
 
 impl<R: RepresentationTag> AsRef<Poly<R>> for Poly<R> {
@@ -180,6 +324,22 @@ impl<R: RepresentationTag> AsMut<Poly<R>> for Poly<R> {
 }
 
 impl<R: RepresentationTag> Poly<R> {
+    fn validate_dimensions(mut self) -> Result<Self> {
+        let (actual_rows, actual_columns) = self.coefficients.dim();
+        let expected_rows = self.ctx.q.len();
+        let expected_columns = self.ctx.degree;
+        if (actual_rows, actual_columns) != (expected_rows, expected_columns) {
+            self.zeroize();
+            return Err(Error::InvalidPolynomialDimensions {
+                expected_rows,
+                expected_columns,
+                actual_rows,
+                actual_columns,
+            });
+        }
+        Ok(self)
+    }
+
     /// Creates a polynomial holding the constant 0.
     #[must_use]
     pub fn zero(ctx: &Arc<Context>) -> Self {
@@ -222,30 +382,19 @@ impl<R: RepresentationTag> Poly<R> {
 
     /// Zeroize the shoup coefficients
     fn zeroize_shoup(&mut self) {
-        if let Some(coeffs_shoup) = self
-            .coefficients_shoup
-            .as_mut()
-            .and_then(|f| f.as_slice_mut())
-        {
-            coeffs_shoup.zeroize()
+        if let Some(coeffs_shoup) = self.coefficients_shoup.as_mut() {
+            for coefficient in coeffs_shoup.iter_mut() {
+                coefficient.zeroize();
+            }
         }
     }
 
     /// Compute the Shoup representation of the coefficients.
     fn compute_coefficients_shoup(&mut self) {
-        let mut coefficients_shoup = Array2::zeros((self.ctx.q.len(), self.ctx.degree));
-        izip!(
-            coefficients_shoup.outer_iter_mut(),
-            self.coefficients.outer_iter(),
-            self.ctx.q.iter()
-        )
-        .for_each(|(mut v_shoup, v, qi)| {
-            v_shoup
-                .as_slice_mut()
-                .unwrap()
-                .copy_from_slice(&qi.shoup_vec(v.as_slice().unwrap()))
-        });
-        self.coefficients_shoup = Some(coefficients_shoup)
+        self.coefficients_shoup = Some(compute_coefficients_shoup_from_array(
+            &self.coefficients,
+            &self.ctx,
+        ))
     }
 
     /// Generate a random polynomial.
@@ -301,20 +450,20 @@ impl<R: RepresentationTag> Poly<R> {
         if R::REPRESENTATION == Representation::PowerBasis {
             Ok(Poly::from_parts(p))
         } else if R::REPRESENTATION == Representation::Ntt {
-            Ok(Poly::from_parts(p.into_ntt()))
+            Ok(Poly::from_parts(p.into_ntt()?))
         } else {
-            Ok(Poly::from_parts(p.into_ntt_shoup()))
+            Ok(Poly::from_parts(p.into_ntt_shoup()?))
         }
     }
 
     /// Convert a PowerBasis polynomial into this representation.
-    fn from_power_basis(p: Poly<PowerBasis>) -> Self {
+    fn from_power_basis(p: Poly<PowerBasis>) -> Result<Self> {
         if R::REPRESENTATION == Representation::PowerBasis {
-            Poly::from_parts(p)
+            Ok(Poly::from_parts(p))
         } else if R::REPRESENTATION == Representation::Ntt {
-            Poly::from_parts(p.into_ntt())
+            Ok(Poly::from_parts(p.into_ntt()?))
         } else {
-            Poly::from_parts(p.into_ntt_shoup())
+            Ok(Poly::from_parts(p.into_ntt_shoup()?))
         }
     }
 
@@ -335,7 +484,7 @@ impl<R: RepresentationTag> Poly<R> {
 
         let coefficients = sample_uniform_coefficients_bigint(bound, ctx.degree, rng);
         let poly = Poly::<PowerBasis>::from_bigints(&coefficients, ctx)?;
-        Ok(Self::from_power_basis((*poly).clone()))
+        Self::from_power_basis((*poly).clone())
     }
 
     /// Generate a polynomial with coefficients sampled uniformly from `[-bound, bound]`
@@ -437,7 +586,7 @@ impl<R: RepresentationTag> Poly<R> {
     ) -> Result<Zeroizing<Self>> {
         let mut poly = Poly::<PowerBasis>::zero(ctx);
         poly.set_coefficients(coeff_matrix);
-        Ok(Zeroizing::new(Self::from_power_basis(poly)))
+        Ok(Zeroizing::new(Self::from_power_basis(poly)?))
     }
 
     /// Generate error polynomial for e1 in threshold BFV.
@@ -456,31 +605,12 @@ impl<R: RepresentationTag> Poly<R> {
         self.coefficients.view()
     }
 
-    /// Set a new array2 coeffs
+    /// Set a new coefficient matrix.
+    ///
+    /// The dimensions are validated by consuming representation conversions;
+    /// malformed matrices remain storable here so this setter stays infallible.
     pub fn set_coefficients(&mut self, new_coeffs: Array2<u64>) {
         self.coefficients = new_coeffs;
-    }
-
-    /// Computes the forward Ntt on the coefficients
-    fn ntt_forward(&mut self) {
-        if self.allow_variable_time_computations {
-            izip!(self.coefficients.outer_iter_mut(), self.ctx.ops.iter())
-                .for_each(|(mut v, op)| unsafe { op.forward_vt(v.as_mut_ptr()) });
-        } else {
-            izip!(self.coefficients.outer_iter_mut(), self.ctx.ops.iter())
-                .for_each(|(mut v, op)| op.forward(v.as_slice_mut().unwrap()));
-        }
-    }
-
-    /// Computes the backward Ntt on the coefficients
-    fn ntt_backward(&mut self) {
-        if self.allow_variable_time_computations {
-            izip!(self.coefficients.outer_iter_mut(), self.ctx.ops.iter())
-                .for_each(|(mut v, op)| unsafe { op.backward_vt(v.as_mut_ptr()) });
-        } else {
-            izip!(self.coefficients.outer_iter_mut(), self.ctx.ops.iter())
-                .for_each(|(mut v, op)| op.backward(v.as_slice_mut().unwrap()));
-        }
     }
 
     /// Substitute x by x^i in a polynomial.
@@ -657,25 +787,49 @@ impl Poly<PowerBasis> {
     }
 
     /// Convert into Ntt representation.
-    #[must_use]
-    pub fn into_ntt(mut self) -> Poly<Ntt> {
-        self.ntt_forward();
-        Poly::from_parts(self)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the coefficient matrix does not match its context.
+    #[must_use = "the conversion result must be checked"]
+    pub fn into_ntt(self) -> Result<Poly<Ntt>> {
+        let mut this = self.validate_dimensions()?;
+        let mut guard = Array2UnwindGuard::new(&mut this.coefficients);
+        let ctx = Arc::clone(&this.ctx);
+        let variable_time = this.allow_variable_time_computations;
+        ntt_forward_array(guard.as_mut_array(), &ctx, variable_time);
+        guard.defuse();
+        Ok(Poly::from_parts(this))
     }
 
     /// Convert into NttShoup representation.
-    #[must_use]
-    pub fn into_ntt_shoup(mut self) -> Poly<NttShoup> {
-        self.ntt_forward();
-        self.compute_coefficients_shoup();
-        Poly::from_parts(self)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the coefficient matrix does not match its context.
+    #[must_use = "the conversion result must be checked"]
+    pub fn into_ntt_shoup(self) -> Result<Poly<NttShoup>> {
+        let mut this = self.validate_dimensions()?;
+        let mut guard = Array2UnwindGuard::new(&mut this.coefficients);
+        let ctx = Arc::clone(&this.ctx);
+        let variable_time = this.allow_variable_time_computations;
+        ntt_forward_array(guard.as_mut_array(), &ctx, variable_time);
+        let coefficients_shoup = compute_coefficients_shoup_from_array(guard.as_array(), &ctx);
+        guard.defuse();
+        this.coefficients_shoup = Some(coefficients_shoup);
+        Ok(Poly::from_parts(this))
     }
 }
 
 impl Poly<Ntt> {
     /// Borrowed conversion to PowerBasis.
-    #[must_use]
-    pub fn to_power_basis(&self) -> Poly<PowerBasis> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPolynomialDimensions`](crate::Error::InvalidPolynomialDimensions)
+    /// when the coefficient matrix does not match its context.
+    #[must_use = "the conversion result must be checked"]
+    pub fn to_power_basis(&self) -> Result<Poly<PowerBasis>> {
         self.clone().into_power_basis()
     }
 
@@ -711,42 +865,97 @@ impl Poly<Ntt> {
     }
 
     /// Convert into PowerBasis representation.
-    #[must_use]
-    pub fn into_power_basis(mut self) -> Poly<PowerBasis> {
-        self.ntt_backward();
-        Poly::from_parts(self)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the coefficient matrix does not match its context.
+    #[must_use = "the conversion result must be checked"]
+    pub fn into_power_basis(self) -> Result<Poly<PowerBasis>> {
+        let mut this = self.validate_dimensions()?;
+        let mut guard = Array2UnwindGuard::new(&mut this.coefficients);
+        let ctx = Arc::clone(&this.ctx);
+        let variable_time = this.allow_variable_time_computations;
+        ntt_backward_array(guard.as_mut_array(), &ctx, variable_time);
+        guard.defuse();
+        Ok(Poly::from_parts(this))
     }
 
     /// Convert into NttShoup representation.
-    #[must_use]
-    pub fn into_ntt_shoup(mut self) -> Poly<NttShoup> {
-        self.compute_coefficients_shoup();
-        Poly::from_parts(self)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the coefficient matrix does not match its context.
+    #[must_use = "the conversion result must be checked"]
+    pub fn into_ntt_shoup(self) -> Result<Poly<NttShoup>> {
+        let mut this = self.validate_dimensions()?;
+        let guard = Array2UnwindGuard::new(&mut this.coefficients);
+        let ctx = Arc::clone(&this.ctx);
+        let coefficients_shoup = compute_coefficients_shoup_from_array(guard.as_array(), &ctx);
+        guard.defuse();
+        this.coefficients_shoup = Some(coefficients_shoup);
+        Ok(Poly::from_parts(this))
     }
 }
 
 impl Poly<NttShoup> {
     /// Borrowed conversion to PowerBasis.
-    #[must_use]
-    pub fn to_power_basis(&self) -> Poly<PowerBasis> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPolynomialDimensions`](crate::Error::InvalidPolynomialDimensions)
+    /// when the coefficient matrix does not match its context.
+    #[must_use = "the conversion result must be checked"]
+    pub fn to_power_basis(&self) -> Result<Poly<PowerBasis>> {
         self.clone().into_power_basis()
     }
 
     /// Convert into Ntt representation.
-    #[must_use]
-    pub fn into_ntt(mut self) -> Poly<Ntt> {
-        self.zeroize_shoup();
-        self.coefficients_shoup = None;
-        Poly::from_parts(self)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the coefficient matrix does not match its context.
+    #[must_use = "the conversion result must be checked"]
+    pub fn into_ntt(self) -> Result<Poly<Ntt>> {
+        let mut this = self.validate_dimensions()?;
+        let coefficients_guard = Array2UnwindGuard::new(&mut this.coefficients);
+        if let Some(coefficients_shoup) = this.coefficients_shoup.as_mut() {
+            let mut shoup_guard = Array2UnwindGuard::new(coefficients_shoup);
+            shoup_guard
+                .as_mut_array()
+                .iter_mut()
+                .for_each(Zeroize::zeroize);
+            shoup_guard.defuse();
+        }
+        this.coefficients_shoup = None;
+        coefficients_guard.defuse();
+        Ok(Poly::from_parts(this))
     }
 
     /// Convert into PowerBasis representation.
-    #[must_use]
-    pub fn into_power_basis(mut self) -> Poly<PowerBasis> {
-        self.zeroize_shoup();
-        self.coefficients_shoup = None;
-        self.ntt_backward();
-        Poly::from_parts(self)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the coefficient matrix does not match its context.
+    #[must_use = "the conversion result must be checked"]
+    pub fn into_power_basis(self) -> Result<Poly<PowerBasis>> {
+        let mut this = self.validate_dimensions()?;
+        let mut coefficients_guard = Array2UnwindGuard::new(&mut this.coefficients);
+        let ctx = Arc::clone(&this.ctx);
+        let variable_time = this.allow_variable_time_computations;
+        if let Some(coefficients_shoup) = this.coefficients_shoup.as_mut() {
+            let mut shoup_guard = Array2UnwindGuard::new(coefficients_shoup);
+            shoup_guard
+                .as_mut_array()
+                .iter_mut()
+                .for_each(Zeroize::zeroize);
+            ntt_backward_array(coefficients_guard.as_mut_array(), &ctx, variable_time);
+            shoup_guard.defuse();
+        } else {
+            ntt_backward_array(coefficients_guard.as_mut_array(), &ctx, variable_time);
+        }
+        this.coefficients_shoup = None;
+        coefficients_guard.defuse();
+        Ok(Poly::from_parts(this))
     }
 }
 
@@ -838,17 +1047,18 @@ pub fn variance_to_uniform_bound(variance: &BigUint) -> Result<BigInt> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Context, Ntt, Poly, PowerBasis, Representation, switcher::Switcher,
-        variance_to_uniform_bound,
+        Array2UnwindGuard, Context, Ntt, Poly, PowerBasis, Representation, UnwindGuard,
+        switcher::Switcher, variance_to_uniform_bound,
     };
-    use crate::{rq::SubstitutionExponent, zq::Modulus};
+    use crate::{Error as CrateError, rq::SubstitutionExponent, zq::Modulus};
     use fhe_util::variance;
     use itertools::Itertools;
+    use ndarray::{Array2, ShapeBuilder};
     use num_bigint::BigUint;
     use num_traits::{One, ToPrimitive, Zero};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
-    use std::{error::Error, sync::Arc};
+    use std::{error::Error, panic::AssertUnwindSafe, panic::catch_unwind, sync::Arc};
 
     // Moduli to be used in tests.
     const MODULI: &[u64; 5] = &[
@@ -858,6 +1068,127 @@ mod tests {
         4611686018232352769,
         4611686018171535361,
     ];
+
+    #[test]
+    fn unwind_guards_zeroize_live_buffers() {
+        let mut temporary = zeroize::Zeroizing::new(Vec::with_capacity(4));
+        temporary.extend([9_u64, 10, 11, 12]);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = UnwindGuard::new(temporary.as_mut_slice());
+            std::panic::resume_unwind(Box::new("test temporary transform failure"));
+        }));
+        assert!(result.is_err());
+        assert!(temporary.iter().all(|value| *value == 0));
+
+        let mut values = vec![1_u64, 2, 3, 4];
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = UnwindGuard::new(values.as_mut_slice());
+            std::panic::resume_unwind(Box::new("test source transform failure"));
+        }));
+        assert!(result.is_err());
+        assert!(values.iter().all(|value| *value == 0));
+
+        let mut array = Array2::from_shape_vec((2, 2), vec![5_u64, 6, 7, 8]).unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = Array2UnwindGuard::new(&mut array);
+            std::panic::resume_unwind(Box::new("test output construction failure"));
+        }));
+        assert!(result.is_err());
+        assert!(array.iter().all(|value| *value == 0));
+    }
+
+    #[test]
+    fn non_contiguous_conversion_round_trips() -> Result<(), Box<dyn Error>> {
+        let ctx = Arc::new(Context::new(MODULI, 16)?);
+        let values = (0..MODULI.len() * 16)
+            .map(|value| value as u64)
+            .collect::<Vec<_>>();
+        let mut poly = Poly::<PowerBasis>::zero(&ctx);
+        poly.set_coefficients(Array2::from_shape_vec((MODULI.len(), 16).f(), values)?);
+        let original = poly.clone();
+
+        let result = catch_unwind(AssertUnwindSafe(|| poly.clone().into_ntt()));
+        assert!(result.is_ok());
+        let ntt = result.unwrap().unwrap();
+        assert_eq!(ntt.coefficients().dim(), (MODULI.len(), 16));
+        let power = ntt.clone().into_power_basis()?;
+        assert_eq!(power, original);
+
+        let shoup = original.clone().into_ntt_shoup()?;
+        let power_from_shoup = shoup.into_power_basis()?;
+        assert_eq!(power_from_shoup, original);
+        Ok(())
+    }
+
+    #[test]
+    fn default_poly_conversions_are_no_ops() -> Result<(), Box<dyn Error>> {
+        let ntt = Poly::<PowerBasis>::default().into_ntt()?;
+        let ntt_shoup = ntt.clone().into_ntt_shoup()?;
+        let power = ntt.into_power_basis()?;
+        let power_shoup = power.clone().into_ntt_shoup()?;
+        let _power_from_shoup = ntt_shoup.into_power_basis()?;
+        let _ntt_from_shoup = power_shoup.into_ntt()?;
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_dimensions_are_rejected_by_every_conversion() -> Result<(), Box<dyn Error>> {
+        let ctx = Arc::new(Context::new(MODULI, 16)?);
+        let malformed = || Array2::zeros((MODULI.len() - 1, 16));
+        let expected = CrateError::InvalidPolynomialDimensions {
+            expected_rows: MODULI.len(),
+            expected_columns: 16,
+            actual_rows: MODULI.len() - 1,
+            actual_columns: 16,
+        };
+
+        let mut power = Poly::<PowerBasis>::zero(&ctx);
+        power.set_coefficients(malformed());
+        assert_eq!(power.clone().into_ntt().unwrap_err(), expected);
+        assert_eq!(power.into_ntt_shoup().unwrap_err(), expected);
+
+        let mut ntt = Poly::<PowerBasis>::zero(&ctx).into_ntt()?;
+        ntt.set_coefficients(malformed());
+        assert_eq!(ntt.clone().into_power_basis().unwrap_err(), expected);
+        assert_eq!(ntt.into_ntt_shoup().unwrap_err(), expected);
+
+        let mut ntt_shoup = Poly::<PowerBasis>::zero(&ctx).into_ntt_shoup()?;
+        ntt_shoup.set_coefficients(malformed());
+        assert_eq!(ntt_shoup.clone().into_ntt().unwrap_err(), expected);
+        assert_eq!(ntt_shoup.into_power_basis().unwrap_err(), expected);
+        Ok(())
+    }
+
+    #[test]
+    fn shoup_conversion_matches_elementwise_reference() -> Result<(), Box<dyn Error>> {
+        let ctx = Arc::new(Context::new(MODULI, 16)?);
+        let mut rng = rand::rng();
+        let power = Poly::<PowerBasis>::random(&ctx, &mut rng);
+        let ntt = power.clone().into_ntt()?;
+        let from_power = power.into_ntt_shoup()?;
+        let from_ntt = ntt.clone().into_ntt_shoup()?;
+
+        assert_eq!(from_power.coefficients, from_ntt.coefficients);
+        for output in [&from_power, &from_ntt] {
+            let shoup = output
+                .coefficients_shoup
+                .as_ref()
+                .ok_or("missing Shoup output")?;
+            for ((coefficients, shoup_coefficients), qi) in output
+                .coefficients
+                .outer_iter()
+                .zip(shoup.outer_iter())
+                .zip(ctx.q.iter())
+            {
+                for (coefficient, shoup_coefficient) in
+                    coefficients.iter().zip(shoup_coefficients.iter())
+                {
+                    assert_eq!(*shoup_coefficient, qi.shoup(*coefficient));
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn poly_zero() -> Result<(), Box<dyn Error>> {
@@ -884,7 +1215,7 @@ mod tests {
             let ctx = Arc::new(Context::new(&[*modulus], 16)?);
             let p = Poly::<PowerBasis>::zero(&ctx);
             let q = Poly::<Ntt>::zero(&ctx);
-            assert_eq!(p, q.to_power_basis());
+            assert_eq!(p, q.to_power_basis()?);
             assert_eq!(Vec::<u64>::try_from(&p).unwrap(), &[0; 16]);
             assert_eq!(Vec::<u64>::try_from(&q).unwrap(), &[0; 16]);
         }
@@ -892,7 +1223,7 @@ mod tests {
         let ctx = Arc::new(Context::new(MODULI, 16)?);
         let p = Poly::<PowerBasis>::zero(&ctx);
         let q = Poly::<Ntt>::zero(&ctx);
-        assert_eq!(p, q.to_power_basis());
+        assert_eq!(p, q.to_power_basis()?);
         assert_eq!(Vec::<u64>::try_from(&p).unwrap(), [0; 16 * MODULI.len()]);
         assert_eq!(Vec::<u64>::try_from(&q).unwrap(), [0; 16 * MODULI.len()]);
         assert_eq!(Vec::<BigUint>::from(&p), reference);
@@ -954,13 +1285,17 @@ mod tests {
                 let ctx = Arc::new(Context::new(&[*modulus], 16)?);
                 let p = Poly::<Ntt>::random(&ctx, &mut rng);
                 let p_coefficients = Vec::<u64>::try_from(&p).unwrap();
-                assert_eq!(p_coefficients, p.coefficients().as_slice().unwrap())
+                assert_eq!(p_coefficients, p.coefficients().as_slice().unwrap());
+                let round_trip = p.clone().into_power_basis()?.into_ntt()?;
+                assert_eq!(Vec::<u64>::try_from(&round_trip).unwrap(), p_coefficients);
             }
 
             let ctx = Arc::new(Context::new(MODULI, 16)?);
             let p = Poly::<Ntt>::random(&ctx, &mut rng);
             let p_coefficients = Vec::<u64>::try_from(&p).unwrap();
-            assert_eq!(p_coefficients, p.coefficients().as_slice().unwrap())
+            assert_eq!(p_coefficients, p.coefficients().as_slice().unwrap());
+            let round_trip = p.clone().into_power_basis()?.into_ntt()?;
+            assert_eq!(Vec::<u64>::try_from(&round_trip).unwrap(), p_coefficients);
         }
         Ok(())
     }
@@ -1156,8 +1491,8 @@ mod tests {
         for modulus in MODULI {
             let ctx = Arc::new(Context::new(&[*modulus], 16)?);
             let p = Poly::<PowerBasis>::random(&ctx, &mut rng);
-            let p_ntt = p.clone().into_ntt();
-            let p_ntt_shoup = p.clone().into_ntt_shoup();
+            let p_ntt = p.clone().into_ntt()?;
+            let p_ntt_shoup = p.clone().into_ntt_shoup()?;
             let p_coeffs = Vec::<u64>::try_from(&p).unwrap();
 
             // Substitution by a multiple of 2 * degree, or even numbers, should fail
@@ -1189,11 +1524,11 @@ mod tests {
             assert_eq!(&Vec::<u64>::try_from(&q).unwrap(), &v);
 
             let q_ntt = p_ntt.substitute(&SubstitutionExponent::new(&ctx, 3)?)?;
-            let q_as_ntt = q.clone().into_ntt();
+            let q_as_ntt = q.clone().into_ntt()?;
             assert_eq!(q_as_ntt, q_ntt);
 
             let q_ntt_shoup = p_ntt_shoup.substitute(&SubstitutionExponent::new(&ctx, 3)?)?;
-            let q_as_ntt_shoup = q.clone().into_ntt_shoup();
+            let q_as_ntt_shoup = q.clone().into_ntt_shoup()?;
             assert_eq!(q_as_ntt_shoup, q_ntt_shoup);
 
             // 11 = 3^(-1) % 16
@@ -1218,8 +1553,8 @@ mod tests {
 
         let ctx = Arc::new(Context::new(MODULI, 16)?);
         let p = Poly::<PowerBasis>::random(&ctx, &mut rng);
-        let p_ntt = p.clone().into_ntt();
-        let p_ntt_shoup = p.clone().into_ntt_shoup();
+        let p_ntt = p.clone().into_ntt()?;
+        let p_ntt_shoup = p.clone().into_ntt_shoup()?;
 
         assert_eq!(
             p,

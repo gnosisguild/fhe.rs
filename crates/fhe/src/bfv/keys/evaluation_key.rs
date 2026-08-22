@@ -270,7 +270,7 @@ mod protobuf {
                 let mut monomial =
                     Poly::<PowerBasis>::try_convert_from(&monomial, ciphertext_ctx, true)?;
                 unsafe { monomial.allow_variable_time_computations() }
-                monomials.push(monomial.into_ntt_shoup());
+                monomials.push(monomial.into_ntt_shoup()?);
             }
 
             Ok(EvaluationKey {
@@ -418,7 +418,7 @@ impl EvaluationKeyBuilder {
             let mut monomial =
                 Poly::<PowerBasis>::try_convert_from(&monomial, ciphertext_ctx, true)?;
             unsafe { monomial.allow_variable_time_computations() }
-            ek.monomials.push(monomial.into_ntt_shoup());
+            ek.monomials.push(monomial.into_ntt_shoup()?);
         }
 
         for index in indices {

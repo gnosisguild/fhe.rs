@@ -83,9 +83,9 @@ impl Ciphertext {
         if self.level < self.max_switchable_level() {
             self.seed = None;
             for ci in self.c.iter_mut() {
-                let mut pb = ci.clone().into_power_basis();
+                let mut pb = ci.clone().into_power_basis()?;
                 pb.switch_down()?;
-                *ci = pb.into_ntt();
+                *ci = pb.into_ntt()?;
             }
             self.level += 1
         }

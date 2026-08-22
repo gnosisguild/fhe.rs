@@ -20,7 +20,6 @@ use fhe::{
 
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
-use ndarray::{Array, ArrayView};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
@@ -225,22 +224,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         num_parties as u32,
         {
             for j in 0..num_parties {
-                let mut node_share_m = Array::zeros((0, degree));
-                let mut es_node_share_m = Array::zeros((0, degree));
-                for m in 0..params.moduli().len() {
-                    node_share_m
-                        .push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).unwrap()))
-                        .unwrap();
-                    es_node_share_m
-                        .push_row(ArrayView::from(&parties[j].esi_sss[m].row(i).unwrap()))
-                        .unwrap();
-                }
-                parties[i]
-                    .sk_sss_collected
-                    .push(SecretShareMatrix::new(node_share_m));
-                parties[i]
-                    .es_sss_collected
-                    .push(SecretShareMatrix::new(es_node_share_m));
+                let node_share_rows = (0..params.moduli().len())
+                    .map(|m| parties[j].sk_sss[m].row(i).unwrap())
+                    .collect::<Vec<_>>();
+                let es_node_share_rows = (0..params.moduli().len())
+                    .map(|m| parties[j].esi_sss[m].row(i).unwrap())
+                    .collect::<Vec<_>>();
+                let node_share_m = SecretShareMatrix::from_rows(&node_share_rows).unwrap();
+                let es_node_share_m = SecretShareMatrix::from_rows(&es_node_share_rows).unwrap();
+                parties[i].sk_sss_collected.push(node_share_m);
+                parties[i].es_sss_collected.push(es_node_share_m);
             }
             i += 1;
         }
@@ -290,15 +283,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Measure decryption share generation (average per party)
     let share_generation_start = Instant::now();
 
-    parties.par_iter_mut().for_each(|party| {
-        party.d_share_poly = trbfv
-            .decryption_share(
+    parties
+        .par_iter_mut()
+        .try_for_each(|party| -> fhe::Result<()> {
+            party.d_share_poly = trbfv.decryption_share(
                 tally.clone(),
-                party.sk_poly_sum.clone().into_ntt(),
+                party.sk_poly_sum.clone().into_ntt()?,
                 party.es_poly_sum.clone(),
-            )
-            .unwrap();
-    });
+            )?;
+            Ok(())
+        })?;
 
     let total_share_generation_time = share_generation_start.elapsed();
     let avg_time_per_party = total_share_generation_time.as_millis() as f64 / num_parties as f64;

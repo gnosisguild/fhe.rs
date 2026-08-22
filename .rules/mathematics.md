@@ -2,7 +2,7 @@
 
 ## Scope
 
-`fhe-math` core arithmetic for HE: RNS basis representation/conversion/CRT, NTT transforms, modular reduction/Shoup/Barrett arithmetic, polynomial multiplication/division/centering/degree management, and scalar/coefficient conversions. The BFV implementation follows <https://eprint.iacr.org/2018/117> and <https://eprint.iacr.org/2021/204>.
+`fhe-math` core arithmetic for HE: RNS basis representation/conversion/CRT, NTT transforms, modular reduction/Shoup/Barrett arithmetic, polynomial multiplication/division/centering/degree management, and scalar/coefficient conversions. The independent `shamir-rns` crate additionally owns runtime prime-field reduction, interpolation, and canonical residue invariants. The BFV implementation follows <https://eprint.iacr.org/2018/117> and <https://eprint.iacr.org/2021/204>.
 
 ## Invariants
 
@@ -19,11 +19,12 @@
 11. Each switch and rounding stage agrees with a BigInt oracle, including HPS `t/Q` and modified `Q -> P` then `t/P` scaling.
 12. Original HPS temporary `QP` contexts satisfy unreduced tensor-product bounds; modified multiplication preserves staged modulus-switch bounds and cancellation of the unwanted `QP` multiple.
 13. RNS or radix digits recompose the original polynomial modulo the source context and pair with the corresponding evaluation-key component.
+14. `shamir-rns` field values remain canonical in `[0, q)`, constructor points are distinct nonzero units, inversion rejects zero, and Lagrange interpolation is checked against field and property-test evidence.
 
 ## Evidence / tests
 
-Use proptest for zero, one, `-1`, modulus-minus-one, full residue ranges, centering boundaries, varying/empty/full-degree polynomials, limb counts, reordered valid bases, half-points on both sides, and BigInt/BigUint oracle comparisons; approximate corrections are tested only on explicitly approximate paths and `RnsScaler` has exact oracle equality.
+Use proptest for zero, one, `-1`, modulus-minus-one, full residue ranges, centering boundaries, varying/empty/full-degree polynomials, limb counts, reordered valid bases, half-points on both sides, and BigInt/BigUint oracle comparisons; approximate corrections are tested only on explicitly approximate paths and `RnsScaler` has exact oracle equality. `shamir-rns` additionally tests the Barrett reduction backend, canonical rejection, fixed inversion, distinct points, and single/batch interpolation round trips.
 
 ## Sync
 
-- Touch → update: `mathematics.md` — `crates/fhe-math/src/**`.
+- Touch → update: `mathematics.md` — `crates/fhe-math/src/**`, `crates/shamir-rns/**`.

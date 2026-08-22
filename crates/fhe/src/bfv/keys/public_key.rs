@@ -51,12 +51,12 @@ impl PublicKey {
         rng: &mut R,
     ) -> Result<(Self, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
         let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
-        let zero_poly = Zeroizing::new(zero.to_poly());
+        let zero_poly = Zeroizing::new(zero.to_poly()?);
 
         let (mut c, a, e) = sk.encrypt_poly_extended(zero_poly.as_ref(), rng)?;
 
-        let s =
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c[0].ctx(), false)?.into_ntt();
+        let s = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c[0].ctx(), false)?
+            .into_ntt()?;
 
         c.iter_mut()
             .for_each(|p| p.disallow_variable_time_computations());
@@ -92,7 +92,7 @@ impl PublicKey {
         );
         let u = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(u_coefficients.as_ref() as &[i64], &ctx, false)?
-                .into_ntt(),
+                .into_ntt()?,
         );
 
         let e2 = Zeroizing::new(Poly::<Ntt>::small(&ctx, self.params.variance, rng)?);
@@ -103,7 +103,7 @@ impl PublicKey {
             rng,
         )?);
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
 
         let u_copy = u.as_ref().clone();
         let e1_copy = e1.as_ref().clone();
@@ -167,7 +167,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
         );
         let u = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(u_coefficients.as_ref() as &[i64], &ctx, false)?
-                .into_ntt(),
+                .into_ntt()?,
         );
 
         let e2 = Zeroizing::new(Poly::<Ntt>::small(&ctx, self.params.variance, rng)?);
@@ -178,7 +178,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
             rng,
         )?);
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         let mut c0 = u.as_ref() * &ct[0];
         c0 += e1.as_ref();
         c0 += &m;
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(a.representation(), Representation::Ntt);
 
         let s_check =
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), b.ctx(), false)?.into_ntt();
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), b.ctx(), false)?.into_ntt()?;
         assert_eq!(
             s.coefficients(),
             s_check.coefficients(),

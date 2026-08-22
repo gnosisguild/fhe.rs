@@ -150,7 +150,8 @@ impl RelinKeyShare<R1> {
         let ctx = params.context_at_level(0)?;
 
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?
+                .into_ntt()?,
         );
         let rns = RnsContext::new(&sk_share.params.moduli[..crp.len()])?;
         let h0 = crp
@@ -181,7 +182,8 @@ impl RelinKeyShare<R1> {
         let params = sk_share.params.clone();
         let ctx = params.context_at_level(0)?;
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?
+                .into_ntt()?,
         );
 
         let h1 = crp
@@ -254,7 +256,8 @@ impl RelinKeyShare<R2> {
         let ctx = params.context_at_level(0)?;
 
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?
+                .into_ntt()?,
         );
         let h0 = r1_h0
             .iter()
@@ -281,7 +284,8 @@ impl RelinKeyShare<R2> {
         let params = sk_share.params.clone();
         let ctx = params.context_at_level(0)?;
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?
+                .into_ntt()?,
         );
 
         let u_s = Zeroizing::new(u.as_ref() - s.as_ref());
@@ -332,16 +336,16 @@ impl Aggregate<RelinKeyShare<R2>> for RelinearizationKey {
         izip!(c0.iter_mut(), h1.iter()).for_each(|(c0, h1)| *c0 += h1);
         let c0 = c0
             .into_iter()
-            .map(Poly::<Ntt>::into_ntt_shoup)
-            .collect::<Vec<Poly<NttShoup>>>()
+            .map(|p| Poly::<Ntt>::into_ntt_shoup(p).map_err(Error::MathError))
+            .collect::<Result<Vec<Poly<NttShoup>>>>()?
             .into_boxed_slice();
 
         let c1 = r1
             .h1
             .iter()
             .cloned()
-            .map(Poly::<Ntt>::into_ntt_shoup)
-            .collect::<Vec<Poly<NttShoup>>>()
+            .map(|p| Poly::<Ntt>::into_ntt_shoup(p).map_err(Error::MathError))
+            .collect::<Result<Vec<Poly<NttShoup>>>>()?
             .into_boxed_slice();
 
         let ksk = KeySwitchingKey {

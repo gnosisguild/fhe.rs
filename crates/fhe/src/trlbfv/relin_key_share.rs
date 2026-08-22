@@ -2,9 +2,9 @@ use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
-use crate::Result;
 use crate::bfv::{BfvParameters, CommonRandomPolyVec, KeySwitchingKey, SecretKey};
 use crate::lbfv::LBFVRelinearizationKey;
+use crate::{Error, Result};
 use fhe_math::rq::{NttShoup, Poly};
 use fhe_traits::FheParametrized;
 
@@ -133,13 +133,13 @@ impl RelinKeyShare {
         let d1_polys: Vec<Poly<NttShoup>> = crp_d1
             .to_polys()
             .into_iter()
-            .map(|p| p.into_ntt_shoup())
-            .collect();
+            .map(|p| p.into_ntt_shoup().map_err(Error::MathError))
+            .collect::<Result<Vec<_>>>()?;
         let a_polys: Vec<Poly<NttShoup>> = crp_a
             .to_polys()
             .into_iter()
-            .map(|p| p.into_ntt_shoup())
-            .collect();
+            .map(|p| p.into_ntt_shoup().map_err(Error::MathError))
+            .collect::<Result<Vec<_>>>()?;
 
         let (mut ksk_r_to_s, mut ksk_s_to_r) =
             LBFVRelinearizationKey::generate_components_with_polys(
@@ -193,13 +193,13 @@ impl RelinKeyShare {
         let d1_polys: Vec<Poly<NttShoup>> = crp_d1
             .to_polys()
             .into_iter()
-            .map(|p| p.into_ntt_shoup())
-            .collect();
+            .map(|p| p.into_ntt_shoup().map_err(Error::MathError))
+            .collect::<Result<Vec<_>>>()?;
         let a_polys: Vec<Poly<NttShoup>> = crp_a
             .to_polys()
             .into_iter()
-            .map(|p| p.into_ntt_shoup())
-            .collect();
+            .map(|p| p.into_ntt_shoup().map_err(Error::MathError))
+            .collect::<Result<Vec<_>>>()?;
 
         let (mut ksk_r_to_s, mut ksk_s_to_r, r, errors_d0, errors_d2) =
             LBFVRelinearizationKey::generate_components_with_polys_extended(

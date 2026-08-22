@@ -531,7 +531,7 @@ mod tests {
         let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
 
         let decryption_share = trbfv
-            .decryption_share(ct, sk_poly.clone().into_ntt(), es_poly)
+            .decryption_share(ct, sk_poly.clone().into_ntt().unwrap(), es_poly)
             .unwrap();
 
         assert_eq!(decryption_share.coefficients().ncols(), params.degree());
@@ -575,7 +575,7 @@ mod tests {
             let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
 
             let share = trbfv_instances[i]
-                .decryption_share(ct.clone(), sk_poly.clone().into_ntt(), es_poly)
+                .decryption_share(ct.clone(), sk_poly.clone().into_ntt().unwrap(), es_poly)
                 .unwrap();
             decryption_shares.push(share);
         }

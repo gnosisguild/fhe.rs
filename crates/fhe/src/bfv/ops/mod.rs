@@ -12,6 +12,102 @@ use fhe_math::rq::{Ntt, Poly};
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::sync::Arc;
 
+impl Ciphertext {
+    /// Add a plaintext, propagating conversion and compatibility errors.
+    ///
+    /// The plaintext is converted with the BFV scaling used by encryption;
+    /// the raw stored plaintext NTT polynomial is intentionally not used.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ciphertext is empty, parameters or levels do
+    /// not match, or plaintext conversion fails.
+    pub fn try_add_plaintext(&self, plaintext: &Plaintext) -> Result<Ciphertext> {
+        let mut result = self.clone();
+        result.try_add_assign_plaintext(plaintext)?;
+        Ok(result)
+    }
+
+    /// Add a plaintext in place, propagating conversion and compatibility errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ciphertext is empty, parameters or levels do
+    /// not match, or plaintext conversion fails.
+    pub fn try_add_assign_plaintext(&mut self, plaintext: &Plaintext) -> Result<()> {
+        validate_plaintext_operation(self, plaintext, "addition")?;
+        let poly = plaintext.to_poly()?;
+        let coefficient = self
+            .first_mut()
+            .ok_or_else(|| invalid_empty_ciphertext("plaintext addition"))?;
+        *coefficient += &poly;
+        self.seed = None;
+        Ok(())
+    }
+
+    /// Subtract a plaintext, propagating conversion and compatibility errors.
+    ///
+    /// The plaintext is converted with the BFV scaling used by encryption;
+    /// the raw stored plaintext NTT polynomial is intentionally not used.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ciphertext is empty, parameters or levels do
+    /// not match, or plaintext conversion fails.
+    pub fn try_sub_plaintext(&self, plaintext: &Plaintext) -> Result<Ciphertext> {
+        let mut result = self.clone();
+        result.try_sub_assign_plaintext(plaintext)?;
+        Ok(result)
+    }
+
+    /// Subtract a plaintext in place, propagating conversion and compatibility errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ciphertext is empty, parameters or levels do
+    /// not match, or plaintext conversion fails.
+    pub fn try_sub_assign_plaintext(&mut self, plaintext: &Plaintext) -> Result<()> {
+        validate_plaintext_operation(self, plaintext, "subtraction")?;
+        let poly = plaintext.to_poly()?;
+        let coefficient = self
+            .first_mut()
+            .ok_or_else(|| invalid_empty_ciphertext("plaintext subtraction"))?;
+        *coefficient -= &poly;
+        self.seed = None;
+        Ok(())
+    }
+}
+
+fn validate_plaintext_operation(
+    ciphertext: &Ciphertext,
+    plaintext: &Plaintext,
+    operation: &str,
+) -> Result<()> {
+    if !Arc::ptr_eq(&ciphertext.params, &plaintext.params) {
+        return Err(Error::ContextMismatch {
+            found: format!("plaintext parameters at level {}", plaintext.level),
+            expected: format!("ciphertext parameters at level {}", ciphertext.level),
+        });
+    }
+    if ciphertext.is_empty() {
+        return Err(invalid_empty_ciphertext(operation));
+    }
+    if ciphertext.level != plaintext.level {
+        return Err(Error::DimensionMismatch {
+            operation: format!("plaintext {operation}"),
+            expected: format!("level {}", ciphertext.level),
+            actual: format!("level {}", plaintext.level),
+        });
+    }
+    Ok(())
+}
+
+fn invalid_empty_ciphertext(operation: &str) -> Error {
+    Error::InvalidCiphertext {
+        reason: format!("cannot perform plaintext {operation} on an empty ciphertext"),
+    }
+}
+
 impl Add<&Ciphertext> for &Ciphertext {
     type Output = Ciphertext;
 
@@ -69,41 +165,27 @@ impl AddAssign<&Ciphertext> for Ciphertext {
 }
 
 impl Add<&Plaintext> for &Ciphertext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
-    fn add(self, rhs: &Plaintext) -> Ciphertext {
-        let mut self_clone = self.clone();
-        self_clone += rhs;
-        self_clone
+    fn add(self, rhs: &Plaintext) -> Result<Ciphertext> {
+        self.try_add_plaintext(rhs)
     }
 }
 
 impl Add<&Ciphertext> for &Plaintext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
-    fn add(self, rhs: &Ciphertext) -> Ciphertext {
+    fn add(self, rhs: &Ciphertext) -> Result<Ciphertext> {
         rhs + self
     }
 }
 
-impl AddAssign<&Plaintext> for Ciphertext {
-    fn add_assign(&mut self, rhs: &Plaintext) {
-        assert!(Arc::ptr_eq(&self.params, &rhs.params));
-        assert!(!self.is_empty());
-        assert_eq!(self.level, rhs.level);
-
-        let poly = rhs.to_poly();
-        self[0] += &poly;
-        self.seed = None
-    }
-}
-
 impl Add<&Plaintext> for Ciphertext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
-    fn add(mut self, rhs: &Plaintext) -> Ciphertext {
-        self += rhs;
-        self
+    fn add(mut self, rhs: &Plaintext) -> Result<Ciphertext> {
+        self.try_add_assign_plaintext(rhs)?;
+        Ok(self)
     }
 }
 
@@ -164,41 +246,27 @@ impl SubAssign<&Ciphertext> for Ciphertext {
 }
 
 impl Sub<&Plaintext> for &Ciphertext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
-    fn sub(self, rhs: &Plaintext) -> Ciphertext {
-        let mut self_clone = self.clone();
-        self_clone -= rhs;
-        self_clone
+    fn sub(self, rhs: &Plaintext) -> Result<Ciphertext> {
+        self.try_sub_plaintext(rhs)
     }
 }
 
 impl Sub<&Ciphertext> for &Plaintext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
-    fn sub(self, rhs: &Ciphertext) -> Ciphertext {
-        -(rhs - self)
-    }
-}
-
-impl SubAssign<&Plaintext> for Ciphertext {
-    fn sub_assign(&mut self, rhs: &Plaintext) {
-        assert!(Arc::ptr_eq(&self.params, &rhs.params));
-        assert!(!self.is_empty());
-        assert_eq!(self.level, rhs.level);
-
-        let poly = rhs.to_poly();
-        self.c[0] -= &poly;
-        self.seed = None
+    fn sub(self, rhs: &Ciphertext) -> Result<Ciphertext> {
+        Ok(-(rhs.try_sub_plaintext(self)?))
     }
 }
 
 impl Sub<&Plaintext> for Ciphertext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
-    fn sub(mut self, rhs: &Plaintext) -> Ciphertext {
-        self -= rhs;
-        self
+    fn sub(mut self, rhs: &Plaintext) -> Result<Ciphertext> {
+        self.try_sub_assign_plaintext(rhs)?;
+        Ok(self)
     }
 }
 
@@ -417,21 +485,21 @@ mod tests {
                     let mut ct_a: Ciphertext = sk.try_encrypt(&pt_a, &mut rng)?;
                     assert_eq!(
                         Vec::<u64>::try_decode(
-                            &sk.try_decrypt(&(&ct_a + &zero))?,
+                            &sk.try_decrypt(&(&ct_a + &zero)?)?,
                             encoding.clone()
                         )?,
                         a
                     );
                     assert_eq!(
                         Vec::<u64>::try_decode(
-                            &sk.try_decrypt(&(&zero + &ct_a))?,
+                            &sk.try_decrypt(&(&zero + &ct_a)?)?,
                             encoding.clone()
                         )?,
                         a
                     );
-                    let ct_c = &ct_a + &pt_b;
-                    let ct_c_owned = ct_a.clone() + &pt_b;
-                    ct_a += &pt_b;
+                    let ct_c = (&ct_a + &pt_b)?;
+                    let ct_c_owned = (ct_a.clone() + &pt_b)?;
+                    ct_a.try_add_assign_plaintext(&pt_b)?;
 
                     let pt_c = sk.try_decrypt(&ct_c)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
@@ -520,21 +588,21 @@ mod tests {
                     let mut ct_a: Ciphertext = sk.try_encrypt(&pt_a, &mut rng)?;
                     assert_eq!(
                         Vec::<u64>::try_decode(
-                            &sk.try_decrypt(&(&ct_a - &zero))?,
+                            &sk.try_decrypt(&(&ct_a - &zero)?)?,
                             encoding.clone()
                         )?,
                         a
                     );
                     assert_eq!(
                         Vec::<u64>::try_decode(
-                            &sk.try_decrypt(&(&zero - &ct_a))?,
+                            &sk.try_decrypt(&(&zero - &ct_a)?)?,
                             encoding.clone()
                         )?,
                         a_neg
                     );
-                    let ct_c = &ct_a - &pt_b;
-                    let ct_c_owned = ct_a.clone() - &pt_b;
-                    ct_a -= &pt_b;
+                    let ct_c = (&ct_a - &pt_b)?;
+                    let ct_c_owned = (ct_a.clone() - &pt_b)?;
+                    ct_a.try_sub_assign_plaintext(&pt_b)?;
 
                     let pt_c = sk.try_decrypt(&ct_c)?;
                     assert_eq!(Vec::<u64>::try_decode(&pt_c, encoding.clone())?, c);
@@ -544,6 +612,38 @@ mod tests {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn checked_plaintext_operations_reject_incompatible_inputs() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 16);
+        let other_params = BfvParameters::default_arc(1, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let plaintext = Plaintext::try_encode(&[1u64], Encoding::poly(), &params)?;
+        let other_plaintext = Plaintext::try_encode(&[1u64], Encoding::poly(), &other_params)?;
+        let ciphertext: Ciphertext = sk.try_encrypt(&plaintext, &mut rng)?;
+
+        assert!(matches!(
+            ciphertext.try_add_plaintext(&other_plaintext),
+            Err(crate::Error::ContextMismatch { .. })
+        ));
+        assert!(matches!(
+            ciphertext.try_sub_plaintext(&other_plaintext),
+            Err(crate::Error::ContextMismatch { .. })
+        ));
+
+        let params = BfvParameters::default_arc(6, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let level_zero = Plaintext::try_encode(&[1u64], Encoding::poly(), &params)?;
+        let level_one = Plaintext::try_encode(&[1u64], Encoding::poly_at_level(1), &params)?;
+        let ciphertext: Ciphertext = sk.try_encrypt(&level_zero, &mut rng)?;
+        assert!(matches!(
+            ciphertext.try_add_plaintext(&level_one),
+            Err(crate::Error::DimensionMismatch { .. })
+        ));
 
         Ok(())
     }

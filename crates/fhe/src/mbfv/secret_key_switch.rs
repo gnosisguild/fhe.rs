@@ -62,7 +62,7 @@ impl SecretKeySwitchShare {
                 ct[0].ctx(),
                 false,
             )?
-            .into_ntt(),
+            .into_ntt()?,
         );
         let s_out = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(
@@ -70,7 +70,7 @@ impl SecretKeySwitchShare {
                 ct[0].ctx(),
                 false,
             )?
-            .into_ntt(),
+            .into_ntt()?,
         );
 
         // Sample error
@@ -154,7 +154,7 @@ impl Aggregate<DecryptionShare> for Plaintext {
         c.disallow_variable_time_computations();
         let ctx = c.ctx().clone();
         let c_inner = std::mem::replace(c.as_mut(), Poly::<Ntt>::zero(&ctx));
-        let c = c_inner.into_power_basis();
+        let c = c_inner.into_power_basis()?;
 
         // The true decryption part is done during SKS; all that is left is to scale
         let ctx_lvl = ct.params.context_level_at(ct.level)?;
@@ -172,7 +172,7 @@ impl Aggregate<DecryptionShare> for Plaintext {
         ct.params.plaintext.reduce_vec(&mut w);
 
         let poly =
-            Poly::<PowerBasis>::try_convert_from(w.as_slice(), ct[0].ctx(), false)?.into_ntt();
+            Poly::<PowerBasis>::try_convert_from(w.as_slice(), ct[0].ctx(), false)?.into_ntt()?;
 
         let value = match ct.params.plaintext {
             crate::bfv::PlaintextModulus::Small { .. } => PlaintextValues::Small(

@@ -158,7 +158,7 @@ impl LBFVPublicKey {
 
         let ctx = sk.params.context_at_level(0)?;
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)?.into_ntt()?,
         );
 
         let mut b_polys: Vec<Poly<Ntt>> = Vec::with_capacity(l);
@@ -353,18 +353,14 @@ impl LBFVPublicKey {
             .iter()
             .take(count)
             .map(|ciphertext| {
-                ciphertext
-                    .c
-                    .get(1)
-                    .cloned()
-                    .map(Poly::<Ntt>::into_ntt_shoup)
-                    .ok_or_else(|| {
-                        Error::DefaultError(
-                            "LBFV public-key ciphertext is missing its a polynomial".to_string(),
-                        )
-                    })
+                let polynomial = ciphertext.c.get(1).cloned().ok_or_else(|| {
+                    Error::DefaultError(
+                        "LBFV public-key ciphertext is missing its a polynomial".to_string(),
+                    )
+                })?;
+                polynomial.into_ntt_shoup().map_err(Error::MathError)
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()
     }
 
     /// Encrypt a plaintext with the public key.
@@ -392,7 +388,7 @@ impl LBFVPublicKey {
         let e1 = Poly::<Ntt>::small(ctx, self.params.variance, rng)?;
         let e2 = Poly::<Ntt>::small(ctx, self.params.variance, rng)?;
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         let b = ct
             .c
             .first()
@@ -499,7 +495,7 @@ impl LBFVPublicKey {
                 poly = poly.switch(&switcher)?;
             }
             let poly = match rep {
-                Representation::NttShoup => poly.into_ntt_shoup(),
+                Representation::NttShoup => poly.into_ntt_shoup()?,
                 Representation::PowerBasis | Representation::Ntt => {
                     return Err(Error::DefaultError(
                         "l-BFV extract_b_polynomials requires NttShoup representation".to_string(),
@@ -540,7 +536,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         let e1 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
         let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         let b = ct
             .c
             .first()

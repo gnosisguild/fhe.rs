@@ -242,9 +242,9 @@ mod tests {
                         .collect_vec();
                     assert_eq!(expected, scaled_biguint);
 
-                    let poly_ntt: Poly<Ntt> = poly.clone().into_ntt();
+                    let poly_ntt: Poly<Ntt> = poly.clone().into_ntt()?;
                     let scaled_poly = scaler.scale(&poly_ntt)?;
-                    let scaled_biguint = Vec::<BigUint>::from(&scaled_poly.to_power_basis());
+                    let scaled_biguint = Vec::<BigUint>::from(&scaled_poly.to_power_basis()?);
                     assert_eq!(expected, scaled_biguint);
                 }
             }

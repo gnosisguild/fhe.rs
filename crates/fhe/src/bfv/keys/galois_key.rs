@@ -63,16 +63,16 @@ impl GaloisKey {
         // assert_eq!(ct.params, self.ksk.params);
         assert_eq!(ct.len(), 2);
 
-        let c2 = ct[1].substitute(&self.element)?.into_power_basis();
+        let c2 = ct[1].substitute(&self.element)?.into_power_basis()?;
         let (mut c0, mut c1) = self.ksk.key_switch(&c2)?;
 
         if c0.ctx() != ct[0].ctx() {
-            let mut c0_pb = c0.into_power_basis();
-            let mut c1_pb = c1.into_power_basis();
+            let mut c0_pb = c0.into_power_basis()?;
+            let mut c1_pb = c1.into_power_basis()?;
             c0_pb.switch_down_to(ct[0].ctx())?;
             c1_pb.switch_down_to(ct[1].ctx())?;
-            c0 = c0_pb.into_ntt();
-            c1 = c1_pb.into_ntt();
+            c0 = c0_pb.into_ntt()?;
+            c1 = c1_pb.into_ntt()?;
         }
 
         c0 += &ct[0].substitute(&self.element)?;
@@ -106,16 +106,16 @@ impl GaloisKey {
         out0.zeroize();
         out1.zeroize();
 
-        let c2 = ct[1].substitute(&self.element)?.into_power_basis();
+        let c2 = ct[1].substitute(&self.element)?.into_power_basis()?;
         self.ksk.key_switch_assign(&c2, out0, out1)?;
 
         if out0.ctx() != ct[0].ctx() {
-            let mut out0_pb = out0.clone().into_power_basis();
-            let mut out1_pb = out1.clone().into_power_basis();
+            let mut out0_pb = out0.clone().into_power_basis()?;
+            let mut out1_pb = out1.clone().into_power_basis()?;
             out0_pb.switch_down_to(ct[0].ctx())?;
             out1_pb.switch_down_to(ct[1].ctx())?;
-            *out0 = out0_pb.into_ntt();
-            *out1 = out1_pb.into_ntt();
+            *out0 = out0_pb.into_ntt()?;
+            *out1 = out1_pb.into_ntt()?;
         }
 
         *out0 += &ct[0].substitute(&self.element)?;

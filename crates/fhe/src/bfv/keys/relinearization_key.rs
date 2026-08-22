@@ -94,9 +94,9 @@ impl RelinearizationKey {
 
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx_ciphertext, false)?
-                .into_ntt(),
+                .into_ntt()?,
         );
-        let s2 = Zeroizing::new((s.as_ref() * s.as_ref()).into_power_basis());
+        let s2 = Zeroizing::new((s.as_ref() * s.as_ref()).into_power_basis()?);
         let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
         let s2_switched_up = Zeroizing::new(s2.switch(&switcher_up)?);
         let ksk = KeySwitchingKey::new(sk, &s2_switched_up, ciphertext_level, key_level, rng)?;
@@ -119,16 +119,16 @@ impl RelinearizationKey {
                 "Ciphertext has incorrect level".to_string(),
             ))
         } else {
-            let c2 = ct[2].clone().into_power_basis();
+            let c2 = ct[2].clone().into_power_basis()?;
             let (mut c0, mut c1) = self.relinearizes_poly(&c2)?;
 
             if c0.ctx() != ct[0].ctx() {
-                let mut c0_pb = c0.into_power_basis();
-                let mut c1_pb = c1.into_power_basis();
+                let mut c0_pb = c0.into_power_basis()?;
+                let mut c1_pb = c1.into_power_basis()?;
                 c0_pb.switch_down_to(ct[0].ctx())?;
                 c1_pb.switch_down_to(ct[1].ctx())?;
-                c0 = c0_pb.into_ntt();
-                c1 = c1_pb.into_ntt();
+                c0 = c0_pb.into_ntt()?;
+                c1 = c1_pb.into_ntt()?;
             }
 
             ct[0] += &c0;
@@ -240,12 +240,12 @@ mod tests {
                 let ctx = params.context_at_level(0)?;
                 let s = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)
                     .map_err(crate::Error::MathError)?
-                    .into_ntt();
+                    .into_ntt()?;
                 let s2 = &s * &s;
 
                 let c2 = Poly::<Ntt>::random(ctx, &mut rng);
                 let c1 = Poly::<Ntt>::random(ctx, &mut rng);
-                let mut c0 = Poly::<PowerBasis>::small(ctx, 16, &mut rng)?.into_ntt();
+                let mut c0 = Poly::<PowerBasis>::small(ctx, 16, &mut rng)?.into_ntt()?;
                 c0 -= &(&c1 * &s);
                 c0 -= &(&c2 * &s2);
                 let mut ct = Ciphertext::new(vec![c0.clone(), c1.clone(), c2.clone()], &params)?;
@@ -253,14 +253,14 @@ mod tests {
                 rk.relinearizes(&mut ct)?;
                 assert_eq!(ct.len(), 2);
 
-                let c2_pb = c2.clone().into_power_basis();
+                let c2_pb = c2.clone().into_power_basis()?;
                 let (c0r, c1r) = rk.relinearizes_poly(&c2_pb)?;
-                let mut c0r_pb = c0r.into_power_basis();
+                let mut c0r_pb = c0r.into_power_basis()?;
                 c0r_pb.switch_down_to(c0.ctx())?;
-                let mut c1r_pb = c1r.into_power_basis();
+                let mut c1r_pb = c1r.into_power_basis()?;
                 c1r_pb.switch_down_to(c1.ctx())?;
-                let c0r = c0r_pb.into_ntt();
-                let c1r = c1r_pb.into_ntt();
+                let c0r = c0r_pb.into_ntt()?;
+                let c1r = c1r_pb.into_ntt()?;
                 assert_eq!(ct, Ciphertext::new(vec![&c0 + &c0r, &c1 + &c1r], &params)?);
 
                 println!("Noise: {}", unsafe { sk.measure_noise(&ct)? });
@@ -291,11 +291,11 @@ mod tests {
                         let s =
                             Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)
                                 .map_err(crate::Error::MathError)?
-                                .into_ntt();
+                                .into_ntt()?;
                         let s2 = &s * &s;
                         let c2 = Poly::<Ntt>::random(ctx, &mut rng);
                         let c1 = Poly::<Ntt>::random(ctx, &mut rng);
-                        let mut c0 = Poly::<PowerBasis>::small(ctx, 16, &mut rng)?.into_ntt();
+                        let mut c0 = Poly::<PowerBasis>::small(ctx, 16, &mut rng)?.into_ntt()?;
                         c0 -= &(&c1 * &s);
                         c0 -= &(&c2 * &s2);
                         let mut ct =
@@ -304,14 +304,14 @@ mod tests {
                         rk.relinearizes(&mut ct)?;
                         assert_eq!(ct.len(), 2);
 
-                        let c2_pb = c2.clone().into_power_basis();
+                        let c2_pb = c2.clone().into_power_basis()?;
                         let (c0r, c1r) = rk.relinearizes_poly(&c2_pb)?;
-                        let mut c0r_pb = c0r.into_power_basis();
+                        let mut c0r_pb = c0r.into_power_basis()?;
                         c0r_pb.switch_down_to(c0.ctx())?;
-                        let mut c1r_pb = c1r.into_power_basis();
+                        let mut c1r_pb = c1r.into_power_basis()?;
                         c1r_pb.switch_down_to(c1.ctx())?;
-                        let c0r = c0r_pb.into_ntt();
-                        let c1r = c1r_pb.into_ntt();
+                        let c0r = c0r_pb.into_ntt()?;
+                        let c1r = c1r_pb.into_ntt()?;
                         assert_eq!(ct, Ciphertext::new(vec![&c0 + &c0r, &c1 + &c1r], &params)?);
 
                         println!("Noise: {}", unsafe { sk.measure_noise(&ct)? });

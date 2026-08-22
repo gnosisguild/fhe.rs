@@ -202,8 +202,8 @@ impl Multiplicator {
         // Scale down to the base context (power basis for scaling, then NTT)
         let mut c = vec![c0, c1, c2];
         for p in c.iter_mut() {
-            let pb = p.clone().into_power_basis();
-            *p = pb.scale(&self.down_scaler)?.into_ntt();
+            let pb = p.clone().into_power_basis()?;
+            *p = pb.scale(&self.down_scaler)?.into_ntt()?;
         }
 
         // Create a ciphertext

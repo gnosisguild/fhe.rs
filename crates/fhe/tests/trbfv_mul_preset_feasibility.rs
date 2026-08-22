@@ -319,7 +319,7 @@ fn mul_examples_preset_depth3_e2e() {
             trbfv
                 .decryption_share(
                     tally.clone(),
-                    party.sk_poly_sum.clone().into_ntt(),
+                    party.sk_poly_sum.clone().into_ntt().unwrap(),
                     party.es_poly_sum.clone(),
                 )
                 .expect("decryption share")

@@ -5,8 +5,6 @@
 pub mod config;
 /// Error types for threshold operations
 pub mod errors;
-/// Shamir Secret Sharing implementation
-pub mod shamir;
 /// Share collection and management
 pub mod shares;
 /// Smudging abstractions and implementations
@@ -15,7 +13,6 @@ pub mod smudging;
 pub mod threshold;
 
 // Re-export main types for convenience
-pub use shamir::ShamirSecretSharing;
 pub use shares::{SecretPoly, SecretShareMatrix, ShareManager};
 pub use smudging::{
     Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,

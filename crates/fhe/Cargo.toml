@@ -25,6 +25,7 @@ num-bigint = { workspace = true, features = ["rand"] }
 fhe-math = { version = "=0.2.1", path = "../fhe-math" }
 fhe-traits = { version = "=0.2.1", path = "../fhe-traits" }
 fhe-util = { version = "=0.2.1", path = "../fhe-util" }
+shamir-rns = { version = "=0.2.1", path = "../shamir-rns", features = ["rayon"] }
 
 bincode.workspace = true
 serde.workspace = true

@@ -259,7 +259,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
             trbfv
                 .decryption_share(
                     tally.clone(),
-                    party.sk_poly_sum.clone().into_ntt(),
+                    party.sk_poly_sum.clone().into_ntt().unwrap(),
                     party.es_poly_sum.clone(),
                 )
                 .unwrap()
