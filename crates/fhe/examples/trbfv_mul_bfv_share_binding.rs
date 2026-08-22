@@ -42,7 +42,7 @@ use fhe::{
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use ndarray::{Array, ArrayView};
+use ndarray::ArrayView1;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Uniform};
@@ -398,21 +398,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                 for sender_shares in encrypted_shares.iter() {
                     let (enc_sk, enc_es) = sender_shares.get(receiver_idx).unwrap();
 
-                    let mut node_sk = Array::zeros((0, degree));
-                    for ct in enc_sk {
-                        let pt = party.sk_share_enc.try_decrypt(ct).unwrap();
-                        let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
-                        node_sk.push_row(ArrayView::from(&row)).unwrap();
-                    }
-                    party.sk_sss_collected.push(SecretShareMatrix::new(node_sk));
+                    let node_sk_rows = enc_sk
+                        .iter()
+                        .map(|ct| {
+                            let pt = party.sk_share_enc.try_decrypt(ct).unwrap();
+                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    let node_sk_views = node_sk_rows
+                        .iter()
+                        .map(|row| ArrayView1::from(row.as_slice()))
+                        .collect::<Vec<_>>();
+                    party
+                        .sk_sss_collected
+                        .push(SecretShareMatrix::from_rows(&node_sk_views).unwrap());
 
-                    let mut node_es = Array::zeros((0, degree));
-                    for ct in enc_es {
-                        let pt = party.sk_share_enc.try_decrypt(ct).unwrap();
-                        let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
-                        node_es.push_row(ArrayView::from(&row)).unwrap();
-                    }
-                    party.es_sss_collected.push(SecretShareMatrix::new(node_es));
+                    let node_es_rows = enc_es
+                        .iter()
+                        .map(|ct| {
+                            let pt = party.sk_share_enc.try_decrypt(ct).unwrap();
+                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    let node_es_views = node_es_rows
+                        .iter()
+                        .map(|row| ArrayView1::from(row.as_slice()))
+                        .collect::<Vec<_>>();
+                    party
+                        .es_sss_collected
+                        .push(SecretShareMatrix::from_rows(&node_es_views).unwrap());
                 }
             });
     });

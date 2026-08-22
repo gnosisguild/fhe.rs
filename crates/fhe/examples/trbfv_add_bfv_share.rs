@@ -19,7 +19,7 @@ use fhe::{
 
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use ndarray::{Array, ArrayView};
+use ndarray::ArrayView1;
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
@@ -290,33 +290,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let (encrypted_sk_shares, encrypted_esi_shares) =
                         &sender_encrypted[receiver_idx];
 
-                    let mut node_share_m = Array::zeros((0, degree));
-                    for ct in encrypted_sk_shares.iter() {
-                        let pt = party.sk_bfv.try_decrypt(ct).unwrap();
-                        let decrypted_share: Vec<u64> =
-                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
-
-                        node_share_m
-                            .push_row(ArrayView::from(&decrypted_share))
-                            .unwrap();
-                    }
+                    let decrypted_sk_rows = encrypted_sk_shares
+                        .iter()
+                        .map(|ct| {
+                            let pt = party.sk_bfv.try_decrypt(ct).unwrap();
+                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    let node_share_rows = decrypted_sk_rows
+                        .iter()
+                        .map(|row| ArrayView1::from(row.as_slice()))
+                        .collect::<Vec<_>>();
                     party
                         .sk_sss_collected
-                        .push(SecretShareMatrix::new(node_share_m));
+                        .push(SecretShareMatrix::from_rows(&node_share_rows).unwrap());
 
-                    let mut es_node_share_m = Array::zeros((0, degree));
-                    for ct in encrypted_esi_shares.iter() {
-                        let pt = party.sk_bfv.try_decrypt(ct).unwrap();
-                        let decrypted_share: Vec<u64> =
-                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
-
-                        es_node_share_m
-                            .push_row(ArrayView::from(&decrypted_share))
-                            .unwrap();
-                    }
+                    let decrypted_es_rows = encrypted_esi_shares
+                        .iter()
+                        .map(|ct| {
+                            let pt = party.sk_bfv.try_decrypt(ct).unwrap();
+                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    let es_node_share_rows = decrypted_es_rows
+                        .iter()
+                        .map(|row| ArrayView1::from(row.as_slice()))
+                        .collect::<Vec<_>>();
                     party
                         .es_sss_collected
-                        .push(SecretShareMatrix::new(es_node_share_m));
+                        .push(SecretShareMatrix::from_rows(&es_node_share_rows).unwrap());
                 }
             });
     });

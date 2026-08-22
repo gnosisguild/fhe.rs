@@ -93,6 +93,27 @@ impl SecretShareMatrix {
         Self { matrix }
     }
 
+    /// Assemble a protected matrix from borrowed party rows.
+    ///
+    /// The destination is preallocated and wrapped in [`Self`] before any row
+    /// contents are copied. This guarantees that no unguarded accumulating
+    /// allocation exists at any point, including error paths. The input rows
+    /// remain borrowed and are never owned by the constructor.
+    ///
+    /// # Errors
+    /// Returns an error when the rows do not all have the same length.
+    pub fn from_rows(rows: &[ArrayView1<'_, u64>]) -> Result<Self, Error> {
+        let columns = rows.first().map_or(0, |row| row.len());
+        if let Some(row) = rows.iter().find(|row| row.len() != columns) {
+            return Err(Error::inconsistent_degree(columns, row.len()));
+        }
+        let mut result = Self::new(Array2::zeros((rows.len(), columns)));
+        for (mut destination, source) in result.matrix.outer_iter_mut().zip(rows) {
+            destination.assign(source);
+        }
+        Ok(result)
+    }
+
     /// The matrix shape as `(rows, columns)`.
     #[must_use]
     pub fn dim(&self) -> (usize, usize) {
@@ -159,8 +180,10 @@ impl ZeroizeOnDrop for SecretShareMatrix {}
 ///
 /// Used for the input to share dealing, the aggregated secret-key and
 /// smudging polynomials, and the final decryption share. The inner
-/// polynomial is erased on drop (delegating to `Poly::zeroize`), including
-/// across early returns and unwinding.
+/// polynomial is erased on drop (delegating to `Poly::zeroize`) across normal
+/// drops, early returns, and unwinding outside the representation conversions
+/// [`SecretPoly::into_ntt`] and [`SecretPoly::into_power_basis`]. Those methods
+/// document their conversion-specific unwind caveat.
 ///
 /// # Security semantics
 ///
@@ -246,6 +269,12 @@ impl SecretPoly<PowerBasis> {
     /// Consume the protected polynomial and return its NTT form, still
     /// protected. Used to prepare the secret input to decryption without
     /// extracting an unprotected polynomial.
+    ///
+    /// # Unwind caveat
+    /// `std::mem::take` consumes the inner polynomial outside the guard before
+    /// the representation transform runs. If the transform itself panics,
+    /// that raw polynomial unwinds without zeroization. Normal drops, early
+    /// returns, and unwinding outside this conversion remain covered.
     #[must_use]
     pub fn into_ntt(mut self) -> SecretPoly<Ntt> {
         // The wrapper implements Drop, so the inner polynomial cannot be
@@ -258,6 +287,12 @@ impl SecretPoly<PowerBasis> {
 impl SecretPoly<Ntt> {
     /// Consume the protected NTT polynomial and return its PowerBasis form,
     /// still protected.
+    ///
+    /// # Unwind caveat
+    /// `std::mem::take` consumes the inner polynomial outside the guard before
+    /// the representation transform runs. If the transform itself panics,
+    /// that raw polynomial unwinds without zeroization. Normal drops, early
+    /// returns, and unwinding outside this conversion remain covered.
     #[must_use]
     pub fn into_power_basis(mut self) -> SecretPoly<PowerBasis> {
         SecretPoly::new(std::mem::take(&mut self.poly).into_power_basis())
@@ -912,6 +947,7 @@ mod tests {
     use crate::ThresholdError;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
+    use ndarray::Array2;
     use num_bigint::BigInt;
     use rand::rng;
     use shamir_rns::{BarrettField, ShamirScheme};
@@ -947,6 +983,20 @@ mod tests {
         assert_eq!(manager.n, 5);
         assert_eq!(manager.threshold, 2);
         assert_eq!(manager.params, params);
+    }
+
+    #[test]
+    fn secret_share_matrix_from_rows_validates_and_preserves_content() {
+        let source = Array2::from_shape_vec((2, 3), vec![1, 2, 3, 4, 5, 6]).unwrap();
+        let rows = source.outer_iter().collect::<Vec<_>>();
+        let matrix = SecretShareMatrix::from_rows(&rows).unwrap();
+        assert_eq!(matrix.dim(), (2, 3));
+        assert_eq!(matrix.row(0).unwrap(), source.row(0));
+        assert_eq!(matrix.row(1).unwrap(), source.row(1));
+
+        let short = Array2::from_shape_vec((1, 2), vec![7, 8]).unwrap();
+        let rows = vec![source.row(0), short.row(0)];
+        assert!(SecretShareMatrix::from_rows(&rows).is_err());
     }
 
     #[test]
@@ -1770,7 +1820,8 @@ mod tests {
     // ── Protected wrapper contracts (issue #126) ─────────────────────────
 
     /// Compile-time assertion that a type implements the unconditional
-    /// `ZeroizeOnDrop` contract (normal drops, early returns, and unwinding).
+    /// `ZeroizeOnDrop` contract. Representation-conversion unwind caveats are
+    /// documented on the two consuming conversion methods.
     fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
 
     #[test]

@@ -20,7 +20,6 @@ use fhe::{
 
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
-use ndarray::{Array, ArrayView};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
@@ -225,22 +224,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         num_parties as u32,
         {
             for j in 0..num_parties {
-                let mut node_share_m = Array::zeros((0, degree));
-                let mut es_node_share_m = Array::zeros((0, degree));
-                for m in 0..params.moduli().len() {
-                    node_share_m
-                        .push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).unwrap()))
-                        .unwrap();
-                    es_node_share_m
-                        .push_row(ArrayView::from(&parties[j].esi_sss[m].row(i).unwrap()))
-                        .unwrap();
-                }
-                parties[i]
-                    .sk_sss_collected
-                    .push(SecretShareMatrix::new(node_share_m));
-                parties[i]
-                    .es_sss_collected
-                    .push(SecretShareMatrix::new(es_node_share_m));
+                let node_share_rows = (0..params.moduli().len())
+                    .map(|m| parties[j].sk_sss[m].row(i).unwrap())
+                    .collect::<Vec<_>>();
+                let es_node_share_rows = (0..params.moduli().len())
+                    .map(|m| parties[j].esi_sss[m].row(i).unwrap())
+                    .collect::<Vec<_>>();
+                let node_share_m = SecretShareMatrix::from_rows(&node_share_rows).unwrap();
+                let es_node_share_m = SecretShareMatrix::from_rows(&es_node_share_rows).unwrap();
+                parties[i].sk_sss_collected.push(node_share_m);
+                parties[i].es_sss_collected.push(es_node_share_m);
             }
             i += 1;
         }
