@@ -57,7 +57,7 @@ ZK proof generation and verification, commitments, proof aggregation, and on-cha
 4.6. Smudging coefficients are uniform in `[-B_sm, B_sm]`; `B_sm` and `B_e` are coefficient bounds, not variances.
 4.7. Decryption-share APIs state whether they accept local noise, a Shamir joint-noise share, or reconstructed joint noise.
 4.8. `ShareManager::new` enforces the trBFV threshold invariants (`n >= 3`, `T = (n - 1) / 2`) via `validate_threshold_config`, rejecting degree-0 sharings and configurations that break privacy or honest-party reconstruction, and requires `n < min modulus` so the Shamir evaluation points `1..=n` are distinct units modulo every modulus.
-4.9. Threshold decryption follows the level-zero contract: `decryption_share` rejects 3-component (unrelinearized) ciphertexts, and `decrypt_from_shares` requires a u64 plaintext modulus.
+4.9. Threshold decryption follows the level-zero contract: `decryption_share` rejects 3-component (unrelinearized) ciphertexts, clears variable-time flags on ciphertext `c0` and `c1` before multiplying `c1` by secret material and adding the result, and `SecretPoly` normalizes flags on construction so every operand in the secret-bearing chain remains constant-time; `decrypt_from_shares` requires a u64 plaintext modulus.
 4.10. Every secure example/benchmark preset proves smudging feasibility for its declared full configuration (moduli, `n`, `lambda`, `m`, `mult_depth`, and the accepted participant set) through the bound calculator — a preset-level feasibility test pins the exact constants the example runs with. An infeasible preset is a parameter/correctness regression to retune, not a runtime panic to unwrap (issue #113).
 
 **MBFV**
