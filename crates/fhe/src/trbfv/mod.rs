@@ -11,9 +11,13 @@ pub mod shares;
 pub mod smudging;
 /// Main threshold BFV orchestrator
 pub mod threshold;
+pub use crate::identity::{ContributionBinding, ParticipantSet, SessionId};
 
 // Re-export main types for convenience
-pub use shares::{SecretPoly, SecretShareMatrix, ShareManager};
+pub use shares::{
+    AggregatedKeyShare, DecryptionShare, KeyShareContribution, NoisePoly, NoiseShareContribution,
+    NoiseShareMatrix, OneTimeNoiseShare, SecretPoly, SecretShareMatrix, ShareManager,
+};
 pub use smudging::{
     Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
     SmudgingCoefficients,

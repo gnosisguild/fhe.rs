@@ -1,0 +1,11 @@
+error[E0382]: use of moved value: `noise`
+  --> tests/trybuild/noise_cannot_be_reused.rs:21:71
+   |
+11 |     noise: OneTimeNoiseShare,
+   |     ----- move occurs because `noise` has type `OneTimeNoiseShare`, which does not implement the `Copy` trait
+...
+19 |         noise,
+   |         ----- value moved here
+20 |     );
+21 |     let _ = manager.decryption_share(ciphertext, 2, key, use_session, noise);
+   |                                                                       ^^^^^ value used here after move

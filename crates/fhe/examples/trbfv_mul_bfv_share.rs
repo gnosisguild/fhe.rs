@@ -41,13 +41,16 @@ use fhe::{
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::LBFVRelinearizationKey,
     mbfv::AggregateIter,
-    trbfv::{Lambda, SecretPoly, SecretShareMatrix, ShareManager, TRBFV},
+    trbfv::{
+        DecryptionShare, KeyShareContribution, Lambda, NoiseShareContribution, NoiseShareMatrix,
+        SecretShareMatrix, SessionId, ShareManager, TRBFV,
+    },
     trlbfv::{
         AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
         aggregate_relinearization_key,
     },
 };
-use fhe_math::rq::{Poly, PowerBasis};
+use fhe_math::rq::PowerBasis;
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use ndarray::ArrayView1;
 use rand_distr::{Distribution, Uniform};
@@ -231,18 +234,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crp_d1 = CommonRandomPolyVec::new(&params_trbfv, &mut rng)?;
 
     // Canonical participant set — one common session ID covering all parties.
-    let lbfv_session_id: [u8; 32] = rand::random();
+    let lbfv_session_id = SessionId::new(rand::random());
     let lbfv_participant_set =
         ParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
 
     struct Party {
         sk_sss: Vec<SecretShareMatrix>, // sk_sss[m]: shape (num_parties, degree)
-        esi_sss: Vec<SecretShareMatrix>, // smudging error Shamir shares, same shape
+        esi_sss: Vec<NoiseShareMatrix>, // smudging error Shamir shares, same shape
         sk_sss_collected: Vec<SecretShareMatrix>, // collected from all senders; each (num_moduli, degree)
-        es_sss_collected: Vec<SecretShareMatrix>,
-        sk_poly_sum: SecretPoly<PowerBasis>,
-        es_poly_sum: SecretPoly<PowerBasis>,
-        d_share_poly: SecretPoly<PowerBasis>,
+        es_sss_collected: Vec<NoiseShareMatrix>,
+        sk_poly_sum: Option<fhe::trbfv::AggregatedKeyShare<PowerBasis>>,
+        es_poly_sum: Option<fhe::trbfv::OneTimeNoiseShare>,
+        d_share_poly: Option<DecryptionShare>,
         pk_lbfv_share: PublicKeyShare, // l-BFV PK contribution (shared crs_a)
         rlk_share: RelinKeyShare,
         // Share-encryption key pair (second BFV parameter set).
@@ -251,6 +254,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let trbfv: TRBFV = TRBFV::new(num_parties, threshold, params_trbfv.clone())?;
+    let use_session = SessionId::new(rand::random());
     let num_moduli = params_trbfv.moduli().len();
 
     println!("\n💻 Available CPU cores: {}", rayon::current_num_threads());
@@ -280,8 +284,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     security,
                     &mut rng,
                 )?;
-                let esi_poly = share_manager.bigints_to_poly(&esi_coeffs)?;
-                let esi_sss = share_manager.generate_secret_shares_from_poly(esi_poly, &mut rng)?;
+                let esi_poly = share_manager.bigints_to_poly(esi_coeffs)?;
+                let esi_sss = share_manager.generate_noise_shares_from_poly(esi_poly, &mut rng)?;
 
                 // l-BFV PK contribution (shared crp_a, same a_j across all parties).
                 let lbfv_binding =
@@ -308,15 +312,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let sk_share_enc = SecretKey::random(&params_share_enc, &mut rng);
                 let pk_share_enc = PublicKey::new(&sk_share_enc, &mut rng);
 
-                let ctx0 = params_trbfv.context_at_level(0)?;
                 Ok(Party {
                     sk_sss,
                     esi_sss,
                     sk_sss_collected: Vec::with_capacity(num_parties),
                     es_sss_collected: Vec::with_capacity(num_parties),
-                    sk_poly_sum: SecretPoly::new(Poly::<PowerBasis>::zero(ctx0)),
-                    es_poly_sum: SecretPoly::new(Poly::<PowerBasis>::zero(ctx0)),
-                    d_share_poly: SecretPoly::new(Poly::<PowerBasis>::zero(ctx0)),
+                    sk_poly_sum: None,
+                    es_poly_sum: None,
+                    d_share_poly: None,
                     pk_lbfv_share,
                     rlk_share,
                     sk_share_enc,
@@ -435,7 +438,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .collect::<Vec<_>>();
                     party
                         .es_sss_collected
-                        .push(SecretShareMatrix::from_rows(&node_es_views).unwrap());
+                        .push(NoiseShareMatrix::from_rows(&node_es_views).unwrap());
                 }
             });
     });
@@ -444,12 +447,39 @@ fn main() -> Result<(), Box<dyn Error>> {
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
             let temp_trbfv = trbfv.clone();
-            party.sk_poly_sum = temp_trbfv
-                .aggregate_collected_shares(&party.sk_sss_collected)
-                .unwrap();
-            party.es_poly_sum = temp_trbfv
-                .aggregate_collected_shares(&party.es_sss_collected)
-                .unwrap();
+            let key_contributions = party
+                .sk_sss_collected
+                .iter()
+                .enumerate()
+                .map(|(index, matrix)| {
+                    KeyShareContribution::new(
+                        ContributionBinding::new(lbfv_participant_set.clone(), (index + 1) as u32)
+                            .unwrap(),
+                        matrix.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            party.sk_poly_sum = Some(
+                temp_trbfv
+                    .aggregate_collected_shares(&lbfv_participant_set, &key_contributions)
+                    .unwrap(),
+            );
+            let noise_contributions = std::mem::take(&mut party.es_sss_collected)
+                .into_iter()
+                .enumerate()
+                .map(|(index, matrix)| {
+                    NoiseShareContribution::new(
+                        ContributionBinding::new(lbfv_participant_set.clone(), (index + 1) as u32)
+                            .unwrap(),
+                        matrix,
+                    )
+                })
+                .collect();
+            party.es_poly_sum = Some(
+                temp_trbfv
+                    .aggregate_noise_shares(&lbfv_participant_set, use_session, noise_contributions)
+                    .unwrap(),
+            );
         });
     });
 
@@ -495,12 +525,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     let t_start = Instant::now();
     parties
         .par_iter_mut()
-        .try_for_each(|party| -> fhe::Result<()> {
-            party.d_share_poly = trbfv.decryption_share(
-                product.clone(),
-                party.sk_poly_sum.clone().into_ntt()?,
-                party.es_poly_sum.clone(),
-            )?;
+        .enumerate()
+        .try_for_each(|(party_index, party)| -> fhe::Result<()> {
+            party.d_share_poly = Some(
+                trbfv.decryption_share(
+                    product.clone(),
+                    (party_index + 1) as u32,
+                    party
+                        .sk_poly_sum
+                        .take()
+                        .ok_or_else(|| fhe::Error::DefaultError("missing key share".to_string()))?
+                        .into_ntt()?,
+                    use_session,
+                    party.es_poly_sum.take().ok_or_else(|| {
+                        fhe::Error::DefaultError("missing noise share".to_string())
+                    })?,
+                )?,
+            );
             Ok(())
         })?;
     println!(
@@ -509,17 +550,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         t_start.elapsed().as_millis() as f64 / num_parties as f64
     );
 
-    let d_shares: Vec<SecretPoly<PowerBasis>> = parties
-        .iter()
+    let d_shares: Vec<DecryptionShare> = parties
+        .iter_mut()
         .take(threshold + 1)
-        .map(|p| p.d_share_poly.clone())
+        .map(|p| p.d_share_poly.take().unwrap())
         .collect();
 
     let result = timeit!("Combine shares and decrypt", {
-        let party_indices: Vec<usize> = (1..=threshold + 1).collect();
-        let pt = trbfv
-            .decrypt(d_shares, party_indices, product.clone())
-            .unwrap();
+        let pt = trbfv.decrypt(d_shares, product.clone()).unwrap();
         let v = Vec::<u64>::try_decode(&pt, Encoding::poly())?;
         Ok::<u64, Box<dyn Error>>(v[0])
     })?;

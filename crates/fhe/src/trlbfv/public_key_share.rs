@@ -117,7 +117,7 @@ mod protobuf {
             let mut proto: LbfvPublicKeyProto = LbfvPublicKeyProto::from(&self.key);
             if let Some(ref binding) = self.binding {
                 proto.binding = Some(LbfvBinding {
-                    session_id: binding.participant_set().session_id().to_vec(),
+                    session_id: binding.participant_set().session_id().as_bytes().to_vec(),
                     participant_ids: binding.participant_set().participant_ids().to_vec(),
                     participant_id: binding.participant_id(),
                     aggregate: false,

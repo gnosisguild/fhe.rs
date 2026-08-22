@@ -149,6 +149,41 @@ impl From<fhe_math::Error> for Error {
 /// modes (e.g. identify the misbehaving party) instead of parsing strings.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ThresholdError {
+    /// The participant set was empty.
+    #[error("participant set must not be empty")]
+    EmptyParticipantSet,
+
+    /// A participant ID was invalid or did not belong to the accepted set.
+    #[error("invalid participant ID {participant_id} for set size {n}")]
+    InvalidParticipantId { participant_id: u32, n: usize },
+
+    /// A contribution was supplied more than once.
+    #[error("duplicate contribution from participant {participant_id}")]
+    DuplicateContribution { participant_id: u32 },
+
+    /// A contribution was not a member of the accepted set.
+    #[error("unexpected contribution from participant {participant_id}")]
+    UnexpectedContribution { participant_id: u32 },
+
+    /// A required contribution was missing.
+    #[error("accepted participant contribution is missing")]
+    MissingContribution,
+
+    /// Contributions refer to different participant sets or epochs.
+    #[error("contribution participant-set or epoch mismatch")]
+    ContributionSetMismatch,
+
+    /// Key and noise aggregate metadata do not agree.
+    #[error("key/noise aggregate binding mismatch")]
+    KeyNoiseBindingMismatch,
+
+    /// Noise was created for a different decryption use session.
+    #[error("decryption-use session mismatch")]
+    DecryptionSessionMismatch,
+
+    /// Identified decryption shares do not share compatible metadata.
+    #[error("identified decryption-share metadata mismatch")]
+    IdentifiedShareMismatch,
     /// A party index is outside the valid range `1..=n`.
     #[error("invalid party ID {party_id}: must be between 1 and {n}")]
     InvalidPartyId {

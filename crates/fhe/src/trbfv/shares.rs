@@ -6,6 +6,7 @@ use crate::Error;
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::smudging::SmudgingCoefficients;
+use crate::trbfv::{ContributionBinding, ParticipantSet, SessionId};
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
 use fhe_math::{
@@ -19,7 +20,6 @@ use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use shamir_rns::{BarrettField, Error as ShamirError, ShamirScheme, ShareMatrix as RnsShareMatrix};
-use std::convert::TryFrom;
 use std::sync::Arc;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -54,12 +54,11 @@ fn map_shamir_error(error: ShamirError, party_id: usize, num_shares: usize) -> E
     }
 }
 
-/// Owning wrapper around a secret-share coefficient matrix (`Array2<u64>`).
+/// Owning wrapper around a secret-key share coefficient matrix (`Array2<u64>`).
 ///
-/// This is the single protected matrix type for both secret-key and
-/// smudging-noise shares: generated shares, shares collected from other
-/// parties, and per-modulus share matrices are all held in this wrapper so
-/// that the secret material is erased when the value is dropped.
+/// Generated shares, shares collected from other parties, and per-modulus
+/// secret-key share matrices are all held in this wrapper so that the secret
+/// material is erased when the value is dropped.
 ///
 /// # Security semantics
 ///
@@ -83,6 +82,86 @@ fn map_shamir_error(error: ShamirError, party_id: usize, num_shares: usize) -> E
 pub struct SecretShareMatrix {
     matrix: Array2<u64>,
 }
+
+/// A non-cloneable protected matrix carrying one-time smudging-noise shares.
+///
+/// This type is deliberately distinct from [`SecretShareMatrix`]. Noise
+/// generated for one decryption use cannot be cloned while it is dealt,
+/// transported, or collected; ownership must eventually be consumed by
+/// [`NoiseShareContribution::new`].
+pub struct NoiseShareMatrix {
+    matrix: Array2<u64>,
+}
+
+/// A cloneable, identified key-share contribution.
+#[derive(Clone, Debug)]
+pub struct KeyShareContribution {
+    binding: ContributionBinding,
+    matrix: SecretShareMatrix,
+}
+
+impl KeyShareContribution {
+    /// Bind a protected receiver matrix to its contributing party.
+    #[must_use]
+    pub fn new(binding: ContributionBinding, matrix: SecretShareMatrix) -> Self {
+        Self { binding, matrix }
+    }
+
+    /// The consistency metadata attached to this contribution.
+    #[must_use]
+    pub fn binding(&self) -> &ContributionBinding {
+        &self.binding
+    }
+}
+
+/// A consumed, non-cloneable identified noise-share contribution.
+#[derive(Debug)]
+pub struct NoiseShareContribution {
+    binding: ContributionBinding,
+    matrix: NoiseShareMatrix,
+}
+
+impl NoiseShareContribution {
+    /// Bind a non-cloneable noise receiver matrix, consuming its owner.
+    #[must_use]
+    pub fn new(binding: ContributionBinding, matrix: NoiseShareMatrix) -> Self {
+        Self { binding, matrix }
+    }
+
+    /// The consistency metadata attached to this contribution.
+    #[must_use]
+    pub fn binding(&self) -> &ContributionBinding {
+        &self.binding
+    }
+}
+
+impl Zeroize for KeyShareContribution {
+    fn zeroize(&mut self) {
+        self.matrix.zeroize();
+    }
+}
+
+impl Drop for KeyShareContribution {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for KeyShareContribution {}
+
+impl Zeroize for NoiseShareContribution {
+    fn zeroize(&mut self) {
+        self.matrix.zeroize();
+    }
+}
+
+impl Drop for NoiseShareContribution {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for NoiseShareContribution {}
 
 impl SecretShareMatrix {
     /// Wrap an owned share matrix, placing it under automatic zeroization.
@@ -152,6 +231,44 @@ impl SecretShareMatrix {
     }
 }
 
+impl NoiseShareMatrix {
+    /// Wrap an owned noise-share matrix under automatic zeroization.
+    #[must_use]
+    pub fn new(matrix: Array2<u64>) -> Self {
+        Self { matrix }
+    }
+
+    /// Assemble a non-cloneable noise matrix from borrowed party rows.
+    pub fn from_rows(rows: &[ArrayView1<'_, u64>]) -> Result<Self, Error> {
+        let columns = rows.first().map_or(0, |row| row.len());
+        if let Some(row) = rows.iter().find(|row| row.len() != columns) {
+            return Err(Error::inconsistent_degree(columns, row.len()));
+        }
+        let mut result = Self::new(Array2::zeros((rows.len(), columns)));
+        for (mut destination, source) in result.matrix.outer_iter_mut().zip(rows) {
+            destination.assign(source);
+        }
+        Ok(result)
+    }
+
+    /// The matrix shape as `(rows, columns)`.
+    #[must_use]
+    pub fn dim(&self) -> (usize, usize) {
+        self.matrix.dim()
+    }
+
+    /// Borrow a single noise-share row for transport.
+    pub fn row(&self, index: usize) -> Result<ArrayView1<'_, u64>, Error> {
+        if index >= self.matrix.nrows() {
+            return Err(Error::DefaultError(format!(
+                "noise share matrix row index {index} out of bounds (nrows = {})",
+                self.matrix.nrows()
+            )));
+        }
+        Ok(self.matrix.row(index))
+    }
+}
+
 // Redacted `Debug` so that `{:?}` never leaks the share values.
 impl std::fmt::Debug for SecretShareMatrix {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -176,6 +293,88 @@ impl Drop for SecretShareMatrix {
 }
 
 impl ZeroizeOnDrop for SecretShareMatrix {}
+
+impl std::fmt::Debug for NoiseShareMatrix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoiseShareMatrix")
+            .field("dim", &self.matrix.dim())
+            .finish()
+    }
+}
+
+impl Zeroize for NoiseShareMatrix {
+    fn zeroize(&mut self) {
+        for value in self.matrix.iter_mut() {
+            value.zeroize();
+        }
+    }
+}
+
+impl Drop for NoiseShareMatrix {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for NoiseShareMatrix {}
+
+trait ShareMatrixView {
+    fn dim(&self) -> (usize, usize);
+    fn row(&self, index: usize) -> Result<ArrayView1<'_, u64>, Error>;
+}
+
+trait ShareMatrixDestination: ShareMatrixView {
+    fn zeroed(shape: (usize, usize)) -> Self;
+    fn copy_from_rns(&mut self, source: &RnsShareMatrix) -> Result<(), Error>;
+}
+
+impl ShareMatrixView for SecretShareMatrix {
+    fn dim(&self) -> (usize, usize) {
+        self.dim()
+    }
+
+    fn row(&self, index: usize) -> Result<ArrayView1<'_, u64>, Error> {
+        self.row(index)
+    }
+}
+
+impl ShareMatrixView for NoiseShareMatrix {
+    fn dim(&self) -> (usize, usize) {
+        self.dim()
+    }
+
+    fn row(&self, index: usize) -> Result<ArrayView1<'_, u64>, Error> {
+        self.row(index)
+    }
+}
+
+impl ShareMatrixDestination for SecretShareMatrix {
+    fn zeroed(shape: (usize, usize)) -> Self {
+        Self::new(Array2::zeros(shape))
+    }
+
+    fn copy_from_rns(&mut self, source: &RnsShareMatrix) -> Result<(), Error> {
+        let source = source.as_slice();
+        for (destination, value) in self.matrix.iter_mut().zip(source) {
+            *destination = *value;
+        }
+        Ok(())
+    }
+}
+
+impl ShareMatrixDestination for NoiseShareMatrix {
+    fn zeroed(shape: (usize, usize)) -> Self {
+        Self::new(Array2::zeros(shape))
+    }
+
+    fn copy_from_rns(&mut self, source: &RnsShareMatrix) -> Result<(), Error> {
+        let source = source.as_slice();
+        for (destination, value) in self.matrix.iter_mut().zip(source) {
+            *destination = *value;
+        }
+        Ok(())
+    }
+}
 
 /// Owning wrapper around a secret polynomial (`Poly<R>`).
 ///
@@ -218,6 +417,135 @@ impl ZeroizeOnDrop for SecretShareMatrix {}
 #[derive(Clone)]
 pub struct SecretPoly<R: RepresentationTag> {
     poly: Poly<R>,
+}
+
+/// A protected, metadata-bearing aggregate of key-share contributions.
+#[derive(Clone, Debug)]
+pub struct AggregatedKeyShare<R: RepresentationTag> {
+    poly: SecretPoly<R>,
+    participant_set: ParticipantSet,
+}
+
+impl<R: RepresentationTag> AggregatedKeyShare<R> {
+    /// Borrow the participant set bound to this aggregate.
+    #[must_use]
+    pub fn participant_set(&self) -> &ParticipantSet {
+        &self.participant_set
+    }
+
+    /// Borrow the protected aggregate's coefficient matrix.
+    #[must_use]
+    pub fn coefficients(&self) -> ndarray::ArrayView2<'_, u64> {
+        self.poly.coefficients()
+    }
+
+    fn into_parts(mut self) -> (SecretPoly<R>, ParticipantSet) {
+        let participant_set = self.participant_set.clone();
+        let ctx = self.poly.ctx().clone();
+        let poly = std::mem::replace(&mut self.poly, SecretPoly::new(Poly::<R>::zero(&ctx)));
+        (poly, participant_set)
+    }
+}
+
+impl AggregatedKeyShare<PowerBasis> {
+    /// Consume this aggregate and transform its polynomial into NTT form.
+    pub fn into_ntt(self) -> Result<AggregatedKeyShare<Ntt>, Error> {
+        let (poly, participant_set) = self.into_parts();
+        let poly = poly.into_ntt()?;
+        Ok(AggregatedKeyShare {
+            poly,
+            participant_set,
+        })
+    }
+}
+
+impl AggregatedKeyShare<Ntt> {
+    /// Consume this aggregate and transform its polynomial into power-basis form.
+    pub fn into_power_basis(self) -> Result<AggregatedKeyShare<PowerBasis>, Error> {
+        let (poly, participant_set) = self.into_parts();
+        let poly = poly.into_power_basis()?;
+        Ok(AggregatedKeyShare {
+            poly,
+            participant_set,
+        })
+    }
+}
+
+/// A non-cloneable aggregate of one decryption-use session's noise.
+#[derive(Debug)]
+pub struct OneTimeNoiseShare {
+    poly: SecretPoly<PowerBasis>,
+    participant_set: ParticipantSet,
+    use_session: SessionId,
+}
+
+impl Zeroize for OneTimeNoiseShare {
+    fn zeroize(&mut self) {
+        self.poly.zeroize();
+    }
+}
+
+impl Drop for OneTimeNoiseShare {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for OneTimeNoiseShare {}
+
+impl OneTimeNoiseShare {
+    /// The key epoch and accepted participant set for this noise.
+    #[must_use]
+    pub fn participant_set(&self) -> &ParticipantSet {
+        &self.participant_set
+    }
+
+    /// The caller-supplied one-time decryption-use identifier.
+    #[must_use]
+    pub fn use_session(&self) -> SessionId {
+        self.use_session
+    }
+}
+
+/// An identified protected decryption share.
+#[derive(Clone, Debug)]
+pub struct DecryptionShare {
+    party_id: u32,
+    participant_set: ParticipantSet,
+    use_session: SessionId,
+    poly: SecretPoly<PowerBasis>,
+}
+
+impl DecryptionShare {
+    /// The party identifier inseparable from this share polynomial.
+    #[must_use]
+    pub fn party_id(&self) -> u32 {
+        self.party_id
+    }
+
+    /// The key epoch participant set.
+    #[must_use]
+    pub fn participant_set(&self) -> &ParticipantSet {
+        &self.participant_set
+    }
+
+    /// The decryption-use identifier.
+    #[must_use]
+    pub fn use_session(&self) -> SessionId {
+        self.use_session
+    }
+
+    /// Borrow the protected polynomial's RNS coefficient matrix.
+    #[must_use]
+    pub fn coefficients(&self) -> ndarray::ArrayView2<'_, u64> {
+        self.poly.coefficients()
+    }
+
+    /// Borrow the protected share polynomial for transport or diagnostics.
+    #[must_use]
+    pub(crate) fn poly(&self) -> &SecretPoly<PowerBasis> {
+        &self.poly
+    }
 }
 
 impl<R: RepresentationTag> SecretPoly<R> {
@@ -279,6 +607,20 @@ impl<R: RepresentationTag> Drop for SecretPoly<R> {
 
 impl<R: RepresentationTag> ZeroizeOnDrop for SecretPoly<R> {}
 
+impl<R: RepresentationTag> Zeroize for AggregatedKeyShare<R> {
+    fn zeroize(&mut self) {
+        self.poly.zeroize();
+    }
+}
+
+impl<R: RepresentationTag> Drop for AggregatedKeyShare<R> {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl<R: RepresentationTag> ZeroizeOnDrop for AggregatedKeyShare<R> {}
+
 impl SecretPoly<PowerBasis> {
     /// Consume the protected polynomial and return its NTT form, still
     /// protected. Used to prepare the secret input to decryption without
@@ -318,6 +660,40 @@ impl SecretPoly<Ntt> {
         ))
     }
 }
+
+/// A non-cloneable protected polynomial containing one-time smudging noise.
+///
+/// The wrapper intentionally exposes no coefficient or polynomial borrow. It
+/// can only be consumed by noise-share dealing, which preserves one-time
+/// ownership until receiver aggregation.
+#[derive(Debug)]
+pub struct NoisePoly {
+    poly: SecretPoly<PowerBasis>,
+}
+
+impl NoisePoly {
+    fn into_secret_poly(mut self) -> SecretPoly<PowerBasis> {
+        let ctx = self.poly.ctx().clone();
+        std::mem::replace(
+            &mut self.poly,
+            SecretPoly::new(Poly::<PowerBasis>::zero(&ctx)),
+        )
+    }
+}
+
+impl Zeroize for NoisePoly {
+    fn zeroize(&mut self) {
+        self.poly.zeroize();
+    }
+}
+
+impl Drop for NoisePoly {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for NoisePoly {}
 
 /// Manager for threshold BFV share operations.
 ///
@@ -430,23 +806,22 @@ impl ShareManager {
         let ctx = self.params.context_at_level(0)?;
         self.coeffs_to_poly(coeffs, ctx)
     }
-    /// Convert a vector of BigInt coefficients into a protected Poly in full
-    /// RNS representation at level 0 using the BFV context.
+    /// Convert one-time BigInt coefficients into a non-cloneable noise owner
+    /// in full RNS representation at level 0 using the BFV context.
     ///
     /// The coefficients are read from the protected
     /// [`SmudgingCoefficients`] wrapper so that generated smudging material
     /// never crosses a raw `&[BigInt]` boundary.
-    pub fn bigints_to_poly(
-        &self,
-        bigints: &SmudgingCoefficients,
-    ) -> Result<SecretPoly<PowerBasis>, Error> {
+    pub fn bigints_to_poly(&self, bigints: SmudgingCoefficients) -> Result<NoisePoly, Error> {
         let ctx = self.params.context_at_level(0)?;
         let mut poly =
             Poly::<PowerBasis>::from_bigints(bigints.as_slice(), ctx).map_err(Error::from)?;
         // `Zeroizing` cannot be unwrapped by value in this zeroize version;
         // swap the polynomial out so the guard drops an empty default and the
         // secret moves directly into the protected wrapper.
-        Ok(SecretPoly::new(std::mem::take(&mut *poly)))
+        Ok(NoisePoly {
+            poly: SecretPoly::new(std::mem::take(&mut *poly)),
+        })
     }
 
     /// Generate Shamir secret shares for polynomial coefficients from a
@@ -456,6 +831,27 @@ impl ShareManager {
         poly: SecretPoly<PowerBasis>,
         rng: &mut R,
     ) -> Result<Vec<SecretShareMatrix>, Error> {
+        self.generate_share_matrices(poly, rng)
+    }
+
+    /// Generate Shamir secret shares for one-time smudging noise.
+    pub fn generate_noise_shares_from_poly<R: RngCore + CryptoRng>(
+        &mut self,
+        poly: NoisePoly,
+        rng: &mut R,
+    ) -> Result<Vec<NoiseShareMatrix>, Error> {
+        self.generate_share_matrices(poly.into_secret_poly(), rng)
+    }
+
+    fn generate_share_matrices<R, M>(
+        &mut self,
+        poly: SecretPoly<PowerBasis>,
+        rng: &mut R,
+    ) -> Result<Vec<M>, Error>
+    where
+        R: RngCore + CryptoRng,
+        M: ShareMatrixDestination + Send,
+    {
         let moduli: Vec<u64> = poly.ctx().moduli().to_vec();
         let expected_moduli = self.params.moduli();
         let expected_shape = (expected_moduli.len(), self.params.degree());
@@ -500,11 +896,11 @@ impl ShareManager {
             seed.zeroize();
         }
 
-        let return_vec: Result<Vec<SecretShareMatrix>, Error> = moduli
+        let return_vec: Result<Vec<M>, Error> = moduli
             .par_iter()
             .zip(coeff_rows.par_iter())
             .enumerate()
-            .map(|(i, (m, p))| -> Result<SecretShareMatrix, Error> {
+            .map(|(i, (m, p))| -> Result<M, Error> {
                 let seed = seeds
                     .get(i)
                     .copied()
@@ -530,13 +926,8 @@ impl ShareManager {
                         ),
                     ));
                 }
-                let mut output = SecretShareMatrix::new(Array2::zeros((
-                    self.n,
-                    self.params.degree(),
-                )));
-                for (slot, value) in output.matrix.iter_mut().zip(matrix.as_slice()) {
-                    *slot = *value;
-                }
+                let mut output = M::zeroed(generated_shape);
+                output.copy_from_rns(&matrix)?;
                 Ok(output)
             })
             .collect();
@@ -561,12 +952,13 @@ impl ShareManager {
     /// they are never reduced or otherwise repaired.
     ///
     /// # Arguments
-    /// - `sk_sss_collected`: One share matrix per contributing party (at most `n`;
+    /// - `sk_sss_collected`: One secret-key share matrix per contributing party (at most `n`;
     ///   fewer is allowed, e.g. when some parties aborted during dealing).
     ///   Each [`SecretShareMatrix`] has one row per modulus and one column per
-    ///   coefficient. The same API is used for secret-key and smudging-noise
-    ///   shares; both are sensitive material and are zeroized automatically
-    ///   on drop.
+    ///   coefficient. Smudging noise uses the separate consuming
+    ///   [`ShareManager::aggregate_noise_shares`] API and
+    ///   [`NoiseShareMatrix`] type; both material types are sensitive and are
+    ///   zeroized automatically on drop.
     ///
     /// # Returns
     /// A protected polynomial representing the aggregated secret key material
@@ -578,13 +970,89 @@ impl ShareManager {
     /// malformed, never reduced).
     pub fn aggregate_collected_shares(
         &self,
-        sk_sss_collected: &[SecretShareMatrix], // collected sk sss shares from other parties
-    ) -> Result<SecretPoly<PowerBasis>, Error> {
-        if sk_sss_collected.is_empty() {
-            return Err(Error::share_count_mismatch(0, 1));
+        participant_set: &ParticipantSet,
+        contributions: &[KeyShareContribution],
+    ) -> Result<AggregatedKeyShare<PowerBasis>, Error> {
+        self.validate_contribution_bindings(
+            participant_set,
+            contributions.iter().map(KeyShareContribution::binding),
+        )?;
+        self.aggregate_matrices(
+            participant_set,
+            contributions
+                .iter()
+                .map(|contribution| &contribution.matrix),
+        )
+    }
+
+    /// Consume and aggregate one identified noise contribution for one use.
+    pub fn aggregate_noise_shares(
+        &self,
+        participant_set: &ParticipantSet,
+        use_session: SessionId,
+        contributions: Vec<NoiseShareContribution>,
+    ) -> Result<OneTimeNoiseShare, Error> {
+        self.validate_contribution_bindings(
+            participant_set,
+            contributions.iter().map(NoiseShareContribution::binding),
+        )?;
+        let poly = self.aggregate_matrices(
+            participant_set,
+            contributions
+                .iter()
+                .map(|contribution| &contribution.matrix),
+        )?;
+        let (poly, participant_set) = poly.into_parts();
+        Ok(OneTimeNoiseShare {
+            poly,
+            participant_set,
+            use_session,
+        })
+    }
+
+    fn validate_contribution_bindings<'a, I>(
+        &self,
+        participant_set: &ParticipantSet,
+        bindings: I,
+    ) -> crate::Result<()>
+    where
+        I: IntoIterator<Item = &'a ContributionBinding>,
+    {
+        let invalid_id = participant_set
+            .participant_ids()
+            .iter()
+            .copied()
+            .find(|party_id| (*party_id as usize) > self.n);
+        if let Some(participant_id) = invalid_id {
+            return Err(Error::Threshold(
+                crate::ThresholdError::InvalidParticipantId {
+                    participant_id,
+                    n: self.n,
+                },
+            ));
         }
-        if sk_sss_collected.len() > self.n {
-            return Err(Error::share_count_mismatch(sk_sss_collected.len(), self.n));
+        let bindings: Vec<_> = bindings.into_iter().collect();
+        if bindings.len() > self.n {
+            return Err(Error::share_count_mismatch(bindings.len(), self.n));
+        }
+        participant_set.validate_contributions(bindings.iter().copied())
+    }
+
+    fn aggregate_matrices<'a, I, M>(
+        &self,
+        participant_set: &ParticipantSet,
+        matrices: I,
+    ) -> Result<AggregatedKeyShare<PowerBasis>, Error>
+    where
+        I: IntoIterator<Item = &'a M>,
+        M: ShareMatrixView + 'a,
+    {
+        let sk_sss_collected: Vec<_> = matrices.into_iter().collect();
+        if sk_sss_collected.is_empty() {
+            return Err(Error::share_count_mismatch(
+                0,
+                participant_set.participant_ids().len(),
+            ));
         }
         let expected_shape = (self.params.moduli().len(), self.params.degree());
         for (party_idx, item) in sk_sss_collected.iter().enumerate() {
@@ -609,7 +1077,7 @@ impl ShareManager {
         // `moduli().get(row)` lookup is expected to succeed, but in keeping with
         // the workspace convention it stays fallible rather than indexed.
         for (party_idx, item) in sk_sss_collected.iter().enumerate() {
-            for row in 0..item.nrows() {
+            for row in 0..item.dim().0 {
                 let q_i =
                     self.params.moduli().get(row).copied().ok_or_else(|| {
                         Error::DefaultError("modulus index out of range".to_string())
@@ -646,7 +1114,7 @@ impl ShareManager {
             let acc = acc_row
                 .as_slice_mut()
                 .ok_or_else(|| Error::DefaultError("non-contiguous row".to_string()))?;
-            for item in sk_sss_collected {
+            for item in &sk_sss_collected {
                 let item_row = item.row(row)?;
                 let share = item_row
                     .as_slice()
@@ -657,7 +1125,10 @@ impl ShareManager {
 
         let mut sum_poly = Poly::<PowerBasis>::zero(ctx);
         sum_poly.set_coefficients(std::mem::take(&mut sum.matrix));
-        Ok(SecretPoly::new(sum_poly))
+        Ok(AggregatedKeyShare {
+            poly: SecretPoly::new(sum_poly),
+            participant_set: participant_set.clone(),
+        })
     }
 
     /// Compute decryption share from ciphertext and secret/smudging polynomials.
@@ -682,9 +1153,24 @@ impl ShareManager {
     pub fn decryption_share(
         &self,
         ciphertext: Arc<Ciphertext>,
-        sk_i: SecretPoly<Ntt>,
-        es_i: SecretPoly<PowerBasis>,
-    ) -> Result<SecretPoly<PowerBasis>, Error> {
+        party_id: u32,
+        sk_i: AggregatedKeyShare<Ntt>,
+        use_session: SessionId,
+        es_i: OneTimeNoiseShare,
+    ) -> Result<DecryptionShare, Error> {
+        if party_id == 0 || (party_id as usize) > self.n {
+            return Err(Error::invalid_party_id(party_id as usize, self.n));
+        }
+        if sk_i.participant_set != es_i.participant_set {
+            return Err(Error::Threshold(
+                crate::ThresholdError::KeyNoiseBindingMismatch,
+            ));
+        }
+        if es_i.use_session != use_session {
+            return Err(Error::Threshold(
+                crate::ThresholdError::DecryptionSessionMismatch,
+            ));
+        }
         if ciphertext.params != self.params {
             return Err(Error::invalid_ciphertext(
                 "ciphertext parameters do not match this ShareManager's parameters",
@@ -705,7 +1191,7 @@ impl ShareManager {
         let c0 = c0.into_power_basis()?;
         let mut c1 = ciphertext.c[1].clone();
         c1.disallow_variable_time_computations();
-        if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
+        if sk_i.poly.ctx() != c1.ctx() || es_i.poly.ctx() != c0.ctx() {
             return Err(Error::context_mismatch(
                 &"share polynomial context",
                 &"ciphertext context",
@@ -713,7 +1199,7 @@ impl ShareManager {
         }
         // c1sk = c1 * sk_i is the secret part of the decryption share; it is
         // computed from the borrowed inner polynomial and guarded immediately.
-        let mut c1sk = Zeroizing::new((&c1 * sk_i.inner()).into_power_basis()?);
+        let mut c1sk = Zeroizing::new((&c1 * sk_i.poly.inner()).into_power_basis()?);
         // `&c0 + &*c1sk` would clone the left operand into a fresh allocation
         // (fhe-math/src/rq/ops.rs `impl Add<&Poly> for &Poly`), leaving an
         // abandoned unzeroized copy behind. Instead the guarded `c1sk` buffer
@@ -722,8 +1208,13 @@ impl ShareManager {
         // polynomial keeps exactly one owner under its guard throughout.
         let mut d_share = Zeroizing::new(std::mem::take(&mut *c1sk));
         *d_share += &c0;
-        *d_share += es_i.inner();
-        Ok(SecretPoly::new(std::mem::take(&mut *d_share)))
+        *d_share += es_i.poly.inner();
+        Ok(DecryptionShare {
+            party_id,
+            participant_set: sk_i.participant_set.clone(),
+            use_session,
+            poly: SecretPoly::new(std::mem::take(&mut *d_share)),
+        })
     }
 
     /// Decrypt ciphertext from collected decryption shares.
@@ -732,9 +1223,9 @@ impl ShareManager {
     /// decryption shares from exactly `threshold + 1` parties to reconstruct the plaintext.
     ///
     /// # Arguments
-    /// - `d_share_polys`: Exactly `threshold + 1` protected decryption shares
-    /// - `reconstructing_parties`: The 1-based party indices the shares came from, in
-    ///   the same order as `d_share_polys`; indices must be distinct and in `1..=n`
+    /// - `d_shares`: Exactly `threshold + 1` identified protected decryption
+    ///   shares. Party IDs and binding metadata are carried by each share and
+    ///   validated before reconstruction.
     /// - `ciphertext`: The original ciphertext being decrypted
     ///
     /// # Returns
@@ -744,8 +1235,7 @@ impl ShareManager {
     #[allow(clippy::indexing_slicing)]
     pub fn decrypt_from_shares(
         &self,
-        d_share_polys: Vec<SecretPoly<PowerBasis>>,
-        reconstructing_parties: Vec<usize>,
+        d_shares: Vec<DecryptionShare>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
         if ciphertext.params != self.params {
@@ -757,19 +1247,41 @@ impl ShareManager {
         // Reconstruction consumes exactly threshold + 1 shares; requiring
         // exactness (rather than truncating extras) avoids silently depending
         // on the order of the provided shares.
-        if d_share_polys.len() != self.threshold + 1 {
+        if d_shares.len() != self.threshold + 1 {
             return Err(Error::share_count_mismatch(
-                d_share_polys.len(),
+                d_shares.len(),
                 self.threshold + 1,
             ));
         }
-        // The number of reconstructing parties must match the provided shares
-        if reconstructing_parties.len() != d_share_polys.len() {
-            return Err(Error::share_count_mismatch(
-                reconstructing_parties.len(),
-                d_share_polys.len(),
+        let first = d_shares
+            .first()
+            .ok_or_else(|| Error::share_count_mismatch(0, 1))?;
+        let participant_set = first.participant_set.clone();
+        let use_session = first.use_session;
+        let invalid_id = participant_set
+            .participant_ids()
+            .iter()
+            .copied()
+            .find(|party_id| *party_id == 0 || (*party_id as usize) > self.n);
+        if let Some(participant_id) = invalid_id {
+            return Err(Error::Threshold(
+                crate::ThresholdError::InvalidParticipantId {
+                    participant_id,
+                    n: self.n,
+                },
             ));
         }
+        for share in &d_shares {
+            if share.participant_set != participant_set || share.use_session != use_session {
+                return Err(Error::Threshold(
+                    crate::ThresholdError::IdentifiedShareMismatch,
+                ));
+            }
+        }
+        let reconstructing_parties: Vec<usize> = d_shares
+            .iter()
+            .map(|share| share.party_id as usize)
+            .collect();
         // Shamir x-coordinates are 1-based, bounded by n, and must be distinct:
         // index 0 would evaluate the sharing polynomial at the secret itself,
         // and duplicates make the Lagrange denominators non-invertible.
@@ -787,6 +1299,8 @@ impl ShareManager {
         // share must carry all RNS rows and all coefficient columns.
         let expected_shape = (self.params.moduli().len(), self.params.degree());
         let expected_ctx = self.params.context_at_level(0)?;
+        let d_share_polys: Vec<&SecretPoly<PowerBasis>> =
+            d_shares.iter().map(DecryptionShare::poly).collect();
         for (i, d_share_poly) in d_share_polys.iter().enumerate() {
             let party_id = reconstructing_parties.get(i).copied().ok_or_else(|| {
                 Error::share_count_mismatch(reconstructing_parties.len(), d_share_polys.len())
@@ -977,18 +1491,22 @@ mod tests {
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use ndarray::Array2;
     use num_bigint::BigInt;
-    use rand::rng;
+    use rand::{SeedableRng, rng};
+    use rand_chacha::ChaCha8Rng;
     use shamir_rns::{BarrettField, ShamirScheme};
 
     // Error-path reachability notes for the zeroization guards (issue #126):
     //
-    // - The infallible `Array2::zeros` + guarded-copy matrix assembly in
-    //   `generate_secret_shares_from_poly` and `decrypt_from_shares` keeps the
-    //   flat `Zeroizing<Vec<u64>>` buffer guarded until after shaping. The
-    //   preserved length-mismatch error is unreachable through the public API:
-    //   the coefficient matrix always has exactly `degree` entries per modulus
-    //   row, so `m_data.len()` always equals the shape product (the checks are
-    //   defensive behavior preservation).
+    // - `generate_secret_shares_from_poly` and
+    //   `generate_noise_shares_from_poly` allocate their destination wrapper
+    //   before copying any Shamir output. The destination therefore remains
+    //   zeroizing if a later operation unwinds.
+    // - The infallible `Array2::zeros` + guarded-copy reconstruction assembly in
+    //   `decrypt_from_shares` keeps the flat `Zeroizing<Vec<u64>>` buffer guarded
+    //   until after shaping. The preserved length-mismatch error is unreachable
+    //   through the public API: the coefficient matrix always has exactly
+    //   `degree` entries per modulus row, so `m_data.len()` always equals the
+    //   shape product (the checks are defensive behavior preservation).
     // - The per-modulus reconstruction buffers in `decrypt_from_shares` are
     //   returned under `Zeroizing` guards. The field-level batch API validates
     //   exact rows, IDs, and canonical values before interpolation.
@@ -1001,6 +1519,122 @@ mod tests {
             .set_plaintext_modulus(4096)
             .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
             .build_arc()
+            .unwrap()
+    }
+
+    fn test_participant_set(n: usize) -> ParticipantSet {
+        ParticipantSet::new(
+            SessionId::new([9; 32]),
+            (1..=n).map(|party_id| party_id as u32).collect(),
+        )
+        .unwrap()
+    }
+
+    fn identified_key(
+        poly: SecretPoly<Ntt>,
+        participant_set: ParticipantSet,
+    ) -> AggregatedKeyShare<Ntt> {
+        AggregatedKeyShare {
+            poly,
+            participant_set,
+        }
+    }
+
+    fn identified_noise(
+        poly: SecretPoly<PowerBasis>,
+        participant_set: ParticipantSet,
+        use_session: SessionId,
+    ) -> OneTimeNoiseShare {
+        OneTimeNoiseShare {
+            poly,
+            participant_set,
+            use_session,
+        }
+    }
+
+    fn identified_decryption_share(
+        poly: SecretPoly<PowerBasis>,
+        party_id: u32,
+        participant_set: ParticipantSet,
+        use_session: SessionId,
+    ) -> DecryptionShare {
+        DecryptionShare {
+            party_id,
+            participant_set,
+            use_session,
+            poly,
+        }
+    }
+
+    fn aggregate_receiver_key(
+        manager: &ShareManager,
+        participant_set: &ParticipantSet,
+        matrix: SecretShareMatrix,
+    ) -> AggregatedKeyShare<PowerBasis> {
+        let shape = matrix.dim();
+        let mut first = Some(matrix);
+        let contributions = participant_set
+            .participant_ids()
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, party_id)| {
+                let matrix = if index == 0 {
+                    first.take().unwrap()
+                } else {
+                    SecretShareMatrix::new(Array2::zeros(shape))
+                };
+                KeyShareContribution::new(
+                    ContributionBinding::new(participant_set.clone(), party_id).unwrap(),
+                    matrix,
+                )
+            })
+            .collect::<Vec<_>>();
+        manager
+            .aggregate_collected_shares(participant_set, &contributions)
+            .unwrap()
+    }
+
+    fn key_contributions(
+        participant_set: &ParticipantSet,
+        matrices: Vec<SecretShareMatrix>,
+    ) -> Vec<KeyShareContribution> {
+        matrices
+            .into_iter()
+            .enumerate()
+            .map(|(index, matrix)| {
+                let party_id = participant_set
+                    .participant_ids()
+                    .get(index)
+                    .copied()
+                    .unwrap_or(1);
+                KeyShareContribution::new(
+                    ContributionBinding::new(participant_set.clone(), party_id).unwrap(),
+                    matrix,
+                )
+            })
+            .collect()
+    }
+
+    fn aggregate_zero_noise(
+        manager: &ShareManager,
+        participant_set: &ParticipantSet,
+        use_session: SessionId,
+    ) -> OneTimeNoiseShare {
+        let shape = (manager.params.moduli().len(), manager.params.degree());
+        let contributions = participant_set
+            .participant_ids()
+            .iter()
+            .copied()
+            .map(|party_id| {
+                NoiseShareContribution::new(
+                    ContributionBinding::new(participant_set.clone(), party_id).unwrap(),
+                    NoiseShareMatrix::new(Array2::zeros(shape)),
+                )
+            })
+            .collect();
+        manager
+            .aggregate_noise_shares(participant_set, use_session, contributions)
             .unwrap()
     }
 
@@ -1169,10 +1803,10 @@ mod tests {
         let bigints: Vec<BigInt> = (0..degree).map(|i| BigInt::from(i as i64)).collect();
 
         let poly = manager
-            .bigints_to_poly(&SmudgingCoefficients::new(bigints))
+            .bigints_to_poly(SmudgingCoefficients::new(bigints))
             .unwrap();
-        assert_eq!(poly.coefficients().ncols(), degree);
-        assert_eq!(poly.coefficients().nrows(), params.moduli().len());
+        assert_eq!(poly.poly.coefficients().ncols(), degree);
+        assert_eq!(poly.poly.coefficients().nrows(), params.moduli().len());
     }
 
     #[test]
@@ -1182,7 +1816,7 @@ mod tests {
 
         // Wrong number of coefficients
         let bigints = vec![BigInt::from(1), BigInt::from(2)]; // Too few
-        let result = manager.bigints_to_poly(&SmudgingCoefficients::new(bigints));
+        let result = manager.bigints_to_poly(SmudgingCoefficients::new(bigints));
         assert!(result.is_err());
     }
 
@@ -1212,18 +1846,28 @@ mod tests {
         unsafe { flagged_sk_source.allow_variable_time_computations() }
         let flagged_sk = SecretPoly::new(flagged_sk_source.into_ntt().unwrap());
         assert!(!flagged_sk.inner().allows_variable_time_computations());
+        let participant_set = test_participant_set(n);
+        let use_session = SessionId::new([10; 32]);
 
         // The secret-key flag is normalized independently of the noise input.
+        let flagged_sk_key = identified_key(flagged_sk, participant_set.clone());
         let decryption_share_from_flagged_sk = manager
             .decryption_share(
                 ct.clone(),
-                flagged_sk,
-                SecretPoly::new(Poly::<PowerBasis>::zero(ctx)),
+                1,
+                flagged_sk_key.clone(),
+                use_session,
+                identified_noise(
+                    SecretPoly::new(Poly::<PowerBasis>::zero(ctx)),
+                    participant_set.clone(),
+                    use_session,
+                ),
             )
             .unwrap();
         assert!(ct.c.get(1).unwrap().allows_variable_time_computations());
         assert!(
             !decryption_share_from_flagged_sk
+                .poly()
                 .inner()
                 .allows_variable_time_computations()
         );
@@ -1236,11 +1880,19 @@ mod tests {
         unsafe { flagged_es_source.allow_variable_time_computations() }
         let flagged_es = SecretPoly::new(flagged_es_source);
         assert!(!flagged_es.inner().allows_variable_time_computations());
+        let flagged_es_key = identified_key(unflagged_sk, participant_set.clone());
         let decryption_share_from_flagged_es = manager
-            .decryption_share(ct.clone(), unflagged_sk, flagged_es)
+            .decryption_share(
+                ct.clone(),
+                1,
+                flagged_es_key.clone(),
+                use_session,
+                identified_noise(flagged_es, participant_set.clone(), use_session),
+            )
             .unwrap();
         assert!(
             !decryption_share_from_flagged_es
+                .poly()
                 .inner()
                 .allows_variable_time_computations()
         );
@@ -1248,12 +1900,21 @@ mod tests {
         // Both independently flagged inputs must preserve functional
         // decryption. Two identical values at distinct Shamir x-coordinates
         // interpolate to a constant polynomial.
-        for decryption_share in [
-            decryption_share_from_flagged_sk,
-            decryption_share_from_flagged_es,
+        for (decryption_share, key) in [
+            (decryption_share_from_flagged_sk, flagged_sk_key),
+            (decryption_share_from_flagged_es, flagged_es_key),
         ] {
-            let shares = vec![decryption_share.clone(), decryption_share];
-            let result = manager.decrypt_from_shares(shares, vec![1, 2], ct.clone());
+            let second_share = manager
+                .decryption_share(
+                    ct.clone(),
+                    2,
+                    key,
+                    use_session,
+                    aggregate_zero_noise(&manager, &participant_set, use_session),
+                )
+                .unwrap();
+            let shares = vec![decryption_share, second_share];
+            let result = manager.decrypt_from_shares(shares, ct.clone());
             let plaintext_found = result.expect("Failed to decrypt from shares");
             let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
                 .expect("Decoding plaintext failed");
@@ -1296,10 +1957,18 @@ mod tests {
             .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
             .unwrap();
         let context = params.context_at_level(0).unwrap();
+        let participant_set = test_participant_set(3);
+        let use_session = SessionId::new([10; 32]);
         let result = manager.decryption_share(
             Arc::new(ciphertext),
-            secret_poly.clone().into_ntt().unwrap(),
-            SecretPoly::new(Poly::<PowerBasis>::zero(context)),
+            1,
+            identified_key(secret_poly.into_ntt().unwrap(), participant_set.clone()),
+            use_session,
+            identified_noise(
+                SecretPoly::new(Poly::<PowerBasis>::zero(context)),
+                participant_set,
+                use_session,
+            ),
         );
 
         assert_eq!(
@@ -1323,8 +1992,15 @@ mod tests {
         ciphertext.switch_down().unwrap();
 
         let context = params.context_at_level(0).unwrap();
-        let shares = vec![SecretPoly::new(Poly::<PowerBasis>::zero(context))];
-        let result = manager.decrypt_from_shares(shares, vec![1], Arc::new(ciphertext));
+        let participant_set = test_participant_set(3);
+        let use_session = SessionId::new([10; 32]);
+        let shares = vec![identified_decryption_share(
+            SecretPoly::new(Poly::<PowerBasis>::zero(context)),
+            1,
+            participant_set,
+            use_session,
+        )];
+        let result = manager.decrypt_from_shares(shares, Arc::new(ciphertext));
 
         assert_eq!(
             result.unwrap_err().to_string(),
@@ -1342,8 +2018,6 @@ mod tests {
         let n = 3;
         let threshold = 1;
 
-        let ctx = params.context_at_level(0).unwrap();
-
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
@@ -1360,21 +2034,20 @@ mod tests {
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        let mut sk_sss_collected: Vec<Vec<SecretShareMatrix>> = vec![vec![], vec![], vec![]];
+        let participant_set = test_participant_set(n);
+        let use_session = SessionId::new([10; 32]);
+        let mut sk_poly_sums = Vec::with_capacity(n);
 
-        let mut sk_poly_sums: Vec<SecretPoly<PowerBasis>> = (0..n)
-            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
-            .collect();
-
-        for i in 0..n {
+        for (i, manager) in managers.iter().enumerate() {
             let mut node_share_m = Array2::zeros((0, params.degree()));
             for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
                 node_share_m.push_row(sk_sss_m.row(i).unwrap()).unwrap();
             }
-            sk_sss_collected[i].push(SecretShareMatrix::new(node_share_m));
-
-            let share_slice: &[SecretShareMatrix] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
+            sk_poly_sums.push(aggregate_receiver_key(
+                manager,
+                &participant_set,
+                SecretShareMatrix::new(node_share_m),
+            ));
         }
 
         // Create a test ciphertext
@@ -1390,15 +2063,13 @@ mod tests {
         //Testing for decryption between parties 0 and 1
         //TODO Add tests for decyption between different parties than the first ones
         for i in 0..(threshold + 1) {
-            let ctx = params.context_at_level(0).unwrap();
-            //Setting smuding noise to be zero in this test
-            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
-
             let share = managers[i]
                 .decryption_share(
                     ct.clone(),
+                    (i + 1) as u32,
                     sk_poly_sums[i].clone().into_ntt().unwrap(),
-                    es_poly,
+                    use_session,
+                    aggregate_zero_noise(&managers[i], &participant_set, use_session),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -1408,9 +2079,7 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares with parties 1 and 2 reconstructing
-        let reconstructing = vec![1, 2];
-        let result =
-            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
+        let result = managers[0].decrypt_from_shares(decryption_shares.clone(), ct.clone());
         assert!(result.is_ok());
 
         // Test if we had correct decyption
@@ -1428,8 +2097,6 @@ mod tests {
         let n = 5;
         let threshold = 2; // need 3 parties
 
-        let ctx = params.context_at_level(0).unwrap();
-
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
@@ -1446,22 +2113,20 @@ mod tests {
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        let mut sk_sss_collected: Vec<Vec<SecretShareMatrix>> =
-            vec![vec![], vec![], vec![], vec![], vec![]];
+        let participant_set = test_participant_set(n);
+        let use_session = SessionId::new([10; 32]);
+        let mut sk_poly_sums = Vec::with_capacity(n);
 
-        let mut sk_poly_sums: Vec<SecretPoly<PowerBasis>> = (0..n)
-            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
-            .collect();
-
-        for i in 0..n {
+        for (i, manager) in managers.iter().enumerate() {
             let mut node_share_m = Array2::zeros((0, params.degree()));
             for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
                 node_share_m.push_row(sk_sss_m.row(i).unwrap()).unwrap();
             }
-            sk_sss_collected[i].push(SecretShareMatrix::new(node_share_m));
-
-            let share_slice: &[SecretShareMatrix] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
+            sk_poly_sums.push(aggregate_receiver_key(
+                manager,
+                &participant_set,
+                SecretShareMatrix::new(node_share_m),
+            ));
         }
 
         // Create a test ciphertext
@@ -1474,18 +2139,17 @@ mod tests {
         // Choose arbitrary reconstructing parties (1-based indices): {2, 4, 5}
         // Corresponding 0-based indices in vectors: {1, 3, 4}
         let chosen_indices = vec![1usize, 3usize, 4usize];
-        let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
 
         // Each chosen party generates their decryption share
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
-            let ctx = params.context_at_level(0).unwrap();
-            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
                 .decryption_share(
                     ct.clone(),
+                    (i + 1) as u32,
                     sk_poly_sums[i].clone().into_ntt().unwrap(),
-                    es_poly,
+                    use_session,
+                    aggregate_zero_noise(&managers[i], &participant_set, use_session),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -1495,8 +2159,7 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares with selected parties
-        let result =
-            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
+        let result = managers[0].decrypt_from_shares(decryption_shares.clone(), ct.clone());
         assert!(result.is_ok());
 
         // Validate plaintext
@@ -1513,8 +2176,6 @@ mod tests {
         let n = 20;
         let threshold = 9; // (n - 1) / 2 for n = 20; need 10 parties
 
-        let ctx = params.context_at_level(0).unwrap();
-
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
@@ -1531,21 +2192,20 @@ mod tests {
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        let mut sk_sss_collected: Vec<Vec<SecretShareMatrix>> = (0..n).map(|_| vec![]).collect();
+        let participant_set = test_participant_set(n);
+        let use_session = SessionId::new([10; 32]);
+        let mut sk_poly_sums = Vec::with_capacity(n);
 
-        let mut sk_poly_sums: Vec<SecretPoly<PowerBasis>> = (0..n)
-            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
-            .collect();
-
-        for i in 0..n {
+        for (i, manager) in managers.iter().enumerate() {
             let mut node_share_m = Array2::zeros((0, params.degree()));
             for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
                 node_share_m.push_row(sk_sss_m.row(i).unwrap()).unwrap();
             }
-            sk_sss_collected[i].push(SecretShareMatrix::new(node_share_m));
-
-            let share_slice: &[SecretShareMatrix] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
+            sk_poly_sums.push(aggregate_receiver_key(
+                manager,
+                &participant_set,
+                SecretShareMatrix::new(node_share_m),
+            ));
         }
 
         // Create a test ciphertext
@@ -1560,18 +2220,16 @@ mod tests {
         let chosen_indices = vec![
             1usize, 3usize, 4usize, 6usize, 10usize, 12usize, 14usize, 16usize, 18usize, 19usize,
         ];
-        let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
-
         // Each chosen party generates their decryption share
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
-            let ctx = params.context_at_level(0).unwrap();
-            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
                 .decryption_share(
                     ct.clone(),
+                    (i + 1) as u32,
                     sk_poly_sums[i].clone().into_ntt().unwrap(),
-                    es_poly,
+                    use_session,
+                    aggregate_zero_noise(&managers[i], &participant_set, use_session),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -1581,8 +2239,7 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares with selected parties
-        let result =
-            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
+        let result = managers[0].decrypt_from_shares(decryption_shares.clone(), ct.clone());
         assert!(result.is_ok());
 
         // Validate plaintext
@@ -1599,8 +2256,6 @@ mod tests {
         let n = 10;
         let threshold = 4; // need 5 parties
 
-        let ctx = params.context_at_level(0).unwrap();
-
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
@@ -1617,21 +2272,20 @@ mod tests {
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        let mut sk_sss_collected: Vec<Vec<SecretShareMatrix>> = (0..n).map(|_| vec![]).collect();
+        let participant_set = test_participant_set(n);
+        let use_session = SessionId::new([10; 32]);
+        let mut sk_poly_sums = Vec::with_capacity(n);
 
-        let mut sk_poly_sums: Vec<SecretPoly<PowerBasis>> = (0..n)
-            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
-            .collect();
-
-        for i in 0..n {
+        for (i, manager) in managers.iter().enumerate() {
             let mut node_share_m = Array2::zeros((0, params.degree()));
             for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
                 node_share_m.push_row(sk_sss_m.row(i).unwrap()).unwrap();
             }
-            sk_sss_collected[i].push(SecretShareMatrix::new(node_share_m));
-
-            let share_slice: &[SecretShareMatrix] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
+            sk_poly_sums.push(aggregate_receiver_key(
+                manager,
+                &participant_set,
+                SecretShareMatrix::new(node_share_m),
+            ));
         }
 
         // Create a test ciphertext
@@ -1641,20 +2295,19 @@ mod tests {
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
+        let ctx = params.context_at_level(0).unwrap();
         // Choose 5 fixed distinct parties (0-based): {0,2,3,6,8}
         let chosen_indices: Vec<usize> = vec![0usize, 2usize, 3usize, 6usize, 8usize];
-        let reconstructing_correct: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
-
         // Each chosen party generates their decryption share
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
-            let ctx = params.context_at_level(0).unwrap();
-            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
                 .decryption_share(
                     ct.clone(),
+                    (i + 1) as u32,
                     sk_poly_sums[i].clone().into_ntt().unwrap(),
-                    es_poly,
+                    use_session,
+                    aggregate_zero_noise(&managers[i], &participant_set, use_session),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -1664,11 +2317,7 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Decrypt with correct indices -> should succeed and match plaintext
-        let result_ok = managers[0].decrypt_from_shares(
-            decryption_shares.clone(),
-            reconstructing_correct.clone(),
-            ct.clone(),
-        );
+        let result_ok = managers[0].decrypt_from_shares(decryption_shares.clone(), ct.clone());
         assert!(result_ok.is_ok());
         let plaintext_found_ok =
             result_ok.expect("Failed to decrypt from shares with correct indices");
@@ -1676,28 +2325,25 @@ mod tests {
             .expect("Decoding plaintext failed");
         assert_eq!(decoded_ok, plaintext_data);
 
-        // Prepare wrong indices: replace one correct index with a non-selected party
-        // Pick a fixed non-selected party: 5 (0-based), which is not in chosen_indices
-        let non_selected: usize = 5;
-
-        let mut reconstructing_wrong = reconstructing_correct.clone();
-        reconstructing_wrong[0] = non_selected + 1; // introduce an incorrect party id (1-based)
-
-        // Decrypt with wrong indices -> should not match plaintext (but may still return Ok)
-        let result_bad = managers[0].decrypt_from_shares(
-            decryption_shares.clone(),
-            reconstructing_wrong,
-            ct.clone(),
+        // A share cannot be relabelled after creation. A duplicate or
+        // unexpected embedded party ID is rejected instead of being paired
+        // positionally with an external ID vector.
+        let duplicate = vec![decryption_shares[0].clone(), decryption_shares[0].clone()];
+        assert!(
+            managers[0]
+                .decrypt_from_shares(duplicate, ct.clone())
+                .is_err()
         );
-        assert!(result_bad.is_ok());
-        let plaintext_found_bad =
-            result_bad.expect("Decryption unexpectedly failed with wrong indices");
-        let decoded_bad: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found_bad, Encoding::poly())
-            .expect("Decoding plaintext failed");
-        assert_ne!(
-            decoded_bad, plaintext_data,
-            "Decryption should not match with wrong indices"
-        );
+        let unexpected = vec![
+            decryption_shares[0].clone(),
+            identified_decryption_share(
+                SecretPoly::new(Poly::<PowerBasis>::zero(ctx)),
+                11,
+                participant_set,
+                use_session,
+            ),
+        ];
+        assert!(managers[0].decrypt_from_shares(unexpected, ct).is_err());
     }
 
     #[test]
@@ -1705,28 +2351,288 @@ mod tests {
         let params = test_params();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let shape = (params.moduli().len(), params.degree());
+        let participant_set = test_participant_set(5);
 
         // Empty input
-        assert!(manager.aggregate_collected_shares(&[]).is_err());
+        assert!(
+            manager
+                .aggregate_collected_shares(&participant_set, &[])
+                .is_err()
+        );
 
         // More matrices than parties
         let matrices: Vec<SecretShareMatrix> = (0..6)
             .map(|_| SecretShareMatrix::new(Array2::zeros(shape)))
             .collect();
-        assert!(manager.aggregate_collected_shares(&matrices).is_err());
+        let matrices = key_contributions(&participant_set, matrices);
+        assert!(
+            manager
+                .aggregate_collected_shares(&participant_set, &matrices)
+                .is_err()
+        );
 
         // Wrong shape (rows and columns swapped)
-        let bad = vec![SecretShareMatrix::new(Array2::zeros((
+        let bad = std::iter::once(SecretShareMatrix::new(Array2::zeros((
             params.degree(),
             params.moduli().len(),
-        )))];
-        assert!(manager.aggregate_collected_shares(&bad).is_err());
+        ))))
+        .chain((1..5).map(|_| SecretShareMatrix::new(Array2::zeros(shape))))
+        .collect();
+        let bad = key_contributions(&participant_set, bad);
+        assert!(
+            manager
+                .aggregate_collected_shares(&participant_set, &bad)
+                .is_err()
+        );
 
         // Valid: between 1 and n well-formed matrices
-        let ok: Vec<SecretShareMatrix> = (0..3)
+        let ok: Vec<SecretShareMatrix> = (0..5)
             .map(|_| SecretShareMatrix::new(Array2::zeros(shape)))
             .collect();
-        assert!(manager.aggregate_collected_shares(&ok).is_ok());
+        let ok = key_contributions(&participant_set, ok);
+        assert!(
+            manager
+                .aggregate_collected_shares(&participant_set, &ok)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn identified_aggregates_preserve_metadata_and_key_cloneability() {
+        let params = test_params();
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let set = ParticipantSet::new(SessionId::new([9; 32]), vec![1, 2]).unwrap();
+        let shape = (params.moduli().len(), params.degree());
+        let contributions = vec![
+            KeyShareContribution::new(
+                ContributionBinding::new(set.clone(), 1).unwrap(),
+                SecretShareMatrix::new(Array2::zeros(shape)),
+            ),
+            KeyShareContribution::new(
+                ContributionBinding::new(set.clone(), 2).unwrap(),
+                SecretShareMatrix::new(Array2::zeros(shape)),
+            ),
+        ];
+        let key = manager
+            .aggregate_collected_shares(&set, &contributions)
+            .unwrap();
+        let key_copy = key.clone();
+        assert_eq!(key_copy.participant_set(), &set);
+        let round_trip = key.into_ntt().unwrap().into_power_basis().unwrap();
+        assert_eq!(round_trip.participant_set(), &set);
+        assert_eq!(round_trip.coefficients(), key_copy.coefficients());
+    }
+
+    #[test]
+    fn identified_metadata_errors_and_subset_decryptors() {
+        let mut rng = rng();
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let accepted_set = ParticipantSet::new(SessionId::new([1; 32]), vec![1, 2]).unwrap();
+        let foreign_epoch = ParticipantSet::new(SessionId::new([2; 32]), vec![1, 2]).unwrap();
+        let different_set = ParticipantSet::new(SessionId::new([1; 32]), vec![1, 3]).unwrap();
+        let shape = (params.moduli().len(), params.degree());
+
+        let make_key_contribution = |binding_set: ParticipantSet| {
+            binding_set
+                .participant_ids()
+                .iter()
+                .copied()
+                .map(|party_id| {
+                    KeyShareContribution::new(
+                        ContributionBinding::new(binding_set.clone(), party_id).unwrap(),
+                        SecretShareMatrix::new(Array2::zeros(shape)),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let foreign_error = manager
+            .aggregate_collected_shares(&accepted_set, &make_key_contribution(foreign_epoch))
+            .unwrap_err();
+        assert!(matches!(
+            foreign_error,
+            Error::Threshold(ThresholdError::ContributionSetMismatch)
+        ));
+        let different_set_error = manager
+            .aggregate_collected_shares(&accepted_set, &make_key_contribution(different_set))
+            .unwrap_err();
+        assert!(matches!(
+            different_set_error,
+            Error::Threshold(ThresholdError::ContributionSetMismatch)
+        ));
+        let zero_noise_error = manager
+            .aggregate_noise_shares(&accepted_set, SessionId::new([3; 32]), Vec::new())
+            .unwrap_err();
+        assert!(matches!(
+            zero_noise_error,
+            Error::Threshold(ThresholdError::MissingContribution)
+        ));
+
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let plaintext = Plaintext::try_encode(&[7_u64], Encoding::poly(), &params).unwrap();
+        let ciphertext = Arc::new(public_key.try_encrypt(&plaintext, &mut rng).unwrap());
+        let ctx = params.context_at_level(0).unwrap();
+        let key_poly = manager
+            .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
+            .unwrap()
+            .into_ntt()
+            .unwrap();
+        let key = identified_key(key_poly, accepted_set.clone());
+        let noise_set = ParticipantSet::new(SessionId::new([4; 32]), vec![1, 2]).unwrap();
+        let binding_error = manager
+            .decryption_share(
+                ciphertext.clone(),
+                1,
+                key.clone(),
+                SessionId::new([5; 32]),
+                identified_noise(
+                    SecretPoly::new(Poly::<PowerBasis>::zero(ctx)),
+                    noise_set,
+                    SessionId::new([5; 32]),
+                ),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            binding_error,
+            Error::Threshold(ThresholdError::KeyNoiseBindingMismatch)
+        ));
+        let session_error = manager
+            .decryption_share(
+                ciphertext.clone(),
+                1,
+                key.clone(),
+                SessionId::new([6; 32]),
+                identified_noise(
+                    SecretPoly::new(Poly::<PowerBasis>::zero(ctx)),
+                    accepted_set.clone(),
+                    SessionId::new([5; 32]),
+                ),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            session_error,
+            Error::Threshold(ThresholdError::DecryptionSessionMismatch)
+        ));
+
+        let use_session = SessionId::new([7; 32]);
+        let decryptors = [4_u32, 5, 3]
+            .into_iter()
+            .map(|party_id| {
+                manager
+                    .decryption_share(
+                        ciphertext.clone(),
+                        party_id,
+                        key.clone(),
+                        use_session,
+                        identified_noise(
+                            SecretPoly::new(Poly::<PowerBasis>::zero(ctx)),
+                            accepted_set.clone(),
+                            use_session,
+                        ),
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let opened = manager
+            .decrypt_from_shares(decryptors, ciphertext.clone())
+            .unwrap();
+        let decoded = Vec::<u64>::try_decode(&opened, Encoding::poly()).unwrap();
+        assert_eq!(decoded.first().copied(), Some(7));
+    }
+
+    #[test]
+    fn false_valid_party_label_can_produce_wrong_plaintext() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0x1d_125);
+        let params = test_params();
+        let n = 5;
+        let threshold = 2;
+        let mut managers: Vec<ShareManager> = (0..n)
+            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
+            .collect();
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let sk_poly = managers[0]
+            .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
+            .unwrap();
+        let sk_sss = managers[0]
+            .generate_secret_shares_from_poly(sk_poly, &mut rng)
+            .unwrap();
+        let participant_set =
+            ParticipantSet::new(SessionId::new([0x31; 32]), (1..=n as u32).collect()).unwrap();
+        let use_session = SessionId::new([0x32; 32]);
+        let mut sk_poly_sums = Vec::with_capacity(n);
+        for (receiver_index, manager) in managers.iter().enumerate() {
+            let mut receiver_rows = Array2::zeros((0, params.degree()));
+            for share_matrix in &sk_sss {
+                receiver_rows
+                    .push_row(share_matrix.row(receiver_index).unwrap())
+                    .unwrap();
+            }
+            sk_poly_sums.push(aggregate_receiver_key(
+                manager,
+                &participant_set,
+                SecretShareMatrix::new(receiver_rows),
+            ));
+        }
+
+        let plaintext_data = {
+            let mut values = vec![37_u64];
+            values.resize(params.degree(), 0);
+            values
+        };
+        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let plaintext = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
+        let ciphertext = Arc::new(public_key.try_encrypt(&plaintext, &mut rng).unwrap());
+
+        let actual_party_one = managers[0]
+            .decryption_share(
+                ciphertext.clone(),
+                1,
+                sk_poly_sums[0].clone().into_ntt().unwrap(),
+                use_session,
+                aggregate_zero_noise(&managers[0], &participant_set, use_session),
+            )
+            .unwrap();
+        let actual_party_two = managers[1]
+            .decryption_share(
+                ciphertext.clone(),
+                2,
+                sk_poly_sums[1].clone().into_ntt().unwrap(),
+                use_session,
+                aggregate_zero_noise(&managers[1], &participant_set, use_session),
+            )
+            .unwrap();
+        let actual_party_four = managers[3]
+            .decryption_share(
+                ciphertext.clone(),
+                4,
+                sk_poly_sums[3].clone().into_ntt().unwrap(),
+                use_session,
+                aggregate_zero_noise(&managers[3], &participant_set, use_session),
+            )
+            .unwrap();
+
+        // The polynomial was computed for party 2, but its valid-range label is
+        // deliberately changed to party 3. The type system accepts this because
+        // labels are metadata, not authenticated claims; callers must bind and
+        // authenticate party identity through the transport/orchestration layer.
+        let relabeled_party_three = identified_decryption_share(
+            actual_party_two.poly.clone(),
+            3,
+            participant_set,
+            use_session,
+        );
+        let opened = managers[0]
+            .decrypt_from_shares(
+                vec![actual_party_one, relabeled_party_three, actual_party_four],
+                ciphertext,
+            )
+            .unwrap();
+        let decoded = Vec::<u64>::try_decode(&opened, Encoding::poly()).unwrap();
+        assert_ne!(
+            decoded, plaintext_data,
+            "a false valid party label must change reconstruction"
+        );
     }
 
     #[test]
@@ -1735,6 +2641,7 @@ mod tests {
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
+        let participant_set = test_participant_set(5);
 
         // A coefficient equal to its row's modulus q_i is not a canonical
         // residue and must be rejected against that row's own modulus, not a
@@ -1742,8 +2649,12 @@ mod tests {
         for (row, &q_i) in moduli.iter().enumerate() {
             let mut shares = Array2::zeros(shape);
             shares[[row, 3]] = q_i;
+            let contributions = std::iter::once(SecretShareMatrix::new(shares))
+                .chain((1..5).map(|_| SecretShareMatrix::new(Array2::zeros(shape))))
+                .collect();
+            let contributions = key_contributions(&participant_set, contributions);
             let err = manager
-                .aggregate_collected_shares(std::slice::from_ref(&SecretShareMatrix::new(shares)))
+                .aggregate_collected_shares(&participant_set, &contributions)
                 .expect_err("coefficient equal to the row modulus must be rejected");
             let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err
             else {
@@ -1771,13 +2682,18 @@ mod tests {
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
+        let participant_set = test_participant_set(5);
 
         // u64::MAX would wrap to a small residue if reduced; it must be
         // rejected as malformed instead of being reduced.
         let mut shares = Array2::zeros(shape);
         shares[[0, 0]] = u64::MAX;
+        let contributions = std::iter::once(SecretShareMatrix::new(shares))
+            .chain((1..5).map(|_| SecretShareMatrix::new(Array2::zeros(shape))))
+            .collect();
+        let contributions = key_contributions(&participant_set, contributions);
         let err = manager
-            .aggregate_collected_shares(std::slice::from_ref(&SecretShareMatrix::new(shares)))
+            .aggregate_collected_shares(&participant_set, &contributions)
             .expect_err("u64::MAX share entry must be rejected");
         let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err else {
             panic!("expected MalformedShares, got: {err}");
@@ -1798,6 +2714,7 @@ mod tests {
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
+        let participant_set = test_participant_set(5);
 
         // q_i - 1 is the largest valid canonical residue for each row; all
         // rows must be accepted against their own distinct moduli.
@@ -1808,8 +2725,12 @@ mod tests {
         // Keep a test-only copy for the equality assertion; the wrapped
         // matrix moves into the protected wrapper for aggregation.
         let expected = shares.clone();
+        let contributions = std::iter::once(SecretShareMatrix::new(shares))
+            .chain((1..5).map(|_| SecretShareMatrix::new(Array2::zeros(shape))))
+            .collect();
+        let contributions = key_contributions(&participant_set, contributions);
         let result = manager
-            .aggregate_collected_shares(std::slice::from_ref(&SecretShareMatrix::new(shares)))
+            .aggregate_collected_shares(&participant_set, &contributions)
             .expect("maximal canonical residues must be accepted");
 
         // A single aggregate preserves the input values exactly (the sum of a
@@ -1825,6 +2746,7 @@ mod tests {
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
         let q1 = moduli[1];
+        let participant_set = test_participant_set(5);
 
         // A valid first contribution followed by a malformed later one must
         // still surface the later contribution's error rather than reaching
@@ -1832,11 +2754,16 @@ mod tests {
         let valid = Array2::zeros(shape);
         let mut invalid = Array2::zeros(shape);
         invalid[[1, 5]] = q1;
+        let contributions = vec![
+            SecretShareMatrix::new(valid),
+            SecretShareMatrix::new(invalid),
+            SecretShareMatrix::new(Array2::zeros(shape)),
+            SecretShareMatrix::new(Array2::zeros(shape)),
+            SecretShareMatrix::new(Array2::zeros(shape)),
+        ];
+        let contributions = key_contributions(&participant_set, contributions);
         let err = manager
-            .aggregate_collected_shares(&[
-                SecretShareMatrix::new(valid),
-                SecretShareMatrix::new(invalid),
-            ])
+            .aggregate_collected_shares(&participant_set, &contributions)
             .expect_err("out-of-range entry in a later contribution must be rejected");
         let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err else {
             panic!("expected MalformedShares, got: {err}");
@@ -1862,34 +2789,41 @@ mod tests {
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
         let ctx = params.context_at_level(0).unwrap();
-        let shares: Vec<SecretPoly<PowerBasis>> = (0..3)
-            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
-            .collect();
+        let participant_set = test_participant_set(n);
+        let use_session = SessionId::new([10; 32]);
+        let shares = |party_ids: &[u32]| {
+            party_ids
+                .iter()
+                .copied()
+                .map(|party_id| {
+                    identified_decryption_share(
+                        SecretPoly::new(Poly::<PowerBasis>::zero(ctx)),
+                        party_id,
+                        participant_set.clone(),
+                        use_session,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
 
         // Duplicate index
-        let result = manager.decrypt_from_shares(shares.clone(), vec![1, 2, 2], ct.clone());
+        let result = manager.decrypt_from_shares(shares(&[1, 2, 2]), ct.clone());
         assert!(result.is_err());
 
         // Index 0 (would evaluate the sharing polynomial at the secret)
-        let result = manager.decrypt_from_shares(shares.clone(), vec![0, 1, 2], ct.clone());
+        let result = manager.decrypt_from_shares(shares(&[0, 1, 2]), ct.clone());
         assert!(result.is_err());
 
         // Index > n
-        let result = manager.decrypt_from_shares(shares.clone(), vec![1, 2, 6], ct.clone());
+        let result = manager.decrypt_from_shares(shares(&[1, 2, 6]), ct.clone());
         assert!(result.is_err());
 
         // Wrong share count: more than threshold + 1 is rejected
-        let four: Vec<SecretPoly<PowerBasis>> = (0..4)
-            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
-            .collect();
-        let result = manager.decrypt_from_shares(four, vec![1, 2, 3, 4], ct.clone());
+        let result = manager.decrypt_from_shares(shares(&[1, 2, 3, 4]), ct.clone());
         assert!(result.is_err());
 
         // Fewer than threshold + 1 is rejected
-        let two: Vec<SecretPoly<PowerBasis>> = (0..2)
-            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
-            .collect();
-        let result = manager.decrypt_from_shares(two, vec![1, 2], ct);
+        let result = manager.decrypt_from_shares(shares(&[1, 2]), ct);
         assert!(result.is_err());
     }
 
@@ -1905,11 +2839,18 @@ mod tests {
         let foreign_ctx =
             Context::new_arc(&[0xffffc4001, 0xffffee001, 0x1ffffe0001], params.degree()).unwrap();
         let shares = (0..3)
-            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(&foreign_ctx)))
+            .map(|party_id| {
+                identified_decryption_share(
+                    SecretPoly::new(Poly::<PowerBasis>::zero(&foreign_ctx)),
+                    party_id + 1,
+                    ParticipantSet::new(SessionId::new([9; 32]), vec![1, 2, 3]).unwrap(),
+                    SessionId::new([10; 32]),
+                )
+            })
             .collect();
 
         let error = manager
-            .decrypt_from_shares(shares, vec![1, 2, 3], ciphertext)
+            .decrypt_from_shares(shares, ciphertext)
             .expect_err("same-shape decryption shares from a foreign context must be rejected");
         assert!(matches!(error, Error::ContextMismatch { .. }));
     }
@@ -1979,6 +2920,34 @@ mod tests {
     }
 
     #[test]
+    fn noise_share_matrix_zeroize_and_debug_are_protected() {
+        let matrix = Array2::from_shape_vec((2, 2), vec![123456, 654321, 111111, 222222]).unwrap();
+        let mut wrapper = NoiseShareMatrix::new(matrix);
+        let debug = format!("{wrapper:?}");
+        assert!(!debug.contains("123456") && !debug.contains("654321"));
+        wrapper.zeroize();
+        for row in 0..wrapper.dim().0 {
+            assert!(wrapper.row(row).unwrap().iter().all(|&value| value == 0));
+        }
+        assert_zeroize_on_drop::<NoiseShareMatrix>();
+    }
+
+    #[test]
+    fn noise_share_contribution_zeroize_and_debug_are_protected() {
+        let set = test_participant_set(3);
+        let binding = ContributionBinding::new(set, 1).unwrap();
+        let matrix = NoiseShareMatrix::new(
+            Array2::from_shape_vec((2, 2), vec![123456, 654321, 111111, 222222]).unwrap(),
+        );
+        let mut contribution = NoiseShareContribution::new(binding, matrix);
+        let debug = format!("{contribution:?}");
+        assert!(!debug.contains("123456") && !debug.contains("654321"));
+        contribution.zeroize();
+        assert!(contribution.matrix.matrix.iter().all(|&value| value == 0));
+        assert_zeroize_on_drop::<NoiseShareContribution>();
+    }
+
+    #[test]
     fn secret_poly_zeroize_clears_coefficients() {
         let params = test_params();
         let ctx = params.context_at_level(0).unwrap();
@@ -2027,13 +2996,57 @@ mod tests {
     }
 
     #[test]
+    fn noise_poly_zeroize_and_debug_are_protected() {
+        let params = test_params();
+        let ctx = params.context_at_level(0).unwrap();
+        let coeffs = vec![123456_i64; params.degree()];
+        let poly = Poly::<PowerBasis>::try_convert_from(&coeffs, ctx, false).unwrap();
+        let mut wrapper = NoisePoly {
+            poly: SecretPoly::new(poly),
+        };
+        let debug = format!("{wrapper:?}");
+        assert!(!debug.contains("123456") && !debug.contains("coeff"));
+        wrapper.zeroize();
+        assert!(wrapper.poly.coefficients().iter().all(|&value| value == 0));
+        assert_zeroize_on_drop::<NoisePoly>();
+    }
+
+    #[test]
+    fn aggregate_and_one_time_noise_zeroize_and_debug_are_protected() {
+        let params = test_params();
+        let ctx = params.context_at_level(0).unwrap();
+        let coeffs = vec![123456_i64; params.degree()];
+        let participant_set = test_participant_set(3);
+        let use_session = SessionId::new([10; 32]);
+
+        let noise_poly =
+            SecretPoly::new(Poly::<PowerBasis>::try_convert_from(&coeffs, ctx, false).unwrap());
+        let mut noise = identified_noise(noise_poly, participant_set.clone(), use_session);
+        let noise_debug = format!("{noise:?}");
+        assert!(!noise_debug.contains("123456") && !noise_debug.contains("coeff"));
+        noise.zeroize();
+        assert!(noise.poly.coefficients().iter().all(|&value| value == 0));
+        assert_zeroize_on_drop::<OneTimeNoiseShare>();
+
+        let key_poly =
+            SecretPoly::new(Poly::<PowerBasis>::try_convert_from(&coeffs, ctx, false).unwrap())
+                .into_ntt()
+                .unwrap();
+        let mut key = identified_key(key_poly, participant_set);
+        let key_debug = format!("{key:?}");
+        assert!(!key_debug.contains("123456") && !key_debug.contains("coeff"));
+        key.zeroize();
+        assert!(key.coefficients().iter().all(|&value| value == 0));
+        assert_zeroize_on_drop::<AggregatedKeyShare<PowerBasis>>();
+        assert_zeroize_on_drop::<AggregatedKeyShare<Ntt>>();
+    }
+
+    #[test]
     fn test_threshold_decryption_random_party_order() {
         let mut rng = rng();
         let params = test_params();
         let n = 15;
         let threshold = 7; // need 8 parties
-
-        let ctx = params.context_at_level(0).unwrap();
 
         // Setup multiple share managers (simulating different parties)
         let mut managers: Vec<ShareManager> = (0..n)
@@ -2051,21 +3064,20 @@ mod tests {
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        let mut sk_sss_collected: Vec<Vec<SecretShareMatrix>> = (0..n).map(|_| vec![]).collect();
+        let participant_set = test_participant_set(n);
+        let use_session = SessionId::new([10; 32]);
+        let mut sk_poly_sums = Vec::with_capacity(n);
 
-        let mut sk_poly_sums: Vec<SecretPoly<PowerBasis>> = (0..n)
-            .map(|_| SecretPoly::new(Poly::<PowerBasis>::zero(ctx)))
-            .collect();
-
-        for i in 0..n {
+        for (i, manager) in managers.iter().enumerate() {
             let mut node_share_m = Array2::zeros((0, params.degree()));
             for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
                 node_share_m.push_row(sk_sss_m.row(i).unwrap()).unwrap();
             }
-            sk_sss_collected[i].push(SecretShareMatrix::new(node_share_m));
-
-            let share_slice: &[SecretShareMatrix] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
+            sk_poly_sums.push(aggregate_receiver_key(
+                manager,
+                &participant_set,
+                SecretShareMatrix::new(node_share_m),
+            ));
         }
 
         // Create a test ciphertext
@@ -2080,18 +3092,16 @@ mod tests {
         let chosen_indices = vec![
             9usize, 10usize, 14usize, 7usize, 5usize, 3usize, 2usize, 1usize,
         ];
-        let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
-
         // Each chosen party generates their decryption share in the same (non-increasing) order
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
-            let ctx = params.context_at_level(0).unwrap();
-            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
                 .decryption_share(
                     ct.clone(),
+                    (i + 1) as u32,
                     sk_poly_sums[i].clone().into_ntt().unwrap(),
-                    es_poly,
+                    use_session,
+                    aggregate_zero_noise(&managers[i], &participant_set, use_session),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -2101,8 +3111,7 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares with non-increasing party order
-        let result =
-            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
+        let result = managers[0].decrypt_from_shares(decryption_shares.clone(), ct.clone());
         assert!(result.is_ok());
 
         // Validate plaintext

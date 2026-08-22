@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `OneTimeNoiseShare` in the current scope
+  --> tests/trybuild/noise_not_clone.rs:19:15
+   |
+19 |         noise.clone(),
+   |               ^^^^^ method not found in `OneTimeNoiseShare`
