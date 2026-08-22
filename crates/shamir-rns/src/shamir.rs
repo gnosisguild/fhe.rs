@@ -265,6 +265,10 @@ impl<F: Field> ShamirScheme<F> {
     ///
     /// # Errors
     /// Returns [`Error::NonCanonicalSecret`] when `secret >= q`.
+    ///
+    /// Random coefficients use rejection sampling. Its random-draw count is
+    /// variable, and any transport or serialization copy of the returned raw
+    /// residues remains the caller's responsibility to protect and erase.
     pub fn share<R: RngCore + CryptoRng>(
         &self,
         secret: u64,
@@ -364,34 +368,25 @@ impl<F: Field> ShamirScheme<F> {
     /// outside the canonical residue range.
     pub fn reconstruct(&self, shares: &[(usize, u64)]) -> Result<u64, Error> {
         self.validate_share_pairs(shares)?;
-        let points = shares
-            .iter()
-            .map(|(point, _)| *point as u64)
-            .collect::<Vec<_>>();
+        let points = shares.iter().map(|(point, _)| *point).collect::<Vec<_>>();
+        let weights = self.interpolation_weights(&points)?;
         let values = Zeroizing::new(shares.iter().map(|(_, value)| *value).collect::<Vec<_>>());
-        let mut terms = Zeroizing::new(Vec::with_capacity(shares.len()));
-        for (index, (point, value)) in points.iter().zip(values.iter()).enumerate() {
-            let mut numerator = 1_u64;
-            let mut denominator = 1_u64;
-            for (other_index, other_point) in points.iter().enumerate() {
-                if index != other_index {
-                    numerator = self.field.mul(numerator, self.field.sub(0, *other_point));
-                    denominator = self
-                        .field
-                        .mul(denominator, self.field.sub(*point, *other_point));
-                }
-            }
-            let inverse = self.field.invert(denominator).ok_or(Error::NonInvertible)?;
-            let weight = self.field.mul(numerator, inverse);
-            terms.push(self.field.mul(weight, *value));
-        }
-        Ok(terms.iter().fold(0_u64, |accumulator, term| {
-            self.field.add(accumulator, *term)
-        }))
+        Ok(weights
+            .iter()
+            .zip(values.iter())
+            .fold(0_u64, |accumulator, (weight, value)| {
+                self.field.add(accumulator, self.field.mul(*weight, *value))
+            }))
     }
 
     /// Reconstruct a batch from a party-major matrix containing exactly the
     /// selected party rows and their corresponding 1-based IDs.
+    ///
+    /// Lagrange weights are computed once for the public party-ID set and
+    /// reused for every column.
+    ///
+    /// The returned secret residues are unprotected raw values. Callers own
+    /// them after transfer and must protect and erase any retained copies.
     pub fn reconstruct_batch(
         &self,
         shares: &ShareMatrix,
@@ -419,23 +414,23 @@ impl<F: Field> ShamirScheme<F> {
         for value in shares.as_slice() {
             self.validate_share_value(*value)?;
         }
+        let weights = self.interpolation_weights(party_ids)?;
         let mut result = Zeroizing::new(Vec::with_capacity(shares.columns()));
         for column in 0..shares.columns() {
-            let pairs = Zeroizing::new(
-                party_ids
-                    .iter()
-                    .enumerate()
-                    .map(|(row, party_id)| {
-                        let value = shares
-                            .row(row)
-                            .and_then(|values| values.get(column))
-                            .copied()
-                            .ok_or(Error::InvalidMatrixStorage)?;
-                        Ok((*party_id, value))
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?,
-            );
-            result.push(self.reconstruct(&pairs)?);
+            let mut secret = 0_u64;
+            for row in 0..shares.rows() {
+                let value = shares
+                    .row(row)
+                    .and_then(|values| values.get(column))
+                    .copied()
+                    .ok_or(Error::InvalidMatrixStorage)?;
+                let weight = weights
+                    .get(row)
+                    .copied()
+                    .ok_or(Error::InvalidMatrixStorage)?;
+                secret = self.field.add(secret, self.field.mul(weight, value));
+            }
+            result.push(secret);
         }
         Ok(std::mem::take(&mut *result))
     }
@@ -540,6 +535,29 @@ impl<F: Field> ShamirScheme<F> {
         }
         Ok(())
     }
+
+    fn interpolation_weights(&self, party_ids: &[usize]) -> Result<Vec<u64>, Error> {
+        let points = party_ids
+            .iter()
+            .map(|party_id| *party_id as u64)
+            .collect::<Vec<_>>();
+        let mut weights = Vec::with_capacity(points.len());
+        for (index, point) in points.iter().enumerate() {
+            let mut numerator = 1_u64;
+            let mut denominator = 1_u64;
+            for (other_index, other_point) in points.iter().enumerate() {
+                if index != other_index {
+                    numerator = self.field.mul(numerator, self.field.sub(0, *other_point));
+                    denominator = self
+                        .field
+                        .mul(denominator, self.field.sub(*point, *other_point));
+                }
+            }
+            let inverse = self.field.invert(denominator).ok_or(Error::NonInvertible)?;
+            weights.push(self.field.mul(numerator, inverse));
+        }
+        Ok(weights)
+    }
 }
 
 #[cfg(test)]
@@ -550,7 +568,7 @@ mod tests {
     use zeroize::{Zeroize, ZeroizeOnDrop};
 
     use super::{SecretShares, ShamirScheme, ShareMatrix};
-    use crate::{BarrettField, Error, MontgomeryField};
+    use crate::{BarrettField, Error};
 
     fn wikipedia<F: crate::Field>() {
         let scheme = ShamirScheme::<F>::new(3, 6, 1613).unwrap();
@@ -572,9 +590,8 @@ mod tests {
     }
 
     #[test]
-    fn wikipedia_both_backends() {
+    fn wikipedia_barrett() {
         wikipedia::<BarrettField>();
-        wikipedia::<MontgomeryField>();
     }
 
     #[test]
@@ -730,12 +747,8 @@ mod tests {
             let num_shares = shares_needed + extra_shares;
             let secret = secret % modulus;
             let barrett = ShamirScheme::<BarrettField>::new(shares_needed, num_shares, modulus).unwrap();
-            let montgomery = ShamirScheme::<MontgomeryField>::new(shares_needed, num_shares, modulus).unwrap();
             let mut barrett_rng = ChaCha20Rng::from_seed([21; 32]);
-            let mut montgomery_rng = ChaCha20Rng::from_seed([21; 32]);
             let barrett_shares = barrett.share(secret, &mut barrett_rng).unwrap();
-            let montgomery_shares = montgomery.share(secret, &mut montgomery_rng).unwrap();
-            prop_assert_eq!(barrett_shares.as_slice(), montgomery_shares.as_slice());
             let mut party_ids = (1..=num_shares).collect::<Vec<_>>();
             let mut subset_rng = ChaCha20Rng::from_seed(subset_seed.to_le_bytes().repeat(4).try_into().unwrap());
             for index in (1..party_ids.len()).rev() {
@@ -749,11 +762,10 @@ mod tests {
                 .map(|party| (*party, *barrett_shares.get(*party - 1).unwrap()))
                 .collect::<Vec<_>>();
             prop_assert_eq!(barrett.reconstruct(&pairs), Ok(secret));
-            prop_assert_eq!(montgomery.reconstruct(&pairs), Ok(secret));
         }
 
         #[test]
-        fn malformed_subsets_are_rejected_by_both_backends(
+        fn malformed_subsets_are_rejected(
             modulus in prop::sample::select(vec![
                 4_611_686_018_326_724_609_u64,
                 4_611_686_018_309_947_393,
@@ -767,12 +779,6 @@ mod tests {
             let num_shares = shares_needed + extra_shares;
             let secret = secret % modulus;
             prop_assert!(malformed_rejections::<BarrettField>(
-                shares_needed,
-                num_shares,
-                modulus,
-                secret,
-            ));
-            prop_assert!(malformed_rejections::<MontgomeryField>(
                 shares_needed,
                 num_shares,
                 modulus,

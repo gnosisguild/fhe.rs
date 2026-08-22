@@ -49,7 +49,8 @@ fn map_shamir_error(error: ShamirError, party_id: usize, num_shares: usize) -> E
         error @ (ShamirError::InvalidModulus { .. }
         | ShamirError::CompositeModulus { .. }
         | ShamirError::InvalidMatrixShape { .. }
-        | ShamirError::InvalidMatrixStorage) => Error::secret_sharing(error.to_string()),
+        | ShamirError::InvalidMatrixStorage
+        | ShamirError::EmptyBasis) => Error::secret_sharing(error.to_string()),
     }
 }
 
@@ -1044,6 +1045,11 @@ mod tests {
         assert!(matches!(
             map_shamir_error(ShamirError::NonInvertible, 2, 5),
             Error::Threshold(ThresholdError::NonInvertibleShares)
+        ));
+        assert!(matches!(
+            map_shamir_error(ShamirError::EmptyBasis, 2, 5),
+            Error::UnspecifiedInput(message)
+                if message == "Secret sharing error: RNS basis must contain at least one modulus"
         ));
     }
 

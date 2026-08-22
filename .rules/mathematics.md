@@ -23,7 +23,7 @@
 
 ## Evidence / tests
 
-Use proptest for zero, one, `-1`, modulus-minus-one, full residue ranges, centering boundaries, varying/empty/full-degree polynomials, limb counts, reordered valid bases, half-points on both sides, and BigInt/BigUint oracle comparisons; approximate corrections are tested only on explicitly approximate paths and `RnsScaler` has exact oracle equality. `shamir-rns` additionally tests both reduction backends, canonical rejection, fixed inversion, distinct points, and single/batch interpolation round trips.
+Use proptest for zero, one, `-1`, modulus-minus-one, full residue ranges, centering boundaries, varying/empty/full-degree polynomials, limb counts, reordered valid bases, half-points on both sides, and BigInt/BigUint oracle comparisons; approximate corrections are tested only on explicitly approximate paths and `RnsScaler` has exact oracle equality. `shamir-rns` additionally tests the Barrett reduction backend, canonical rejection, fixed inversion, distinct points, and single/batch interpolation round trips.
 
 ## Sync
 

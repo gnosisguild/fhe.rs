@@ -8,8 +8,8 @@ Security-sensitive areas are key generation/handling, noise sampling, parameters
 
 The independent `shamir-rns` primitive accepts only canonical residues, uses
 public points `1..=n` with the secret at zero, and requires an exact
-`shares_needed` reconstruction count. Only its Barrett and Montgomery field
-kernels and fixed-schedule Fermat inversion have a bounded constant-time
+`shares_needed` reconstruction count. Only its Barrett field kernel and
+fixed-schedule Fermat inversion have a bounded constant-time
 design goal;
 rejection sampling, rayon scheduling, allocation, transport, and callers are
 outside that claim. The crate is unaudited and supplies no commitments,

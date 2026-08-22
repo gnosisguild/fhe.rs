@@ -1,11 +1,11 @@
-//! Criterion measurements for both prime-field Shamir backends.
+//! Criterion measurements for the Barrett prime-field Shamir backend.
 
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
-use shamir_rns::{BarrettField, MontgomeryField, ShamirScheme};
+use shamir_rns::{BarrettField, ShamirScheme};
 
 const MODULI: [u64; 3] = [
     4_611_686_018_326_724_609,
@@ -97,7 +97,6 @@ fn benchmark_backend<F: shamir_rns::Field>(criterion: &mut Criterion, name: &str
 
 fn shamir_benchmarks(criterion: &mut Criterion) {
     benchmark_backend::<BarrettField>(criterion, "barrett");
-    benchmark_backend::<MontgomeryField>(criterion, "montgomery");
 }
 
 criterion_group!(benches, shamir_benchmarks);

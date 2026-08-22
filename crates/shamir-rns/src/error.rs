@@ -73,6 +73,8 @@ pub enum Error {
     },
     /// A matrix's flat storage length does not match its declared shape.
     InvalidMatrixStorage,
+    /// An RNS basis contains no moduli.
+    EmptyBasis,
     /// A nonzero denominator could not be inverted.
     NonInvertible,
 }
@@ -121,6 +123,7 @@ impl fmt::Display for Error {
             Self::InvalidMatrixStorage => {
                 write!(formatter, "matrix storage does not match its shape")
             }
+            Self::EmptyBasis => write!(formatter, "RNS basis must contain at least one modulus"),
             Self::NonInvertible => write!(formatter, "field denominator is not invertible"),
         }
     }
@@ -189,6 +192,7 @@ impl fmt::Debug for Error {
                 .field("actual_columns", actual_columns)
                 .finish(),
             Self::InvalidMatrixStorage => formatter.write_str("InvalidMatrixStorage"),
+            Self::EmptyBasis => formatter.write_str("EmptyBasis"),
             Self::NonInvertible => formatter.write_str("NonInvertible"),
         }
     }

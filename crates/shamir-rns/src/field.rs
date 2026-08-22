@@ -1,4 +1,4 @@
-//! Runtime prime-field arithmetic with interchangeable reduction backends.
+//! Runtime prime-field arithmetic with Barrett reduction.
 
 use core::fmt;
 
@@ -48,6 +48,10 @@ pub trait Field: Clone + Send + Sync + fmt::Debug + 'static {
     fn invert(&self, value: u64) -> Option<u64>;
 
     /// Draw a uniform canonical residue by rejection sampling.
+    ///
+    /// The number of rejection draws is observable through variable random-draw
+    /// timing. After acceptance, the algorithm does not branch or divide based
+    /// on the accepted candidate's magnitude; reduction is branchless Barrett.
     fn sample<R: RngCore + CryptoRng>(&self, rng: &mut R) -> u64;
 }
 
@@ -67,35 +71,11 @@ impl fmt::Debug for BarrettBackend {
     }
 }
 
-/// Montgomery-reduction field backend.
-#[derive(Clone, Copy)]
-pub struct MontgomeryBackend {
-    modulus: u64,
-    negative_inverse: u64,
-    r_squared: u64,
-    reciprocal: u128,
-}
-
-impl fmt::Debug for MontgomeryBackend {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("MontgomeryBackend")
-            .field("modulus", &self.modulus)
-            .finish()
-    }
-}
-
 /// The default field backend, selected for its straightforward auditability.
 pub type BarrettField = BarrettBackend;
 
-/// The Montgomery field backend.
-pub type MontgomeryField = MontgomeryBackend;
-
 /// Short alias for [`BarrettBackend`].
 pub type Barrett = BarrettBackend;
-
-/// Short alias for [`MontgomeryBackend`].
-pub type Montgomery = MontgomeryBackend;
 
 /// Compatibility name for the public field abstraction.
 pub use Field as FieldBackend;
@@ -108,13 +88,6 @@ fn validate_modulus(modulus: u64) -> Result<(), Error> {
         return Err(Error::CompositeModulus { modulus });
     }
     Ok(())
-}
-
-fn add_modulus(left: u64, right: u64, modulus: u64) -> u64 {
-    let sum = left + right;
-    let (reduced, borrow) = sum.overflowing_sub(modulus);
-    let mask = 0_u64.wrapping_sub((!borrow) as u64);
-    (reduced & mask) | (sum & !mask)
 }
 
 fn sub_modulus(left: u64, right: u64, modulus: u64) -> u64 {
@@ -134,12 +107,16 @@ fn pow_fixed<F: Fn(u64, u64) -> u64>(base: u64, exponent: u64, multiply: F) -> u
     result
 }
 
-fn sample_uniform<R: RngCore + CryptoRng>(modulus: u64, rng: &mut R) -> u64 {
+fn sample_uniform<R, F>(modulus: u64, rng: &mut R, reduce: F) -> u64
+where
+    R: RngCore + CryptoRng,
+    F: Fn(u128) -> u64,
+{
     let limit = u64::MAX - u64::MAX % modulus;
     loop {
         let candidate = rng.next_u64();
         if candidate < limit {
-            return candidate % modulus;
+            return reduce(candidate as u128);
         }
     }
 }
@@ -208,86 +185,7 @@ impl Field for BarrettBackend {
     }
 
     fn sample<R: RngCore + CryptoRng>(&self, rng: &mut R) -> u64 {
-        sample_uniform(self.modulus, rng)
-    }
-}
-
-impl MontgomeryBackend {
-    fn montgomery_reduce(&self, value: u128) -> u64 {
-        let low = value as u64;
-        let factor = low.wrapping_mul(self.negative_inverse);
-        let multiple = factor as u128 * self.modulus as u128;
-        let (sum, carry) = value.overflowing_add(multiple);
-        let mut quotient = (sum >> 64) + ((carry as u128) << 64);
-        let modulus = self.modulus as u128;
-        let mask = 0_u128.wrapping_sub((quotient >= modulus) as u128);
-        quotient = quotient.wrapping_sub(modulus & mask);
-        quotient as u64
-    }
-
-    fn encode(&self, value: u64) -> u64 {
-        self.montgomery_reduce(value as u128 * self.r_squared as u128)
-    }
-
-    fn decode(&self, value: u64) -> u64 {
-        self.montgomery_reduce(value as u128)
-    }
-
-    fn montgomery_mul(&self, left: u64, right: u64) -> u64 {
-        self.montgomery_reduce(left as u128 * right as u128)
-    }
-}
-
-impl Field for MontgomeryBackend {
-    fn try_new(modulus: u64) -> Result<Self, Error> {
-        validate_modulus(modulus)?;
-        let mut inverse = 1_u64;
-        for _ in 0..6 {
-            inverse = inverse.wrapping_mul(2_u64.wrapping_sub(modulus.wrapping_mul(inverse)));
-        }
-        let r_modulus = ((1_u128 << 64) % modulus as u128) as u64;
-        let r_squared = (r_modulus as u128 * r_modulus as u128 % modulus as u128) as u64;
-        Ok(Self {
-            modulus,
-            negative_inverse: inverse.wrapping_neg(),
-            r_squared,
-            reciprocal: u128::MAX / modulus as u128,
-        })
-    }
-
-    fn modulus(&self) -> u64 {
-        self.modulus
-    }
-
-    fn add(&self, left: u64, right: u64) -> u64 {
-        add_modulus(left, right, self.modulus)
-    }
-
-    fn sub(&self, left: u64, right: u64) -> u64 {
-        sub_modulus(left, right, self.modulus)
-    }
-
-    fn mul(&self, left: u64, right: u64) -> u64 {
-        let left = self.encode(left);
-        let right = self.encode(right);
-        self.decode(self.montgomery_mul(left, right))
-    }
-
-    fn reduce_u128(&self, value: u128) -> u64 {
-        barrett_reduce(value, self.modulus, self.reciprocal)
-    }
-
-    fn pow(&self, base: u64, exponent: u64) -> u64 {
-        pow_fixed(base, exponent, |left, right| self.mul(left, right))
-    }
-
-    fn invert(&self, value: u64) -> Option<u64> {
-        let inverse = self.pow(value, self.modulus - 2);
-        (value != 0).then_some(inverse)
-    }
-
-    fn sample<R: RngCore + CryptoRng>(&self, rng: &mut R) -> u64 {
-        sample_uniform(self.modulus, rng)
+        sample_uniform(self.modulus, rng, |value| self.reduce_u128(value))
     }
 }
 
@@ -297,7 +195,7 @@ mod tests {
     use proptest::prelude::*;
     use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 
-    use super::{BarrettBackend, Field, MontgomeryBackend};
+    use super::{BarrettBackend, Field};
 
     fn check_backend<F: Field>(field: F) {
         let modulus = BigUint::from(field.modulus());
@@ -317,9 +215,8 @@ mod tests {
     }
 
     #[test]
-    fn both_backends_match_oracle() {
+    fn barrett_matches_oracle() {
         check_backend(BarrettBackend::try_new(4_611_686_018_326_724_609).unwrap());
-        check_backend(MontgomeryBackend::try_new(4_611_686_018_326_724_609).unwrap());
     }
 
     #[test]
@@ -348,24 +245,5 @@ mod tests {
             );
         }
 
-        #[test]
-        fn montgomery_reduces_full_u128(value: u128) {
-            let field = MontgomeryBackend::try_new(4_611_686_018_326_724_609).unwrap();
-            prop_assert_eq!(
-                field.reduce_u128(value),
-                (value % field.modulus() as u128) as u64
-            );
-        }
-
-        #[test]
-        fn backends_agree(left: u64, right: u64) {
-            let barrett = BarrettBackend::try_new(1613).unwrap();
-            let montgomery = MontgomeryBackend::try_new(1613).unwrap();
-            let left = left % 1613;
-            let right = right % 1613;
-            prop_assert_eq!(barrett.add(left, right), montgomery.add(left, right));
-            prop_assert_eq!(barrett.sub(left, right), montgomery.sub(left, right));
-            prop_assert_eq!(barrett.mul(left, right), montgomery.mul(left, right));
-        }
     }
 }

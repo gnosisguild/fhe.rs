@@ -37,7 +37,7 @@ impl<F: Field> RnsShamir<F> {
     /// rejected because an RNS value must have at least one residue.
     pub fn new(shares_needed: usize, num_shares: usize, moduli: &[u64]) -> Result<Self, Error> {
         if moduli.is_empty() {
-            return Err(Error::InvalidMatrixStorage);
+            return Err(Error::EmptyBasis);
         }
         let schemes = moduli
             .iter()
@@ -72,6 +72,12 @@ impl<F: Field> RnsShamir<F> {
     }
 
     /// Share one RNS value, returning protected party-ordered shares per modulus.
+    ///
+    /// Each residue is validated as a canonical value and shared independently
+    /// in its field. The field sampler uses rejection sampling: the number of
+    /// random draws is variable, and the returned share values are raw
+    /// residues whose transport copies are the caller's responsibility to
+    /// protect and erase.
     pub fn share<R: RngCore + CryptoRng>(
         &self,
         residues: &[u64],
@@ -153,7 +159,9 @@ impl<F: Field> RnsShamir<F> {
 
     /// Reconstruct a batch of RNS values from one selected party matrix per
     /// modulus. Results are secret-major: each inner vector is an ordered RNS
-    /// residue vector for one original input column.
+    /// residue vector for one original input column. The returned vectors own
+    /// raw secret residues; callers are responsible for protecting and
+    /// erasing any copies they retain.
     pub fn reconstruct_batch(
         &self,
         shares: &[ShareMatrix],
@@ -238,7 +246,7 @@ mod tests {
     use rand_core::SeedableRng;
 
     use super::RnsShamir;
-    use crate::{BarrettField, Field, MontgomeryField};
+    use crate::{BarrettField, Error, Field};
 
     fn crt(residues: &[u64], moduli: &[u64]) -> BigUint {
         let product = moduli
@@ -302,6 +310,14 @@ mod tests {
         assert!(wrapper.share_batch(&[vec![1]], &mut rng).is_err());
     }
 
+    #[test]
+    fn rns_rejects_empty_basis_explicitly() {
+        assert!(matches!(
+            RnsShamir::<BarrettField>::new(2, 3, &[]),
+            Err(Error::EmptyBasis)
+        ));
+    }
+
     fn check_batch_boundaries<F: Field>() {
         let wrapper = RnsShamir::<F>::new(2, 4, &[1613, 2017]).unwrap();
         let mut rng = ChaCha20Rng::from_seed([46; 32]);
@@ -328,8 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn rns_batch_boundaries_cover_both_backends() {
+    fn rns_batch_boundaries() {
         check_batch_boundaries::<BarrettField>();
-        check_batch_boundaries::<MontgomeryField>();
     }
 }
