@@ -658,7 +658,7 @@ mod protobuf {
         fn to_bytes(&self) -> Vec<u8> {
             let mut proto: LbfvPublicKeyProto = LbfvPublicKeyProto::from(&self.key);
             proto.binding = Some(LbfvBinding {
-                session_id: self.participant_set.session_id().to_vec(),
+                session_id: self.participant_set.session_id().as_bytes().to_vec(),
                 participant_ids: self.participant_set.participant_ids().to_vec(),
                 participant_id: 0,
                 aggregate: true,

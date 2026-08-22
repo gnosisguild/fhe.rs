@@ -52,6 +52,7 @@ itertools.workspace = true
 log.workspace = true
 ndarray.workspace = true
 rand.workspace = true
+trybuild = "1.0"
 
 [build-dependencies]
 prost-build = { workspace = true, optional = true }

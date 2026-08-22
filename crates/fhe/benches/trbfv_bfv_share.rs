@@ -86,8 +86,6 @@ fn bench_data_sizes(c: &mut Criterion) {
     // Generate parties with threshold BFV keys and BFV encryption keys
     println!("\n📊 Generating party keys...");
     let mut parties = Vec::new();
-    let mut all_sk_shares = Vec::new();
-    let mut all_esi_shares = Vec::new();
 
     for _party_id in 0..num_parties {
         let mut rng = make_rng();
@@ -111,17 +109,15 @@ fn bench_data_sizes(c: &mut Criterion) {
         let esi_coeffs = trbfv
             .generate_smudging_error(100, 0, Lambda::secure(80).unwrap(), &mut rng)
             .unwrap();
-        let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
+        let esi_poly = share_manager.bigints_to_poly(esi_coeffs).unwrap();
         let esi_sss = share_manager
-            .generate_secret_shares_from_poly(esi_poly, &mut rng)
+            .generate_noise_shares_from_poly(esi_poly, &mut rng)
             .unwrap();
 
         // Generate BFV keys for share encryption
         let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
         let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
 
-        all_sk_shares.push(sk_sss.clone());
-        all_esi_shares.push(esi_sss.clone());
         parties.push((sk_share, pk_share, sk_bfv, pk_bfv, sk_sss, esi_sss));
     }
 

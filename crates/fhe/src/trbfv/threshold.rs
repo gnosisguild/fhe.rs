@@ -42,11 +42,15 @@ use crate::Error;
 ///    - Combine threshold shares to recover plaintext
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
-use crate::trbfv::shares::{SecretPoly, SecretShareMatrix, ShareManager};
+use crate::trbfv::shares::{
+    AggregatedKeyShare, DecryptionShare, KeyShareContribution, NoiseShareContribution,
+    OneTimeNoiseShare, SecretPoly, SecretShareMatrix, ShareManager,
+};
 use crate::trbfv::smudging::{
     Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingCoefficients,
     SmudgingNoiseGenerator,
 };
+use crate::trbfv::{ParticipantSet, SessionId};
 use fhe_math::rq::{Ntt, PowerBasis};
 use fhe_traits::FheParametrized;
 use rand::{CryptoRng, RngCore};
@@ -103,24 +107,35 @@ impl TRBFV {
         share_manager.generate_secret_shares_from_poly(poly, rng)
     }
 
-    /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
+    /// Aggregate identified secret-sharing contributions to compute SK_i.
     ///
-    /// This method combines shares collected from other parties to reconstruct the
-    /// secret key material needed for decryption.
+    /// The explicit participant set is checked for exact one-per-member coverage.
     ///
     /// # Arguments
-    /// * `sk_sss_collected` - Shares collected from other parties, as protected
-    ///   [`SecretShareMatrix`] values
+    /// * `participant_set` - Caller-selected key epoch and accepted set
+    /// * `contributions` - Identified protected receiver matrices
     ///
     /// # Returns
-    /// Aggregated protected polynomial representing the combined secret key
-    /// material, zeroized automatically on drop
+    /// Metadata-bearing protected aggregate representing the combined key
+    /// material.
     pub fn aggregate_collected_shares(
         &self,
-        sk_sss_collected: &[SecretShareMatrix], // collected sk sss shares from other parties
-    ) -> Result<SecretPoly<PowerBasis>, Error> {
+        participant_set: &ParticipantSet,
+        contributions: &[KeyShareContribution],
+    ) -> Result<AggregatedKeyShare<PowerBasis>, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
-        share_manager.aggregate_collected_shares(sk_sss_collected)
+        share_manager.aggregate_collected_shares(participant_set, contributions)
+    }
+
+    /// Consume and aggregate identified one-time noise contributions.
+    pub fn aggregate_noise_shares(
+        &self,
+        participant_set: &ParticipantSet,
+        use_session: SessionId,
+        contributions: Vec<NoiseShareContribution>,
+    ) -> Result<OneTimeNoiseShare, Error> {
+        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
+        share_manager.aggregate_noise_shares(participant_set, use_session, contributions)
     }
 
     /// Generate smudging error coefficients for noise.
@@ -134,9 +149,8 @@ impl TRBFV {
     ///
     /// # Limitations
     ///
-    /// The generated smudging noise is one-time pre-shared material that must
-    /// not be reused across decryptions. This API does not track or enforce
-    /// consumption.
+    /// The returned coefficients must be moved into identified noise
+    /// contributions and consumed for one decryption use.
     ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed (e.g., votes to count, numbers to sum)
@@ -177,9 +191,8 @@ impl TRBFV {
     ///
     /// # Limitations
     ///
-    /// The generated smudging noise is **one-time pre-shared material**: it
-    /// must not be reused across decryptions. This API does not track or
-    /// enforce consumption.
+    /// The returned coefficients are one-time material and must be consumed
+    /// into an identified noise aggregate before decryption.
     ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed
@@ -225,26 +238,25 @@ impl TRBFV {
     ///
     /// # Arguments
     /// * `ciphertext` - The ciphertext to decrypt
-    /// * `sk_i` - This party's *aggregated share of the joint secret key*, i.e. the
-    ///   output of [`TRBFV::aggregate_collected_shares`] over the key share matrices
-    ///   received from all parties — not a party's own secret key
-    /// * `es_i` - This party's *aggregated share of the joint smudging noise*,
-    ///   aggregated the same way from the dealt noise shares. Do not pass raw
-    ///   [`TRBFV::generate_smudging_error`] output here: unshared noise is blown up
-    ///   by the Lagrange coefficients during reconstruction and breaks correctness
+    /// * `party_id` - The 1-based ID attached to the returned share
+    /// * `sk_i` - This party's metadata-bearing aggregated key share
+    /// * `use_session` - Fresh caller-supplied ID for this decryption use
+    /// * `es_i` - Consumed aggregated noise for the same epoch, set, and use
     ///
     /// # Returns
-    /// Protected decryption share polynomial (zeroized automatically on drop
+    /// Identified protected decryption share (zeroized automatically on drop
     /// after use). The ciphertext must be at level 0;
     /// non-zero levels return [`Error::InvalidCiphertext`].
     pub fn decryption_share(
         &self,
         ciphertext: Arc<Ciphertext>,
-        sk_i: SecretPoly<Ntt>,
-        es_i: SecretPoly<PowerBasis>,
-    ) -> Result<SecretPoly<PowerBasis>, Error> {
+        party_id: u32,
+        sk_i: AggregatedKeyShare<Ntt>,
+        use_session: SessionId,
+        es_i: OneTimeNoiseShare,
+    ) -> Result<DecryptionShare, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
-        share_manager.decryption_share(ciphertext, sk_i, es_i)
+        share_manager.decryption_share(ciphertext, party_id, sk_i, use_session, es_i)
     }
 
     /// Decrypt ciphertext from collected decryption shares.
@@ -253,9 +265,8 @@ impl TRBFV {
     /// decryption shares from exactly `threshold + 1` parties.
     ///
     /// # Arguments
-    /// * `d_share_polys` - Exactly `threshold + 1` protected decryption shares
-    /// * `reconstructing_parties` - The 1-based party indices the shares came from,
-    ///   in the same order as `d_share_polys`; indices must be distinct and in `1..=n`
+    /// * `d_shares` - Exactly `threshold + 1` identified shares. Embedded IDs,
+    ///   unique in-range membership, and common metadata are validated.
     /// * `ciphertext` - The original ciphertext being decrypted
     ///
     /// # Returns
@@ -263,12 +274,11 @@ impl TRBFV {
     /// non-zero levels return [`Error::InvalidCiphertext`].
     pub fn decrypt(
         &self,
-        d_share_polys: Vec<SecretPoly<PowerBasis>>,
-        reconstructing_parties: Vec<usize>,
+        d_shares: Vec<DecryptionShare>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
-        share_manager.decrypt_from_shares(d_share_polys, reconstructing_parties, ciphertext)
+        share_manager.decrypt_from_shares(d_shares, ciphertext)
     }
 }
 
@@ -281,7 +291,7 @@ impl FheParametrized for TRBFV {
 mod tests {
     use super::*;
     use crate::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
-    use fhe_math::rq::Poly;
+    use crate::trbfv::{ContributionBinding, NoiseShareMatrix};
     use fhe_traits::{FheEncoder, FheEncrypter};
     use num_traits::Zero;
     use rand::rng;
@@ -292,6 +302,67 @@ mod tests {
             .set_plaintext_modulus(16384)
             .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
             .build_arc()
+            .unwrap()
+    }
+
+    fn test_participant_set(n: usize) -> ParticipantSet {
+        ParticipantSet::new(
+            SessionId::new([9; 32]),
+            (1..=n).map(|party_id| party_id as u32).collect(),
+        )
+        .unwrap()
+    }
+
+    fn aggregate_key(
+        manager: &ShareManager,
+        poly: SecretPoly<PowerBasis>,
+        participant_set: &ParticipantSet,
+    ) -> AggregatedKeyShare<Ntt> {
+        let shape = poly.coefficients().dim();
+        let mut matrices = Vec::with_capacity(participant_set.participant_ids().len());
+        matrices.push(SecretShareMatrix::new(poly.coefficients().to_owned()));
+        matrices.extend(
+            (1..participant_set.participant_ids().len())
+                .map(|_| SecretShareMatrix::new(ndarray::Array2::zeros(shape))),
+        );
+        let contributions = participant_set
+            .participant_ids()
+            .iter()
+            .copied()
+            .zip(matrices)
+            .map(|(party_id, matrix)| {
+                KeyShareContribution::new(
+                    ContributionBinding::new(participant_set.clone(), party_id).unwrap(),
+                    matrix,
+                )
+            })
+            .collect::<Vec<_>>();
+        manager
+            .aggregate_collected_shares(participant_set, &contributions)
+            .unwrap()
+            .into_ntt()
+            .unwrap()
+    }
+
+    fn aggregate_zero_noise(
+        manager: &ShareManager,
+        participant_set: &ParticipantSet,
+        use_session: SessionId,
+    ) -> OneTimeNoiseShare {
+        let shape = (manager.params.moduli().len(), manager.params.degree());
+        let contributions = participant_set
+            .participant_ids()
+            .iter()
+            .copied()
+            .map(|party_id| {
+                NoiseShareContribution::new(
+                    ContributionBinding::new(participant_set.clone(), party_id).unwrap(),
+                    NoiseShareMatrix::new(ndarray::Array2::zeros(shape)),
+                )
+            })
+            .collect();
+        manager
+            .aggregate_noise_shares(participant_set, use_session, contributions)
             .unwrap()
     }
 
@@ -527,11 +598,17 @@ mod tests {
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();
-        let ctx = params.context_at_level(0).unwrap();
-        let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
+        let participant_set = test_participant_set(n);
+        let use_session = SessionId::new([10; 32]);
 
         let decryption_share = trbfv
-            .decryption_share(ct, sk_poly.clone().into_ntt().unwrap(), es_poly)
+            .decryption_share(
+                ct,
+                1,
+                aggregate_key(&share_manager, sk_poly, &participant_set),
+                use_session,
+                aggregate_zero_noise(&share_manager, &participant_set, use_session),
+            )
             .unwrap();
 
         assert_eq!(decryption_share.coefficients().ncols(), params.degree());
@@ -566,23 +643,28 @@ mod tests {
 
         // Each party generates decryption shares
         let mut decryption_shares = Vec::new();
+        let participant_set = test_participant_set(n);
+        let use_session = SessionId::new([10; 32]);
         for i in 0..(threshold + 1) {
             let share_manager = ShareManager::new(n, threshold, params.clone()).unwrap();
             let sk_poly = share_manager
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
                 .unwrap();
-            let ctx = params.context_at_level(0).unwrap();
-            let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
 
             let share = trbfv_instances[i]
-                .decryption_share(ct.clone(), sk_poly.clone().into_ntt().unwrap(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    (i + 1) as u32,
+                    aggregate_key(&share_manager, sk_poly, &participant_set),
+                    use_session,
+                    aggregate_zero_noise(&share_manager, &participant_set, use_session),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
 
         // Test the decrypt method with parties 1 and 2 reconstructing
-        let reconstructing = vec![1, 2];
-        let result = trbfv_instances[0].decrypt(decryption_shares, reconstructing, ct);
+        let result = trbfv_instances[0].decrypt(decryption_shares, ct);
         assert!(result.is_ok());
     }
 

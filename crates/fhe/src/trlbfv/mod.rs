@@ -39,6 +39,6 @@ pub use crate::mbfv::{Aggregate, AggregateIter};
 pub use aggregate::{
     AggregatedPublicKey, aggregate_relinearization_key, aggregate_relinearization_key_unbound,
 };
-pub use binding::{ContributionBinding, ParticipantSet};
+pub use binding::{ContributionBinding, ParticipantSet, SessionId};
 pub use public_key_share::PublicKeyShare;
 pub use relin_key_share::{RelinKeyShare, RlkWitness};

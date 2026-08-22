@@ -15,14 +15,14 @@ use std::sync::Arc;
 use fhe::bfv::{self, BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
 use fhe::mbfv::AggregateIter;
 use fhe::trbfv::{
-    Lambda, SecretPoly, SecretShareMatrix, ShareManager, SmudgingBoundCalculator,
-    SmudgingBoundCalculatorConfig, SmudgingCoefficients, TRBFV,
+    ContributionBinding, DecryptionShare, KeyShareContribution, Lambda, NoiseShareContribution,
+    NoiseShareMatrix, ParticipantSet, SecretShareMatrix, SessionId, ShareManager,
+    SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingCoefficients, TRBFV,
 };
 use fhe::trlbfv::{
-    AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
-    aggregate_relinearization_key,
+    AggregatedPublicKey, PublicKeyShare, RelinKeyShare, aggregate_relinearization_key,
 };
-use fhe_math::rq::{Poly, PowerBasis};
+use fhe_math::rq::PowerBasis;
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::Array;
 use num_bigint::BigUint;
@@ -191,7 +191,7 @@ fn mul_examples_preset_depth3_e2e() {
     let rlk = aggregate_relinearization_key(&rlk_shares, &aggregated_pk).expect("RLK aggregation");
 
     // ── Smudging noise (one-time pre-shared material) at the preset ──────
-    let smudging_noises: Vec<SmudgingCoefficients> = (0..NUM_PARTIES)
+    let mut smudging_noises: Vec<Option<SmudgingCoefficients>> = (0..NUM_PARTIES)
         .map(|_| {
             trbfv
                 .generate_smudging_error_with_participant_count(
@@ -203,19 +203,19 @@ fn mul_examples_preset_depth3_e2e() {
                 )
                 .expect("smudging noise generation at the preset must be feasible")
         })
+        .map(Some)
         .collect();
 
     // ── Shamir share deal / collect / aggregate (SK + noise) ─────────────
     struct Party {
         sk_sss: Vec<SecretShareMatrix>,
-        esi_sss: Vec<SecretShareMatrix>,
+        esi_sss: Vec<NoiseShareMatrix>,
         sk_sss_collected: Vec<SecretShareMatrix>,
-        es_sss_collected: Vec<SecretShareMatrix>,
-        sk_poly_sum: SecretPoly<PowerBasis>,
-        es_poly_sum: SecretPoly<PowerBasis>,
+        es_sss_collected: Vec<NoiseShareMatrix>,
+        sk_poly_sum: Option<fhe::trbfv::AggregatedKeyShare<PowerBasis>>,
+        es_poly_sum: Option<fhe::trbfv::OneTimeNoiseShare>,
     }
 
-    let ctx_level0 = params.context_at_level(0).expect("level-0 context");
     let mut parties: Vec<Party> = (0..NUM_PARTIES)
         .map(|i| {
             let mut share_manager =
@@ -231,10 +231,10 @@ fn mul_examples_preset_depth3_e2e() {
 
             // Shamir-share this party's smudging noise.
             let esi_poly = share_manager
-                .bigints_to_poly(&smudging_noises[i])
+                .bigints_to_poly(smudging_noises[i].take().unwrap())
                 .expect("esi to poly");
             let esi_sss = share_manager
-                .generate_secret_shares_from_poly(esi_poly, &mut rng)
+                .generate_noise_shares_from_poly(esi_poly, &mut rng)
                 .expect("esi share generation");
 
             Party {
@@ -242,8 +242,8 @@ fn mul_examples_preset_depth3_e2e() {
                 esi_sss,
                 sk_sss_collected: Vec::with_capacity(NUM_PARTIES),
                 es_sss_collected: Vec::with_capacity(NUM_PARTIES),
-                sk_poly_sum: SecretPoly::new(Poly::<PowerBasis>::zero(ctx_level0)),
-                es_poly_sum: SecretPoly::new(Poly::<PowerBasis>::zero(ctx_level0)),
+                sk_poly_sum: None,
+                es_poly_sum: None,
             }
         })
         .collect();
@@ -252,9 +252,9 @@ fn mul_examples_preset_depth3_e2e() {
     // share matrix (simulated as local access, as in the e2e test suite).
     for receiver_idx in 0..NUM_PARTIES {
         let mut sk_rows: Vec<SecretShareMatrix> = Vec::with_capacity(NUM_PARTIES);
-        let mut es_rows: Vec<SecretShareMatrix> = Vec::with_capacity(NUM_PARTIES);
+        let mut es_rows: Vec<NoiseShareMatrix> = Vec::with_capacity(NUM_PARTIES);
         for sender in parties.iter() {
-            let collect_row = |sss: &[SecretShareMatrix]| -> SecretShareMatrix {
+            let collect_secret_row = |sss: &[SecretShareMatrix]| -> SecretShareMatrix {
                 let mut rows = Array::zeros((0, params.degree()));
                 for share_matrix in sss {
                     let row = share_matrix.row(receiver_idx).expect("valid share row");
@@ -262,21 +262,62 @@ fn mul_examples_preset_depth3_e2e() {
                 }
                 SecretShareMatrix::new(rows)
             };
-            sk_rows.push(collect_row(&sender.sk_sss));
-            es_rows.push(collect_row(&sender.esi_sss));
+            let collect_noise_row = |sss: &[NoiseShareMatrix]| -> NoiseShareMatrix {
+                let mut rows = Array::zeros((0, params.degree()));
+                for share_matrix in sss {
+                    let row = share_matrix.row(receiver_idx).expect("valid share row");
+                    rows.push_row(row).expect("append share row");
+                }
+                NoiseShareMatrix::new(rows)
+            };
+            sk_rows.push(collect_secret_row(&sender.sk_sss));
+            es_rows.push(collect_noise_row(&sender.esi_sss));
         }
         parties[receiver_idx].sk_sss_collected = sk_rows;
         parties[receiver_idx].es_sss_collected = es_rows;
     }
 
     // Aggregate collected SK and noise shares into per-party polynomials.
+    let participant_set = ParticipantSet::new(
+        SessionId::new(rand::random()),
+        (1..=NUM_PARTIES as u32).collect(),
+    )
+    .expect("participant set");
+    let use_session = SessionId::new(rand::random());
     for party in parties.iter_mut() {
-        party.sk_poly_sum = trbfv
-            .aggregate_collected_shares(&party.sk_sss_collected)
-            .expect("aggregate sk shares");
-        party.es_poly_sum = trbfv
-            .aggregate_collected_shares(&party.es_sss_collected)
-            .expect("aggregate es shares");
+        let key_contributions = party
+            .sk_sss_collected
+            .iter()
+            .enumerate()
+            .map(|(index, matrix)| {
+                KeyShareContribution::new(
+                    ContributionBinding::new(participant_set.clone(), (index + 1) as u32)
+                        .expect("binding"),
+                    matrix.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        party.sk_poly_sum = Some(
+            trbfv
+                .aggregate_collected_shares(&participant_set, &key_contributions)
+                .expect("aggregate sk shares"),
+        );
+        let noise_contributions = std::mem::take(&mut party.es_sss_collected)
+            .into_iter()
+            .enumerate()
+            .map(|(index, matrix)| {
+                NoiseShareContribution::new(
+                    ContributionBinding::new(participant_set.clone(), (index + 1) as u32)
+                        .expect("binding"),
+                    matrix,
+                )
+            })
+            .collect();
+        party.es_poly_sum = Some(
+            trbfv
+                .aggregate_noise_shares(&participant_set, use_session, noise_contributions)
+                .expect("aggregate es shares"),
+        );
     }
 
     // ── Encrypt, chain three multiplications with relinearization ────────
@@ -312,26 +353,24 @@ fn mul_examples_preset_depth3_e2e() {
     let reconstructing: Vec<usize> = (1..=THRESHOLD + 1).collect();
     assert_eq!(reconstructing.len(), THRESHOLD + 1);
 
-    let d_share_polys: Vec<SecretPoly<PowerBasis>> = reconstructing
+    let d_share_polys: Vec<DecryptionShare> = reconstructing
         .iter()
         .map(|&party_id| {
-            let party = &parties[party_id - 1];
+            let party = &mut parties[party_id - 1];
             trbfv
                 .decryption_share(
                     tally.clone(),
-                    party.sk_poly_sum.clone().into_ntt().unwrap(),
-                    party.es_poly_sum.clone(),
+                    party_id as u32,
+                    party.sk_poly_sum.take().unwrap().into_ntt().unwrap(),
+                    use_session,
+                    party.es_poly_sum.take().unwrap(),
                 )
                 .expect("decryption share")
         })
         .collect();
 
     // A single share must be insufficient.
-    let one_share_result = trbfv.decrypt(
-        vec![d_share_polys[0].clone()],
-        vec![reconstructing[0]],
-        tally.clone(),
-    );
+    let one_share_result = trbfv.decrypt(vec![d_share_polys[0].clone()], tally.clone());
     assert!(
         one_share_result.is_err(),
         "single share must not decrypt (threshold requires {} shares)",
@@ -340,7 +379,7 @@ fn mul_examples_preset_depth3_e2e() {
 
     // Exactly threshold + 1 shares must decrypt to the correct product.
     let decrypted = trbfv
-        .decrypt(d_share_polys, reconstructing, tally)
+        .decrypt(d_share_polys, tally)
         .expect("threshold decryption with t+1 shares");
     let result_vec = Vec::<u64>::try_decode(&decrypted, Encoding::poly()).expect("decode result");
     let expected = a * b * c * d;

@@ -3,6 +3,7 @@
 #![doc = include_str!("../README.md")]
 
 mod errors;
+pub mod identity;
 
 pub mod bfv;
 pub mod lbfv;
@@ -12,6 +13,7 @@ pub mod proto;
 pub mod trbfv;
 pub mod trlbfv;
 pub use errors::{Error, ParametersError, Result, SerializationError, ThresholdError};
+pub use identity::{ContributionBinding, ParticipantSet, SessionId};
 
 // Test the source code included in the README.
 #[macro_use]

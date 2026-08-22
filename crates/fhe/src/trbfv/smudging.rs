@@ -463,8 +463,8 @@ impl SmudgingBoundCalculator {
 ///   [`Drop`] impl), so normal drops, early returns, and unwinding all run
 ///   cleanup without caller action.
 /// - Only borrowed slice access (`as_slice`) and length information are
-///   exposed; `Clone` produces another protected owner. There is no
-///   raw-value escape.
+///   exposed. The wrapper is deliberately non-`Clone`, so ownership cannot be
+///   duplicated through the public API.
 ///
 /// # Best-effort BigInt cleanup
 ///
@@ -480,7 +480,6 @@ impl SmudgingBoundCalculator {
 /// Deliberate `std::mem::forget`/`ManuallyDrop` can bypass Rust
 /// destructors; copies made outside this wrapper, swap, core dumps, and
 /// allocator behavior are outside this guarantee.
-#[derive(Clone)]
 pub struct SmudgingCoefficients {
     coeffs: Vec<BigInt>,
 }
@@ -495,7 +494,7 @@ impl SmudgingCoefficients {
 
     /// Borrow the coefficients (e.g. for conversion into a polynomial).
     #[must_use]
-    pub fn as_slice(&self) -> &[BigInt] {
+    pub(crate) fn as_slice(&self) -> &[BigInt] {
         &self.coeffs
     }
 
@@ -1215,14 +1214,14 @@ mod tests {
     }
 
     #[test]
-    fn smudging_coefficients_borrowed_access_and_clone() {
+    fn smudging_coefficients_borrowed_access_is_non_cloneable() {
         let coeffs = vec![BigInt::from(5), BigInt::from(-5)];
         let wrapper = SmudgingCoefficients::new(coeffs);
         assert_eq!(wrapper.len(), 2);
         assert_eq!(wrapper.as_slice(), &[BigInt::from(5), BigInt::from(-5)]);
-        // A clone is another protected owner, not a raw escape.
-        let clone = wrapper.clone();
-        assert_eq!(clone.as_slice(), wrapper.as_slice());
+        // Ownership is intentionally consumed by the polynomial conversion;
+        // this test only exercises the read-only inspection boundary.
+        assert_eq!(wrapper.as_slice().len(), 2);
     }
 
     #[test]
