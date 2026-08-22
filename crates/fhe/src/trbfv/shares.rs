@@ -187,6 +187,14 @@ impl ZeroizeOnDrop for SecretShareMatrix {}
 /// The underlying `fhe-math` consuming conversions guard their input while the
 /// transform runs and guard freshly-built Shoup output while it is populated,
 /// so a panic during conversion zeroizes both source and partial output.
+/// `SecretPoly` enforces constant-time discipline: secret-bearing polynomials
+/// never dispatch variable-time arithmetic, regardless of the source
+/// polynomial's variable-time flag.
+/// This normalization changes only the `allow_variable_time` metadata bit;
+/// coefficient values and the protobuf wire format are otherwise unchanged.
+/// With `protobuf`, serializing `SecretPoly::inner()` and deserializing it
+/// round-trips the same coefficients with the dispatch flag normalized to
+/// constant-time.
 ///
 /// # Security semantics
 ///
@@ -216,9 +224,12 @@ impl<R: RepresentationTag> SecretPoly<R> {
     /// Wrap an owned polynomial, placing it under automatic zeroization.
     ///
     /// The value is immediately owned by the protected wrapper; no
-    /// unprotected access to the inner polynomial is exposed.
+    /// unprotected access to the inner polynomial is exposed. The wrapper
+    /// clears the source's variable-time flag before taking ownership, so
+    /// secret-bearing arithmetic always uses constant-time dispatch.
     #[must_use]
-    pub fn new(poly: Poly<R>) -> Self {
+    pub fn new(mut poly: Poly<R>) -> Self {
+        poly.disallow_variable_time_computations();
         Self { poly }
     }
 
@@ -689,8 +700,11 @@ impl ShareManager {
                 ciphertext.c.len()
             )));
         }
-        let c0 = ciphertext.c[0].clone().into_power_basis()?;
-        let c1 = ciphertext.c[1].clone();
+        let mut c0 = ciphertext.c[0].clone();
+        c0.disallow_variable_time_computations();
+        let c0 = c0.into_power_basis()?;
+        let mut c1 = ciphertext.c[1].clone();
+        c1.disallow_variable_time_computations();
         if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
             return Err(Error::context_mismatch(
                 &"share polynomial context",
@@ -958,6 +972,8 @@ mod tests {
     use super::*;
     use crate::ThresholdError;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
+    #[cfg(feature = "protobuf")]
+    use fhe_traits::{DeserializeWithContext, Serialize};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use ndarray::Array2;
     use num_bigint::BigInt;
@@ -1189,32 +1205,80 @@ mod tests {
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct: Arc<Ciphertext> = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
-        // Generate polynomials for decryption share
-        let sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        // Generate polynomials for decryption share.
         let ctx = params.context_at_level(0).unwrap();
-        //Setting smuding noise to be zero in this test
-        let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
+        let mut flagged_sk_source =
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false).unwrap();
+        unsafe { flagged_sk_source.allow_variable_time_computations() }
+        let flagged_sk = SecretPoly::new(flagged_sk_source.into_ntt().unwrap());
+        assert!(!flagged_sk.inner().allows_variable_time_computations());
 
-        // Compute decryption share
-        let decryption_share = manager
-            .decryption_share(ct.clone(), sk_poly.clone().into_ntt().unwrap(), es_poly)
+        // The secret-key flag is normalized independently of the noise input.
+        let decryption_share_from_flagged_sk = manager
+            .decryption_share(
+                ct.clone(),
+                flagged_sk,
+                SecretPoly::new(Poly::<PowerBasis>::zero(ctx)),
+            )
             .unwrap();
+        assert!(ct.c.get(1).unwrap().allows_variable_time_computations());
+        assert!(
+            !decryption_share_from_flagged_sk
+                .inner()
+                .allows_variable_time_computations()
+        );
 
-        // This unit test uses the full secret as the "aggregate" for both
-        // parties; two identical values at distinct Shamir x-coordinates
-        // interpolate to a constant polynomial and reconstruct to the same
-        // value, which is exactly what the plaintext recovery needs.
-        let shares = vec![decryption_share.clone(), decryption_share];
+        // The smudging-noise flag is normalized independently of the key input.
+        let unflagged_sk_source =
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false).unwrap();
+        let unflagged_sk = SecretPoly::new(unflagged_sk_source.into_ntt().unwrap());
+        let mut flagged_es_source = Poly::<PowerBasis>::zero(ctx);
+        unsafe { flagged_es_source.allow_variable_time_computations() }
+        let flagged_es = SecretPoly::new(flagged_es_source);
+        assert!(!flagged_es.inner().allows_variable_time_computations());
+        let decryption_share_from_flagged_es = manager
+            .decryption_share(ct.clone(), unflagged_sk, flagged_es)
+            .unwrap();
+        assert!(
+            !decryption_share_from_flagged_es
+                .inner()
+                .allows_variable_time_computations()
+        );
 
-        // Parties are 1-based; reconstruction needs threshold + 1 = 2 shares.
-        let reconstructing = vec![1, 2];
-        let result = manager.decrypt_from_shares(shares, reconstructing, ct);
-        let plaintext_found = result.expect("Failed to decrypt from shares");
+        // Both independently flagged inputs must preserve functional
+        // decryption. Two identical values at distinct Shamir x-coordinates
+        // interpolate to a constant polynomial.
+        for decryption_share in [
+            decryption_share_from_flagged_sk,
+            decryption_share_from_flagged_es,
+        ] {
+            let shares = vec![decryption_share.clone(), decryption_share];
+            let result = manager.decrypt_from_shares(shares, vec![1, 2], ct.clone());
+            let plaintext_found = result.expect("Failed to decrypt from shares");
+            let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
+                .expect("Decoding plaintext failed");
+            assert_eq!(decoded, plaintext_data);
+        }
+    }
 
-        let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
-            .expect("Decoding plaintext failed");
+    #[cfg(feature = "protobuf")]
+    #[test]
+    fn secret_poly_protobuf_roundtrip_preserves_coefficients_and_ct_flag() {
+        let params = test_params();
+        let ctx = params.context_at_level(0).unwrap();
+        let coefficients = (0..params.degree())
+            .map(|index| (index % 7) as i64)
+            .collect::<Vec<_>>();
+        let mut source = Poly::<PowerBasis>::try_convert_from(&coefficients, ctx, false).unwrap();
+        unsafe { source.allow_variable_time_computations() }
 
-        assert_eq!(decoded, plaintext_data);
+        let wrapped = SecretPoly::new(source);
+        assert!(!wrapped.inner().allows_variable_time_computations());
+
+        let serialized = wrapped.inner().to_bytes();
+        let round_tripped = Poly::<PowerBasis>::from_bytes(&serialized, ctx).unwrap();
+        assert_eq!(round_tripped.coefficients(), wrapped.coefficients());
+        assert!(!round_tripped.allows_variable_time_computations());
     }
 
     #[test]

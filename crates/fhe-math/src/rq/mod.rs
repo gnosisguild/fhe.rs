@@ -374,6 +374,12 @@ impl<R: RepresentationTag> Poly<R> {
         self.allow_variable_time_computations = false
     }
 
+    /// Return whether variable-time computations are allowed for this polynomial.
+    #[must_use]
+    pub const fn allows_variable_time_computations(&self) -> bool {
+        self.allow_variable_time_computations
+    }
+
     /// Current representation of the polynomial.
     #[must_use]
     pub const fn representation(&self) -> Representation {
