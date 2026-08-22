@@ -127,7 +127,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("add_pt", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| c1 = &c1 + &pt2);
+                b.iter(|| c1 = c1.try_add_plaintext(&pt2).unwrap());
             },
         );
 
@@ -137,7 +137,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                 format!("n={}/log(q)={}", params.degree(), q),
             ),
             |b| {
-                b.iter(|| c1 += &pt2);
+                b.iter(|| c1.try_add_assign_plaintext(&pt2).unwrap());
             },
         );
 
@@ -161,7 +161,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("sub_pt", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| c1 = &c1 - &pt2);
+                b.iter(|| c1 = c1.try_sub_plaintext(&pt2).unwrap());
             },
         );
 
@@ -171,7 +171,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                 format!("n={}/log(q)={}", params.degree(), q),
             ),
             |b| {
-                b.iter(|| c1 -= &pt2);
+                b.iter(|| c1.try_sub_assign_plaintext(&pt2).unwrap());
             },
         );
 

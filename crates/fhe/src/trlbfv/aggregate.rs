@@ -239,7 +239,7 @@ fn sum_ksk_c0<'a>(
         }
         // Convert and sum in NTT.
         for (slot, c0_j) in acc.iter_mut().zip(ksk.c0.iter()) {
-            let c0_j_ntt = c0_j.clone().into_ntt();
+            let c0_j_ntt = c0_j.clone().into_ntt()?;
             match slot {
                 Some(sum) => *sum += &c0_j_ntt,
                 None => *slot = Some(c0_j_ntt),
@@ -256,7 +256,7 @@ fn sum_ksk_c0<'a>(
         .into_iter()
         .map(|p| {
             p.ok_or_else(|| Error::DefaultError("missing c0 component".to_string()))
-                .map(Poly::<Ntt>::into_ntt_shoup)
+                .and_then(|poly| Poly::<Ntt>::into_ntt_shoup(poly).map_err(Error::MathError))
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(out.into_boxed_slice())
@@ -444,7 +444,7 @@ fn aggregate_relinearization_key_impl(
         ));
     }
     for (j, c1_j) in first.ksk_s_to_r.c1.iter().enumerate() {
-        let mut a_ksk: Poly<Ntt> = c1_j.clone().into_ntt();
+        let mut a_ksk: Poly<Ntt> = c1_j.clone().into_ntt()?;
         a_ksk.disallow_variable_time_computations();
         let pk_a_j = public_key
             .c

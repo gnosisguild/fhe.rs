@@ -1,5 +1,9 @@
 // Expect indexing in benchmarks for convenience
 #![expect(missing_docs, reason = "examples/benches/tests omit docs by design")]
+#![expect(
+    clippy::expect_used,
+    reason = "benchmark failure should identify the operation"
+)]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fhe::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, RGSWCiphertext, SecretKey};
@@ -29,7 +33,7 @@ pub fn bfv_rgsw_benchmark(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("external", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| &c1 * &c2);
+                b.iter(|| (&c1 * &c2).expect("RGSW external product"));
             },
         );
     }

@@ -226,14 +226,14 @@ impl<'a> TryConvertFrom<&'a [BigUint]> for Poly<PowerBasis> {
 impl<'a> TryConvertFrom<&'a [BigUint]> for Poly<Ntt> {
     fn try_convert_from(v: &'a [BigUint], ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         let p = Poly::<PowerBasis>::try_convert_from(v, ctx, variable_time)?;
-        Ok(p.into_ntt())
+        p.into_ntt()
     }
 }
 
 impl<'a> TryConvertFrom<&'a [BigUint]> for Poly<NttShoup> {
     fn try_convert_from(v: &'a [BigUint], ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         let p = Poly::<PowerBasis>::try_convert_from(v, ctx, variable_time)?;
-        Ok(p.into_ntt_shoup())
+        p.into_ntt_shoup()
     }
 }
 
@@ -378,14 +378,29 @@ mod protobuf {
     use crate::proto::rq::{Representation as RepresentationProto, Rq};
     use crate::rq::{Representation, RepresentationTag};
 
-    impl<R: RepresentationTag> From<&Poly<R>> for Rq {
-        fn from(p: &Poly<R>) -> Self {
-            assert!(!p.has_lazy_coefficients);
+    impl<R: RepresentationTag> TryFrom<&Poly<R>> for Rq {
+        type Error = Error;
+
+        fn try_from(p: &Poly<R>) -> Result<Self> {
+            if p.has_lazy_coefficients {
+                return Err(Error::Default(
+                    "Cannot serialize a polynomial with lazy coefficients".to_string(),
+                ));
+            }
+            let (actual_rows, actual_columns) = p.coefficients.dim();
+            if (actual_rows, actual_columns) != (p.ctx.q.len(), p.ctx.degree) {
+                return Err(Error::InvalidPolynomialDimensions {
+                    expected_rows: p.ctx.q.len(),
+                    expected_columns: p.ctx.degree,
+                    actual_rows,
+                    actual_columns,
+                });
+            }
             let q: Poly<PowerBasis> = match R::REPRESENTATION {
                 Representation::PowerBasis => Poly::<PowerBasis>::from_parts(p.clone()),
-                Representation::Ntt => Poly::<Ntt>::from_parts(p.clone()).into_power_basis(),
+                Representation::Ntt => Poly::<Ntt>::from_parts(p.clone()).into_power_basis()?,
                 Representation::NttShoup => {
-                    Poly::<NttShoup>::from_parts(p.clone()).into_power_basis()
+                    Poly::<NttShoup>::from_parts(p.clone()).into_power_basis()?
                 }
             };
 
@@ -400,12 +415,15 @@ mod protobuf {
                 }
             }
             let serialization: Vec<u8> = izip!(q.coefficients.outer_iter(), p.ctx.q.iter())
-                .flat_map(|(v, qi)| qi.serialize_vec(v.as_slice().unwrap()))
+                .flat_map(|(v, qi)| {
+                    let row = v.iter().copied().collect::<Vec<_>>();
+                    qi.serialize_vec(&row)
+                })
                 .collect();
             proto.coefficients = serialization;
             proto.degree = p.ctx.degree as u32;
             proto.allow_variable_time = p.allow_variable_time_computations;
-            proto
+            Ok(proto)
         }
     }
 
@@ -484,7 +502,7 @@ mod protobuf {
                 ));
             }
             let p = Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)?;
-            Ok(p.into_ntt())
+            p.into_ntt()
         }
     }
 
@@ -498,7 +516,7 @@ mod protobuf {
                 ));
             }
             let p = Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)?;
-            Ok(p.into_ntt_shoup())
+            p.into_ntt_shoup()
         }
     }
 }
@@ -525,7 +543,7 @@ mod tests {
             for modulus in MODULI {
                 let ctx = Arc::new(Context::new(&[*modulus], 16)?);
                 let p = Poly::<PowerBasis>::random(&ctx, &mut rng);
-                let proto = Rq::from(&p);
+                let proto = Rq::try_from(&p)?;
                 assert_eq!(
                     Poly::<PowerBasis>::try_convert_from(&proto, &ctx, false)?,
                     p
@@ -546,11 +564,11 @@ mod tests {
 
             let ctx = Arc::new(Context::new(MODULI, 16)?);
             let p = Poly::<Ntt>::random(&ctx, &mut rng);
-            let proto = Rq::from(&p);
+            let proto = Rq::try_from(&p)?;
             assert_eq!(Poly::<Ntt>::try_convert_from(&proto, &ctx, false)?, p);
 
             let p = Poly::<NttShoup>::random(&ctx, &mut rng);
-            let proto = Rq::from(&p);
+            let proto = Rq::try_from(&p)?;
             assert_eq!(Poly::<NttShoup>::try_convert_from(&proto, &ctx, false)?, p);
 
             Ok(())

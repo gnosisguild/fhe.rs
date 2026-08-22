@@ -163,7 +163,7 @@ let es_poly_sum = trbfv.aggregate_collected_shares(&collected_es_shares)?;
 // Each decrypting party: compute a decryption share from its aggregated
 // shares. The returned share is a protected `SecretPoly<PowerBasis>`: it
 // stays intact until transmitted/reconstructed and is zeroized on drop.
-let d_share = trbfv.decryption_share(ciphertext.clone(), sk_poly_sum.into_ntt(), es_poly_sum)?;
+let d_share = trbfv.decryption_share(ciphertext.clone(), sk_poly_sum.into_ntt()?, es_poly_sum)?;
 
 // Combine exactly threshold + 1 decryption shares; reconstructing_parties
 // holds the 1-based indices of the parties the shares came from

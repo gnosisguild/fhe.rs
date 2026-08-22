@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
-use crate::{BarrettField, Error, Field, ShamirScheme, ShareMatrix};
+use crate::{BarrettField, Error, Field, SecretShares, ShamirScheme, ShareMatrix};
 
 /// Ordered independent Shamir schemes for an RNS basis.
 ///
@@ -71,12 +71,12 @@ impl<F: Field> RnsShamir<F> {
         self.schemes.first().map_or(0, ShamirScheme::num_shares)
     }
 
-    /// Share one RNS value, returning one party-ordered share vector per modulus.
+    /// Share one RNS value, returning protected party-ordered shares per modulus.
     pub fn share<R: RngCore + CryptoRng>(
         &self,
         residues: &[u64],
         rng: &mut R,
-    ) -> Result<Vec<Vec<u64>>, Error> {
+    ) -> Result<Vec<SecretShares>, Error> {
         if residues.len() != self.num_moduli() {
             return Err(Error::InvalidMatrixShape {
                 expected_rows: self.num_moduli(),
@@ -85,13 +85,9 @@ impl<F: Field> RnsShamir<F> {
                 actual_columns: 1,
             });
         }
-        let mut protected = Vec::with_capacity(self.num_moduli());
+        let mut result = Vec::with_capacity(self.num_moduli());
         for (scheme, residue) in self.schemes.iter().zip(residues.iter().copied()) {
-            protected.push(Zeroizing::new(scheme.share(residue, rng)?));
-        }
-        let mut result = Vec::with_capacity(protected.len());
-        for mut shares in protected {
-            result.push(std::mem::take(&mut *shares));
+            result.push(scheme.share(residue, rng)?);
         }
         Ok(result)
     }

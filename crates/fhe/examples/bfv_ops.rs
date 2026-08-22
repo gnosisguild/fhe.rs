@@ -134,7 +134,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pt_one = Plaintext::try_encode(&[1u64], Encoding::poly(), &params)?;
     let mut ct_res = &ct_x2 * &pt_three;
     ct_res += &(&ct_x * &pt_two);
-    ct_res += &pt_one;
+    ct_res.try_add_assign_plaintext(&pt_one)?;
     let pt = sk.try_decrypt(&ct_res)?;
     let poly_plain = Vec::<u64>::try_decode(&pt, Encoding::poly())?[0];
     println!("Polynomial (no SIMD) = {poly_plain}");
@@ -150,7 +150,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pt_one_v = Plaintext::try_encode(&vec![1u64; x_vec.len()], Encoding::simd(), &params)?;
     let mut ct_res_v = &ct_xv2 * &pt_three_v;
     ct_res_v += &(&ct_xv * &pt_two_v);
-    ct_res_v += &pt_one_v;
+    ct_res_v.try_add_assign_plaintext(&pt_one_v)?;
     let pt = sk.try_decrypt(&ct_res_v)?;
     let poly_simd = Vec::<u64>::try_decode(&pt, Encoding::simd())?;
     println!("Polynomial (SIMD) = {:?}", &poly_simd[..x_vec.len()]);

@@ -163,7 +163,7 @@ pub fn rq_dot_product(c: &mut Criterion) {
             let q_vec_shoup = q_vec
                 .iter()
                 .cloned()
-                .map(Poly::<Ntt>::into_ntt_shoup)
+                .map(|poly| poly.into_ntt_shoup().unwrap())
                 .collect_vec();
             group.bench_function(
                 BenchmarkId::from_parameter(format!(
@@ -229,7 +229,7 @@ pub fn rq_benchmark(c: &mut Criterion) {
                 ),
                 |b| {
                     b.iter(|| {
-                        let _ = p_pb.clone().into_ntt();
+                        let _ = p_pb.clone().into_ntt().unwrap();
                     });
                 },
             );
@@ -242,7 +242,7 @@ pub fn rq_benchmark(c: &mut Criterion) {
                 ),
                 |b| {
                     b.iter(|| {
-                        let _ = p_ntt.clone().into_power_basis();
+                        let _ = p_ntt.clone().into_power_basis().unwrap();
                     });
                 },
             );
@@ -273,7 +273,7 @@ pub fn rq_benchmark(c: &mut Criterion) {
                     ),
                     |b| {
                         b.iter(|| {
-                            let _ = p_pb_vt.clone().into_ntt();
+                            let _ = p_pb_vt.clone().into_ntt().unwrap();
                         });
                     },
                 );
@@ -287,7 +287,7 @@ pub fn rq_benchmark(c: &mut Criterion) {
                     ),
                     |b| {
                         b.iter(|| {
-                            let _ = p_ntt_vt.clone().into_power_basis();
+                            let _ = p_ntt_vt.clone().into_power_basis().unwrap();
                         });
                     },
                 );

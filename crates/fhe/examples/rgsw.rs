@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ct2: Ciphertext = sk.try_encrypt(&pt2, &mut rng)?;
     let ct2_rgsw: RGSWCiphertext = sk.try_encrypt(&pt2, &mut rng)?;
 
-    let mut product = &ct1 * &ct2_rgsw;
+    let mut product = (&ct1 * &ct2_rgsw)?;
     let expected = &ct1 * &ct2;
 
     println!("Noise in product: {}", unsafe {

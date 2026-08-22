@@ -493,8 +493,8 @@ impl LBFVRelinearizationKey {
         let d1_polys: Vec<Poly<NttShoup>> = crp_d1
             .to_polys()
             .into_iter()
-            .map(|p| p.into_ntt_shoup())
-            .collect();
+            .map(|p| p.into_ntt_shoup().map_err(Error::MathError))
+            .collect::<Result<Vec<_>>>()?;
         Self::new_leveled_with_polys(sk, pk, d1_polys, ciphertext_level, key_level, rng)
     }
 
@@ -576,24 +576,24 @@ impl LBFVRelinearizationKey {
             ))
         } else {
             let ciphertext_ctx = self.ciphertext_ctx();
-            let c2_hat = ct.c[2].clone().into_power_basis();
+            let c2_hat = ct.c[2].clone().into_power_basis()?;
 
             let mut c2_prime = self.decompose_poly_and_product_sum(&c2_hat, &self.b_vec)?;
             if c2_prime.ctx() != &ciphertext_ctx {
-                let mut pb = c2_prime.into_power_basis();
+                let mut pb = c2_prime.into_power_basis()?;
                 pb.switch_down_to(&ciphertext_ctx)?;
-                c2_prime = pb.into_ntt();
+                c2_prime = pb.into_ntt()?;
             }
 
-            let c2_pb = c2_prime.into_power_basis();
+            let c2_pb = c2_prime.into_power_basis()?;
             let (mut c0_prime, mut c1_prime) = self.ksk_r_to_s.key_switch(&c2_pb)?;
             if c0_prime.ctx() != &ciphertext_ctx || c1_prime.ctx() != &ciphertext_ctx {
-                let mut c0_pb = c0_prime.into_power_basis();
-                let mut c1_pb = c1_prime.into_power_basis();
+                let mut c0_pb = c0_prime.into_power_basis()?;
+                let mut c1_pb = c1_prime.into_power_basis()?;
                 c0_pb.switch_down_to(&ciphertext_ctx)?;
                 c1_pb.switch_down_to(&ciphertext_ctx)?;
-                c0_prime = c0_pb.into_ntt();
-                c1_prime = c1_pb.into_ntt();
+                c0_prime = c0_pb.into_ntt()?;
+                c1_prime = c1_pb.into_ntt()?;
             }
             ct.c[0] += &c0_prime;
             ct.c[1] += &c1_prime;
@@ -601,9 +601,9 @@ impl LBFVRelinearizationKey {
             let mut c1_double_prime =
                 self.decompose_poly_and_product_sum(&c2_hat, &self.ksk_s_to_r.c0)?;
             if c1_double_prime.ctx() != &ciphertext_ctx {
-                let mut pb = c1_double_prime.into_power_basis();
+                let mut pb = c1_double_prime.into_power_basis()?;
                 pb.switch_down_to(&ciphertext_ctx)?;
-                c1_double_prime = pb.into_ntt();
+                c1_double_prime = pb.into_ntt()?;
             }
             ct.c[1] += &c1_double_prime;
 
@@ -1052,7 +1052,7 @@ mod tests {
         let rns = RnsContext::new(&params.moduli)?;
 
         let sk_ntt =
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)?.into_ntt();
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)?.into_ntt()?;
         let r_pb = Poly::<PowerBasis>::try_convert_from(r.coeffs.as_ref(), ctx, false)?;
         let sk_pb = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)?;
 
@@ -1064,10 +1064,13 @@ mod tests {
             .zip(errors_d0.iter())
             .enumerate()
         {
-            let lhs = (&d0_i.clone().into_ntt() + &(&d1_i.clone().into_ntt() * &sk_ntt))
-                .into_power_basis();
+            let d0_i_ntt = d0_i.clone().into_ntt()?;
+            let d1_i_ntt = d1_i.clone().into_ntt()?;
+            let lhs = (&d0_i_ntt + &(&d1_i_ntt * &sk_ntt)).into_power_basis()?;
             let gi = rns.get_garner(i).expect("garner");
-            let rhs = (&e0_i.clone().into_ntt() + &(gi * &r_pb).into_ntt()).into_power_basis();
+            let e0_i_ntt = e0_i.clone().into_ntt()?;
+            let gi_r_ntt = (gi * &r_pb).into_ntt()?;
+            let rhs = (&e0_i_ntt + &gi_r_ntt).into_power_basis()?;
             assert_eq!(lhs, rhs, "d0 witness equation failed at row {i}");
         }
 
@@ -1078,7 +1081,7 @@ mod tests {
         let mut neg_r_coeffs = r.coeffs.clone();
         neg_r_coeffs.iter_mut().for_each(|c| *c = c.wrapping_neg());
         let neg_r_pb = Poly::<PowerBasis>::try_convert_from(neg_r_coeffs.as_ref(), ctx, false)?;
-        let neg_r_ntt = neg_r_pb.into_ntt();
+        let neg_r_ntt = neg_r_pb.into_ntt()?;
 
         for (i, ((d2_i, a_i), e2_i)) in ksk_s_to_r
             .c0
@@ -1087,10 +1090,13 @@ mod tests {
             .zip(errors_d2.iter())
             .enumerate()
         {
-            let lhs = (&d2_i.clone().into_ntt() + &(&a_i.clone().into_ntt() * &neg_r_ntt))
-                .into_power_basis();
+            let d2_i_ntt = d2_i.clone().into_ntt()?;
+            let a_i_ntt = a_i.clone().into_ntt()?;
+            let lhs = (&d2_i_ntt + &(&a_i_ntt * &neg_r_ntt)).into_power_basis()?;
             let gi = rns.get_garner(i).expect("garner");
-            let rhs = (&e2_i.clone().into_ntt() + &(gi * &sk_pb).into_ntt()).into_power_basis();
+            let e2_i_ntt = e2_i.clone().into_ntt()?;
+            let gi_sk_ntt = (gi * &sk_pb).into_ntt()?;
+            let rhs = (&e2_i_ntt + &gi_sk_ntt).into_power_basis()?;
             assert_eq!(lhs, rhs, "d2 witness equation failed at row {i}");
         }
 

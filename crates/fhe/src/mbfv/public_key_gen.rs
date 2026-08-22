@@ -42,7 +42,8 @@ impl PublicKeyShare {
 
         // Convert secret key to usable polynomial
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?
+                .into_ntt()?,
         );
 
         // Sample error
@@ -78,7 +79,8 @@ impl PublicKeyShare {
         let ctx = params.context_at_level(0)?;
 
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?
+                .into_ntt()?,
         );
         let e = Zeroizing::new(Poly::<Ntt>::small(ctx, params.variance, rng)?);
 

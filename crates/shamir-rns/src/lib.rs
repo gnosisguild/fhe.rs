@@ -25,4 +25,4 @@ pub use field::{
     MontgomeryField,
 };
 pub use rns::RnsShamir;
-pub use shamir::{ShamirScheme, ShareMatrix};
+pub use shamir::{SecretShares, ShamirScheme, ShareMatrix};

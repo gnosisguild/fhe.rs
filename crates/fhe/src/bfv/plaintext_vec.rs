@@ -77,7 +77,7 @@ impl FheEncoderVariableTime<&[u64]> for PlaintextVec {
                         }
                     };
 
-                    let poly = Poly::<PowerBasis>::try_convert_from(&v, ctx, true)?.into_ntt();
+                    let poly = Poly::<PowerBasis>::try_convert_from(&v, ctx, true)?.into_ntt()?;
 
                     let value_enum = match params.plaintext {
                         crate::bfv::PlaintextModulus::Small { .. } => {
@@ -151,8 +151,8 @@ impl FheEncoder<&[BigUint]> for PlaintextVec {
                         }
                     };
 
-                    let poly =
-                        Poly::<PowerBasis>::try_convert_from(v.as_slice(), ctx, false)?.into_ntt();
+                    let poly = Poly::<PowerBasis>::try_convert_from(v.as_slice(), ctx, false)?
+                        .into_ntt()?;
 
                     let value_enum = match &params.plaintext {
                         crate::bfv::PlaintextModulus::Small { modulus_big, .. } => {
@@ -218,7 +218,7 @@ impl FheEncoder<&[u64]> for PlaintextVec {
                         }
                     };
 
-                    let poly = Poly::<PowerBasis>::try_convert_from(&v, ctx, false)?.into_ntt();
+                    let poly = Poly::<PowerBasis>::try_convert_from(&v, ctx, false)?.into_ntt()?;
 
                     let value_enum = match params.plaintext {
                         crate::bfv::PlaintextModulus::Small { .. } => {

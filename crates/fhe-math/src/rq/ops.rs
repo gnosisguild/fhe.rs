@@ -857,10 +857,10 @@ mod tests {
     }
 
     #[test]
-    fn mul_scalar_ntt_shoup() {
-        let ctx = Arc::new(Context::new(MODULI, 16).unwrap());
+    fn mul_scalar_ntt_shoup() -> Result<(), Box<dyn Error>> {
+        let ctx = Arc::new(Context::new(MODULI, 16)?);
         let p = Poly::<NttShoup>::random(&ctx, &mut rng());
-        let mut p_ntt = p.clone().into_ntt();
+        let mut p_ntt = p.clone().into_ntt()?;
         let scalar = BigUint::from(42u64);
 
         let mut p_ntt_scaled = p_ntt.clone();
@@ -868,5 +868,7 @@ mod tests {
 
         p_ntt *= &scalar;
         assert_eq!(p_ntt_scaled, p_ntt);
+
+        Ok(())
     }
 }

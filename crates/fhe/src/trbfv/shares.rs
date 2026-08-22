@@ -181,9 +181,11 @@ impl ZeroizeOnDrop for SecretShareMatrix {}
 /// Used for the input to share dealing, the aggregated secret-key and
 /// smudging polynomials, and the final decryption share. The inner
 /// polynomial is erased on drop (delegating to `Poly::zeroize`) across normal
-/// drops, early returns, and unwinding outside the representation conversions
-/// [`SecretPoly::into_ntt`] and [`SecretPoly::into_power_basis`]. Those methods
-/// document their conversion-specific unwind caveat.
+/// drops, early returns, and unwinding, including the representation
+/// conversions [`SecretPoly::into_ntt`] and [`SecretPoly::into_power_basis`].
+/// The underlying `fhe-math` consuming conversions guard their input while the
+/// transform runs and guard freshly-built Shoup output while it is populated,
+/// so a panic during conversion zeroizes both source and partial output.
 ///
 /// # Security semantics
 ///
@@ -270,17 +272,19 @@ impl SecretPoly<PowerBasis> {
     /// protected. Used to prepare the secret input to decryption without
     /// extracting an unprotected polynomial.
     ///
-    /// # Unwind caveat
-    /// `std::mem::take` consumes the inner polynomial outside the guard before
-    /// the representation transform runs. If the transform itself panics,
-    /// that raw polynomial unwinds without zeroization. Normal drops, early
-    /// returns, and unwinding outside this conversion remain covered.
-    #[must_use]
-    pub fn into_ntt(mut self) -> SecretPoly<Ntt> {
+    /// The underlying `fhe-math` conversion keeps the source polynomial under
+    /// a zeroizing guard for the duration of the transform.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the protected polynomial dimensions do not match
+    /// its context.
+    #[must_use = "the protected conversion result must be checked"]
+    pub fn into_ntt(mut self) -> Result<SecretPoly<Ntt>, Error> {
         // The wrapper implements Drop, so the inner polynomial cannot be
         // moved out directly; swap in an empty default that the wrapper's
         // drop zeroizes harmlessly.
-        SecretPoly::new(std::mem::take(&mut self.poly).into_ntt())
+        Ok(SecretPoly::new(std::mem::take(&mut self.poly).into_ntt()?))
     }
 }
 
@@ -288,14 +292,18 @@ impl SecretPoly<Ntt> {
     /// Consume the protected NTT polynomial and return its PowerBasis form,
     /// still protected.
     ///
-    /// # Unwind caveat
-    /// `std::mem::take` consumes the inner polynomial outside the guard before
-    /// the representation transform runs. If the transform itself panics,
-    /// that raw polynomial unwinds without zeroization. Normal drops, early
-    /// returns, and unwinding outside this conversion remain covered.
-    #[must_use]
-    pub fn into_power_basis(mut self) -> SecretPoly<PowerBasis> {
-        SecretPoly::new(std::mem::take(&mut self.poly).into_power_basis())
+    /// The underlying `fhe-math` conversion keeps the source polynomial under
+    /// a zeroizing guard for the duration of the transform.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the protected polynomial dimensions do not match
+    /// its context.
+    #[must_use = "the protected conversion result must be checked"]
+    pub fn into_power_basis(mut self) -> Result<SecretPoly<PowerBasis>, Error> {
+        Ok(SecretPoly::new(
+            std::mem::take(&mut self.poly).into_power_basis()?,
+        ))
     }
 }
 
@@ -510,11 +518,14 @@ impl ShareManager {
                         ),
                     ));
                 }
-                let mut output = Array2::zeros((self.n, self.params.degree()));
-                for (slot, value) in output.iter_mut().zip(matrix.as_slice()) {
+                let mut output = SecretShareMatrix::new(Array2::zeros((
+                    self.n,
+                    self.params.degree(),
+                )));
+                for (slot, value) in output.matrix.iter_mut().zip(matrix.as_slice()) {
                     *slot = *value;
                 }
-                Ok(SecretShareMatrix::new(output))
+                Ok(output)
             })
             .collect();
 
@@ -677,7 +688,7 @@ impl ShareManager {
                 ciphertext.c.len()
             )));
         }
-        let c0 = ciphertext.c[0].clone().into_power_basis();
+        let c0 = ciphertext.c[0].clone().into_power_basis()?;
         let c1 = ciphertext.c[1].clone();
         if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
             return Err(Error::context_mismatch(
@@ -687,7 +698,7 @@ impl ShareManager {
         }
         // c1sk = c1 * sk_i is the secret part of the decryption share; it is
         // computed from the borrowed inner polynomial and guarded immediately.
-        let mut c1sk = Zeroizing::new((&c1 * sk_i.inner()).into_power_basis());
+        let mut c1sk = Zeroizing::new((&c1 * sk_i.inner()).into_power_basis()?);
         // `&c0 + &*c1sk` would clone the left operand into a fresh allocation
         // (fhe-math/src/rq/ops.rs `impl Add<&Poly> for &Poly`), leaving an
         // abandoned unzeroized copy behind. Instead the guarded `c1sk` buffer
@@ -922,7 +933,7 @@ impl ShareManager {
 
         let poly =
             Poly::<PowerBasis>::try_convert_from(w.as_slice(), ciphertext.c[0].ctx(), false)?
-                .into_ntt();
+                .into_ntt()?;
 
         let pt = Plaintext {
             params: params.clone(),
@@ -1180,7 +1191,7 @@ mod tests {
 
         // Compute decryption share
         let decryption_share = manager
-            .decryption_share(ct.clone(), sk_poly.clone().into_ntt(), es_poly)
+            .decryption_share(ct.clone(), sk_poly.clone().into_ntt().unwrap(), es_poly)
             .unwrap();
 
         // This unit test uses the full secret as the "aggregate" for both
@@ -1217,7 +1228,7 @@ mod tests {
         let context = params.context_at_level(0).unwrap();
         let result = manager.decryption_share(
             Arc::new(ciphertext),
-            secret_poly.clone().into_ntt(),
+            secret_poly.clone().into_ntt().unwrap(),
             SecretPoly::new(Poly::<PowerBasis>::zero(context)),
         );
 
@@ -1314,7 +1325,11 @@ mod tests {
             let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
 
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt().unwrap(),
+                    es_poly,
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1397,7 +1412,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt().unwrap(),
+                    es_poly,
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1479,7 +1498,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt().unwrap(),
+                    es_poly,
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1558,7 +1581,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt().unwrap(),
+                    es_poly,
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1820,8 +1847,8 @@ mod tests {
     // ── Protected wrapper contracts (issue #126) ─────────────────────────
 
     /// Compile-time assertion that a type implements the unconditional
-    /// `ZeroizeOnDrop` contract. Representation-conversion unwind caveats are
-    /// documented on the two consuming conversion methods.
+    /// `ZeroizeOnDrop` contract, including representation conversions guarded
+    /// by the underlying `fhe-math` polynomial implementation.
     fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
 
     #[test]
@@ -1905,12 +1932,12 @@ mod tests {
         let wrapper = SecretPoly::new(poly);
 
         // into_ntt must return another protected owner, never a raw Poly.
-        let ntt: SecretPoly<Ntt> = wrapper.into_ntt();
+        let ntt: SecretPoly<Ntt> = wrapper.into_ntt().unwrap();
         assert_eq!(
             ntt.coefficients().dim(),
             (params.moduli().len(), params.degree())
         );
-        let power_basis: SecretPoly<PowerBasis> = ntt.into_power_basis();
+        let power_basis: SecretPoly<PowerBasis> = ntt.into_power_basis().unwrap();
         assert_eq!(power_basis.ctx(), ctx);
         assert_zeroize_on_drop::<SecretPoly<Ntt>>();
     }
@@ -1991,7 +2018,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt().unwrap(),
+                    es_poly,
+                )
                 .unwrap();
             decryption_shares.push(share);
         }

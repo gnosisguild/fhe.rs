@@ -236,7 +236,7 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
             trbfv
                 .decryption_share(
                     tally.clone(),
-                    party.sk_poly_sum.clone().into_ntt(),
+                    party.sk_poly_sum.clone().into_ntt().unwrap(),
                     party.es_poly_sum.clone(),
                 )
                 .expect("decryption share")

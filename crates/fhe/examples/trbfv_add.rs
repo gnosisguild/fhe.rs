@@ -283,15 +283,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Measure decryption share generation (average per party)
     let share_generation_start = Instant::now();
 
-    parties.par_iter_mut().for_each(|party| {
-        party.d_share_poly = trbfv
-            .decryption_share(
+    parties
+        .par_iter_mut()
+        .try_for_each(|party| -> fhe::Result<()> {
+            party.d_share_poly = trbfv.decryption_share(
                 tally.clone(),
-                party.sk_poly_sum.clone().into_ntt(),
+                party.sk_poly_sum.clone().into_ntt()?,
                 party.es_poly_sum.clone(),
-            )
-            .unwrap();
-    });
+            )?;
+            Ok(())
+        })?;
 
     let total_share_generation_time = share_generation_start.elapsed();
     let avg_time_per_party = total_share_generation_time.as_millis() as f64 / num_parties as f64;

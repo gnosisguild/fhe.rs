@@ -636,7 +636,7 @@ impl BfvParametersBuilder {
                 &cipher_ctx,
                 true,
             )?
-            .into_ntt_shoup();
+            .into_ntt_shoup()?;
 
             // Compute q_mod_t
             let q_mod_t = rns.modulus() % plaintext_big;

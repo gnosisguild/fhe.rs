@@ -82,11 +82,11 @@ impl SecretKey {
     /// noise.
     pub unsafe fn measure_noise(&self, ct: &Ciphertext) -> Result<usize> {
         let plaintext = Zeroizing::new(self.try_decrypt(ct)?);
-        let m = Zeroizing::new(plaintext.to_poly());
+        let m = Zeroizing::new(plaintext.to_poly()?);
 
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), ct[0].ctx(), false)?
-                .into_ntt(),
+                .into_ntt()?,
         );
         let mut si = s.clone();
 
@@ -103,7 +103,7 @@ impl SecretKey {
         *c.as_mut() -= &m;
         let ctx = c.ctx().clone();
         let c_inner = std::mem::replace(c.as_mut(), Poly::<Ntt>::zero(&ctx));
-        let c = Zeroizing::new(c_inner.into_power_basis());
+        let c = Zeroizing::new(c_inner.into_power_basis()?);
 
         let ciphertext_modulus = ct[0].ctx().modulus();
         let mut noise = 0usize;
@@ -128,7 +128,8 @@ impl SecretKey {
         let level = self.params.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), p.ctx(), false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), p.ctx(), false)?
+                .into_ntt()?,
         );
 
         let mut a = Poly::<Ntt>::random_from_seed(p.ctx(), seed);
@@ -162,7 +163,8 @@ impl SecretKey {
         let level = self.params.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), p.ctx(), false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), p.ctx(), false)?
+                .into_ntt()?,
         );
 
         let mut a = Poly::<Ntt>::random_from_seed(p.ctx(), seed);
@@ -226,7 +228,7 @@ impl SecretKey {
         rng: &mut R,
     ) -> Result<Ciphertext> {
         assert_eq!(self.params, pt.params);
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         self.encrypt_poly_with_seed(m.as_ref(), seed, rng)
     }
 }
@@ -292,7 +294,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for SecretKey {
         rng: &mut R,
     ) -> Result<Ciphertext> {
         assert!(Arc::ptr_eq(&self.params, &pt.params));
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         self.encrypt_poly(m.as_ref(), rng)
     }
 }
@@ -308,7 +310,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
         } else {
             let s = Zeroizing::new(
                 Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), ct[0].ctx(), false)?
-                    .into_ntt(),
+                    .into_ntt()?,
             );
             let mut si = s.clone();
 
@@ -327,7 +329,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
             let ctx_lvl = self.params.context_level_at(ct.level).unwrap();
             let ctx = c.ctx().clone();
             let c_inner = std::mem::replace(c.as_mut(), Poly::<Ntt>::zero(&ctx));
-            let c_pb = Zeroizing::new(c_inner.into_power_basis());
+            let c_pb = Zeroizing::new(c_inner.into_power_basis()?);
             let d = Zeroizing::new(c_pb.as_ref().scale(&ctx_lvl.cipher_plain_context.scaler)?);
 
             let value = match self.params.plaintext {
@@ -367,7 +369,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
                     Poly::<PowerBasis>::try_convert_from(v.as_ref(), ct[0].ctx(), false)?
                 }
             }
-            .into_ntt();
+            .into_ntt()?;
 
             let pt = Plaintext {
                 params: self.params.clone(),

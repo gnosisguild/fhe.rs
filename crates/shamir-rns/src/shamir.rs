@@ -2,6 +2,7 @@
 
 use core::fmt;
 use std::collections::HashSet;
+use std::ops::Deref;
 
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, RngCore, SeedableRng};
@@ -12,14 +13,80 @@ use rayon::prelude::*;
 
 use crate::{BarrettField, Error, Field};
 
+/// Secret shares for one canonical secret, ordered by party ID.
+///
+/// The owned share vector is always zeroized on explicit zeroization and drop,
+/// and the type has no raw-vector extraction or `Clone` implementation. The
+/// [`Deref`] and [`SecretShares::as_slice`] views are for transport reads only;
+/// copies made by a caller for serialization or other transport remain the
+/// caller's responsibility.
+pub struct SecretShares {
+    values: Vec<u64>,
+}
+
+impl SecretShares {
+    fn new(values: Vec<u64>) -> Self {
+        Self { values }
+    }
+
+    /// Borrow the canonical share values in party-ID order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u64] {
+        &self.values
+    }
+
+    /// Return the number of party shares.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Return whether no party shares are stored.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+impl Deref for SecretShares {
+    type Target = [u64];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl fmt::Debug for SecretShares {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SecretShares")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl Zeroize for SecretShares {
+    fn zeroize(&mut self) {
+        self.values.as_mut_slice().zeroize();
+        self.values.clear();
+    }
+}
+
+impl Drop for SecretShares {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SecretShares {}
+
 /// Secret shares in party-major layout.
 ///
 /// A matrix with shape `[rows, columns]` stores each party's complete row
 /// contiguously. `rows` is the number of parties represented and `columns` is
 /// the number of independently shared secrets. Values are canonical residues
-/// modulo the scheme modulus. The owned storage is zeroized on drop; a plain
-/// `Vec<u64>` returned by a single-secret API remains the caller's ownership
-/// responsibility.
+/// modulo the scheme modulus. The owned storage is zeroized on drop, and its
+/// `Clone` implementation creates another zeroizing owner.
 pub struct ShareMatrix {
     rows: usize,
     columns: usize,
@@ -190,7 +257,7 @@ impl<F: Field> ShamirScheme<F> {
         (1..=self.num_shares).collect()
     }
 
-    /// Share one canonical secret, returning values ordered by party ID.
+    /// Share one canonical secret, returning protected values ordered by party ID.
     ///
     /// A fresh ChaCha20 stream is forked for every random polynomial
     /// coefficient from the caller's cryptographic RNG. The fork schedule is
@@ -202,7 +269,7 @@ impl<F: Field> ShamirScheme<F> {
         &self,
         secret: u64,
         rng: &mut R,
-    ) -> Result<Vec<u64>, Error> {
+    ) -> Result<SecretShares, Error> {
         self.validate_secret(secret)?;
         let mut seed = [0_u8; 32];
         rng.fill_bytes(&mut seed);
@@ -215,9 +282,9 @@ impl<F: Field> ShamirScheme<F> {
         &self,
         secret: u64,
         rng: &mut R,
-    ) -> Result<Vec<u64>, Error> {
+    ) -> Result<SecretShares, Error> {
         let coefficients = self.sample_coefficients(secret, rng);
-        let mut shares = Vec::with_capacity(self.num_shares);
+        let mut shares = Zeroizing::new(Vec::with_capacity(self.num_shares));
         for point in 1..=self.num_shares {
             let x = point as u64;
             let mut value = 0_u64;
@@ -226,7 +293,7 @@ impl<F: Field> ShamirScheme<F> {
             }
             shares.push(value);
         }
-        Ok(shares)
+        Ok(SecretShares::new(std::mem::take(&mut *shares)))
     }
 
     /// Share many canonical secrets into a party-major matrix.
@@ -250,7 +317,7 @@ impl<F: Field> ShamirScheme<F> {
             seed.zeroize();
         }
         #[cfg(feature = "rayon")]
-        let by_secret: Vec<Zeroizing<Vec<u64>>> = secrets
+        let by_secret: Vec<Zeroizing<SecretShares>> = secrets
             .par_iter()
             .zip(seeds.par_iter())
             .map(|(secret, source_seed)| {
@@ -262,7 +329,7 @@ impl<F: Field> ShamirScheme<F> {
             })
             .collect::<Result<_, _>>()?;
         #[cfg(not(feature = "rayon"))]
-        let by_secret: Vec<Zeroizing<Vec<u64>>> = secrets
+        let by_secret: Vec<Zeroizing<SecretShares>> = secrets
             .iter()
             .zip(seeds.iter())
             .map(|(secret, source_seed)| {
@@ -480,9 +547,9 @@ mod tests {
     use proptest::prelude::*;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
-    use zeroize::Zeroize;
+    use zeroize::{Zeroize, ZeroizeOnDrop};
 
-    use super::{ShamirScheme, ShareMatrix};
+    use super::{SecretShares, ShamirScheme, ShareMatrix};
     use crate::{BarrettField, Error, MontgomeryField};
 
     fn wikipedia<F: crate::Field>() {
@@ -577,6 +644,21 @@ mod tests {
         assert!(matrix.as_slice().is_empty());
     }
 
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    #[test]
+    fn secret_shares_are_guarded_and_redacted() {
+        let scheme = ShamirScheme::<BarrettField>::new(2, 3, 1613).unwrap();
+        let mut rng = ChaCha20Rng::from_seed([24; 32]);
+        let mut shares: SecretShares = scheme.share(7, &mut rng).unwrap();
+        assert_zeroize_on_drop::<SecretShares>();
+        assert_eq!(shares.len(), 3);
+        assert!(!shares.is_empty());
+        assert!(!format!("{shares:?}").contains("7"));
+        shares.zeroize();
+        assert!(shares.is_empty());
+    }
+
     fn malformed_rejections<F: crate::Field>(
         shares_needed: usize,
         num_shares: usize,
@@ -653,7 +735,7 @@ mod tests {
             let mut montgomery_rng = ChaCha20Rng::from_seed([21; 32]);
             let barrett_shares = barrett.share(secret, &mut barrett_rng).unwrap();
             let montgomery_shares = montgomery.share(secret, &mut montgomery_rng).unwrap();
-            prop_assert_eq!(&barrett_shares, &montgomery_shares);
+            prop_assert_eq!(barrett_shares.as_slice(), montgomery_shares.as_slice());
             let mut party_ids = (1..=num_shares).collect::<Vec<_>>();
             let mut subset_rng = ChaCha20Rng::from_seed(subset_seed.to_le_bytes().repeat(4).try_into().unwrap());
             for index in (1..party_ids.len()).rev() {

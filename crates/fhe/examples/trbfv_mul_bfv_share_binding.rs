@@ -490,15 +490,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // ── Threshold decryption ──────────────────────────────────────────────────
     let t_start = Instant::now();
-    parties.par_iter_mut().for_each(|party| {
-        party.d_share_poly = trbfv
-            .decryption_share(
+    parties
+        .par_iter_mut()
+        .try_for_each(|party| -> fhe::Result<()> {
+            party.d_share_poly = trbfv.decryption_share(
                 product.clone(),
-                party.sk_poly_sum.clone().into_ntt(),
+                party.sk_poly_sum.clone().into_ntt()?,
                 party.es_poly_sum.clone(),
-            )
-            .unwrap();
-    });
+            )?;
+            Ok(())
+        })?;
     println!(
         "Decryption share generation: {:.2?} ({:.2} ms/party)",
         t_start.elapsed(),

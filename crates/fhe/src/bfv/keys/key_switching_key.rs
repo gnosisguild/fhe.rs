@@ -363,7 +363,7 @@ impl KeySwitchingKey {
             .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
             .ctx();
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt()?,
         );
 
         let moduli_slice =
@@ -376,12 +376,12 @@ impl KeySwitchingKey {
             .iter()
             .enumerate()
             .map(|(i, c1i)| {
-                let mut a_s = Zeroizing::new(c1i.clone().into_ntt());
+                let mut a_s = Zeroizing::new(c1i.clone().into_ntt()?);
                 a_s.disallow_variable_time_computations();
                 *a_s.as_mut() *= s.as_ref();
                 let ctx = a_s.ctx().clone();
                 let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
-                let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis());
+                let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis()?);
 
                 let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
                 b -= a_s_pb.as_ref();
@@ -394,7 +394,7 @@ impl KeySwitchingKey {
                 b += &g_i_from;
 
                 unsafe { b.allow_variable_time_computations() }
-                Ok(b.into_ntt_shoup())
+                Ok(b.into_ntt_shoup()?)
             })
             .collect::<Result<Vec<Poly<NttShoup>>>>()?;
 
@@ -415,19 +415,19 @@ impl KeySwitchingKey {
             .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
             .ctx();
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt()?,
         );
 
         let c0 = c1
             .iter()
             .enumerate()
             .map(|(i, c1i)| {
-                let mut a_s = Zeroizing::new(c1i.clone().into_ntt());
+                let mut a_s = Zeroizing::new(c1i.clone().into_ntt()?);
                 a_s.disallow_variable_time_computations();
                 *a_s.as_mut() *= s.as_ref();
                 let ctx = a_s.ctx().clone();
                 let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
-                let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis());
+                let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis()?);
 
                 let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
                 b -= a_s_pb.as_ref();
@@ -437,7 +437,7 @@ impl KeySwitchingKey {
                 b += from_power.as_ref();
 
                 unsafe { b.allow_variable_time_computations() }
-                Ok(b.into_ntt_shoup())
+                Ok(b.into_ntt_shoup()?)
             })
             .collect::<Result<Vec<Poly<NttShoup>>>>()?;
 
@@ -458,7 +458,7 @@ impl KeySwitchingKey {
             .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
             .ctx();
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt()?,
         );
 
         let moduli_slice =
@@ -471,18 +471,18 @@ impl KeySwitchingKey {
             .iter()
             .enumerate()
             .map(|(i, c1i)| {
-                let mut a_s = Zeroizing::new(c1i.clone().into_ntt());
+                let mut a_s = Zeroizing::new(c1i.clone().into_ntt()?);
                 a_s.disallow_variable_time_computations();
                 *a_s.as_mut() *= s.as_ref();
                 let ctx = a_s.ctx().clone();
                 let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
-                let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis());
+                let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis()?);
 
                 let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
 
                 let mut error_i = b.clone();
                 unsafe { error_i.allow_variable_time_computations() }
-                let error_ntt = error_i.into_ntt_shoup();
+                let error_ntt = error_i.into_ntt_shoup()?;
 
                 b -= a_s_pb.as_ref();
 
@@ -493,7 +493,7 @@ impl KeySwitchingKey {
                 b += &g_i_from;
 
                 unsafe { b.allow_variable_time_computations() }
-                Ok((b.into_ntt_shoup(), error_ntt))
+                Ok((b.into_ntt_shoup()?, error_ntt))
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -515,25 +515,25 @@ impl KeySwitchingKey {
             .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
             .ctx();
         let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt()?,
         );
 
         let pairs: Vec<(Poly<NttShoup>, Poly<NttShoup>)> = c1
             .iter()
             .enumerate()
             .map(|(i, c1i)| {
-                let mut a_s = Zeroizing::new(c1i.clone().into_ntt());
+                let mut a_s = Zeroizing::new(c1i.clone().into_ntt()?);
                 a_s.disallow_variable_time_computations();
                 *a_s.as_mut() *= s.as_ref();
                 let ctx = a_s.ctx().clone();
                 let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
-                let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis());
+                let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis()?);
 
                 let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
 
                 let mut error_i = b.clone();
                 unsafe { error_i.allow_variable_time_computations() }
-                let error_ntt = error_i.into_ntt_shoup();
+                let error_ntt = error_i.into_ntt_shoup()?;
 
                 b -= a_s_pb.as_ref();
 
@@ -542,7 +542,7 @@ impl KeySwitchingKey {
                 b += from_power.as_ref();
 
                 unsafe { b.allow_variable_time_computations() }
-                Ok((b.into_ntt_shoup(), error_ntt))
+                Ok((b.into_ntt_shoup()?, error_ntt))
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -912,16 +912,16 @@ mod tests {
                 let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
                 let s = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)
                     .map_err(crate::Error::MathError)?
-                    .into_ntt();
+                    .into_ntt()?;
 
                 let input = Poly::<PowerBasis>::random(ctx, &mut rng);
                 let (c0, c1) = ksk.key_switch(&input)?;
 
-                let c2 = (&c0 + &(&c1 * &s)).into_power_basis();
+                let c2 = (&c0 + &(&c1 * &s)).into_power_basis()?;
 
-                let input_ntt = input.into_ntt();
-                let p_ntt = p.into_ntt();
-                let c3 = (&input_ntt * &p_ntt).into_power_basis();
+                let input_ntt = input.into_ntt()?;
+                let p_ntt = p.into_ntt()?;
+                let c3 = (&input_ntt * &p_ntt).into_power_basis()?;
 
                 let rns = RnsContext::new(&params.moduli)?;
                 Vec::<BigUint>::from(&(&c2 - &c3)).iter().for_each(|b| {
@@ -966,16 +966,16 @@ mod tests {
                 let ksk = KeySwitchingKey::new(&sk, &p, 5, 5, &mut rng)?;
                 let s = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)
                     .map_err(crate::Error::MathError)?
-                    .into_ntt();
+                    .into_ntt()?;
 
                 let input = Poly::<PowerBasis>::random(ctx, &mut rng);
                 let (c0, c1) = ksk.key_switch(&input)?;
 
-                let c2 = (&c0 + &(&c1 * &s)).into_power_basis();
+                let c2 = (&c0 + &(&c1 * &s)).into_power_basis()?;
 
-                let input_ntt = input.into_ntt();
-                let p_ntt = p.into_ntt();
-                let c3 = (&input_ntt * &p_ntt).into_power_basis();
+                let input_ntt = input.into_ntt()?;
+                let p_ntt = p.into_ntt()?;
+                let c3 = (&input_ntt * &p_ntt).into_power_basis()?;
 
                 let rns = RnsContext::new(ctx.moduli())?;
                 Vec::<BigUint>::from(&(&c2 - &c3)).iter().for_each(|b| {
@@ -1088,7 +1088,7 @@ mod tests {
 
         let sk_ntt = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)
             .map_err(crate::Error::MathError)?
-            .into_ntt();
+            .into_ntt()?;
         let rns = RnsContext::new(&params.moduli)?;
 
         for (i, ((c0_i, c1_i), e_i)) in ksk
@@ -1098,10 +1098,13 @@ mod tests {
             .zip(errors.iter())
             .enumerate()
         {
-            let lhs = (&c0_i.clone().into_ntt() + &(&c1_i.clone().into_ntt() * &sk_ntt))
-                .into_power_basis();
+            let c0_i_ntt = c0_i.clone().into_ntt()?;
+            let c1_i_ntt = c1_i.clone().into_ntt()?;
+            let lhs = (&c0_i_ntt + &(&c1_i_ntt * &sk_ntt)).into_power_basis()?;
             let gi = rns.get_garner(i).expect("garner");
-            let rhs = (&e_i.clone().into_ntt() + &(gi * &from).into_ntt()).into_power_basis();
+            let e_i_ntt = e_i.clone().into_ntt()?;
+            let gi_from_ntt = (gi * &from).into_ntt()?;
+            let rhs = (&e_i_ntt + &gi_from_ntt).into_power_basis()?;
             assert_eq!(lhs, rhs, "witness equation failed at row {i}");
         }
         Ok(())

@@ -51,7 +51,8 @@ impl PublicKeySwitchShare {
         let ctx = params.context_at_level(ct.level)?;
 
         let mut s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?
+                .into_ntt()?,
         );
         s.disallow_variable_time_computations();
 

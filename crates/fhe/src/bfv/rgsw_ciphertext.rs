@@ -32,14 +32,14 @@ impl FheEncrypter<Plaintext, RGSWCiphertext> for SecretKey {
         let level = pt.level;
         let ctx = self.params.context_at_level(level)?;
 
-        let m = Zeroizing::new(pt.poly_ntt.clone().into_power_basis());
+        let m = Zeroizing::new(pt.poly_ntt.clone().into_power_basis()?);
         let mut m_s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), ctx, false)?.into_ntt(),
+            Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), ctx, false)?.into_ntt()?,
         );
         *m_s.as_mut() *= pt.poly_ntt.as_ref();
         let ctx = m_s.ctx().clone();
         let m_s_inner = std::mem::replace(m_s.as_mut(), Poly::<Ntt>::zero(&ctx));
-        let m_s = Zeroizing::new(m_s_inner.into_power_basis());
+        let m_s = Zeroizing::new(m_s_inner.into_power_basis()?);
 
         let ksk0 = KeySwitchingKey::new(self, &m, pt.level, pt.level, rng)?;
         let ksk1 = KeySwitchingKey::new(self, &m_s, pt.level, pt.level, rng)?;
@@ -49,43 +49,57 @@ impl FheEncrypter<Plaintext, RGSWCiphertext> for SecretKey {
 }
 
 impl Mul<&RGSWCiphertext> for &Ciphertext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
     fn mul(self, rhs: &RGSWCiphertext) -> Self::Output {
-        assert_eq!(
-            self.params, rhs.ksk0.params,
-            "Ciphertext and RGSWCiphertext must have the same parameters"
-        );
-        assert_eq!(
-            self.level, rhs.ksk0.ciphertext_level,
-            "Ciphertext and RGSWCiphertext must have the same level"
-        );
-        assert_eq!(self.len(), 2, "Ciphertext must have two parts");
+        if self.params != rhs.ksk0.params {
+            return Err(Error::DefaultError(
+                "Ciphertext and RGSWCiphertext must have the same parameters".to_string(),
+            ));
+        }
+        if self.level != rhs.ksk0.ciphertext_level {
+            return Err(Error::DefaultError(
+                "Ciphertext and RGSWCiphertext must have the same level".to_string(),
+            ));
+        }
+        if self.len() != 2 {
+            return Err(Error::DefaultError(
+                "Ciphertext must have two parts".to_string(),
+            ));
+        }
 
-        let ct0 = self[0].clone().into_power_basis();
-        let ct1 = self[1].clone().into_power_basis();
+        let ct0 = self
+            .c
+            .first()
+            .ok_or_else(|| Error::DefaultError("Ciphertext is missing c0".to_string()))?
+            .clone()
+            .into_power_basis()?;
+        let ct1 = self
+            .c
+            .get(1)
+            .ok_or_else(|| Error::DefaultError("Ciphertext is missing c1".to_string()))?
+            .clone()
+            .into_power_basis()?;
 
         let mut c0 = Poly::<Ntt>::zero(&rhs.ksk0.ctx_ksk);
         let mut c1 = Poly::<Ntt>::zero(&rhs.ksk0.ctx_ksk);
-        rhs.ksk0.key_switch_assign(&ct0, &mut c0, &mut c1).unwrap();
+        rhs.ksk0.key_switch_assign(&ct0, &mut c0, &mut c1)?;
 
         let mut c0p = Poly::<Ntt>::zero(&rhs.ksk1.ctx_ksk);
         let mut c1p = Poly::<Ntt>::zero(&rhs.ksk1.ctx_ksk);
-        rhs.ksk1
-            .key_switch_assign(&ct1, &mut c0p, &mut c1p)
-            .unwrap();
+        rhs.ksk1.key_switch_assign(&ct1, &mut c0p, &mut c1p)?;
 
-        Ciphertext {
+        Ok(Ciphertext {
             params: self.params.clone(),
             seed: None,
             c: vec![&c0 + &c0p, &c1 + &c1p],
             level: self.level,
-        }
+        })
     }
 }
 
 impl Mul<&Ciphertext> for &RGSWCiphertext {
-    type Output = Ciphertext;
+    type Output = Result<Ciphertext>;
 
     fn mul(self, rhs: &Ciphertext) -> Self::Output {
         rhs * self
@@ -203,8 +217,8 @@ mod tests {
             let product = &ct1 * &ct2;
             let expected = sk.try_decrypt(&product)?;
 
-            let ct3 = &ct1 * &ct2_rgsw;
-            let ct4 = &ct2_rgsw * &ct1;
+            let ct3 = (&ct1 * &ct2_rgsw)?;
+            let ct4 = (&ct2_rgsw * &ct1)?;
 
             println!("Noise 1: {:?}", unsafe { sk.measure_noise(&ct3) });
             println!("Noise 2: {:?}", unsafe { sk.measure_noise(&ct4) });
