@@ -10,6 +10,53 @@ use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 
+/// Best-effort drop guard for secret `Vec<BigInt>` scratch values.
+///
+/// `BigInt` does not implement [`zeroize::Zeroize`], so [`zeroize::Zeroizing`]
+/// cannot wrap it directly. On drop this guard replaces every held `BigInt`
+/// with zero and clears the container. As with
+/// [`crate::trbfv::smudging::SmudgingCoefficients`], this is **best effort**:
+/// num-bigint does not expose its private limb allocation for overwriting
+/// before deallocation, so this guard does not promise allocator-level or
+/// complete historical-copy erasure.
+pub(crate) struct ZeroizingBigInts {
+    values: Vec<BigInt>,
+}
+
+impl ZeroizingBigInts {
+    /// Wrap an owned coefficient vector, placing it under best-effort
+    /// zeroization on drop.
+    pub(crate) fn new(values: Vec<BigInt>) -> Self {
+        Self { values }
+    }
+
+    /// Create an empty guard with room for `capacity` values.
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Append a value to the guarded buffer.
+    pub(crate) fn push(&mut self, value: BigInt) {
+        self.values.push(value);
+    }
+
+    /// Borrow the guarded values (e.g. for Lagrange reconstruction).
+    pub(crate) fn as_slice(&self) -> &[BigInt] {
+        &self.values
+    }
+}
+
+impl Drop for ZeroizingBigInts {
+    fn drop(&mut self) {
+        for value in &mut self.values {
+            value.set_zero();
+        }
+        self.values.clear();
+    }
+}
+
 /// A rust porting of Shamir Secret Sharing over Finite Field
 /// from https://docs.rs/shamir_secret_sharing adapted to work with
 /// num_bigint v0.4.4.
@@ -101,16 +148,28 @@ impl ShamirSecretSharing {
     /// # Errors
     ///
     /// Returns an error if `threshold` is greater than `(share_amount - 1) / 2`.
+    ///
+    /// # Cleanup
+    ///
+    /// The sharing polynomial scratch is guarded (best-effort BigInt cleanup,
+    /// see [`ZeroizingBigInts`] and the module docs); callers should treat the
+    /// returned share values as secret material.
     pub fn split<R: RngCore + CryptoRng>(
         &self,
         secret: BigInt,
         rng: &mut R,
     ) -> Result<Vec<(usize, BigInt)>, Error> {
         if self.threshold > (self.share_amount.max(1) - 1) / 2 {
+            // Best-effort cleanup of the secret before the validation error
+            // return: `BigInt` does not implement `Zeroize`, so the guard is
+            // a manual `set_zero` on the single value (same limitation as
+            // `SmudgingCoefficients`).
+            let mut secret = secret;
+            secret.set_zero();
             return Err(Error::invalid_threshold(self.threshold, self.share_amount));
         }
-        let polynomial = self.sample_polynomial(secret, rng);
-        Ok(self.evaluate_polynomial(polynomial))
+        let polynomial = ZeroizingBigInts::new(self.sample_polynomial(secret, rng));
+        Ok(self.evaluate_polynomial(&polynomial.values))
     }
 
     /// Samples a Shamir sharing polynomial over `Z_q` with a fixed constant term.
@@ -129,6 +188,13 @@ impl ShamirSecretSharing {
     /// - `Vec<BigInt>` of length `self.threshold + 1` in **constant-first** order:
     ///   `[c0, c1, ..., c_T]`, where `T = self.threshold`.
     ///
+    /// # Cleanup
+    ///
+    /// The sampled random coefficients are guarded (best-effort BigInt
+    /// cleanup, see [`ZeroizingBigInts`]); the caller (e.g.
+    /// [`ShamirSecretSharing::split`]) should guard the returned polynomial,
+    /// which contains the secret as its constant term.
+    ///
     pub fn sample_polynomial<R: RngCore + CryptoRng>(
         &self,
         secret: BigInt,
@@ -143,22 +209,25 @@ impl ShamirSecretSharing {
         // This is done so clients can test using deterministic rngs
         let seeds: Vec<[u8; 32]> = (0..self.threshold).map(|_| fork_seed(rng)).collect();
 
-        // Use the seeds
-        let random_coefficients: Vec<BigInt> = seeds
-            .into_par_iter()
-            .map(|seed| {
-                let mut rng = ChaCha20Rng::from_seed(seed);
-                rng08::adapt(&mut rng).gen_bigint_range(&low, &high)
-            })
-            .collect();
-        coefficients.extend(random_coefficients);
+        // Use the seeds; the sampled coefficients are secret and are guarded
+        // until they are appended into the returned polynomial.
+        let mut random_coefficients = ZeroizingBigInts::new(
+            seeds
+                .into_par_iter()
+                .map(|seed| {
+                    let mut rng = ChaCha20Rng::from_seed(seed);
+                    rng08::adapt(&mut rng).gen_bigint_range(&low, &high)
+                })
+                .collect::<Vec<BigInt>>(),
+        );
+        coefficients.append(&mut random_coefficients.values);
         coefficients
     }
 
-    fn evaluate_polynomial(&self, polynomial: Vec<BigInt>) -> Vec<(usize, BigInt)> {
+    fn evaluate_polynomial(&self, polynomial: &[BigInt]) -> Vec<(usize, BigInt)> {
         (1..=self.share_amount)
             .into_par_iter()
-            .map(|x| (x, self.mod_evaluate_at(&polynomial, x)))
+            .map(|x| (x, self.mod_evaluate_at(polynomial, x)))
             .collect()
     }
 
@@ -184,6 +253,12 @@ impl ShamirSecretSharing {
     /// Returns an error if the number of shares provided is not equal to
     /// threshold + 1, or if a Lagrange denominator is not invertible
     /// (e.g., duplicate share indices).
+    ///
+    /// # Cleanup
+    ///
+    /// The recovered share values are guarded (best-effort BigInt cleanup,
+    /// see [`ZeroizingBigInts`]); the returned secret should be consumed
+    /// immediately by the caller.
     pub fn recover(&self, shares: &[(usize, BigInt)]) -> Result<BigInt, Error> {
         if shares.len() != self.threshold + 1 {
             return Err(Error::share_count_mismatch(
@@ -192,6 +267,18 @@ impl ShamirSecretSharing {
             ));
         }
         let (xs, ys): (Vec<usize>, Vec<BigInt>) = shares.iter().cloned().unzip();
+        let ys = ZeroizingBigInts::new(ys);
+        self.recover_from_parts(&xs, &ys.values)
+    }
+
+    /// Internal reconstruction from parallel index/value slices.
+    ///
+    /// `ys` holds the secret share values and should be guarded by the caller
+    /// (the x-coordinates in `xs` are public party indices).
+    pub(crate) fn recover_from_parts(&self, xs: &[usize], ys: &[BigInt]) -> Result<BigInt, Error> {
+        if xs.len() != self.threshold + 1 {
+            return Err(Error::share_count_mismatch(xs.len(), self.threshold + 1));
+        }
         let result = self.lagrange_interpolation(Zero::zero(), xs, ys)?;
         if result < Zero::zero() {
             Ok(result + &self.prime)
@@ -205,13 +292,18 @@ impl ShamirSecretSharing {
     fn lagrange_interpolation(
         &self,
         x: BigInt,
-        xs: Vec<usize>,
-        ys: Vec<BigInt>,
+        xs: &[usize],
+        ys: &[BigInt],
     ) -> Result<BigInt, Error> {
         let len = xs.len();
         let xs_bigint: Vec<BigInt> = xs.iter().map(|x| BigInt::from(*x as i64)).collect();
 
-        let terms: Result<Vec<BigInt>, Error> = (0..len)
+        // Each parallel task returns its Lagrange term already under the
+        // best-effort guard, so a partial collected vector zeroizes the
+        // already-computed terms if any task fails (e.g. a non-invertible
+        // Lagrange denominator) instead of dropping a raw partial
+        // `Vec<BigInt>`.
+        let terms: Result<Vec<ZeroizingBigInts>, Error> = (0..len)
             .into_par_iter()
             .map(|item| {
                 let numerator = (0..len).fold(One::one(), |product: BigInt, i| {
@@ -229,12 +321,19 @@ impl ShamirSecretSharing {
                     }
                 });
                 // Calculate this Lagrange term
-                Ok((numerator * self.mod_reverse(denominator)? * &ys[item]) % &self.prime)
+                let term = (numerator * self.mod_reverse(denominator)? * &ys[item]) % &self.prime;
+                Ok(ZeroizingBigInts::new(vec![term]))
             })
             .collect();
 
+        // The Lagrange terms are secret share values; the final summation
+        // folds through each per-term guard (best-effort BigInt cleanup), so
+        // the term values remain covered until their guards drop after the
+        // fold instead of being moved out (`std::mem::take`) and dropped
+        // unzeroized after each step.
         Ok(terms?
-            .into_iter()
+            .iter()
+            .flat_map(|term| term.as_slice().iter())
             .fold(Zero::zero(), |sum: BigInt, term| (sum + term) % &self.prime))
     }
 
@@ -288,6 +387,7 @@ impl ShamirSecretSharing {
 #[allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::ThresholdError;
     #[test]
     fn test_wikipedia_example() {
         let sss = ShamirSecretSharing {
@@ -295,11 +395,8 @@ mod tests {
             share_amount: 6,
             prime: BigInt::from(1613),
         };
-        let shares = sss.evaluate_polynomial(vec![
-            BigInt::from(1234),
-            BigInt::from(166),
-            BigInt::from(94),
-        ]);
+        let shares =
+            sss.evaluate_polynomial(&[BigInt::from(1234), BigInt::from(166), BigInt::from(94)]);
         assert_eq!(
             shares,
             [
@@ -333,15 +430,20 @@ mod tests {
             sss.recover(&[(1, BigInt::from(1494)), (2, BigInt::from(329))])
                 .is_err()
         );
-        // Duplicate share indices -> non-invertible Lagrange denominator
-        assert!(
+        // Duplicate share indices -> non-invertible Lagrange denominator.
+        // This exercises the guarded per-task error path of
+        // `lagrange_interpolation` (issue #126): each parallel task returns
+        // its term under `ZeroizingBigInts`, so the partial collected terms
+        // zeroize (best-effort BigInt cleanup) when `mod_reverse` fails
+        // instead of dropping a raw partial `Vec<BigInt>`.
+        assert!(matches!(
             sss.recover(&[
                 (1, BigInt::from(1494)),
                 (1, BigInt::from(1494)),
                 (3, BigInt::from(965))
-            ])
-            .is_err()
-        );
+            ]),
+            Err(Error::Threshold(ThresholdError::NonInvertibleShares))
+        ));
     }
 
     #[test]
@@ -358,6 +460,24 @@ mod tests {
         };
         let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
         let shares = sss.split(secret.clone(), &mut rand::rng()).unwrap();
+        assert_eq!(secret, sss.recover(&shares[0..sss.threshold + 1]).unwrap());
+    }
+
+    #[test]
+    fn test_recover_threshold_three_guarded_fold() {
+        // Exercises the guarded Lagrange-term fold (issue #126 review finding
+        // 3b): the terms are summed through the best-effort guard instead of
+        // being moved out of it and dropped unzeroized. Behavior must be
+        // unchanged: with `threshold + 1 = 4` shares the round trip recovers
+        // the exact secret.
+        let sss = ShamirSecretSharing {
+            threshold: 3,
+            share_amount: 7,
+            prime: BigInt::from(1613),
+        };
+        let secret = BigInt::from(987);
+        let shares = sss.split(secret.clone(), &mut rand::rng()).unwrap();
+        assert_eq!(shares.len(), 7);
         assert_eq!(secret, sss.recover(&shares[0..sss.threshold + 1]).unwrap());
     }
 }

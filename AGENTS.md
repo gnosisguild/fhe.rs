@@ -113,7 +113,7 @@ Even if nobody asked. Follow the testing rules in [`.rules/testing.md`](.rules/t
 
 ## Git — never commit or push without explicit consent
 
-When asked to commit, follow repo style: inspect `git status`, `git diff`, and recent `git log`; stage only intended files. PR titles use the format `[agent] <Title>`.
+When asked to commit, follow repo style: inspect `git status`, `git diff`, and recent `git log`; stage only intended files. Commit messages and PR titles are plain descriptive titles — do not add `[agent]` or other role prefixes.
 ## Style & lints
 
 Workspace lints are strict — code that violates them won't pass CI:

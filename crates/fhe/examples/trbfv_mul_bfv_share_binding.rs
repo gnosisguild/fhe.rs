@@ -34,7 +34,7 @@ use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::LBFVRelinearizationKey,
     mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
-    trbfv::{Lambda, ShareManager, TRBFV},
+    trbfv::{Lambda, SecretPoly, SecretShareMatrix, ShareManager, TRBFV},
     trlbfv::{
         AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
         aggregate_relinearization_key,
@@ -42,7 +42,7 @@ use fhe::{
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use ndarray::{Array, Array2, ArrayView};
+use ndarray::{Array, ArrayView};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Uniform};
@@ -222,13 +222,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     struct Party {
         pk_share: MBFVPublicKeyShare,
-        sk_sss: Vec<Array2<u64>>,  // sk_sss[m]: shape (num_parties, degree)
-        esi_sss: Vec<Array2<u64>>, // smudging error Shamir shares, same shape
-        sk_sss_collected: Vec<Array2<u64>>, // collected from all senders; each (num_moduli, degree)
-        es_sss_collected: Vec<Array2<u64>>,
-        sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
-        d_share_poly: Poly<PowerBasis>,
+        sk_sss: Vec<SecretShareMatrix>, // sk_sss[m]: shape (num_parties, degree)
+        esi_sss: Vec<SecretShareMatrix>, // smudging error Shamir shares, same shape
+        sk_sss_collected: Vec<SecretShareMatrix>, // collected from all senders; each (num_moduli, degree)
+        es_sss_collected: Vec<SecretShareMatrix>,
+        sk_poly_sum: SecretPoly<PowerBasis>,
+        es_poly_sum: SecretPoly<PowerBasis>,
+        d_share_poly: SecretPoly<PowerBasis>,
         pk_lbfv_share: PublicKeyShare, // l-BFV PK contribution (CRS = pk_seed)
         rlk_share: RelinKeyShare,
         // Share-encryption key pair (second BFV parameter set).
@@ -296,9 +296,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     esi_sss,
                     sk_sss_collected: Vec::with_capacity(num_parties),
                     es_sss_collected: Vec::with_capacity(num_parties),
-                    sk_poly_sum: Poly::<PowerBasis>::zero(ctx0),
-                    es_poly_sum: Poly::<PowerBasis>::zero(ctx0),
-                    d_share_poly: Poly::<PowerBasis>::zero(ctx0),
+                    sk_poly_sum: SecretPoly::new(Poly::<PowerBasis>::zero(ctx0)),
+                    es_poly_sum: SecretPoly::new(Poly::<PowerBasis>::zero(ctx0)),
+                    d_share_poly: SecretPoly::new(Poly::<PowerBasis>::zero(ctx0)),
                     pk_lbfv_share,
                     rlk_share,
                     sk_share_enc,
@@ -346,8 +346,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                             let enc_sk: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
-                                    let row =
-                                        party.sk_sss.get(m).unwrap().row(receiver_idx).to_vec();
+                                    let row = party
+                                        .sk_sss
+                                        .get(m)
+                                        .unwrap()
+                                        .row(receiver_idx)
+                                        .unwrap()
+                                        .to_vec();
                                     let pt = Plaintext::try_encode(
                                         &row,
                                         Encoding::poly(),
@@ -360,8 +365,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                             let enc_es: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
-                                    let row =
-                                        party.esi_sss.get(m).unwrap().row(receiver_idx).to_vec();
+                                    let row = party
+                                        .esi_sss
+                                        .get(m)
+                                        .unwrap()
+                                        .row(receiver_idx)
+                                        .unwrap()
+                                        .to_vec();
                                     let pt = Plaintext::try_encode(
                                         &row,
                                         Encoding::poly(),
@@ -394,7 +404,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         node_sk.push_row(ArrayView::from(&row)).unwrap();
                     }
-                    party.sk_sss_collected.push(node_sk);
+                    party.sk_sss_collected.push(SecretShareMatrix::new(node_sk));
 
                     let mut node_es = Array::zeros((0, degree));
                     for ct in enc_es {
@@ -402,7 +412,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         node_es.push_row(ArrayView::from(&row)).unwrap();
                     }
-                    party.es_sss_collected.push(node_es);
+                    party.es_sss_collected.push(SecretShareMatrix::new(node_es));
                 }
             });
     });
@@ -481,7 +491,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         t_start.elapsed().as_millis() as f64 / num_parties as f64
     );
 
-    let d_shares: Vec<Poly<PowerBasis>> = parties
+    let d_shares: Vec<SecretPoly<PowerBasis>> = parties
         .iter()
         .take(threshold + 1)
         .map(|p| p.d_share_poly.clone())

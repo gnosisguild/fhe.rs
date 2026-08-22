@@ -14,12 +14,12 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{Lambda, ShareManager, TRBFV},
+    trbfv::{Lambda, SecretPoly, SecretShareMatrix, ShareManager, SmudgingCoefficients, TRBFV},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use ndarray::{Array, Array2, ArrayView};
+use ndarray::{Array, ArrayView};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
@@ -161,13 +161,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     struct Party {
         pk_share: PublicKeyShare,
-        sk_sss: Vec<Array2<u64>>,
-        esi_sss: Vec<Array2<u64>>,
-        sk_sss_collected: Vec<Array2<u64>>,
-        es_sss_collected: Vec<Array2<u64>>,
-        sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
-        d_share_poly: Poly<PowerBasis>,
+        sk_sss: Vec<SecretShareMatrix>,
+        esi_sss: Vec<SecretShareMatrix>,
+        sk_sss_collected: Vec<SecretShareMatrix>,
+        es_sss_collected: Vec<SecretShareMatrix>,
+        sk_poly_sum: SecretPoly<PowerBasis>,
+        es_poly_sum: SecretPoly<PowerBasis>,
+        d_share_poly: SecretPoly<PowerBasis>,
         // BFV keys for share encryption
         sk_bfv: SecretKey,
         pk_bfv: PublicKey,
@@ -197,14 +197,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .generate_secret_shares_from_poly(sk_poly, &mut rng)
                     .unwrap();
 
-                let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-                let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
+                let sk_sss_collected: Vec<SecretShareMatrix> = Vec::with_capacity(num_parties);
+                let es_sss_collected: Vec<SecretShareMatrix> = Vec::with_capacity(num_parties);
                 let ctx = params_trbfv.context_at_level(0).unwrap();
-                let sk_poly_sum = Poly::<PowerBasis>::zero(ctx);
-                let es_poly_sum = Poly::<PowerBasis>::zero(ctx);
-                let d_share_poly = Poly::<PowerBasis>::zero(ctx);
+                let sk_poly_sum = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
+                let es_poly_sum = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
+                let d_share_poly = SecretPoly::new(Poly::<PowerBasis>::zero(ctx));
 
-                let esi_coeffs = trbfv
+                let esi_coeffs: SmudgingCoefficients = trbfv
                     .generate_smudging_error(num_summed, 0, security, &mut rng)
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
@@ -251,7 +251,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                         let mut encrypted_sk_shares = Vec::new();
                         for m in 0..params_trbfv.moduli().len() {
-                            let share_row = party.sk_sss[m].row(receiver_idx);
+                            let share_row = party.sk_sss[m].row(receiver_idx).unwrap();
                             let share_vec: Vec<u64> = share_row.to_vec();
                             let pt =
                                 Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv)
@@ -262,7 +262,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                         let mut encrypted_esi_shares = Vec::new();
                         for m in 0..params_trbfv.moduli().len() {
-                            let share_row = party.esi_sss[m].row(receiver_idx);
+                            let share_row = party.esi_sss[m].row(receiver_idx).unwrap();
                             let share_vec: Vec<u64> = share_row.to_vec();
                             let pt =
                                 Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv)
@@ -298,7 +298,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .push_row(ArrayView::from(&decrypted_share))
                             .unwrap();
                     }
-                    party.sk_sss_collected.push(node_share_m);
+                    party
+                        .sk_sss_collected
+                        .push(SecretShareMatrix::new(node_share_m));
 
                     let mut es_node_share_m = Array::zeros((0, degree));
                     for ct in encrypted_esi_shares.iter() {
@@ -310,7 +312,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .push_row(ArrayView::from(&decrypted_share))
                             .unwrap();
                     }
-                    party.es_sss_collected.push(es_node_share_m);
+                    party
+                        .es_sss_collected
+                        .push(SecretShareMatrix::new(es_node_share_m));
                 }
             });
     });
@@ -375,7 +379,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     println!("  Average time per party: {:.2} ms", avg_time_per_party);
 
-    let d_share_polys: Vec<Poly<PowerBasis>> = parties
+    let d_share_polys: Vec<SecretPoly<PowerBasis>> = parties
         .iter()
         .take(threshold + 1)
         .map(|party| party.d_share_poly.clone())

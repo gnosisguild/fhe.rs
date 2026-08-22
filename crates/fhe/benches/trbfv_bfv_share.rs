@@ -162,7 +162,7 @@ fn bench_data_sizes(c: &mut Criterion) {
 
             // Encrypt sk shares
             for sk_sss_m in sk_sss.iter().take(num_moduli) {
-                let share_row = sk_sss_m.row(receiver_idx);
+                let share_row = sk_sss_m.row(receiver_idx).unwrap();
                 let share_vec: Vec<u64> = share_row.to_vec();
 
                 let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv).unwrap();
@@ -176,7 +176,7 @@ fn bench_data_sizes(c: &mut Criterion) {
 
             // Encrypt esi shares
             for esi_sss_m in esi_sss.iter().take(num_moduli) {
-                let share_row = esi_sss_m.row(receiver_idx);
+                let share_row = esi_sss_m.row(receiver_idx).unwrap();
                 let share_vec: Vec<u64> = share_row.to_vec();
 
                 let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv).unwrap();
