@@ -14,6 +14,7 @@ use std::{env, error::Error, process::exit, sync::Arc};
 use console::style;
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
+    identity::{ContributionBinding, ParticipantSet, SessionId},
     mbfv::{AggregateIter, DecryptionShare, PublicKeyShare},
 };
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
@@ -105,6 +106,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rng();
     let crp = CommonRandomPoly::new(&params, &mut rng)?;
 
+    // One operation-specific MBFV session with an exact N-out-of-N participant
+    // set; every share below carries a binding into this set. Bindings provide
+    // consistency, not authentication.
+    let participant_set = ParticipantSet::new(
+        SessionId::new(rand::random()),
+        (1..=num_parties as u32).collect(),
+    )?;
+
     // Party setup: each party generates a secret key and shares of a collective
     // public key.
     struct Party {
@@ -112,10 +121,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         pk_share: PublicKeyShare,
     }
     let mut parties = Vec::with_capacity(num_parties);
+    let mut _party_id = 0usize;
     timeit_n!("Party setup (per party)", num_parties as u32, {
         let sk_share = SecretKey::random(&params, &mut rng);
-        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng)?;
+        let pk_binding = ContributionBinding::new(participant_set.clone(), (_party_id + 1) as u32)?;
+        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), pk_binding, &mut rng)?;
         parties.push(Party { sk_share, pk_share });
+        _party_id += 1;
     });
 
     // Aggregation: this could be one of the parties or a separate entity. Or the
@@ -151,10 +163,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // perform a collective decryption. If instead the result of the computation
     // should be kept private, the parties could collectively perform a
     // keyswitch to a different public key.
+    // Collective decryption reuses the same session/participant set.
     let mut decryption_shares = Vec::with_capacity(num_parties);
     let mut _i = 0;
     timeit_n!("Decryption (per party)", num_parties as u32, {
-        let sh = DecryptionShare::new(&parties[_i].sk_share, &tally, &mut rng)?;
+        let d_binding = ContributionBinding::new(participant_set.clone(), (_i + 1) as u32)?;
+        let sh = DecryptionShare::new(&parties[_i].sk_share, &tally, d_binding, &mut rng)?;
         decryption_shares.push(sh);
         _i += 1;
     });

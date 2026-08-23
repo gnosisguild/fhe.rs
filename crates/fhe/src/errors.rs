@@ -124,6 +124,10 @@ pub enum Error {
     #[error("Threshold error: {0}")]
     Threshold(#[from] ThresholdError),
 
+    /// Indicates a multiparty BFV (mbfv) protocol consistency error.
+    #[error("MBFV error: {0}")]
+    Mbfv(#[from] MbfvError),
+
     /// Catch-all for unexpected errors (should be minimized)
     #[error("Unexpected error: {message}")]
     UnexpectedError { message: String },
@@ -266,6 +270,64 @@ pub enum ThresholdError {
         n: usize,
         /// The smallest modulus
         min_modulus: u64,
+    },
+}
+
+/// Errors specific to multiparty BFV (mbfv) protocol consistency.
+///
+/// These are matchable variants covering aggregation and deserialization
+/// consistency failures: missing contribution bindings, mismatched public
+/// inputs or parameters, invalid levels/contexts, malformed share shapes,
+/// round-reference mismatches, and unsupported serialized envelope versions.
+/// They provide consistency only; they do not authenticate a contributor.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MbfvError {
+    /// A share was supplied without its required contribution binding.
+    #[error("MBFV share is missing its contribution binding")]
+    MissingBinding,
+
+    /// Shares or inputs were built under different BFV parameters.
+    #[error("MBFV shares or public inputs use different BFV parameters")]
+    ParameterMismatch,
+
+    /// Shares disagree on a concrete public input (CRP, ciphertext, or key).
+    #[error("MBFV shares disagree on a concrete public input: {reason}")]
+    PublicInputMismatch {
+        /// Description of the disagreeing public input.
+        reason: String,
+    },
+
+    /// A round-2 share does not reference the validated round-1 aggregate.
+    #[error("MBFV round-2 shares do not all reference the same round-1 aggregate")]
+    RoundReferenceMismatch,
+
+    /// A share level does not match the level of the operation.
+    #[error("MBFV share level {found} does not match the expected level {expected}")]
+    LevelMismatch {
+        /// The level found on the share or serialized payload.
+        found: usize,
+        /// The level expected by the caller-supplied input.
+        expected: usize,
+    },
+
+    /// A polynomial context is not valid for the requested operation.
+    #[error("MBFV polynomial context is invalid for this operation")]
+    InvalidContext,
+
+    /// A share has an invalid vector length, component count, or shape.
+    #[error("MBFV share has an invalid shape: {reason}")]
+    ShareShapeMismatch {
+        /// Description of the invalid shape.
+        reason: String,
+    },
+
+    /// Serialized data carries an unsupported envelope version.
+    #[error("MBFV serialized data version {found} is not supported (expected {expected})")]
+    UnsupportedVersion {
+        /// The version found in the serialized bytes.
+        found: u32,
+        /// The only supported version.
+        expected: u32,
     },
 }
 
@@ -483,7 +545,21 @@ impl ParametersError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, ParametersError, SerializationError};
+    use super::{Error, MbfvError, ParametersError, SerializationError};
+
+    #[test]
+    fn mbfv_errors_are_matchable() {
+        let err = Error::Mbfv(MbfvError::MissingBinding);
+        assert!(matches!(err, Error::Mbfv(MbfvError::MissingBinding)));
+        assert_eq!(
+            Error::Mbfv(MbfvError::LevelMismatch {
+                found: 1,
+                expected: 0
+            })
+            .to_string(),
+            "MBFV error: MBFV share level 1 does not match the expected level 0"
+        );
+    }
 
     #[test]
     fn error_strings() {

@@ -82,6 +82,52 @@ message PublicKeyShare {
   Poly p0 = 1;
 }
 
+// ---------------------------------------------------------------------------
+// MBFV versioned share envelopes
+//
+// MBFV shares are serialized only through these fail-closed, versioned
+// envelopes carrying the contribution binding (session id, canonical
+// participant ID list, and this share's participant ID). Old raw polynomial
+// bytes have no binding metadata and are rejected by the bound deserializers;
+// there is no unbound fallback. This binding is distinct from `LbfvBinding`
+// and carries no aggregate flag.
+// ---------------------------------------------------------------------------
+
+message MbfvBinding {
+  // Opaque session identifier; exactly 32 bytes.
+  bytes session_id = 1;
+  // Canonical sorted list of unique 1-based participant IDs.
+  repeated uint32 participant_ids = 2;
+  // This share's contributor within the set.
+  uint32 participant_id = 3;
+}
+
+message MbfvShareEnvelope {
+  // Schema version; must equal the single supported version.
+  uint32 version = 1;
+  // Required contribution binding metadata.
+  MbfvBinding binding = 2;
+  // Share kind discriminator; an absent payload is rejected.
+  oneof payload {
+    MbfvPublicKeySharePayload public_key_share = 3;
+    MbfvSecretKeySwitchSharePayload secret_key_switch_share = 4;
+  }
+}
+
+message MbfvPublicKeySharePayload {
+  // p0 share polynomial at the parameters' level-zero context.
+  bytes p0_share = 1;
+  // EncKeyGen level; collective public-key generation is level zero.
+  uint32 level = 2;
+}
+
+message MbfvSecretKeySwitchSharePayload {
+  // h share polynomial at the input ciphertext's context.
+  bytes h_share = 1;
+  // Input ciphertext level; validated against the caller-supplied ciphertext.
+  uint32 level = 2;
+}
+
 message Poly {
   Poly p0 = 1;
 }

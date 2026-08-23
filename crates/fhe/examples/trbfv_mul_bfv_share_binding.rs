@@ -259,7 +259,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // trBFV keys and Shamir shares.
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-                let pk_share = MBFVPublicKeyShare::new(&sk_share, crp.clone(), &mut rng)?;
+                let pk_share =
+                    MBFVPublicKeyShare::new(&sk_share, crp.clone(), binding.clone(), &mut rng)?;
 
                 let mut share_manager =
                     ShareManager::new(num_parties, threshold, params_trbfv.clone())?;

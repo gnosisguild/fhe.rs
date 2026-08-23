@@ -190,11 +190,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
         (0..num_parties)
             .into_par_iter()
-            .map(|_| {
+            .map(|party_idx| {
                 let mut rng = rand::rng();
 
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-                let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
+                // MBFV public-key shares require a per-party contribution binding.
+                let pk_binding =
+                    ContributionBinding::new(participant_set.clone(), (party_idx + 1) as u32)
+                        .unwrap();
+                let pk_share =
+                    PublicKeyShare::new(&sk_share, crp.clone(), pk_binding, &mut rng).unwrap();
 
                 let mut share_manager =
                     ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
