@@ -8,6 +8,7 @@
 //! RNS scaler inspired from Remark 3.2 of <https://eprint.iacr.org/2021/204.pdf>.
 
 use super::RnsContext;
+use crate::{Error, Result};
 use ethnum::{U256, u256};
 use itertools::{Itertools, izip};
 use ndarray::{ArrayView1, ArrayViewMut1};
@@ -17,34 +18,49 @@ use serde::{Deserialize, Serialize};
 use std::{cmp::min, sync::Arc};
 
 /// Scaling factor when performing a RNS scaling.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+///
+/// The default value is the identity factor (`1/1`): no public constructor
+/// path can produce a scaling factor with a zero denominator.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScalingFactor {
     numerator: BigUint,
     denominator: BigUint,
     pub(crate) is_one: bool,
 }
 
+impl Default for ScalingFactor {
+    fn default() -> Self {
+        Self::one()
+    }
+}
+
 /// Serializable representation of [`ScalingFactor`].
+///
+/// The raw bytes are untrusted transport data: `is_one` is derived, and a
+/// zero denominator is rejected by [`ScalingFactorRaw::into_scaling_factor`].
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalingFactorRaw {
     /// Numerator.
     pub numerator: Vec<u8>,
     /// Denominator.
     pub denominator: Vec<u8>,
-    /// Whether the scaling factor is one.
-    pub is_one: bool,
 }
 
 impl ScalingFactor {
-    /// Create a new scaling factor. Aborts if the denominator is 0.
-    #[must_use]
-    pub fn new(numerator: &BigUint, denominator: &BigUint) -> Self {
-        assert_ne!(denominator, &BigUint::zero());
-        Self {
+    /// Create a new scaling factor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ZeroScalingDenominator`] if the denominator is zero.
+    pub fn new(numerator: &BigUint, denominator: &BigUint) -> Result<Self> {
+        if denominator.is_zero() {
+            return Err(Error::ZeroScalingDenominator);
+        }
+        Ok(Self {
             numerator: numerator.clone(),
             denominator: denominator.clone(),
             is_one: numerator == denominator,
-        }
+        })
     }
 
     /// Returns the identity element of `Self`.
@@ -65,15 +81,18 @@ impl ScalingFactor {
         ScalingFactorRaw {
             numerator: self.numerator.to_bytes_be(),
             denominator: self.denominator.to_bytes_be(),
-            is_one: self.is_one,
         }
     }
 }
 
 impl ScalingFactorRaw {
     /// Import a scaling factor from raw bytes.
-    #[must_use]
-    pub fn into_scaling_factor(self) -> ScalingFactor {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ZeroScalingDenominator`] if the denominator bytes
+    /// represent zero (including the empty byte string).
+    pub fn into_scaling_factor(self) -> Result<ScalingFactor> {
         let numerator = BigUint::from_bytes_be(&self.numerator);
         let denominator = BigUint::from_bytes_be(&self.denominator);
         ScalingFactor::new(&numerator, &denominator)
@@ -82,7 +101,7 @@ impl ScalingFactorRaw {
 
 /// Scaler for a RNS context.
 /// This is a helper struct to perform RNS scaling.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RnsScaler {
     from: Arc<RnsContext>,
     to: Arc<RnsContext>,
@@ -106,42 +125,23 @@ pub struct RnsScaler {
 }
 
 /// Serializable representation of [`RnsScaler`].
+///
+/// The raw data is untrusted transport state: only the scaling factor is
+/// authoritative. All cached projection tables (gamma, omega, Shoup, theta
+/// values, and the shift) are recomputed by
+/// [`RnsScalerRaw::into_scaler`] from the validated source and destination
+/// contexts.
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RnsScalerRaw {
     /// Scaling factor.
     pub scaling_factor: ScalingFactorRaw,
-    /// Gamma.
-    pub gamma: Vec<u64>,
-    /// Shoup representation of gamma.
-    pub gamma_shoup: Vec<u64>,
-    /// Theta gamma low.
-    pub theta_gamma_lo: u64,
-    /// Theta gamma high.
-    pub theta_gamma_hi: u64,
-    /// Theta gamma sign.
-    pub theta_gamma_sign: bool,
-    /// Omega.
-    pub omega: Vec<Vec<u64>>,
-    /// Shoup representation of omega.
-    pub omega_shoup: Vec<Vec<u64>>,
-    /// Theta omega low.
-    pub theta_omega_lo: Vec<u64>,
-    /// Theta omega high.
-    pub theta_omega_hi: Vec<u64>,
-    /// Theta omega sign.
-    pub theta_omega_sign: Vec<bool>,
-    /// Theta garner low.
-    pub theta_garner_lo: Vec<u64>,
-    /// Theta garner high.
-    pub theta_garner_hi: Vec<u64>,
-    /// Theta garner shift.
-    pub theta_garner_shift: usize,
 }
 
 impl RnsScaler {
     /// Create a RNS scaler by numerator / denominator.
     ///
-    /// Aborts if denominator is equal to 0.
+    /// The scaling factor must have a non-zero denominator, which is enforced
+    /// by [`ScalingFactor::new`].
     #[must_use]
     pub fn new(
         from: &Arc<RnsContext>,
@@ -425,68 +425,67 @@ impl RnsScaler {
     pub fn to_raw(&self) -> RnsScalerRaw {
         RnsScalerRaw {
             scaling_factor: self.scaling_factor.to_raw(),
-            gamma: self.gamma.to_vec(),
-            gamma_shoup: self.gamma_shoup.to_vec(),
-            theta_gamma_lo: self.theta_gamma_lo,
-            theta_gamma_hi: self.theta_gamma_hi,
-            theta_gamma_sign: self.theta_gamma_sign,
-            omega: self.omega.iter().map(|row| row.to_vec()).collect(),
-            omega_shoup: self.omega_shoup.iter().map(|row| row.to_vec()).collect(),
-            theta_omega_lo: self.theta_omega_lo.to_vec(),
-            theta_omega_hi: self.theta_omega_hi.to_vec(),
-            theta_omega_sign: self.theta_omega_sign.to_vec(),
-            theta_garner_lo: self.theta_garner_lo.to_vec(),
-            theta_garner_hi: self.theta_garner_hi.to_vec(),
-            theta_garner_shift: self.theta_garner_shift,
         }
     }
 }
 
 impl RnsScalerRaw {
-    /// Import a scaler from its raw form.
-    #[must_use]
-    pub fn into_scaler(self, from: &Arc<RnsContext>, to: &Arc<RnsContext>) -> RnsScaler {
-        RnsScaler {
-            from: from.clone(),
-            to: to.clone(),
-            scaling_factor: self.scaling_factor.into_scaling_factor(),
-            gamma: self.gamma.into_boxed_slice(),
-            gamma_shoup: self.gamma_shoup.into_boxed_slice(),
-            theta_gamma_lo: self.theta_gamma_lo,
-            theta_gamma_hi: self.theta_gamma_hi,
-            theta_gamma_sign: self.theta_gamma_sign,
-            omega: self
-                .omega
-                .into_iter()
-                .map(|row| row.into_boxed_slice())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            omega_shoup: self
-                .omega_shoup
-                .into_iter()
-                .map(|row| row.into_boxed_slice())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            theta_omega_lo: self.theta_omega_lo.into_boxed_slice(),
-            theta_omega_hi: self.theta_omega_hi.into_boxed_slice(),
-            theta_omega_sign: self.theta_omega_sign.into_boxed_slice(),
-            theta_garner_lo: self.theta_garner_lo.into_boxed_slice(),
-            theta_garner_hi: self.theta_garner_hi.into_boxed_slice(),
-            theta_garner_shift: self.theta_garner_shift,
-        }
+    /// Rebuild a scaler from validated source/destination contexts and the raw
+    /// scaling factor.
+    ///
+    /// The raw data is untrusted: only the scaling factor is used, and all
+    /// cached projection tables are recomputed by [`RnsScaler::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ZeroScalingDenominator`] if the raw scaling factor has
+    /// a zero denominator.
+    pub fn into_scaler(self, from: &Arc<RnsContext>, to: &Arc<RnsContext>) -> Result<RnsScaler> {
+        Ok(RnsScaler::new(
+            from,
+            to,
+            self.scaling_factor.into_scaling_factor()?,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, panic::catch_unwind, sync::Arc};
+    use std::{error::Error, sync::Arc};
 
-    use super::RnsScaler;
-    use crate::rns::{RnsContext, scaler::ScalingFactor};
+    use super::{RnsScaler, RnsScalerRaw, ScalingFactor, ScalingFactorRaw};
+    use crate::rns::RnsContext;
     use ndarray::ArrayView1;
     use num_bigint::BigUint;
     use num_traits::{ToPrimitive, Zero};
     use rand::{RngCore, rng};
+
+    #[test]
+    fn default_scaling_factor_is_the_identity() -> Result<(), Box<dyn Error>> {
+        // The default scaling factor must be the identity so that no public
+        // constructor path can yield a zero denominator.
+        assert_eq!(ScalingFactor::default(), ScalingFactor::one());
+        assert!(!ScalingFactor::default().to_raw().denominator.is_empty());
+
+        // A scaler built from the default factor behaves like the exact
+        // converter instead of dividing by zero.
+        let q = Arc::new(RnsContext::new(&[4, 4611686018326724609, 1153])?);
+        let scaler = RnsScaler::new(&q, &q, ScalingFactor::default());
+        let reference = RnsScaler::new(&q, &q, ScalingFactor::one());
+        let mut rng = rng();
+        for _ in 0..100 {
+            let x = vec![
+                rng.next_u64() % q.moduli_u64[0],
+                rng.next_u64() % q.moduli_u64[1],
+                rng.next_u64() % q.moduli_u64[2],
+            ];
+            assert_eq!(
+                scaler.scale_new((&x).into(), x.len()),
+                reference.scale_new((&x).into(), x.len())
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn constructor() -> Result<(), Box<dyn Error>> {
@@ -495,8 +494,77 @@ mod tests {
         let scaler = RnsScaler::new(&q, &q, ScalingFactor::one());
         assert_eq!(scaler.from, q);
 
-        assert!(
-            catch_unwind(|| ScalingFactor::new(&BigUint::from(1u64), &BigUint::zero())).is_err()
+        // A zero denominator is rejected with a typed error, without
+        // unwinding.
+        assert_eq!(
+            ScalingFactor::new(&BigUint::from(1u64), &BigUint::zero()).unwrap_err(),
+            crate::Error::ZeroScalingDenominator
+        );
+        // Empty or zero bytes both represent a zero denominator.
+        let raw = ScalingFactorRaw {
+            numerator: vec![1],
+            denominator: vec![],
+        };
+        assert_eq!(
+            raw.into_scaling_factor().unwrap_err(),
+            crate::Error::ZeroScalingDenominator
+        );
+        let raw = ScalingFactorRaw {
+            numerator: vec![1],
+            denominator: vec![0],
+        };
+        assert_eq!(
+            raw.into_scaling_factor().unwrap_err(),
+            crate::Error::ZeroScalingDenominator
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn raw_scaler_import_rebuilds_from_factor() -> Result<(), Box<dyn Error>> {
+        let q = Arc::new(RnsContext::new(&[4, 4611686018326724609, 1153])?);
+        let n = BigUint::from(3u64);
+        let d = BigUint::from(7u64);
+        let factor = ScalingFactor::new(&n, &d)?;
+        let scaler = RnsScaler::new(&q, &q, factor);
+
+        // The raw DTO carries only the scaling factor; all cached projection
+        // tables are recomputed from the authoritative contexts on import.
+        let raw = scaler.to_raw();
+        assert_eq!(raw.scaling_factor.numerator, n.to_bytes_be());
+        assert_eq!(raw.scaling_factor.denominator, d.to_bytes_be());
+
+        let rebuilt = raw.into_scaler(&q, &q)?;
+        assert_eq!(rebuilt, scaler);
+
+        // Functional equivalence: both scalers produce the same outputs.
+        let mut rng = rng();
+        for _ in 0..100 {
+            let x = vec![
+                rng.next_u64() % q.moduli_u64[0],
+                rng.next_u64() % q.moduli_u64[1],
+                rng.next_u64() % q.moduli_u64[2],
+            ];
+            assert_eq!(
+                scaler.scale_new((&x).into(), x.len()),
+                rebuilt.scale_new((&x).into(), x.len())
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn raw_scaler_rejects_zero_denominator() -> Result<(), Box<dyn Error>> {
+        let q = Arc::new(RnsContext::new(&[4, 4611686018326724609, 1153])?);
+        let raw = RnsScalerRaw {
+            scaling_factor: ScalingFactorRaw {
+                numerator: vec![1],
+                denominator: vec![],
+            },
+        };
+        assert_eq!(
+            raw.into_scaler(&q, &q).unwrap_err(),
+            crate::Error::ZeroScalingDenominator
         );
         Ok(())
     }
@@ -511,7 +579,7 @@ mod tests {
             for denominator in &[1u64, 2, 3, 4, 100, 101, 1000, 1001, 4611686018326724610] {
                 let n = BigUint::from(*numerator);
                 let d = BigUint::from(*denominator);
-                let scaler = RnsScaler::new(&q, &q, ScalingFactor::new(&n, &d));
+                let scaler = RnsScaler::new(&q, &q, ScalingFactor::new(&n, &d)?);
 
                 for _ in 0..ntests {
                     let x = vec![
@@ -519,7 +587,7 @@ mod tests {
                         rng.next_u64() % q.moduli_u64[1],
                         rng.next_u64() % q.moduli_u64[2],
                     ];
-                    let mut x_lift = q.lift(ArrayView1::from(&x));
+                    let mut x_lift = q.lift(ArrayView1::from(&x))?;
                     let x_sign = x_lift >= (q.modulus() >> 1);
                     if x_sign {
                         x_lift = q.modulus() - x_lift;
@@ -565,7 +633,7 @@ mod tests {
             for denominator in &[1u64, 2, 3, 4, 100, 101, 1000, 1001, 4611686018326724610] {
                 let n = BigUint::from(*numerator);
                 let d = BigUint::from(*denominator);
-                let scaler = RnsScaler::new(&q, &r, ScalingFactor::new(&n, &d));
+                let scaler = RnsScaler::new(&q, &r, ScalingFactor::new(&n, &d)?);
                 for _ in 0..ntests {
                     let x = vec![
                         rng.next_u64() % q.moduli_u64[0],
@@ -573,7 +641,7 @@ mod tests {
                         rng.next_u64() % q.moduli_u64[2],
                     ];
 
-                    let mut x_lift = q.lift(ArrayView1::from(&x));
+                    let mut x_lift = q.lift(ArrayView1::from(&x))?;
                     let x_sign = x_lift >= (q.modulus() >> 1);
                     if x_sign {
                         x_lift = q.modulus() - x_lift;

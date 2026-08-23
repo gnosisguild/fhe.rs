@@ -631,12 +631,9 @@ impl BfvParametersBuilder {
 
             // Use RnsContext to lift the delta values and create the scaling polynomial
             let rns = RnsContext::new(level_moduli)?;
-            let delta = Poly::<PowerBasis>::try_convert_from(
-                &[rns.lift((&delta_rests).into())],
-                &cipher_ctx,
-                true,
-            )?
-            .into_ntt_shoup()?;
+            let delta_value = rns.lift((&delta_rests).into())?;
+            let delta = Poly::<PowerBasis>::try_convert_from(&[delta_value], &cipher_ctx, true)?
+                .into_ntt_shoup()?;
 
             // Compute q_mod_t
             let q_mod_t = rns.modulus() % plaintext_big;
@@ -651,7 +648,7 @@ impl BfvParametersBuilder {
             let scaler = Scaler::new(
                 &cipher_ctx,
                 &plaintext_context,
-                ScalingFactor::new(plaintext_big, rns.modulus()),
+                ScalingFactor::new(plaintext_big, rns.modulus())?,
             )?;
 
             let cipher_plain_ctx = CipherPlainContext::new_arc(
@@ -711,7 +708,7 @@ impl BfvParametersBuilder {
                 &node.poly_context,
                 &mul_1_ctx,
                 ScalingFactor::one(),
-                ScalingFactor::new(plaintext_big, node.poly_context.modulus()),
+                ScalingFactor::new(plaintext_big, node.poly_context.modulus())?,
             )?;
             node.mul_params.set(mp).unwrap();
         }
@@ -807,7 +804,7 @@ mod protobuf {
 }
 
 /// Multiplication parameters
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MultiplicationParameters {
     pub(crate) extender: Scaler,
     pub(crate) down_scaler: Scaler,

@@ -124,7 +124,7 @@ mod tests {
         let ctx = Arc::new(Context::new(Q, 16)?);
         let values = (0..Q.len() * 16).map(|value| value as u64).collect();
         let mut power = Poly::<PowerBasis>::zero(&ctx);
-        power.set_coefficients(Array2::from_shape_vec((Q.len(), 16).f(), values)?);
+        power.set_coefficients(Array2::from_shape_vec((Q.len(), 16).f(), values)?)?;
 
         let ntt = power.clone().into_ntt()?;
         assert_eq!(ntt, Poly::<Ntt>::from_bytes(&ntt.to_bytes(), &ctx)?);
