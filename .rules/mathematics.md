@@ -24,6 +24,7 @@
 16. `RnsContext::lift` requires exactly one residue per basis modulus and each residue in `[0, modulus)`; wrong-length or out-of-range inputs are rejected fallibly without truncation or reinterpretation.
 17. Every public RNS-matrix ingress (`TryConvertFrom<Array2<u64>>`, `Poly::set_coefficients`, `from_coeffs_matrix`) validates exact context shape and per-row canonicality before storing; no unchecked public setter exists.
 18. Serialized raw importers (`RnsContextRaw`, `ScalingFactorRaw`, `RnsScalerRaw`, `ScalerRaw`) are untrusted transport DTOs carrying only authoritative inputs (modulus lists, scaling numerators/denominators); every derived value (products, CRT tables, Shoup/Garner data, scaler caches, common-moduli counts, zero-denominator checks) is recomputed through the canonical constructors, invalid authoritative inputs (empty/non-coprime bases, zero denominators) are rejected, and default scaling factors are the identity so no public constructor path yields a zero denominator.
+19. The conditional error sampler and its public support-bound helper (`Poly::conditional_error` and `error_support_bound` in `crates/fhe-math/src/rq/`) share one canonical branch specification: CBD for integer variances `1..=16` with support bound `2v`, uniform for larger (including arbitrarily large `BigUint`) variances with the minimal `B` satisfying `B(B+1)/3 >= v`; zero variance is rejected explicitly and every arbitrary-precision conversion in this path is checked and error-returning.
 
 ## Evidence / tests
 
