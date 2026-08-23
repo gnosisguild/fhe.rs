@@ -288,7 +288,8 @@ fn dkg_plaintext_modulus_covers_trbfv_moduli() {
 }
 
 /// Pins the smudging bound formula to the trBFV paper (eprint 2024/1285):
-/// B_sm = 2^lambda * B_C with B_C = m * (B_fresh + (Q mod t)) and
+/// B_sm = 2^(lambda + 1) * d * B_C with
+/// B_C = m * (B_fresh + (Q mod t)) and
 /// B_fresh = d*||e_ek|| + B_enc + d*B_e*||sk|| (Eq. 25/26/8), subject to
 /// B_C + n*B_sm <= Q/(2t) (Eq. 31). A failure here means the implemented
 /// formula diverged from the paper, even if decryption still succeeds.
@@ -316,8 +317,11 @@ fn trbfv_smudging_bound_matches_paper_formula() {
     let t = BigUint::from(params.plaintext());
     let b_c = BigUint::from(NUM_SUMMED) * (&b_fresh + &q_full % &t);
 
-    let expected = BigUint::from(2u64).pow(LAMBDA as u32) * &b_c;
-    assert_eq!(bound, expected, "B_sm formula diverged from 2^lambda * B_C");
+    let expected = (BigUint::from(1u64) << (LAMBDA + 1)) * &d * &b_c;
+    assert_eq!(
+        bound, expected,
+        "B_sm formula diverged from 2^(lambda + 1) * d * B_C"
+    );
 
     // Correctness budget, Eq. (31): B_C + n * B_sm <= Q / (2t).
     let q_over_2t = &q_full / (BigUint::from(2u64) * &t);

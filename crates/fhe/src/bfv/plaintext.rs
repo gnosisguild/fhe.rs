@@ -473,19 +473,21 @@ impl FheDecoder<Plaintext> for Vec<i64> {
             PlaintextValues::Large(_) => {
                 let v = Vec::<BigUint>::try_decode(pt, encoding)?;
                 let modulus_big = pt.par.plaintext_big();
-                let modulus_int = BigInt::from_biguint(Sign::Plus, modulus_big.clone());
-                let half_modulus = modulus_big / 2u32;
+                let threshold = (modulus_big + 1u32) >> 1;
 
-                Ok(v.iter()
+                v.iter()
                     .map(|x| {
-                        if x >= &half_modulus {
-                            let x_int = BigInt::from_biguint(Sign::Plus, x.clone());
-                            (x_int - &modulus_int).to_i64().unwrap()
-                        } else {
-                            x.to_i64().unwrap()
-                        }
+                        pt.par
+                            .plaintext
+                            .center_biguint(x, &threshold)
+                            .to_i64()
+                            .ok_or_else(|| {
+                                Error::DefaultError(
+                                    "Centered plaintext value too large for i64".to_string(),
+                                )
+                            })
                     })
-                    .collect())
+                    .collect()
             }
         }
     }
@@ -496,12 +498,12 @@ impl FheDecoder<Plaintext> for Vec<i64> {
 #[cfg(test)]
 mod tests {
     use super::{Encoding, Plaintext};
-    use crate::bfv::parameters::{BfvParameters, BfvParametersBuilder};
+    use crate::bfv::parameters::{BfvParameters, BfvParametersBuilder, PlaintextModulus};
     use crate::bfv::plaintext::PlaintextValues;
     use fhe_math::rq::{Ntt, Poly};
     use fhe_traits::{FheDecoder, FheEncoder};
     use num_bigint::BigUint;
-    use num_traits::Zero;
+    use num_traits::{ToPrimitive, Zero};
     use rand::rng;
     use std::error::Error;
     use zeroize::Zeroize;
@@ -575,6 +577,49 @@ mod tests {
         assert_eq!(decoded[0], p_val - 1u32);
         assert_eq!(decoded[1], BigUint::from(123u32));
         assert_eq!(decoded[2], BigUint::zero());
+
+        Ok(())
+    }
+
+    #[test]
+    fn center_biguint_matches_small_modulus_boundary() {
+        let p = 7u64;
+        let p_big = BigUint::from(p);
+        let large = PlaintextModulus::Large(p_big.clone());
+        let threshold = (&p_big + 1u32) >> 1;
+        let small = fhe_math::zq::Modulus::new(p).unwrap();
+
+        for x in 0..p {
+            let expected = small.center(x);
+            let actual = large
+                .center_biguint(&BigUint::from(x), &threshold)
+                .to_i64()
+                .unwrap();
+            assert_eq!(actual, expected);
+        }
+
+        assert_eq!(small.center(3), 3);
+    }
+
+    #[test]
+    fn try_decode_i64_big_modulus() -> Result<(), Box<dyn Error>> {
+        let p_val = BigUint::parse_bytes(b"340282366920938463463374607431768211507", 10).unwrap();
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus_biguint(p_val.clone())
+            .set_moduli_sizes(&[62, 62, 62, 62, 62])
+            .build_arc()?;
+
+        let vals = vec![p_val.clone() - 1u32, BigUint::from(123u32)];
+        let plaintext = Plaintext::try_encode(&vals, Encoding::poly(), &params)?;
+        let decoded = Vec::<i64>::try_decode(&plaintext, Encoding::poly())?;
+        assert_eq!(decoded[0], -1);
+        assert_eq!(decoded[1], 123);
+        assert_eq!(decoded[2], 0);
+
+        let huge_vals = vec![&p_val / 2u32];
+        let plaintext = Plaintext::try_encode(&huge_vals, Encoding::poly(), &params)?;
+        assert!(Vec::<i64>::try_decode(&plaintext, Encoding::poly()).is_err());
 
         Ok(())
     }

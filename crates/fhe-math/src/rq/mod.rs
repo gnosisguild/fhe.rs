@@ -365,7 +365,7 @@ impl<R: RepresentationTag> Poly<R> {
 
         let variance_u64 = variance.to_u64().unwrap_or(u64::MAX);
 
-        if variance_u64 < 16 {
+        if variance_u64 <= 16 {
             let variance_usize = variance.to_usize().unwrap_or(0);
             Self::small(ctx, variance_usize, rng)
         } else {
@@ -811,22 +811,38 @@ pub fn sample_uniform_coefficients_bigint<T: RngCore + CryptoRng>(
 }
 
 /// Convert variance to bound for uniform distribution.
-/// For uniform distribution on `[-B, B]`, variance = B²/3, so B = sqrt(3 * variance).
-fn variance_to_uniform_bound(variance: &BigUint) -> Result<BigInt> {
-    let bound_uint = (variance * 3u32).sqrt();
-    bound_uint
+///
+/// The sampler draws from the discrete uniform distribution on the `2B + 1`
+/// integers `[-B, B]`, whose exact variance is `B(B+1)/3`. This returns the
+/// smallest `B` such that `B(B+1)/3 >= variance`, so the achieved variance
+/// never falls short of the requested value.
+pub fn variance_to_uniform_bound(variance: &BigUint) -> Result<BigInt> {
+    let target = variance * 3u32;
+    let mut bound = target.sqrt();
+
+    while &bound * (&bound + 1u32) < target {
+        bound += 1u32;
+    }
+    while bound > BigUint::from(0u32) && (&bound - 1u32) * &bound >= target {
+        bound -= 1u32;
+    }
+
+    bound
         .to_bigint()
         .ok_or_else(|| Error::Default("Failed to convert bound to BigInt".to_string()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Context, Ntt, Poly, PowerBasis, Representation, switcher::Switcher};
+    use super::{
+        Context, Ntt, Poly, PowerBasis, Representation, switcher::Switcher,
+        variance_to_uniform_bound,
+    };
     use crate::{rq::SubstitutionExponent, zq::Modulus};
     use fhe_util::variance;
     use itertools::Itertools;
     use num_bigint::BigUint;
-    use num_traits::{One, Zero};
+    use num_traits::{One, ToPrimitive, Zero};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
     use std::{error::Error, sync::Arc};
@@ -1079,6 +1095,43 @@ mod tests {
         assert!(v.iter().map(|vi| vi.abs()).max().unwrap() <= 32);
         assert_eq!(variance(&v).round(), 16.0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn variance_to_uniform_bound_is_minimal_and_never_undershoots() {
+        for variance in 1u32..=1000 {
+            let target = BigUint::from(3u32 * variance);
+            let bound = variance_to_uniform_bound(&BigUint::from(variance))
+                .unwrap()
+                .to_biguint()
+                .unwrap();
+
+            assert!(&bound * (&bound + 1u32) >= target);
+            if bound > BigUint::zero() {
+                let previous = &bound - 1u32;
+                assert!(&previous * &bound < target);
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_error_boundary_is_monotonic() -> Result<(), Box<dyn Error>> {
+        let ctx = Arc::new(Context::new(&[4611686018326724609], 1 << 18)?);
+        let q = Modulus::new(4611686018326724609).unwrap();
+        let mut rng = rand::rng();
+
+        let p16 = Poly::<PowerBasis>::small(&ctx, 16, &mut rng)?;
+        let v16 = variance(&q.center_vec(p16.coefficients().to_slice().unwrap()));
+
+        let bound17 = variance_to_uniform_bound(&BigUint::from(17u32))?
+            .to_biguint()
+            .unwrap()
+            .to_u32()
+            .unwrap();
+        let v17_achieved = f64::from(bound17) * f64::from(bound17 + 1) / 3.0;
+
+        assert!(v17_achieved >= v16 - 1.0);
         Ok(())
     }
 

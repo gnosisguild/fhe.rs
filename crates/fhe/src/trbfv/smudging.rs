@@ -8,20 +8,22 @@ use crate::Error;
 /// Key features:
 /// - Arbitrary precision variance calculation using BigUint
 /// - Efficient noise generation using standard uniform sampling
-/// - Statistical Security parameter λ = 80 with configurable circuit depth
+/// - Configurable statistical security parameter λ
 /// - No precision loss in calculations while maintaining performance
 use crate::bfv::BfvParameters;
 
 use num_bigint::{BigInt, BigUint};
+use num_traits::ToPrimitive;
 use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
 
 /// Minimum statistical security parameter accepted for production use.
-pub const MIN_SECURE_LAMBDA: usize = 50;
+pub const MIN_SECURE_LAMBDA: usize = 35;
 
 /// Statistical security level for smudging noise generation.
 ///
-/// The smudging bound is always computed as `B_sm = 2^lambda * B_C`; this type
+/// The smudging bound is always computed as
+/// `B_sm = 2^(lambda + 1) * degree * B_C`; this type
 /// only controls which values of lambda the library accepts. Production code
 /// must use [`Lambda::secure`], which rejects lambda below
 /// [`MIN_SECURE_LAMBDA`]. Test setups that deliberately trade security for
@@ -81,7 +83,7 @@ pub struct SmudgingBoundCalculatorConfig {
     pub n: usize,
     /// Number of ciphertexts being processed
     pub m: usize,
-    /// Encryption error1 bound (BigUint for arbitrary precision)
+    /// Encryption error1 infinity-norm bound (BigUint for arbitrary precision)
     pub b_enc: BigUint,
     /// Encryption error2 bound (u64 for standard integers)
     pub b_e: u64,
@@ -91,6 +93,21 @@ pub struct SmudgingBoundCalculatorConfig {
     pub secret_key_bound: u64,
     /// Statistical security level
     pub lambda: Lambda,
+}
+
+/// Compute the infinity-norm bound for the configured error sampler.
+fn compute_b_enc(error1_variance: &BigUint) -> BigUint {
+    match error1_variance.to_u64() {
+        Some(variance) if variance <= 16 => BigUint::from(2u32 * variance as u32),
+        _ => {
+            let target = error1_variance * 3u32;
+            let mut bound = target.sqrt();
+            while &bound * (&bound + 1u32) < target {
+                bound += 1u32;
+            }
+            bound
+        }
+    }
 }
 
 impl SmudgingBoundCalculatorConfig {
@@ -104,9 +121,7 @@ impl SmudgingBoundCalculatorConfig {
     #[must_use]
     pub fn new(params: Arc<BfvParameters>, n: usize, m: usize, lambda: Lambda) -> Self {
         let variance = params.variance();
-        let error1_variance = params.get_error1_variance().clone();
-        // B_enc ≈ sqrt(3 * error1_variance)
-        let b_enc = (BigUint::from(3u32) * error1_variance).sqrt();
+        let b_enc = compute_b_enc(params.get_error1_variance());
 
         Self {
             params,
@@ -139,7 +154,8 @@ impl SmudgingBoundCalculator {
     /// Calculate the optimal smudging bound using arbitrary precision arithmetic.
     ///
     /// Implements the trBFV security formula for B_sm which balances
-    /// security (≥ 2^λ * B_c) and correctness (< (Q/2t - B_c)/n).
+    /// security (`2^(lambda + 1) * degree * B_C`) and correctness
+    /// (`< (Q/2t - B_C)/n`).
     ///
     /// # Returns
     /// Calculated bound B_sm as BigUint (can be arbitrarily large)
@@ -178,15 +194,16 @@ impl SmudgingBoundCalculator {
             ));
         }
 
-        // Calculate optimal B_sm: balance security (2^λ·B_c) and correctness ((Q/2t - B_c)/n).
-        // The same formula applies at every security level; Lambda only
-        // controls which lambdas are accepted in the first place.
+        // Calculate B_sm using the degree-aware whole-transcript security bound.
         let lambda = self.config.lambda.value();
-        let lower_bound = BigUint::from(2u64).pow(lambda as u32) * &b_c;
+        let exponent = lambda.checked_add(1).ok_or_else(|| {
+            Error::smudging_bound_infeasible("lambda is too large to calculate B_sm")
+        })?;
+        let lower_bound = (BigUint::from(1u64) << exponent) * &d * &b_c;
         let upper_bound = (&q_over_2t - &b_c) / BigUint::from(self.config.n);
         if upper_bound < lower_bound {
             return Err(Error::smudging_bound_infeasible(
-                "security lower bound 2^lambda * B_C exceeds the correctness upper bound (Q/(2t) - B_C)/n",
+                "security lower bound 2^(lambda + 1) * degree * B_C exceeds the correctness upper bound (Q/(2t) - B_C)/n",
             ));
         }
         Ok(lower_bound)
@@ -286,12 +303,7 @@ mod tests {
         assert_eq!(config.n, 5);
         assert_eq!(config.m, 2);
         assert_eq!(config.lambda.value(), 80);
-        // b_enc is now BigUint
-        assert_eq!(
-            config.b_enc,
-            (BigUint::from(3u32) * params.get_error1_variance()).sqrt()
-        );
-        // b_e is u64
+        assert_eq!(config.b_enc, compute_b_enc(params.get_error1_variance()));
         assert_eq!(config.b_e, (params.variance() * 2) as u64);
         assert_eq!(
             config.public_key_error,
@@ -299,6 +311,57 @@ mod tests {
         );
         assert_eq!(config.secret_key_bound, 5);
         assert_eq!(config.lambda.value(), 80);
+    }
+
+    #[test]
+    fn b_enc_matches_the_error_sampler_support() {
+        let params16 = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(2)
+            .set_moduli(&[65537])
+            .set_error1_variance_usize(16)
+            .build_arc()
+            .unwrap();
+        let config16 = SmudgingBoundCalculatorConfig::new(params16, 1, 1, Lambda::insecure(2));
+        assert_eq!(config16.b_enc, BigUint::from(32u32));
+
+        let params17 = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(2)
+            .set_moduli(&[65537])
+            .set_error1_variance_usize(17)
+            .build_arc()
+            .unwrap();
+        let config17 = SmudgingBoundCalculatorConfig::new(params17, 1, 1, Lambda::insecure(2));
+        assert_eq!(config17.b_enc, BigUint::from(7u32));
+    }
+
+    #[test]
+    fn smudging_bound_includes_degree_and_extra_security_bit() {
+        let params = test_params();
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::insecure(2));
+
+        let degree = BigUint::from(params.degree());
+        let b_enc = config.b_enc.clone();
+        let b_e = BigUint::from(config.b_e);
+        let public_key_error = BigUint::from(config.public_key_error);
+        let secret_key_bound = BigUint::from(config.secret_key_bound);
+        let b_fresh = &degree * &public_key_error + b_enc + &degree * &b_e * &secret_key_bound;
+
+        let mut q = BigUint::from(1u64);
+        for &modulus in params.moduli() {
+            q *= modulus;
+        }
+        let plaintext = BigUint::from(params.plaintext());
+        let b_c = &b_fresh + &q % &plaintext;
+        let expected = (BigUint::from(1u64) << 3usize) * &degree * &b_c;
+
+        assert_eq!(
+            SmudgingBoundCalculator::new(config)
+                .calculate_sm_bound()
+                .unwrap(),
+            expected
+        );
     }
 
     #[test]
