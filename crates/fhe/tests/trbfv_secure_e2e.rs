@@ -106,13 +106,23 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
     let mut rng = rand::rng();
     let crp = CommonRandomPoly::new(&params_trbfv, &mut rng).unwrap();
 
+    // MBFV public-key generation session: exact N-out-of-N participant set.
+    let mbfv_set = ParticipantSet::new(
+        fhe::identity::SessionId::new(rand::random()),
+        (1..=NUM_PARTIES as u32).collect(),
+    )
+    .unwrap();
+
     let mut parties: Vec<Party> = (0..NUM_PARTIES)
         .into_par_iter()
-        .map(|_| {
+        .map(|party_idx| {
             let mut rng = rand::rng();
 
             let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-            let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
+            let pk_binding =
+                ContributionBinding::new(mbfv_set.clone(), (party_idx + 1) as u32).unwrap();
+            let pk_share =
+                PublicKeyShare::new(&sk_share, crp.clone(), pk_binding, &mut rng).unwrap();
 
             let mut share_manager =
                 ShareManager::new(NUM_PARTIES, THRESHOLD, params_trbfv.clone()).unwrap();

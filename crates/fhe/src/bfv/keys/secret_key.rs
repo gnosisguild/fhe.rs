@@ -107,7 +107,7 @@ impl SecretKey {
 
         let ciphertext_modulus = ct[0].ctx().modulus();
         let mut noise = 0usize;
-        for coeff in Vec::<BigUint>::from(c.as_ref()) {
+        for coeff in Vec::<BigUint>::try_from(c.as_ref())? {
             noise = std::cmp::max(
                 noise,
                 std::cmp::min(coeff.bits(), (ciphertext_modulus - &coeff).bits()) as usize,
@@ -347,7 +347,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
                     PlaintextValues::Small(w.into_boxed_slice())
                 }
                 PlaintextModulus::Large(_) => {
-                    let v: Vec<BigUint> = Vec::<BigUint>::from(d.as_ref())
+                    let v: Vec<BigUint> = Vec::<BigUint>::try_from(d.as_ref())?
                         .into_iter()
                         .map(|vi| vi + self.params.plaintext_big())
                         .collect_vec();

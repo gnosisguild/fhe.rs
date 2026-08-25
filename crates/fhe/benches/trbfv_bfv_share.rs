@@ -80,6 +80,13 @@ fn bench_data_sizes(c: &mut Criterion) {
     // Generate Common Reference Polynomial
     let crp = CommonRandomPoly::new(&params_trbfv, &mut make_rng()).unwrap();
 
+    // MBFV public-key generation session: exact N-out-of-N participant set.
+    let mbfv_set = fhe::identity::ParticipantSet::new(
+        fhe::identity::SessionId::new(rand::random()),
+        (1..=num_parties as u32).collect(),
+    )
+    .unwrap();
+
     // Setup trBFV
     let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
 
@@ -87,12 +94,16 @@ fn bench_data_sizes(c: &mut Criterion) {
     println!("\n📊 Generating party keys...");
     let mut parties = Vec::new();
 
-    for _party_id in 0..num_parties {
+    for party_id in 0..num_parties {
         let mut rng = make_rng();
 
         // Generate threshold BFV keys
         let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut make_rng()).unwrap();
+        let pk_binding =
+            fhe::identity::ContributionBinding::new(mbfv_set.clone(), (party_id + 1) as u32)
+                .unwrap();
+        let pk_share =
+            PublicKeyShare::new(&sk_share, crp.clone(), pk_binding, &mut make_rng()).unwrap();
 
         // Generate Shamir shares of the secret key
         let mut share_manager =

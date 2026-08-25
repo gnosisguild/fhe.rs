@@ -32,7 +32,7 @@ pub fn rns_benchmark(c: &mut Criterion) {
     let scaler = RnsScaler::new(
         &rns_q,
         &rns_p,
-        ScalingFactor::new(&BigUint::from(1u64), &BigUint::from(46116860181065u64)),
+        ScalingFactor::new(&BigUint::from(1u64), &BigUint::from(46116860181065u64)).unwrap(),
     );
     let scaler_as_converter = RnsScaler::new(&rns_q, &rns_p, ScalingFactor::one());
 

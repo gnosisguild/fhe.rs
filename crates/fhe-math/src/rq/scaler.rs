@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Context extender.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scaler {
     from: Arc<Context>,
     to: Arc<Context>,
@@ -24,10 +24,12 @@ pub struct Scaler {
 }
 
 /// Serializable representation of [`Scaler`].
+///
+/// The raw data is untrusted transport state: `number_common_moduli` is
+/// derived and recomputed by [`ScalerRaw::into_scaler`], which rebuilds the
+/// whole scaler from the authoritative contexts and scaling factor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalerRaw {
-    /// Number of common moduli.
-    pub number_common_moduli: usize,
     /// RNS scaler.
     pub rns_scaler: RnsScalerRaw,
 }
@@ -155,7 +157,6 @@ impl Scaler {
     #[must_use]
     pub fn to_raw(&self) -> ScalerRaw {
         ScalerRaw {
-            number_common_moduli: self.number_common_moduli,
             rns_scaler: self.scaler.to_raw(),
         }
     }
@@ -163,23 +164,28 @@ impl Scaler {
 
 impl ScalerRaw {
     /// Rebuild a [`Scaler`] using the provided contexts.
+    ///
+    /// The raw data is untrusted: only the scaling factor is used. The number
+    /// of common moduli and all RNS precomputed tables are recomputed by
+    /// [`Scaler::new`] from the authoritative contexts and factor, and
+    /// incompatible source/destination degrees are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Default`] if the contexts have incompatible degrees,
+    /// and [`Error::ZeroScalingDenominator`] if the raw scaling factor has a
+    /// zero denominator.
     pub fn into_scaler(self, from: &Arc<Context>, to: &Arc<Context>) -> Result<Scaler> {
-        if from.degree != to.degree {
-            return Err(Error::Default("Incompatible degrees".to_string()));
-        }
-
-        Ok(Scaler {
-            from: from.clone(),
-            to: to.clone(),
-            number_common_moduli: self.number_common_moduli,
-            scaler: self.rns_scaler.into_scaler(&from.rns, &to.rns),
-        })
+        let factor = self.rns_scaler.scaling_factor.into_scaling_factor()?;
+        Scaler::new(from, to, factor)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Scaler, ScalingFactor};
+    use super::{Scaler, ScalerRaw, ScalingFactor};
+    use crate::rns::ScalingFactorRaw;
+    use crate::rns::scaler::RnsScalerRaw;
     use crate::rq::{Context, Ntt, Poly, PowerBasis};
     use itertools::Itertools;
     use num_bigint::BigUint;
@@ -201,6 +207,59 @@ mod tests {
     ];
 
     #[test]
+    fn raw_scaler_rebuilds_from_authoritative_inputs() -> Result<(), Box<dyn Error>> {
+        let from = Context::new_arc(Q, 16)?;
+        let to = Context::new_arc(P, 16)?;
+        let n = BigUint::from(3u64);
+        let d = BigUint::from(7u64);
+        let factor = ScalingFactor::new(&n, &d)?;
+        let scaler = Scaler::new(&from, &to, factor)?;
+
+        // The DTO no longer carries derived state such as
+        // `number_common_moduli`; only the scaling factor survives.
+        let raw = scaler.to_raw();
+        assert_eq!(raw.rns_scaler.scaling_factor.numerator, n.to_bytes_be());
+        assert_eq!(raw.rns_scaler.scaling_factor.denominator, d.to_bytes_be());
+
+        let rebuilt = raw.into_scaler(&from, &to)?;
+        assert_eq!(rebuilt, scaler);
+
+        // Functional equivalence: both scalers produce the same outputs.
+        let mut rng = rng();
+        for _ in 0..100 {
+            let p = Poly::<PowerBasis>::random(&from, &mut rng);
+            assert_eq!(scaler.scale(&p)?, rebuilt.scale(&p)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn raw_scaler_rejects_mismatched_degrees_and_zero_denominator() -> Result<(), Box<dyn Error>> {
+        let from = Context::new_arc(Q, 16)?;
+        let to = Context::new_arc(P, 16)?;
+        let to32 = Context::new_arc(P, 32)?;
+        let scaler = Scaler::new(&from, &to, ScalingFactor::one())?;
+
+        // Different source/destination degrees are rejected on import.
+        assert!(scaler.to_raw().into_scaler(&from, &to32).is_err());
+
+        // A zero denominator is rejected through the raw chain.
+        let raw = ScalerRaw {
+            rns_scaler: RnsScalerRaw {
+                scaling_factor: ScalingFactorRaw {
+                    numerator: vec![1],
+                    denominator: vec![],
+                },
+            },
+        };
+        assert_eq!(
+            raw.into_scaler(&from, &to).unwrap_err(),
+            crate::Error::ZeroScalingDenominator
+        );
+        Ok(())
+    }
+
+    #[test]
     fn scaler() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let ntests = 100;
@@ -212,14 +271,14 @@ mod tests {
                 let n = BigUint::from(*numerator);
                 let d = BigUint::from(*denominator);
 
-                let scaler = Scaler::new(&from, &to, ScalingFactor::new(&n, &d))?;
+                let scaler = Scaler::new(&from, &to, ScalingFactor::new(&n, &d)?)?;
 
                 for _ in 0..ntests {
                     let poly = Poly::<PowerBasis>::random(&from, &mut rng);
-                    let poly_biguint = Vec::<BigUint>::from(&poly);
+                    let poly_biguint = Vec::<BigUint>::try_from(&poly)?;
 
                     let scaled_poly = scaler.scale(&poly)?;
-                    let scaled_biguint = Vec::<BigUint>::from(&scaled_poly);
+                    let scaled_biguint = Vec::<BigUint>::try_from(&scaled_poly)?;
 
                     let expected = poly_biguint
                         .iter()
@@ -244,7 +303,7 @@ mod tests {
 
                     let poly_ntt: Poly<Ntt> = poly.clone().into_ntt()?;
                     let scaled_poly = scaler.scale(&poly_ntt)?;
-                    let scaled_biguint = Vec::<BigUint>::from(&scaled_poly.to_power_basis()?);
+                    let scaled_biguint = Vec::<BigUint>::try_from(&scaled_poly.to_power_basis()?)?;
                     assert_eq!(expected, scaled_biguint);
                 }
             }

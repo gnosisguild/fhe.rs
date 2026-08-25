@@ -1124,7 +1124,9 @@ impl ShareManager {
         }
 
         let mut sum_poly = Poly::<PowerBasis>::zero(ctx);
-        sum_poly.set_coefficients(std::mem::take(&mut sum.matrix));
+        sum_poly
+            .set_coefficients(std::mem::take(&mut sum.matrix))
+            .map_err(Error::MathError)?;
         Ok(AggregatedKeyShare {
             poly: SecretPoly::new(sum_poly),
             participant_set: participant_set.clone(),
@@ -1409,7 +1411,7 @@ impl ShareManager {
         let mut arr_matrix = SecretShareMatrix::new(matrix);
         let ctx = self.params.context_at_level(0)?;
         let mut result_poly = Zeroizing::new(Poly::<PowerBasis>::zero(ctx));
-        result_poly.set_coefficients(std::mem::take(&mut arr_matrix.matrix));
+        result_poly.set_coefficients(std::mem::take(&mut arr_matrix.matrix))?;
 
         let plaintext_ctx = Context::new_arc(&self.params.moduli()[..1], self.params.degree())
             .map_err(Error::MathError)?;
@@ -1424,12 +1426,10 @@ impl ShareManager {
                     self.params.degree(),
                 )
                 .map_err(Error::MathError)?;
-                Scaler::new(
-                    &ctx_i,
-                    &plaintext_ctx,
-                    ScalingFactor::new(&BigUint::from(self.params.plaintext()), rns.modulus()),
-                )
-                .map_err(Error::MathError)
+                let factor =
+                    ScalingFactor::new(&BigUint::from(self.params.plaintext()), rns.modulus())
+                        .map_err(Error::MathError)?;
+                Scaler::new(&ctx_i, &plaintext_ctx, factor).map_err(Error::MathError)
             })
             .collect();
         let scalers = scalers?;

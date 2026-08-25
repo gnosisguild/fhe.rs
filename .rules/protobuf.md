@@ -13,6 +13,7 @@ Serialization is feature-gated behind `protobuf` (disabled by default). `crates/
 5. `LbfvBinding` and `LBFVRelinKeyShare` are serialized by public `trlbfv` types from `bfv.proto`, while operational l-BFV keys carry no binding metadata and reject it.
 6. Schema changes edit the `.proto`, enable the feature to regenerate, verify generated behavior, and commit only the schema.
 7. Generated code is never hand-edited, committed, or regenerated with the feature disabled.
+8. MBFV shares serialize only as versioned `MbfvShareEnvelope` messages from `bfv.proto`, each carrying a required `MbfvBinding` (32-byte session ID, canonical participant ID list, contributor ID) and a share-kind payload that includes its operation-specific level. Deserialization fails closed: it rejects unsupported versions, missing or malformed bindings (including duplicate/zero IDs and lists that are not sorted in strictly increasing order), wrong payload kinds, level mismatches against the caller-supplied input, and pre-envelope raw payloads. Old raw MBFV bytes are not accepted; there is no silently inferred unbound mode.
 
 ## Evidence / tests
 

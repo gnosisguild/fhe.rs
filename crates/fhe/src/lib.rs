@@ -12,7 +12,7 @@ pub mod mbfv;
 pub mod proto;
 pub mod trbfv;
 pub mod trlbfv;
-pub use errors::{Error, ParametersError, Result, SerializationError, ThresholdError};
+pub use errors::{Error, MbfvError, ParametersError, Result, SerializationError, ThresholdError};
 pub use identity::{ContributionBinding, ParticipantSet, SessionId};
 
 // Test the source code included in the README.

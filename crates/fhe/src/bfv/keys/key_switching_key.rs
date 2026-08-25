@@ -924,9 +924,12 @@ mod tests {
                 let c3 = (&input_ntt * &p_ntt).into_power_basis()?;
 
                 let rns = RnsContext::new(&params.moduli)?;
-                Vec::<BigUint>::from(&(&c2 - &c3)).iter().for_each(|b| {
-                    assert!(std::cmp::min(b.bits(), (rns.modulus() - b).bits()) <= 70)
-                });
+                Vec::<BigUint>::try_from(&(&c2 - &c3))
+                    .unwrap()
+                    .iter()
+                    .for_each(|b| {
+                        assert!(std::cmp::min(b.bits(), (rns.modulus() - b).bits()) <= 70)
+                    });
             }
         }
         Ok(())
@@ -978,12 +981,15 @@ mod tests {
                 let c3 = (&input_ntt * &p_ntt).into_power_basis()?;
 
                 let rns = RnsContext::new(ctx.moduli())?;
-                Vec::<BigUint>::from(&(&c2 - &c3)).iter().for_each(|b| {
-                    assert!(
-                        std::cmp::min(b.bits(), (rns.modulus() - b).bits())
-                            <= (rns.modulus().bits() / 2) + 10
-                    )
-                });
+                Vec::<BigUint>::try_from(&(&c2 - &c3))
+                    .unwrap()
+                    .iter()
+                    .for_each(|b| {
+                        assert!(
+                            std::cmp::min(b.bits(), (rns.modulus() - b).bits())
+                                <= (rns.modulus().bits() / 2) + 10
+                        )
+                    });
             }
         }
         Ok(())

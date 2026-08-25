@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
+use crate::identity::ContributionBinding;
 use crate::{Error, Result};
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
 use rand::{CryptoRng, RngCore};
@@ -10,15 +11,28 @@ use zeroize::Zeroizing;
 use crate::bfv::CommonRandomPoly;
 
 use super::Aggregate;
+use super::consistency::{
+    require_poly_context, require_same_parameters, validate_binding_coverage,
+};
 
 /// A party's share in public key generation protocol.
 ///
 /// Each party uses the `PublicKeyShare` to generate their share of the public key and participate in the in the "Protocol 1: EncKeyGen", as detailed in [Multiparty BFV](https://eprint.iacr.org/2020/304.pdf) (p6). Use the [`Aggregate`] impl to combine the shares into a [`PublicKey`].
+///
+/// # Binding contract
+///
+/// Every share carries a required [`ContributionBinding`] identifying its
+/// contributor within an exact N-out-of-N [`ParticipantSet`] for one
+/// operation-specific [`crate::SessionId`]. Aggregation rejects duplicate,
+/// missing, unknown, or cross-session/set contributions before any polynomial
+/// arithmetic. Bindings provide consistency only; they do not authenticate a
+/// contributor. All parties must use the same concrete level-zero CRP.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PublicKeyShare {
     pub(crate) params: Arc<BfvParameters>,
     pub(crate) crp: CommonRandomPoly,
     pub(crate) p0_share: Poly<Ntt>,
+    pub(crate) binding: ContributionBinding,
 }
 
 impl PublicKeyShare {
@@ -26,19 +40,32 @@ impl PublicKeyShare {
     ///
     /// 1. *Private input*: BFV secret key share
     /// 2. *Public input*: common random polynomial
+    /// 3. *Binding*: this party's [`ContributionBinding`] for the execution
     //
     // Implementation note: This is largely the same approach taken by fhe.rs, a
     // symmetric encryption of zero, the difference being that the crp is used
     // instead of a random poly. Might be possible to just pass a valid seed to
     // each party and basically take the SecretKey::try_encrypt implementation,
     // but with the hardcoded seed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the CRP is not at the parameters' level-zero
+    /// context: collective public-key generation is a level-zero protocol by
+    /// design, and a nonzero-level CRP is rejected rather than silently
+    /// combined.
     pub fn new<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
         crp: CommonRandomPoly,
+        binding: ContributionBinding,
         rng: &mut R,
     ) -> Result<Self> {
         let params = sk_share.params.clone();
         let ctx = params.context_at_level(0)?;
+
+        // Collective public-key generation is level zero by protocol design:
+        // reject a nonzero-level CRP instead of silently combining it later.
+        require_poly_context(crp.poly(), ctx)?;
 
         // Convert secret key to usable polynomial
         let s = Zeroizing::new(
@@ -59,6 +86,7 @@ impl PublicKeyShare {
             params,
             crp,
             p0_share,
+            binding,
         })
     }
 
@@ -133,26 +161,64 @@ impl PublicKeyShare {
     pub fn into_p0_share(self) -> Poly<Ntt> {
         self.p0_share
     }
+
+    /// Borrow the contribution binding attached to this share.
+    #[must_use]
+    pub fn binding(&self) -> &ContributionBinding {
+        &self.binding
+    }
 }
 
 impl Aggregate<PublicKeyShare> for PublicKey {
+    /// Aggregate public-key shares into the collective [`PublicKey`].
+    ///
+    /// # Errors
+    ///
+    /// Validates, immediately after the share list is collected and before
+    /// any parameter, context, CRP, or polynomial access: exact one-per-member
+    /// coverage of the shares' common [`crate::ParticipantSet`] (rejecting
+    /// duplicate, missing, unknown, and cross-session/set contributions);
+    /// then structural parameter equality, concrete equality of every share's
+    /// CRP, and that all polynomials live at the parameters' level-zero
+    /// context.
     fn from_shares<T>(iter: T) -> Result<Self>
     where
         T: IntoIterator<Item = PublicKeyShare>,
     {
-        let mut shares = iter.into_iter();
-        let share = shares.next().ok_or(Error::TooFewValues {
+        let shares = iter.into_iter().collect::<Vec<_>>();
+        let (first, rest) = shares.split_first().ok_or(Error::TooFewValues {
             actual: 0,
             minimum: 1,
         })?;
-        let mut p0 = share.p0_share;
-        for sh in shares {
+
+        // Exact N-out-of-N coverage of every share's binding, validated
+        // before any parameter, context, CRP, or polynomial access.
+        validate_binding_coverage(shares.iter().map(|share| &share.binding))?;
+
+        let ctx = first.params.context_at_level(0)?;
+        require_poly_context(first.crp.poly(), ctx)?;
+        require_poly_context(&first.p0_share, ctx)?;
+
+        for share in rest {
+            require_same_parameters(&share.params, &first.params)?;
+            if share.crp != first.crp {
+                return Err(Error::Mbfv(crate::MbfvError::PublicInputMismatch {
+                    reason: "public-key shares use different level-zero CRPs".to_string(),
+                }));
+            }
+            require_poly_context(share.crp.poly(), ctx)?;
+            require_poly_context(&share.p0_share, ctx)?;
+        }
+
+        // Only validated values are combined.
+        let mut p0 = first.p0_share.clone();
+        for sh in rest {
             p0 += &sh.p0_share;
         }
 
         Ok(PublicKey {
-            c: Ciphertext::new(vec![p0, share.crp.poly], &share.params)?,
-            params: share.params,
+            c: Ciphertext::new(vec![p0, first.crp.poly.clone()], &first.params)?,
+            params: first.params.clone(),
         })
     }
 }
@@ -180,40 +246,183 @@ impl Aggregate<PublicKeyShare> for PublicKey {
 #[cfg(feature = "protobuf")]
 mod protobuf {
     use super::*;
-    use fhe_traits::{DeserializeWithContext, Serialize};
+    use crate::mbfv::wire;
+    use crate::proto::bfv::{MbfvPublicKeySharePayload, mbfv_share_envelope};
+    use fhe_traits::{DeserializeWithContext as _, Serialize};
 
     impl PublicKeyShare {
-        /// Deserialize a PublicKeyShare from bytes with the given parameters and
-        /// CRP
+        /// Deserialize a bound `PublicKeyShare` from a versioned MBFV share
+        /// envelope.
+        ///
+        /// The caller supplies the parameters and the common random polynomial;
+        /// collective public-key generation is a level-zero protocol by design,
+        /// so the deserializer validates that the supplied CRP lives at the
+        /// parameters' level-zero context and that the envelope's serialized
+        /// level is zero. It also validates the supported version, a well-formed
+        /// contribution binding, and that the decoded share polynomial lives in
+        /// the level-zero context. Old raw polynomial bytes are rejected: there
+        /// is no unbound fallback.
+        ///
+        /// Serialized share bytes alone do not prove provenance; cross-share
+        /// binding and concrete-CRP checks remain the aggregation boundary.
         pub fn deserialize(
             bytes: &[u8],
             par: &std::sync::Arc<BfvParameters>,
             crp: CommonRandomPoly,
         ) -> Result<Self> {
+            let envelope = wire::decode_share(bytes)?;
+            let payload = match envelope.payload {
+                Some(mbfv_share_envelope::Payload::PublicKeyShare(payload)) => payload,
+                _ => {
+                    return Err(Error::Mbfv(crate::MbfvError::ShareShapeMismatch {
+                        reason: "envelope does not carry a public-key share payload".to_string(),
+                    }));
+                }
+            };
+            let binding = wire::decode_binding(envelope.binding)?;
+
+            if payload.level != 0 {
+                return Err(Error::Mbfv(crate::MbfvError::LevelMismatch {
+                    found: payload.level as usize,
+                    expected: 0,
+                }));
+            }
             let ctx = par.context_at_level(0)?;
-            let p0_share = Poly::<Ntt>::from_bytes(bytes, ctx)?;
+            // Collective public-key generation is level zero by protocol
+            // design; reject a nonzero-level CRP instead of combining it later.
+            require_poly_context(crp.poly(), ctx)?;
+            let p0_share = Poly::<Ntt>::from_bytes(&payload.p0_share, ctx)?;
+
             Ok(Self {
                 params: par.clone(),
                 crp,
                 p0_share,
+                binding,
             })
         }
     }
 
     impl Serialize for PublicKeyShare {
         fn to_bytes(&self) -> Vec<u8> {
-            self.p0_share.to_bytes()
+            wire::encode_share(
+                &self.binding,
+                mbfv_share_envelope::Payload::PublicKeyShare(MbfvPublicKeySharePayload {
+                    p0_share: self.p0_share.to_bytes(),
+                    // Collective public-key generation is a level-zero protocol.
+                    level: 0,
+                }),
+            )
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+    mod tests {
+        use super::*;
+        use crate::identity::{ParticipantSet, SessionId};
+        use prost::Message as _;
+        use rand::rng;
+
+        fn bound_share(params: &Arc<BfvParameters>) -> (CommonRandomPoly, PublicKeyShare) {
+            let mut rng = rng();
+            let crp = CommonRandomPoly::new(params, &mut rng).unwrap();
+            let set = ParticipantSet::new(SessionId::new([91u8; 32]), vec![1, 2]).unwrap();
+            let sk_share = SecretKey::random(params, &mut rng);
+            let binding = ContributionBinding::new(set, 1).unwrap();
+            let share = PublicKeyShare::new(&sk_share, crp.clone(), binding, &mut rng).unwrap();
+            (crp, share)
+        }
+
+        #[test]
+        fn round_trips_binding_metadata() -> Result<()> {
+            let params = BfvParameters::default_arc(6, 32);
+            let (crp, share) = bound_share(&params);
+
+            let restored = PublicKeyShare::deserialize(&share.to_bytes(), &params, crp.clone())?;
+            assert_eq!(restored, share);
+            assert_eq!(restored.binding().participant_id(), 1);
+            assert_eq!(
+                restored.binding().participant_set().session_id(),
+                SessionId::new([91u8; 32])
+            );
+            assert_eq!(restored.crp, crp);
+            Ok(())
+        }
+
+        #[test]
+        fn rejects_wrong_level_payload_and_invalid_crp_context() -> Result<()> {
+            let params = BfvParameters::default_arc(6, 32);
+            let (crp, share) = bound_share(&params);
+
+            // A nonzero serialized level is rejected even though EncKeyGen is
+            // always level zero: decode the envelope, set the public-key
+            // payload's declared level to one, and re-serialize.
+            let mut envelope =
+                crate::proto::bfv::MbfvShareEnvelope::decode(share.to_bytes().as_slice()).unwrap();
+            assert!(
+                matches!(
+                    envelope.payload,
+                    Some(crate::proto::bfv::mbfv_share_envelope::Payload::PublicKeyShare(_))
+                ),
+                "envelope does not carry a public-key payload"
+            );
+            if let Some(crate::proto::bfv::mbfv_share_envelope::Payload::PublicKeyShare(payload)) =
+                envelope.payload.as_mut()
+            {
+                payload.level = 1;
+            }
+            let err = PublicKeyShare::deserialize(&envelope.encode_to_vec(), &params, crp.clone());
+            assert!(
+                matches!(
+                    err,
+                    Err(Error::Mbfv(crate::MbfvError::LevelMismatch {
+                        found: 1,
+                        expected: 0
+                    }))
+                ),
+                "unexpected error: {err:?}"
+            );
+
+            // A nonzero-level CRP is rejected by the level-zero protocol.
+            let leveled_crp = CommonRandomPoly::new_leveled(&params, 1, &mut rng())?;
+            let err = PublicKeyShare::deserialize(&share.to_bytes(), &params, leveled_crp);
+            assert!(
+                matches!(err, Err(Error::Mbfv(crate::MbfvError::InvalidContext))),
+                "unexpected error: {err:?}"
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn rejects_old_raw_bytes_and_malformed_metadata() -> Result<()> {
+            let params = BfvParameters::default_arc(6, 32);
+            let (crp, share) = bound_share(&params);
+
+            // Old raw polynomial bytes have no version/binding metadata.
+            let raw = share.p0_share().to_bytes();
+            let err = PublicKeyShare::deserialize(&raw, &params, crp.clone());
+            assert!(err.is_err(), "old raw bytes must be rejected");
+
+            // A malformed session id inside an otherwise valid envelope.
+            let mut envelope =
+                crate::proto::bfv::MbfvShareEnvelope::decode(share.to_bytes().as_slice()).unwrap();
+            envelope.binding.as_mut().unwrap().session_id = vec![7u8; 31];
+            let err = PublicKeyShare::deserialize(&envelope.encode_to_vec(), &params, crp.clone());
+            assert!(err.is_err(), "malformed session id must be rejected");
+            Ok(())
         }
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use fhe_traits::{FheEncoder, FheEncrypter};
     use rand::rng;
 
     use crate::{
         bfv::{BfvParameters, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
+        identity::{ContributionBinding, ParticipantSet, SessionId},
         mbfv::Aggregate as _,
     };
 
@@ -221,11 +430,30 @@ mod tests {
 
     const NUM_PARTIES: usize = 11;
 
+    fn participant_set() -> ParticipantSet {
+        ParticipantSet::new(
+            SessionId::new([7u8; 32]),
+            (1..=NUM_PARTIES as u32).collect(),
+        )
+        .unwrap()
+    }
+
+    fn bound_pk_share(
+        params: &std::sync::Arc<BfvParameters>,
+        set: &ParticipantSet,
+        id: u32,
+        crp: &CommonRandomPoly,
+    ) -> PublicKeyShare {
+        let sk_share = SecretKey::random(params, &mut rng());
+        let binding = ContributionBinding::new(set.clone(), id).unwrap();
+        PublicKeyShare::new(&sk_share, crp.clone(), binding, &mut rng()).unwrap()
+    }
+
     #[test]
     // This just makes sure the public key creation is successful, and arbitrary
     // encryptions complete without error. See a full encrypt->decrypt test in
     // `secret_key_switch`.
-    fn protocol_creates_valid_pk() {
+    fn protocol_creates_valid_pk() -> Result<(), Box<dyn std::error::Error>> {
         let mut rng = rng();
         for params in [
             BfvParameters::default_arc(1, 16),
@@ -233,18 +461,20 @@ mod tests {
         ] {
             for level in 0..=params.max_level() {
                 for _ in 0..20 {
-                    let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
+                    let crp = CommonRandomPoly::new(&params, &mut rng)?;
+                    let set = participant_set();
 
                     let mut pk_shares: Vec<PublicKeyShare> = vec![];
 
                     // Parties collectively generate public key
-                    for _ in 0..NUM_PARTIES {
+                    for i in 1..=NUM_PARTIES as u32 {
                         let sk_share = SecretKey::random(&params, &mut rng);
+                        let binding = ContributionBinding::new(set.clone(), i)?;
                         let pk_share =
-                            PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
+                            PublicKeyShare::new(&sk_share, crp.clone(), binding, &mut rng)?;
                         pk_shares.push(pk_share);
                     }
-                    let public_key = PublicKey::from_shares(pk_shares).unwrap();
+                    let public_key = PublicKey::from_shares(pk_shares)?;
 
                     // Use it to encrypt a random polynomial
                     let pt = Plaintext::try_encode(
@@ -259,6 +489,175 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn aggregation_accepts_reordered_shares_and_reports_binding() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 32);
+        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        // Exactly four contributors for this execution.
+        let set = ParticipantSet::new(SessionId::new([7u8; 32]), vec![1, 2, 3, 4]).unwrap();
+
+        let mut shares: Vec<PublicKeyShare> = (1..=4)
+            .map(|i| bound_pk_share(&params, &set, i, &crp))
+            .collect();
+        shares.reverse();
+
+        let pk = PublicKey::from_shares(shares.clone()).unwrap();
+        assert_eq!(pk.params, params);
+
+        // Every share carries its contribution binding.
+        assert_eq!(shares.first().unwrap().binding().participant_id(), 4);
+        assert_eq!(shares.first().unwrap().binding().participant_set(), &set);
+    }
+
+    #[test]
+    fn aggregation_rejects_duplicate_participant_id() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 32);
+        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        let set = ParticipantSet::new(SessionId::new([7u8; 32]), vec![1, 2]).unwrap();
+
+        let one = bound_pk_share(&params, &set, 1, &crp);
+        let duplicate_one = bound_pk_share(&params, &set, 1, &crp);
+
+        let err = PublicKey::from_shares(vec![one, duplicate_one]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::Error::Threshold(crate::ThresholdError::DuplicateContribution {
+                    participant_id: 1
+                })
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregation_rejects_missing_participant_contribution() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 32);
+        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        // Set declares two members but only party 1 contributes.
+        let set = ParticipantSet::new(SessionId::new([7u8; 32]), vec![1, 2]).unwrap();
+        let one = bound_pk_share(&params, &set, 1, &crp);
+
+        let err = PublicKey::from_shares(vec![one]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::Error::Threshold(crate::ThresholdError::MissingContribution)
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregation_rejects_cross_session_shares() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 32);
+        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        let set_a = ParticipantSet::new(SessionId::new([7u8; 32]), vec![1, 2]).unwrap();
+        let set_b = ParticipantSet::new(SessionId::new([9u8; 32]), vec![1, 2]).unwrap();
+
+        let a1 = bound_pk_share(&params, &set_a, 1, &crp);
+        let b2 = bound_pk_share(&params, &set_b, 2, &crp);
+
+        let err = PublicKey::from_shares(vec![a1, b2]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::Error::Threshold(crate::ThresholdError::ContributionSetMismatch)
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregation_rejects_different_crps() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 32);
+        let crp_a = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        let crp_b = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        let set = ParticipantSet::new(SessionId::new([7u8; 32]), vec![1, 2]).unwrap();
+
+        let a1 = bound_pk_share(&params, &set, 1, &crp_a);
+        let b2 = bound_pk_share(&params, &set, 2, &crp_b);
+
+        let err = PublicKey::from_shares(vec![a1, b2]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::Error::Mbfv(crate::MbfvError::PublicInputMismatch { .. })
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregation_rejects_parameter_mismatch() {
+        let mut rng = rng();
+        let params_small = BfvParameters::default_arc(1, 16);
+        let params_large = BfvParameters::default_arc(6, 32);
+        let crp_small = CommonRandomPoly::new(&params_small, &mut rng).unwrap();
+        let crp_large = CommonRandomPoly::new(&params_large, &mut rng).unwrap();
+        let set = ParticipantSet::new(SessionId::new([7u8; 32]), vec![1, 2]).unwrap();
+
+        let small = bound_pk_share(&params_small, &set, 1, &crp_small);
+        let large = bound_pk_share(&params_large, &set, 2, &crp_large);
+
+        let err = PublicKey::from_shares(vec![small, large]).unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Mbfv(crate::MbfvError::ParameterMismatch)),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn constructor_rejects_nonzero_level_crp() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 32);
+        let leveled_crp = CommonRandomPoly::new_leveled(&params, 1, &mut rng).unwrap();
+        let set = ParticipantSet::new(SessionId::new([7u8; 32]), vec![1]).unwrap();
+        let sk_share = SecretKey::random(&params, &mut rng);
+        let binding = ContributionBinding::new(set, 1).unwrap();
+
+        let err = PublicKeyShare::new(&sk_share, leveled_crp, binding, &mut rng).unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Mbfv(crate::MbfvError::InvalidContext)),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregation_rejects_wrong_share_context() {
+        use fhe_math::rq::{Ntt, Poly};
+
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 32);
+        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        let set = ParticipantSet::new(SessionId::new([7u8; 32]), vec![1, 2]).unwrap();
+
+        let good = bound_pk_share(&params, &set, 1, &crp);
+
+        // Fabricate a share whose p0_share lives at another level's context,
+        // bound to the set's other member so coverage stays exact.
+        let ctx_other = params.context_at_level(1).unwrap();
+        let mut bad = good.clone();
+        bad.binding = ContributionBinding::new(set.clone(), 2).unwrap();
+        bad.p0_share = Poly::<Ntt>::random(ctx_other, &mut rng);
+
+        let err = PublicKey::from_shares(vec![good.clone(), bad]).unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Mbfv(crate::MbfvError::InvalidContext)),
+            "unexpected error: {err}"
+        );
+
+        // Sanity: the same pair without the fabricated context still aggregates.
+        let other = bound_pk_share(&params, &set, 2, &crp);
+        assert!(PublicKey::from_shares(vec![good, other]).is_ok());
     }
 
     #[test]
@@ -339,9 +738,16 @@ mod tests {
         let params = BfvParameters::default_arc(1, 8);
         let sk_share = SecretKey::random(&params, &mut rng);
         let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        let set = ParticipantSet::new(SessionId::new([7u8; 32]), vec![1]).unwrap();
 
         // Create PublicKeyShare using original new()
-        let pks = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
+        let pks = PublicKeyShare::new(
+            &sk_share,
+            crp.clone(),
+            ContributionBinding::new(set, 1).unwrap(),
+            &mut rng,
+        )
+        .unwrap();
 
         // Verify that new_extended produces pk_1 that matches the crp
         let (_pk_0, pk_1, _s, _e) =

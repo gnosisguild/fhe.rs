@@ -586,12 +586,18 @@ impl<R: RepresentationTag> Poly<R> {
 
     /// Create a polynomial from a coefficient matrix in RNS representation
     /// This is a utility function that can be used by various polynomial constructors
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPolynomialDimensions`] if the matrix does not
+    /// match the context shape, and [`Error::NonCanonicalCoefficient`] if any
+    /// coefficient is not a canonical residue of its row modulus.
     pub fn from_coeffs_matrix(
         coeff_matrix: Array2<u64>,
         ctx: &Arc<Context>,
     ) -> Result<Zeroizing<Self>> {
         let mut poly = Poly::<PowerBasis>::zero(ctx);
-        poly.set_coefficients(coeff_matrix);
+        poly.set_coefficients(coeff_matrix)?;
         Ok(Zeroizing::new(Self::from_power_basis(poly)?))
     }
 
@@ -613,10 +619,21 @@ impl<R: RepresentationTag> Poly<R> {
 
     /// Set a new coefficient matrix.
     ///
-    /// The dimensions are validated by consuming representation conversions;
-    /// malformed matrices remain storable here so this setter stays infallible.
-    pub fn set_coefficients(&mut self, new_coeffs: Array2<u64>) {
+    /// The matrix is validated before being stored: it must match the context
+    /// shape exactly and hold canonical residues in `[0, q_i)` for every row,
+    /// so every public RNS-matrix ingress enforces the same canonicality
+    /// contract as deserialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPolynomialDimensions`] if the matrix does not
+    /// match the context shape, and [`Error::NonCanonicalCoefficient`] if any
+    /// coefficient is not a canonical residue of its row modulus. The stored
+    /// coefficients are left unchanged when validation fails.
+    pub fn set_coefficients(&mut self, new_coeffs: Array2<u64>) -> Result<()> {
+        convert::validate_coefficient_matrix(&new_coeffs, &self.ctx)?;
         self.coefficients = new_coeffs;
+        Ok(())
     }
 
     /// Substitute x by x^i in a polynomial.
@@ -1110,7 +1127,7 @@ mod tests {
             .map(|value| value as u64)
             .collect::<Vec<_>>();
         let mut poly = Poly::<PowerBasis>::zero(&ctx);
-        poly.set_coefficients(Array2::from_shape_vec((MODULI.len(), 16).f(), values)?);
+        poly.set_coefficients(Array2::from_shape_vec((MODULI.len(), 16).f(), values)?)?;
         let original = poly.clone();
 
         let result = catch_unwind(AssertUnwindSafe(|| poly.clone().into_ntt()));
@@ -1138,30 +1155,41 @@ mod tests {
     }
 
     #[test]
-    fn malformed_dimensions_are_rejected_by_every_conversion() -> Result<(), Box<dyn Error>> {
+    fn set_coefficients_rejects_malformed_or_noncanonical_matrices() -> Result<(), Box<dyn Error>> {
         let ctx = Arc::new(Context::new(MODULI, 16)?);
-        let malformed = || Array2::zeros((MODULI.len() - 1, 16));
-        let expected = CrateError::InvalidPolynomialDimensions {
+        let mut poly = Poly::<PowerBasis>::zero(&ctx);
+        let dimensions_error = |actual_rows: usize| CrateError::InvalidPolynomialDimensions {
             expected_rows: MODULI.len(),
             expected_columns: 16,
-            actual_rows: MODULI.len() - 1,
+            actual_rows,
             actual_columns: 16,
         };
 
-        let mut power = Poly::<PowerBasis>::zero(&ctx);
-        power.set_coefficients(malformed());
-        assert_eq!(power.clone().into_ntt().unwrap_err(), expected);
-        assert_eq!(power.into_ntt_shoup().unwrap_err(), expected);
+        // Wrong shapes are rejected with typed dimension errors, and the
+        // stored coefficients are left untouched.
+        for rows in [MODULI.len() - 1, MODULI.len() + 1] {
+            let malformed = Array2::zeros((rows, 16));
+            assert_eq!(
+                poly.set_coefficients(malformed).unwrap_err(),
+                dimensions_error(rows)
+            );
+        }
 
-        let mut ntt = Poly::<PowerBasis>::zero(&ctx).into_ntt()?;
-        ntt.set_coefficients(malformed());
-        assert_eq!(ntt.clone().into_power_basis().unwrap_err(), expected);
-        assert_eq!(ntt.into_ntt_shoup().unwrap_err(), expected);
+        // Right shape but non-canonical values are rejected too.
+        let mut bad = Array2::zeros((MODULI.len(), 16));
+        bad[[0, 0]] = MODULI[0];
+        bad[[MODULI.len() - 1, 15]] = MODULI[MODULI.len() - 1] + 1;
+        assert_eq!(
+            poly.set_coefficients(bad).unwrap_err(),
+            CrateError::NonCanonicalCoefficient {
+                modulus: MODULI[0],
+                value: MODULI[0],
+            }
+        );
 
-        let mut ntt_shoup = Poly::<PowerBasis>::zero(&ctx).into_ntt_shoup()?;
-        ntt_shoup.set_coefficients(malformed());
-        assert_eq!(ntt_shoup.clone().into_ntt().unwrap_err(), expected);
-        assert_eq!(ntt_shoup.into_power_basis().unwrap_err(), expected);
+        // Canonical matrices of exact shape are accepted.
+        let ok = Array2::zeros((MODULI.len(), 16));
+        assert!(poly.set_coefficients(ok).is_ok());
         Ok(())
     }
 
@@ -1232,8 +1260,8 @@ mod tests {
         assert_eq!(p, q.to_power_basis()?);
         assert_eq!(Vec::<u64>::try_from(&p).unwrap(), [0; 16 * MODULI.len()]);
         assert_eq!(Vec::<u64>::try_from(&q).unwrap(), [0; 16 * MODULI.len()]);
-        assert_eq!(Vec::<BigUint>::from(&p), reference);
-        assert_eq!(Vec::<BigUint>::from(&q), reference);
+        assert_eq!(Vec::<BigUint>::try_from(&p)?, reference);
+        assert_eq!(Vec::<BigUint>::try_from(&q)?, reference);
 
         Ok(())
     }
@@ -1592,7 +1620,7 @@ mod tests {
         for _ in 0..ntests {
             // Otherwise, no error happens and the coefficients evolve as expected.
             let mut p = Poly::<PowerBasis>::random(&ctx, &mut rng);
-            let mut reference = Vec::<BigUint>::from(&p);
+            let mut reference = Vec::<BigUint>::try_from(&p)?;
             let mut current_ctx = ctx.clone();
             assert_eq!(p.ctx, current_ctx);
             while current_ctx.next_context.is_some() {
@@ -1601,7 +1629,7 @@ mod tests {
                 let numerator = current_ctx.modulus().clone();
                 assert!(p.switch_down().is_ok());
                 assert_eq!(p.ctx, current_ctx);
-                let p_biguint = Vec::<BigUint>::from(&p);
+                let p_biguint = Vec::<BigUint>::try_from(&p)?;
                 assert_eq!(
                     p_biguint,
                     reference
@@ -1627,13 +1655,13 @@ mod tests {
 
         for _ in 0..ntests {
             let mut p = Poly::<PowerBasis>::random(&ctx1, &mut rng);
-            let reference = Vec::<BigUint>::from(&p);
+            let reference = Vec::<BigUint>::try_from(&p)?;
 
             p.switch_down_to(&ctx2)?;
 
             assert_eq!(p.ctx, ctx2);
             assert_eq!(
-                Vec::<BigUint>::from(&p),
+                Vec::<BigUint>::try_from(&p)?,
                 reference
                     .iter()
                     .map(|b| ((b * ctx2.modulus()) + (ctx1.modulus() >> 1)) / ctx1.modulus())
@@ -1653,13 +1681,13 @@ mod tests {
         let switcher = Switcher::new(&ctx1, &ctx2)?;
         for _ in 0..ntests {
             let p = Poly::<PowerBasis>::random(&ctx1, &mut rng);
-            let reference = Vec::<BigUint>::from(&p);
+            let reference = Vec::<BigUint>::try_from(&p)?;
 
             let q = p.switch(&switcher)?;
 
             assert_eq!(q.ctx, ctx2);
             assert_eq!(
-                Vec::<BigUint>::from(&q),
+                Vec::<BigUint>::try_from(&q)?,
                 reference
                     .iter()
                     .map(|b| ((b * ctx2.modulus()) + (ctx1.modulus() >> 1)) / ctx1.modulus())
@@ -1687,11 +1715,11 @@ mod tests {
 
         p.multiply_inverse_power_of_x(ctx.degree)?;
         assert_eq!(
-            Vec::<BigUint>::from(&p)
+            Vec::<BigUint>::try_from(&p)?
                 .iter()
                 .map(|c| ctx.modulus() - c)
                 .collect_vec(),
-            Vec::<BigUint>::from(&q)
+            Vec::<BigUint>::try_from(&q)?
         );
 
         Ok(())

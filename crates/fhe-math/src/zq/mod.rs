@@ -813,17 +813,43 @@ impl Modulus {
         transcode_to_bytes(a, p_nbits)
     }
 
-    /// Deserialize a vector of bytes into a vector of elements mod p.
-    #[must_use]
-    pub fn deserialize_vec(&self, b: &[u8]) -> Vec<u64> {
+    /// Deserialize a vector of bytes into a vector of canonical elements
+    /// modulo `p`.
+    ///
+    /// The bytes must encode a whole number of `nbits`-bit coefficients, where
+    /// `nbits` is the bit length of `p`, and every decoded coefficient must be
+    /// a canonical representative in `[0, p)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPackedLength`] if the byte length does not
+    /// encode a whole number of coefficients, and
+    /// [`Error::NonCanonicalCoefficient`] if a decoded value is not in
+    /// `[0, p)`.
+    pub fn deserialize_vec(&self, b: &[u8]) -> Result<Vec<u64>> {
         let p_nbits = 64 - (self.p - 1).leading_zeros() as usize;
-        transcode_from_bytes(b, p_nbits)
+        if !(b.len() * 8).is_multiple_of(p_nbits) {
+            return Err(Error::InvalidPackedLength {
+                actual: b.len(),
+                bits: p_nbits,
+            });
+        }
+        let values = transcode_from_bytes(b, p_nbits);
+        if let Some(value) = values.iter().find(|value| **value >= self.p) {
+            return Err(Error::NonCanonicalCoefficient {
+                modulus: self.p,
+                value: *value,
+            });
+        }
+        Ok(values)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Modulus;
+    use crate::Error;
+    use fhe_util::transcode_to_bytes;
     use itertools::{Itertools, izip};
     use proptest::collection::vec as prop_vec;
     use proptest::prelude::{BoxedStrategy, Just, Strategy, any};
@@ -1115,7 +1141,7 @@ mod tests {
         fn serialize(p in valid_moduli(), mut a in prop_vec(any::<u64>(), 8)) {
             p.reduce_vec(&mut a);
             let b = p.serialize_vec(&a);
-            let c = p.deserialize_vec(&b);
+            let c = p.deserialize_vec(&b).unwrap();
             prop_assert_eq!(a, c);
         }
 
@@ -1189,6 +1215,123 @@ mod tests {
     }
 
     // TODO: Make a proptest.
+    #[test]
+    fn deserialize_vec_rejects_noncanonical_coefficients() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // 1153 needs 11 bits, so values in [1153, 2047] are non-canonical.
+        let small = Modulus::new(1153)?;
+        let small_nbits = 64 - (1153u64 - 1).leading_zeros() as usize;
+        assert_eq!(small_nbits, 11);
+        let mut packed = vec![0u64; 8];
+        for bad in [1153u64, 1154, 2047] {
+            packed[0] = bad;
+            let bytes = transcode_to_bytes(&packed, small_nbits);
+            assert_eq!(
+                small.deserialize_vec(&bytes).unwrap_err(),
+                Error::NonCanonicalCoefficient {
+                    modulus: 1153,
+                    value: bad,
+                }
+            );
+        }
+        for good in [0u64, 1152] {
+            packed[0] = good;
+            let bytes = transcode_to_bytes(&packed, small_nbits);
+            let mut expected = vec![0u64; 8];
+            expected[0] = good;
+            assert_eq!(small.deserialize_vec(&bytes)?, expected);
+        }
+
+        // 4611686018326724609 needs 62 bits, so values in
+        // [p, 2^62 - 1] are non-canonical.
+        let big = Modulus::new(4611686018326724609)?;
+        let big_nbits = 64 - (4611686018326724609u64 - 1).leading_zeros() as usize;
+        assert_eq!(big_nbits, 62);
+        for bad in [
+            4611686018326724609u64,
+            4611686018326724610,
+            (1u64 << 62) - 1,
+        ] {
+            packed[0] = bad;
+            let bytes = transcode_to_bytes(&packed, big_nbits);
+            assert_eq!(
+                big.deserialize_vec(&bytes).unwrap_err(),
+                Error::NonCanonicalCoefficient {
+                    modulus: 4611686018326724609,
+                    value: bad,
+                }
+            );
+        }
+        for good in [0u64, 4611686018326724608] {
+            packed[0] = good;
+            let bytes = transcode_to_bytes(&packed, big_nbits);
+            let mut expected = vec![0u64; 8];
+            expected[0] = good;
+            assert_eq!(big.deserialize_vec(&bytes)?, expected);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_vec_rejects_partial_coefficient_streams()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A single byte cannot encode a whole 62-bit coefficient.
+        let big = Modulus::new(4611686018326724609)?;
+        assert_eq!(
+            big.deserialize_vec(&[0u8]).unwrap_err(),
+            Error::InvalidPackedLength {
+                actual: 1,
+                bits: 62,
+            }
+        );
+        // 3 bytes do not encode a whole number of 11-bit coefficients.
+        let small = Modulus::new(1153)?;
+        assert_eq!(
+            small.deserialize_vec(&[0u8; 3]).unwrap_err(),
+            Error::InvalidPackedLength {
+                actual: 3,
+                bits: 11,
+            }
+        );
+        // 31 bytes encode exactly four 62-bit coefficients.
+        let values = big.deserialize_vec(&[0u8; 31])?;
+        assert_eq!(values, vec![0u64; 4]);
+        Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn deserialize_rejects_noncanonical(
+            p in valid_moduli(),
+            mut a in prop_vec(any::<u64>(), 8),
+            x: u64,
+        ) {
+            p.reduce_vec(&mut a);
+            let p_nbits = 64 - (*p - 1).leading_zeros() as usize;
+            // Pick a non-canonical representative in [p, 2^nbits). The
+            // interval is empty exactly when p is a power of two, in which
+            // case every nbits-bit value is canonical and there is nothing
+            // to reject.
+            let range = ((1u128 << p_nbits) - *p as u128) as u64;
+            if range == 0 {
+                return Ok(());
+            }
+            let bad = *p + x % range;
+            let mut tampered = a.clone();
+            tampered[0] = bad;
+            let bytes = p.serialize_vec(&tampered);
+            let err = p.deserialize_vec(&bytes).unwrap_err();
+            prop_assert_eq!(
+                err,
+                Error::NonCanonicalCoefficient {
+                    modulus: *p,
+                    value: bad,
+                }
+            );
+        }
+    }
+
     #[test]
     fn inv() {
         let ntests = 100;

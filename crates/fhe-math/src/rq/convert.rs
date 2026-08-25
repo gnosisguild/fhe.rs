@@ -2,7 +2,7 @@
 
 use super::{Context, Ntt, NttShoup, Poly, PowerBasis, traits::TryConvertFrom};
 use crate::{Error, Result};
-use itertools::{Itertools, izip};
+use itertools::izip;
 use ndarray::{Array2, ArrayView, Axis};
 use num_bigint::BigUint;
 use std::sync::Arc;
@@ -11,7 +11,16 @@ use zeroize::{Zeroize, Zeroizing};
 impl TryConvertFrom<Vec<u64>> for Poly<PowerBasis> {
     fn try_convert_from(mut v: Vec<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         if v.len() == ctx.q.len() * ctx.degree {
-            let coefficients = Array2::from_shape_vec((ctx.q.len(), ctx.degree), v).unwrap();
+            // Full-RNS input: every row must contain canonical residues for
+            // its modulus.
+            let coefficients =
+                Array2::from_shape_vec((ctx.q.len(), ctx.degree), v).map_err(|_| {
+                    Error::Default(
+                        "In PowerBasis representation, all coefficients must be specified"
+                            .to_string(),
+                    )
+                })?;
+            validate_canonical_rows(&coefficients, ctx)?;
             Ok(Self {
                 ctx: ctx.clone(),
                 allow_variable_time_computations: variable_time,
@@ -53,6 +62,7 @@ impl TryConvertFrom<Vec<u64>> for Poly<PowerBasis> {
 impl TryConvertFrom<Vec<u64>> for Poly<Ntt> {
     fn try_convert_from(v: Vec<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         if let Ok(coefficients) = Array2::from_shape_vec((ctx.q.len(), ctx.degree), v) {
+            validate_canonical_rows(&coefficients, ctx)?;
             Ok(Self {
                 ctx: ctx.clone(),
                 allow_variable_time_computations: variable_time,
@@ -72,6 +82,7 @@ impl TryConvertFrom<Vec<u64>> for Poly<Ntt> {
 impl TryConvertFrom<Vec<u64>> for Poly<NttShoup> {
     fn try_convert_from(v: Vec<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         if let Ok(coefficients) = Array2::from_shape_vec((ctx.q.len(), ctx.degree), v) {
+            validate_canonical_rows(&coefficients, ctx)?;
             let mut p = Self {
                 ctx: ctx.clone(),
                 allow_variable_time_computations: variable_time,
@@ -90,62 +101,75 @@ impl TryConvertFrom<Vec<u64>> for Poly<NttShoup> {
     }
 }
 
+/// Validate that every row of the coefficient matrix holds canonical residues
+/// for its corresponding modulus.
+fn validate_canonical_rows(coefficients: &Array2<u64>, ctx: &Context) -> Result<()> {
+    for (row, qi) in coefficients.outer_iter().zip(ctx.q.iter()) {
+        if let Some(value) = row.iter().find(|value| **value >= **qi) {
+            return Err(Error::NonCanonicalCoefficient {
+                modulus: **qi,
+                value: *value,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate that a coefficient matrix matches the context shape exactly and
+/// holds canonical residues in `[0, q_i)` for every row.
+pub(crate) fn validate_coefficient_matrix(a: &Array2<u64>, ctx: &Context) -> Result<()> {
+    if a.shape() != [ctx.q.len(), ctx.degree] {
+        return Err(Error::InvalidPolynomialDimensions {
+            expected_rows: ctx.q.len(),
+            expected_columns: ctx.degree,
+            actual_rows: a.nrows(),
+            actual_columns: a.ncols(),
+        });
+    }
+    validate_canonical_rows(a, ctx)
+}
+
 impl TryConvertFrom<Array2<u64>> for Poly<PowerBasis> {
     fn try_convert_from(a: Array2<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        if a.shape() != [ctx.q.len(), ctx.degree] {
-            Err(Error::Default(
-                "The array of coefficient does not have the correct shape".to_string(),
-            ))
-        } else {
-            Ok(Self {
-                ctx: ctx.clone(),
-                allow_variable_time_computations: variable_time,
-                coefficients: a,
-                coefficients_shoup: None,
-                has_lazy_coefficients: false,
-                _repr: std::marker::PhantomData,
-            })
-        }
+        validate_coefficient_matrix(&a, ctx)?;
+        Ok(Self {
+            ctx: ctx.clone(),
+            allow_variable_time_computations: variable_time,
+            coefficients: a,
+            coefficients_shoup: None,
+            has_lazy_coefficients: false,
+            _repr: std::marker::PhantomData,
+        })
     }
 }
 
 impl TryConvertFrom<Array2<u64>> for Poly<Ntt> {
     fn try_convert_from(a: Array2<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        if a.shape() != [ctx.q.len(), ctx.degree] {
-            Err(Error::Default(
-                "The array of coefficient does not have the correct shape".to_string(),
-            ))
-        } else {
-            Ok(Self {
-                ctx: ctx.clone(),
-                allow_variable_time_computations: variable_time,
-                coefficients: a,
-                coefficients_shoup: None,
-                has_lazy_coefficients: false,
-                _repr: std::marker::PhantomData,
-            })
-        }
+        validate_coefficient_matrix(&a, ctx)?;
+        Ok(Self {
+            ctx: ctx.clone(),
+            allow_variable_time_computations: variable_time,
+            coefficients: a,
+            coefficients_shoup: None,
+            has_lazy_coefficients: false,
+            _repr: std::marker::PhantomData,
+        })
     }
 }
 
 impl TryConvertFrom<Array2<u64>> for Poly<NttShoup> {
     fn try_convert_from(a: Array2<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        if a.shape() != [ctx.q.len(), ctx.degree] {
-            Err(Error::Default(
-                "The array of coefficient does not have the correct shape".to_string(),
-            ))
-        } else {
-            let mut p = Self {
-                ctx: ctx.clone(),
-                allow_variable_time_computations: variable_time,
-                coefficients: a,
-                coefficients_shoup: None,
-                has_lazy_coefficients: false,
-                _repr: std::marker::PhantomData,
-            };
-            p.compute_coefficients_shoup();
-            Ok(p)
-        }
+        validate_coefficient_matrix(&a, ctx)?;
+        let mut p = Self {
+            ctx: ctx.clone(),
+            allow_variable_time_computations: variable_time,
+            coefficients: a,
+            coefficients_shoup: None,
+            has_lazy_coefficients: false,
+            _repr: std::marker::PhantomData,
+        };
+        p.compute_coefficients_shoup();
+        Ok(p)
     }
 }
 
@@ -348,27 +372,36 @@ impl TryFrom<&Poly<NttShoup>> for Vec<u64> {
     }
 }
 
-impl From<&Poly<PowerBasis>> for Vec<BigUint> {
-    fn from(p: &Poly<PowerBasis>) -> Self {
-        izip!(p.coefficients.axis_iter(Axis(1)))
+impl TryFrom<&Poly<PowerBasis>> for Vec<BigUint> {
+    type Error = Error;
+
+    fn try_from(p: &Poly<PowerBasis>) -> Result<Self> {
+        p.coefficients
+            .axis_iter(Axis(1))
             .map(|c| p.ctx.rns.lift(c))
-            .collect_vec()
+            .collect()
     }
 }
 
-impl From<&Poly<Ntt>> for Vec<BigUint> {
-    fn from(p: &Poly<Ntt>) -> Self {
-        izip!(p.coefficients.axis_iter(Axis(1)))
+impl TryFrom<&Poly<Ntt>> for Vec<BigUint> {
+    type Error = Error;
+
+    fn try_from(p: &Poly<Ntt>) -> Result<Self> {
+        p.coefficients
+            .axis_iter(Axis(1))
             .map(|c| p.ctx.rns.lift(c))
-            .collect_vec()
+            .collect()
     }
 }
 
-impl From<&Poly<NttShoup>> for Vec<BigUint> {
-    fn from(p: &Poly<NttShoup>) -> Self {
-        izip!(p.coefficients.axis_iter(Axis(1)))
+impl TryFrom<&Poly<NttShoup>> for Vec<BigUint> {
+    type Error = Error;
+
+    fn try_from(p: &Poly<NttShoup>) -> Result<Self> {
+        p.coefficients
+            .axis_iter(Axis(1))
             .map(|c| p.ctx.rns.lift(c))
-            .collect_vec()
+            .collect()
     }
 }
 
@@ -451,6 +484,11 @@ mod protobuf {
         if !degree.is_multiple_of(8) || degree < 8 {
             return Err(Error::Default("Invalid degree".to_string()));
         }
+        if degree != ctx.degree {
+            return Err(Error::Default(
+                "The polynomial degree does not match the context".to_string(),
+            ));
+        }
 
         let mut expected_nbytes = 0;
         ctx.q
@@ -460,17 +498,24 @@ mod protobuf {
             return Err(Error::Default("Invalid coefficients".to_string()));
         }
 
-        let mut index = 0;
-        let power_basis_coefficients: Vec<u64> = ctx
-            .q
-            .iter()
-            .flat_map(|qi| {
-                let size = qi.serialization_length(degree);
-                let v = qi.deserialize_vec(&value.coefficients[index..index + size]);
-                index += size;
-                v
-            })
-            .collect();
+        let mut index = 0usize;
+        let mut power_basis_coefficients = Vec::with_capacity(ctx.q.len() * degree);
+        for qi in ctx.q.iter() {
+            let size = qi.serialization_length(degree);
+            // The total length was validated above, so this range is always
+            // in bounds; the checked accesses keep the trust boundary free of
+            // panics even on malformed inputs.
+            let end = index
+                .checked_add(size)
+                .ok_or_else(|| Error::Default("Invalid coefficients".to_string()))?;
+            let bytes = value
+                .coefficients
+                .get(index..end)
+                .ok_or_else(|| Error::Default("Invalid coefficients".to_string()))?;
+            let mut row = qi.deserialize_vec(bytes)?;
+            index = end;
+            power_basis_coefficients.append(&mut row);
+        }
 
         Ok((
             representation_from_proto,
@@ -523,19 +568,275 @@ mod protobuf {
 
 #[cfg(test)]
 mod tests {
-    use crate::rq::{Context, Ntt, Poly, PowerBasis, traits::TryConvertFrom};
+    use crate::rq::{Context, Ntt, NttShoup, Poly, PowerBasis, traits::TryConvertFrom};
+    use ndarray::Array2;
     use num_bigint::BigUint;
     use rand::rng;
     use std::{error::Error, sync::Arc};
 
+    use crate::Error as CrateError;
+
     static MODULI: &[u64; 3] = &[1153, 4611686018326724609, 4611686018309947393];
+
+    #[test]
+    fn try_convert_from_full_rns_rejects_noncanonical_rows() -> Result<(), Box<dyn Error>> {
+        let ctx = Arc::new(Context::new(MODULI, 16)?);
+        // Canonical full-RNS vector: row i contains canonical residues for
+        // MODULI[i].
+        let mut values = vec![0u64; MODULI.len() * 16];
+        for (i, qi) in MODULI.iter().enumerate() {
+            for j in 0..16 {
+                values[i * 16 + j] = (i as u64 * 16 + j as u64) % *qi;
+            }
+        }
+        let p = Poly::<PowerBasis>::try_convert_from(values.clone(), &ctx, false)?;
+        assert_eq!(Vec::<u64>::try_from(&p)?, values);
+
+        // A value equal to the row's modulus is rejected in every
+        // representation.
+        for (i, qi) in MODULI.iter().enumerate() {
+            let mut tampered = values.clone();
+            tampered[i * 16 + 3] = *qi;
+            assert_eq!(
+                Poly::<PowerBasis>::try_convert_from(tampered.clone(), &ctx, false).unwrap_err(),
+                CrateError::NonCanonicalCoefficient {
+                    modulus: *qi,
+                    value: *qi,
+                }
+            );
+            assert!(Poly::<Ntt>::try_convert_from(tampered.clone(), &ctx, false).is_err());
+            assert!(Poly::<NttShoup>::try_convert_from(tampered, &ctx, false).is_err());
+        }
+
+        // A value strictly above the row's modulus is rejected too.
+        let mut tampered = values;
+        tampered[16] = MODULI[1] + 1;
+        assert_eq!(
+            Poly::<PowerBasis>::try_convert_from(tampered.clone(), &ctx, false).unwrap_err(),
+            CrateError::NonCanonicalCoefficient {
+                modulus: MODULI[1],
+                value: MODULI[1] + 1,
+            }
+        );
+        assert!(Poly::<Ntt>::try_convert_from(tampered.clone(), &ctx, false).is_err());
+        assert!(Poly::<NttShoup>::try_convert_from(tampered, &ctx, false).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn try_convert_from_matrix_rejects_noncanonical_rows() -> Result<(), Box<dyn Error>> {
+        let ctx = Arc::new(Context::new(MODULI, 16)?);
+        // Canonical matrix: row i contains canonical residues for MODULI[i].
+        let mut values = vec![0u64; MODULI.len() * 16];
+        for (i, qi) in MODULI.iter().enumerate() {
+            for j in 0..16 {
+                values[i * 16 + j] = (i as u64 * 16 + j as u64) % *qi;
+            }
+        }
+        let canonical =
+            |values: &[u64]| Array2::from_shape_vec((MODULI.len(), 16), values.to_vec()).unwrap();
+        let p = Poly::<PowerBasis>::try_convert_from(canonical(&values), &ctx, false)?;
+        assert_eq!(Vec::<u64>::try_from(&p)?, values);
+
+        // A non-canonical value in any row is rejected by every
+        // representation.
+        for (i, qi) in MODULI.iter().enumerate() {
+            let mut tampered = values.clone();
+            tampered[i * 16 + 3] = *qi;
+            assert_eq!(
+                Poly::<PowerBasis>::try_convert_from(canonical(&tampered), &ctx, false)
+                    .unwrap_err(),
+                CrateError::NonCanonicalCoefficient {
+                    modulus: *qi,
+                    value: *qi,
+                }
+            );
+            assert!(Poly::<Ntt>::try_convert_from(canonical(&tampered), &ctx, false).is_err());
+            assert!(Poly::<NttShoup>::try_convert_from(canonical(&tampered), &ctx, false).is_err());
+        }
+
+        // Wrong shapes are rejected with typed dimension errors.
+        let malformed = Array2::zeros((MODULI.len() - 1, 16));
+        let expected = CrateError::InvalidPolynomialDimensions {
+            expected_rows: MODULI.len(),
+            expected_columns: 16,
+            actual_rows: MODULI.len() - 1,
+            actual_columns: 16,
+        };
+        assert_eq!(
+            Poly::<PowerBasis>::try_convert_from(malformed.clone(), &ctx, false).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            Poly::<Ntt>::try_convert_from(malformed.clone(), &ctx, false).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            Poly::<NttShoup>::try_convert_from(malformed, &ctx, false).unwrap_err(),
+            expected
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn try_convert_from_short_vector_still_reduces() -> Result<(), Box<dyn Error>> {
+        let ctx = Arc::new(Context::new(MODULI, 16)?);
+        // Short vectors are ordinary integer coefficients and keep their
+        // intended reduction semantics in every row.
+        let p = Poly::<PowerBasis>::try_convert_from(vec![MODULI[0] + 3, 5], &ctx, false)?;
+        let coefficients = Vec::<u64>::try_from(&p)?;
+        for (i, qi) in MODULI.iter().enumerate() {
+            assert_eq!(coefficients[i * 16], (MODULI[0] + 3) % *qi);
+            assert_eq!(coefficients[i * 16 + 1], 5 % *qi);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn biguint() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let ctx = Arc::new(Context::new(MODULI, 16)?);
+        let p = Poly::<PowerBasis>::random(&ctx, &mut rng);
+        let values = Vec::<BigUint>::try_from(&p)?;
+        let p2 = Poly::<PowerBasis>::try_convert_from(values.as_slice(), &ctx, false)?;
+        assert_eq!(p, p2);
+        Ok(())
+    }
 
     #[cfg(feature = "protobuf")]
     mod protobuf {
         use super::*;
-        use crate::Error as CrateError;
         use crate::proto::rq::Rq;
         use crate::rq::NttShoup;
+        use fhe_traits::DeserializeWithContext;
+        use fhe_util::transcode_to_bytes;
+        use prost::Message;
+
+        #[test]
+        fn proto_rejects_noncanonical_coefficients() -> Result<(), Box<dyn std::error::Error>> {
+            let ctx = Arc::new(Context::new(MODULI, 16)?);
+            let mut rng = rng();
+
+            // Build packed bytes whose second row contains a non-canonical
+            // value (MODULI[1] + 1).
+            let mut tampered_rows = vec![];
+            for (i, qi) in MODULI.iter().enumerate() {
+                let nbits = 64 - (*qi - 1).leading_zeros() as usize;
+                let mut row = vec![0u64; 16];
+                if i == 1 {
+                    row[0] = *qi + 1;
+                }
+                tampered_rows.push(transcode_to_bytes(&row, nbits));
+            }
+            let tampered = tampered_rows.concat();
+
+            let protos = [
+                Rq::try_from(&Poly::<PowerBasis>::random(&ctx, &mut rng))?,
+                Rq::try_from(&Poly::<Ntt>::random(&ctx, &mut rng))?,
+                Rq::try_from(&Poly::<NttShoup>::random(&ctx, &mut rng))?,
+            ];
+            for mut proto in protos {
+                proto.coefficients = tampered.clone();
+                let bytes = proto.encode_to_vec();
+                let expected = CrateError::NonCanonicalCoefficient {
+                    modulus: MODULI[1],
+                    value: MODULI[1] + 1,
+                };
+                assert_eq!(
+                    Poly::<PowerBasis>::from_bytes(&bytes, &ctx).unwrap_err(),
+                    expected
+                );
+                assert_eq!(Poly::<Ntt>::from_bytes(&bytes, &ctx).unwrap_err(), expected);
+                assert_eq!(
+                    Poly::<NttShoup>::from_bytes(&bytes, &ctx).unwrap_err(),
+                    expected
+                );
+            }
+            Ok(())
+        }
+        #[test]
+        fn proto_rejects_degree_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+            // A validly packed message whose degree differs from the context
+            // degree must be rejected, never reinterpreted (e.g. through the
+            // short-vector branch of the PowerBasis conversion).
+            let ctx16 = Arc::new(Context::new(&[MODULI[0]], 16)?);
+            let ctx8 = Arc::new(Context::new(&[MODULI[0]], 8)?);
+            let ctx16_multi = Arc::new(Context::new(MODULI, 16)?);
+            let ctx8_multi = Arc::new(Context::new(MODULI, 8)?);
+            let mut rng = rng();
+            let expected =
+                CrateError::Default("The polynomial degree does not match the context".to_string());
+
+            for (small, large) in [(&ctx8, &ctx16), (&ctx8_multi, &ctx16_multi)] {
+                let protos = [
+                    Rq::try_from(&Poly::<PowerBasis>::random(small, &mut rng))?,
+                    Rq::try_from(&Poly::<Ntt>::random(small, &mut rng))?,
+                    Rq::try_from(&Poly::<NttShoup>::random(small, &mut rng))?,
+                ];
+                for proto in protos {
+                    let bytes = proto.encode_to_vec();
+                    assert_eq!(
+                        Poly::<PowerBasis>::from_bytes(&bytes, large).unwrap_err(),
+                        expected
+                    );
+                    assert_eq!(
+                        Poly::<Ntt>::from_bytes(&bytes, large).unwrap_err(),
+                        expected
+                    );
+                    assert_eq!(
+                        Poly::<NttShoup>::from_bytes(&bytes, large).unwrap_err(),
+                        expected
+                    );
+                }
+            }
+
+            // A larger message degree is rejected too.
+            let mut proto = Rq::try_from(&Poly::<PowerBasis>::random(&ctx16, &mut rng))?;
+            proto.degree = 32;
+            proto.coefficients.extend(std::iter::repeat_n(0u8, 16 / 2));
+            let bytes = proto.encode_to_vec();
+            assert_eq!(
+                Poly::<PowerBasis>::from_bytes(&bytes, &ctx16).unwrap_err(),
+                expected
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn proto_rejects_malformed_coefficient_lengths() -> Result<(), Box<dyn std::error::Error>> {
+            let ctx = Arc::new(Context::new(MODULI, 16)?);
+            let mut rng = rng();
+            let full_len = ctx
+                .q
+                .iter()
+                .map(|qi| qi.serialization_length(16))
+                .sum::<usize>();
+
+            // A truncated or oversized coefficient stream never decodes, in
+            // any representation.
+            for len in [full_len - 1, full_len + 1, 0] {
+                let protos = [
+                    Rq::try_from(&Poly::<PowerBasis>::random(&ctx, &mut rng))?,
+                    Rq::try_from(&Poly::<Ntt>::random(&ctx, &mut rng))?,
+                    Rq::try_from(&Poly::<NttShoup>::random(&ctx, &mut rng))?,
+                ];
+                for mut proto in protos {
+                    proto.coefficients.resize(len, 0);
+                    let bytes = proto.encode_to_vec();
+                    let expected = CrateError::Default("Invalid coefficients".to_string());
+                    assert_eq!(
+                        Poly::<PowerBasis>::from_bytes(&bytes, &ctx).unwrap_err(),
+                        expected
+                    );
+                    assert_eq!(Poly::<Ntt>::from_bytes(&bytes, &ctx).unwrap_err(), expected);
+                    assert_eq!(
+                        Poly::<NttShoup>::from_bytes(&bytes, &ctx).unwrap_err(),
+                        expected
+                    );
+                }
+            }
+            Ok(())
+        }
 
         #[test]
         fn proto() -> Result<(), Box<dyn std::error::Error>> {
@@ -641,17 +942,6 @@ mod tests {
             );
         }
 
-        Ok(())
-    }
-
-    #[test]
-    fn biguint() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let ctx = Arc::new(Context::new(MODULI, 16)?);
-        let p = Poly::<PowerBasis>::random(&ctx, &mut rng);
-        let values = Vec::<BigUint>::from(&p);
-        let p2 = Poly::<PowerBasis>::try_convert_from(values.as_slice(), &ctx, false)?;
-        assert_eq!(p, p2);
         Ok(())
     }
 }

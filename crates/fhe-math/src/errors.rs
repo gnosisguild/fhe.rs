@@ -48,6 +48,56 @@ pub enum Error {
     #[error("Invalid seed: got {0} bytes, expected {1} bytes.")]
     InvalidSeedSize(usize, usize),
 
+    /// Indicates that a serialized coefficient is not a canonical
+    /// representative of its modulus.
+    #[error("Non-canonical coefficient: value {value} is not in [0, {modulus}).")]
+    NonCanonicalCoefficient {
+        /// The modulus the coefficient belongs to.
+        modulus: u64,
+        /// The offending coefficient value.
+        value: u64,
+    },
+
+    /// Indicates that packed bytes do not encode a whole number of
+    /// coefficients.
+    #[error(
+        "Invalid packed length: {actual} bytes do not encode a whole number of {bits}-bit coefficients."
+    )]
+    InvalidPackedLength {
+        /// The number of bytes provided.
+        actual: usize,
+        /// The number of bits per coefficient.
+        bits: usize,
+    },
+
+    /// Indicates that a residue vector does not have exactly one entry per
+    /// modulus of the context.
+    #[error("Invalid number of residues: got {actual}, expected {expected}.")]
+    InvalidResidueCount {
+        /// The expected number of residues.
+        expected: usize,
+        /// The number of residues provided.
+        actual: usize,
+    },
+
+    /// Indicates that a residue is not a canonical representative of its
+    /// modulus.
+    #[error("Invalid residue: value {value} is not in [0, {modulus}).")]
+    InvalidResidue {
+        /// The modulus the residue belongs to.
+        modulus: u64,
+        /// The offending residue value.
+        value: u64,
+    },
+
+    /// Indicates that a raw context import received invalid data.
+    #[error("Invalid raw RNS context: {0}")]
+    InvalidRawContext(String),
+
+    /// Indicates that a scaling factor has a zero denominator.
+    #[error("The scaling denominator cannot be zero.")]
+    ZeroScalingDenominator,
+
     /// Indicates a default error
     /// TODO: To delete when transition is over
     #[error("{0}")]
@@ -81,6 +131,46 @@ mod tests {
         assert_eq!(
             Error::InvalidSeedSize(0, 1).to_string(),
             "Invalid seed: got 0 bytes, expected 1 bytes."
+        );
+        assert_eq!(
+            Error::NonCanonicalCoefficient {
+                modulus: 1153,
+                value: 1153,
+            }
+            .to_string(),
+            "Non-canonical coefficient: value 1153 is not in [0, 1153)."
+        );
+        assert_eq!(
+            Error::InvalidPackedLength {
+                actual: 1,
+                bits: 62
+            }
+            .to_string(),
+            "Invalid packed length: 1 bytes do not encode a whole number of 62-bit coefficients."
+        );
+        assert_eq!(
+            Error::InvalidResidueCount {
+                expected: 3,
+                actual: 2,
+            }
+            .to_string(),
+            "Invalid number of residues: got 2, expected 3."
+        );
+        assert_eq!(
+            Error::InvalidResidue {
+                modulus: 4,
+                value: 4,
+            }
+            .to_string(),
+            "Invalid residue: value 4 is not in [0, 4)."
+        );
+        assert_eq!(
+            Error::InvalidRawContext("bad moduli".to_string()).to_string(),
+            "Invalid raw RNS context: bad moduli"
+        );
+        assert_eq!(
+            Error::ZeroScalingDenominator.to_string(),
+            "The scaling denominator cannot be zero."
         );
     }
 }
