@@ -276,11 +276,29 @@ mod tests {
                 let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
                 let ct = sk.try_encrypt(&pt, &mut rng)?;
                 let ct_proto = CiphertextProto::from(&ct);
-                assert_eq!(ct, Ciphertext::try_convert_from(&ct_proto, &params)?);
+                // Caller-wins policy (#99): wire-decoded components have their
+                // variable-time computations disabled, while a seed-regenerated
+                // last component keeps the local variable-time policy on both
+                // sides.
+                let mut expected = ct.clone();
+                let wire_components = if expected.seed.is_some() {
+                    expected.c.len() - 1
+                } else {
+                    expected.c.len()
+                };
+                expected
+                    .iter_mut()
+                    .take(wire_components)
+                    .for_each(|p| p.disallow_variable_time_computations());
+                assert_eq!(expected, Ciphertext::try_convert_from(&ct_proto, &params)?);
 
                 let ct = &ct * &ct;
                 let ct_proto = CiphertextProto::from(&ct);
-                assert_eq!(ct, Ciphertext::try_convert_from(&ct_proto, &params)?)
+                let mut expected = ct.clone();
+                expected
+                    .iter_mut()
+                    .for_each(|p| p.disallow_variable_time_computations());
+                assert_eq!(expected, Ciphertext::try_convert_from(&ct_proto, &params)?)
             }
             Ok(())
         }
@@ -299,7 +317,21 @@ mod tests {
                 let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
                 let ct: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
                 let ct_bytes = ct.to_bytes();
-                assert_eq!(ct, Ciphertext::from_bytes(&ct_bytes, &params)?);
+                // Caller-wins policy (#99): wire-decoded components have their
+                // variable-time computations disabled, while a seed-regenerated
+                // last component keeps the local variable-time policy on both
+                // sides.
+                let mut expected = ct.clone();
+                let wire_components = if expected.seed.is_some() {
+                    expected.c.len() - 1
+                } else {
+                    expected.c.len()
+                };
+                expected
+                    .iter_mut()
+                    .take(wire_components)
+                    .for_each(|p| p.disallow_variable_time_computations());
+                assert_eq!(expected, Ciphertext::from_bytes(&ct_bytes, &params)?);
             }
             Ok(())
         }

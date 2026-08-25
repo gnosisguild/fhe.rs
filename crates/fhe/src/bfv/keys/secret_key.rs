@@ -153,7 +153,14 @@ impl SecretKey {
         })
     }
 
-    /// Encrypt a plaintext using a provided seed and return the error polynomial.
+    /// Test-only extended variant of `encrypt_poly_with_seed` that also
+    /// returns the error polynomial.
+    ///
+    /// This method is `#[cfg(test)]`: it exists only in test builds and is not
+    /// part of the public API. It returns secret and error components
+    /// (`a`, `e`) as ordinary polynomials and must not be used outside the
+    /// tests proving the encryption equation.
+    #[cfg(test)]
     pub(crate) fn encrypt_poly_with_seed_extended<R: RngCore + CryptoRng>(
         &self,
         p: &Poly<Ntt>,
@@ -207,7 +214,14 @@ impl SecretKey {
         self.encrypt_poly_with_seed(p, seed, rng)
     }
 
-    /// Encrypt a plaintext using a random seed and return the error polynomial.
+    /// Test-only extended variant of `encrypt_poly` that also returns the
+    /// error polynomial.
+    ///
+    /// This method is `#[cfg(test)]`: it exists only in test builds and is not
+    /// part of the public API. It returns secret and error components
+    /// (`a`, `e`) as ordinary polynomials and must not be used outside the
+    /// tests proving the encryption equation.
+    #[cfg(test)]
     pub(crate) fn encrypt_poly_extended<R: RngCore + CryptoRng>(
         &self,
         p: &Poly<Ntt>,

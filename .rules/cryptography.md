@@ -87,10 +87,14 @@ ZK proof generation and verification, commitments, proof aggregation, and on-cha
 7.7. Distinguish verifiable correctness from security findings and cite ePrint section when paper-dependent.
 7.8. trlBFV `compute_b_enc` in `crates/fhe/src/trbfv/smudging.rs` deviates from `Poly::conditional_error`: it uses the CBD branch only for `v < 16` (sampler: `v <= 16`) and `floor(sqrt(3v))` on the uniform branch instead of `variance_to_uniform_bound` (e.g. `v = 16` reports 6 while CBD(32) has support ±32; `v = 20` reports 7 while the sampler uses 8). Align it with the sampler before relying on `B_enc` for smudging bounds (tracked in issue #167).
 
+**Serialization and timing policy**
+
+8.1. Mathematical polynomial bytes do not select local timing policy: `Rq.allow_variable_time` on the wire is non-authoritative input metadata and is ignored during deserialization; only the trusted caller's `variable_time` argument dispatches variable-time arithmetic (caller-wins, issue #99). Deserializers that locally regenerate components from a seed may set their own policy, but never from serialized bytes.
+
 ## Evidence / tests
 
 Crypto changes add arithmetic/protocol tests. Threshold tests cover fewer than `threshold + 1`, exactly `threshold + 1`, and `(n-1)/2`; trlBFV tests reject inconsistent participant sets. Noise tests pin both sides of the smudging interval (hiding lower bound, strict `Delta` correctness upper bound) — a plaintext round-trip alone does not establish adequate smudging. One-time smudging-noise ownership is covered by runtime and `trybuild` tests; MBFV aggregation matrices cover reordered shares, parameter/CRP/ciphertext/target-key/context/level mismatches, cross-session shares, duplicate/unknown/missing participants, truncated h vectors, missing/mismatched round-1 references, single-member exact coverage, and protobuf-gated level-aware serialization round trips at level zero and nonzero levels. Do not present ordinary BFV error sampling as secure key-switch smudging.
 
 ## Sync
 
-- Touch → update: `cryptography.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`, `crates/shamir-rns/**`.
+- Touch → update: `cryptography.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`, `crates/fhe-math/src/rq/**`, `crates/shamir-rns/**`.

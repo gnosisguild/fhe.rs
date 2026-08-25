@@ -460,6 +460,14 @@ mod protobuf {
         }
     }
 
+    /// Parse a serialized `Rq` message into representation, power-basis
+    /// coefficients, and the local timing policy.
+    ///
+    /// Timing policy is caller-controlled: only the trusted `variable_time`
+    /// argument selects variable-time arithmetic. The serialized
+    /// `Rq.allow_variable_time` field is non-authoritative input metadata —
+    /// mathematical polynomial bytes must not elevate local policy — so it is
+    /// kept on the wire for compatibility but ignored during deserialization.
     fn parse_proto(
         value: &Rq,
         ctx: &Arc<Context>,
@@ -477,8 +485,6 @@ mod protobuf {
                 return Err(Error::Default("Unknown representation".to_string()));
             }
         };
-
-        let variable_time = variable_time || value.allow_variable_time;
 
         let degree = value.degree as usize;
         if !degree.is_multiple_of(8) || degree < 8 {

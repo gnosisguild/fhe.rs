@@ -83,7 +83,7 @@ Update the canonical `.rules/*.md` in the same change when your edit makes a rul
 **Touch → update:**
 
 - `conventions.md` — `**/*.rs` (only when conventions change, not every edit)
-- `cryptography.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`, `crates/shamir-rns/**`
+- `cryptography.md` — `crates/fhe/src/{bfv,trbfv,trlbfv,lbfv,mbfv}/**`, `crates/fhe/examples/{mulpir,sealpir}.rs`, `crates/fhe-math/src/rq/**`, `crates/shamir-rns/**`
 - `mathematics.md` — `crates/fhe-math/src/**`, `crates/shamir-rns/**`
 - `protobuf.md` — `**/build.rs`, `**/*.proto`, `**/src/proto/**`
 - `testing.md` — `**/tests/**`, `**/benches/**`, `.github/workflows/**`, `crates/shamir-rns/**`

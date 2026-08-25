@@ -90,13 +90,25 @@ impl PublicKeyShare {
         })
     }
 
-    /// Extended version of `new` that returns intermediate values for debugging/testing.
+    /// Test-only extended version of `new` that returns the intermediate
+    /// values for proving the public-key share equation.
+    ///
+    /// This method is `#[cfg(test)]`: it exists only in test builds and is not
+    /// part of the public API. It returns secret and error components as
+    /// ordinary polynomials — `sk_poly` is the party's secret key share and
+    /// `e` the encryption error — so it is diagnostic material only:
     ///
     /// Returns: (pk_0, pk_1, sk_poly, e)
     /// - pk_0: the p0_share (public key part 0 share) = -a*s + e
     /// - pk_1: the crp_poly (common random polynomial `a`, public key part 1)
     /// - sk_poly: the secret key polynomial in NTT form
     /// - e: the error polynomial
+    ///
+    /// The returned values must not be copied, logged, serialized, or used
+    /// outside the test that proves `pk_0 = -a*s + e`. This is not a stable
+    /// witness or transport API; do not rely on its signature or presence in
+    /// library builds.
+    #[cfg(test)]
     #[allow(clippy::type_complexity)]
     pub fn new_extended<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
@@ -339,7 +351,12 @@ mod protobuf {
             let (crp, share) = bound_share(&params);
 
             let restored = PublicKeyShare::deserialize(&share.to_bytes(), &params, crp.clone())?;
-            assert_eq!(restored, share);
+            // Caller-wins policy (#99): the wire cannot carry variable-time
+            // state, so the round trip preserves values with the timing flags
+            // cleared.
+            let mut expected = share.clone();
+            expected.p0_share.disallow_variable_time_computations();
+            assert_eq!(restored, expected);
             assert_eq!(restored.binding().participant_id(), 1);
             assert_eq!(
                 restored.binding().participant_set().session_id(),

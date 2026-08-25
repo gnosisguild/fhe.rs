@@ -38,13 +38,25 @@ impl PublicKey {
         }
     }
 
-    /// Generate a new [`PublicKey`] and return all components for testing.
+    /// Test-only variant of `new` that returns all components for proving the
+    /// public-key equation.
+    ///
+    /// This method is `#[cfg(test)]`: it exists only in test builds and is not
+    /// part of the public API. It returns secret and error components as
+    /// ordinary polynomials — `s` is the secret key in NTT representation and
+    /// `e` the encryption error — so it is diagnostic material only:
     ///
     /// Returns: (public_key, a, s, e)
     /// where:
     /// - `a` is the random polynomial
     /// - `s` is the secret key as a polynomial in NTT representation
     /// - `e` is the error polynomial
+    ///
+    /// The returned values must not be copied, logged, serialized, or used
+    /// outside the test that proves `b = e - a*s`. This is not a stable
+    /// witness or transport API; do not rely on its signature or presence in
+    /// library builds.
+    #[cfg(test)]
     #[allow(clippy::type_complexity)]
     pub fn new_extended<R: RngCore + CryptoRng>(
         sk: &SecretKey,
