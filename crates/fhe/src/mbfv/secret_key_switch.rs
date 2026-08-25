@@ -458,7 +458,7 @@ mod protobuf {
                 sk_shares.push(sk_share);
             }
             let public_key: PublicKey = Aggregate::from_shares(pk_shares).unwrap();
-            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+            let q = fhe_math::zq::Modulus::new(params.try_plaintext().unwrap()).unwrap();
             let pt = Plaintext::try_encode(
                 &q.random_vec(params.degree(), &mut rng),
                 Encoding::poly_at_level(level),
@@ -672,7 +672,7 @@ mod tests {
                         .unwrap();
 
                     // Use it to encrypt a random polynomial
-                    let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+                    let q = fhe_math::zq::Modulus::new(params.try_plaintext().unwrap()).unwrap();
                     let pt1 = Plaintext::try_encode(
                         &q.random_vec(params.degree(), &mut rng),
                         Encoding::poly_at_level(level),
@@ -718,7 +718,7 @@ mod tests {
                         .unwrap();
 
                     // Use it to encrypt a random polynomial ct1
-                    let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+                    let q = fhe_math::zq::Modulus::new(params.try_plaintext().unwrap()).unwrap();
                     let pt1 = Plaintext::try_encode(
                         &q.random_vec(params.degree(), &mut rng),
                         Encoding::poly_at_level(level),
@@ -787,7 +787,7 @@ mod tests {
                         .unwrap();
 
                     // Parties encrypt two plaintexts
-                    let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+                    let q = fhe_math::zq::Modulus::new(params.try_plaintext().unwrap()).unwrap();
                     let a = q.random_vec(params.degree(), &mut rng);
                     let b = q.random_vec(params.degree(), &mut rng);
                     let mut expected = a.clone();

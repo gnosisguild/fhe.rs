@@ -14,7 +14,7 @@ fn test_unified_context_api() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test basic properties
     assert_eq!(params.degree(), 16);
-    assert_eq!(params.plaintext(), 1153);
+    assert_eq!(params.try_plaintext()?, 1153);
     assert_eq!(params.max_level(), 1);
     assert_eq!(params.context_chain().iter_chain().count(), 2);
 

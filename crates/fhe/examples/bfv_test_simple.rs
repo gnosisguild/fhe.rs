@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .set_degree(degree)
         .set_plaintext_modulus(plaintext_modulus_bfv)
         .set_moduli(&moduli_bfv)
-        .set_variance(10)
+        .set_variance(10)?
         .build_arc()?;
 
     println!("Parameters:");
@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Generate keys
     let sk = SecretKey::random(&params, &mut rng);
-    let pk = PublicKey::new(&sk, &mut rng);
+    let pk = PublicKey::new(&sk, &mut rng)?;
 
     // // Test with small values
     // let values = vec![3u64, 5, 10, 100, 1000];

@@ -143,14 +143,33 @@ impl BfvParameters {
         &self.moduli_sizes
     }
 
-    /// Returns the plaintext modulus if it fits in u64.
-    /// Panics if the modulus is too large.
-    #[must_use]
-    pub fn plaintext(&self) -> u64 {
-        self.plaintext.as_u64().unwrap()
+    /// Returns the plaintext modulus as a `u64`, if it fits.
+    ///
+    /// This is a checked conversion of the authoritative [`BigUint`] value
+    /// ([`Self::plaintext_big`]): it succeeds for every plaintext modulus up
+    /// to and including `u64::MAX`, regardless of whether the modulus is
+    /// stored in the small u64-NTT representation or the large [`BigUint`]
+    /// representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParametersError::PlaintextModulusNotU64`] when the plaintext
+    /// modulus exceeds `u64::MAX`. Use [`Self::plaintext_big`] for arbitrary
+    /// precision arithmetic or scaling.
+    pub fn try_plaintext(&self) -> Result<u64> {
+        self.plaintext.as_biguint().to_u64().ok_or_else(|| {
+            Error::ParametersError(ParametersError::PlaintextModulusNotU64 {
+                plaintext_modulus: self.plaintext.as_biguint().clone(),
+            })
+        })
     }
 
-    /// Returns the plaintext modulus as BigUint
+    /// Returns the plaintext modulus as [`BigUint`].
+    ///
+    /// This is the universal accessor: it is representation-independent
+    /// (works for both the small u64-NTT representation and the large
+    /// [`BigUint`] representation) and supports arbitrary precision
+    /// arithmetic, scaling, and bit-length calculations.
     #[must_use]
     pub fn plaintext_big(&self) -> &BigUint {
         self.plaintext.as_biguint()
@@ -352,13 +371,6 @@ impl BfvParameters {
             .build_arc()
             .unwrap()
     }
-
-    /// Create a new BfvParameters with custom error1_variance for threshold BFV
-    #[must_use]
-    pub fn with_error1_variance(mut self, error1_variance: BigUint) -> Self {
-        self.error1_variance = error1_variance;
-        self
-    }
 }
 
 /// Builder for parameters for the Bfv encryption scheme.
@@ -374,6 +386,16 @@ pub struct BfvParametersBuilder {
     error1_variance_explicitly_set: bool,
     ciphertext_moduli: Vec<u64>,
     ciphertext_moduli_sizes: Vec<usize>,
+}
+
+/// Greatest common divisor of two positive u64 values (Euclid's algorithm).
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    a
 }
 
 impl BfvParametersBuilder {
@@ -398,8 +420,12 @@ impl BfvParametersBuilder {
         }
     }
 
-    /// Sets the polynomial degree. Returns an error if the degree is not
-    /// a power of two larger or equal to 8.
+    /// Sets the polynomial degree.
+    ///
+    /// The degree is validated at [`Self::build`] time: it must be a power of
+    /// two in `[8, 65536]`. The upper bound is a resource/API policy and is
+    /// enforced before any context allocation (including protobuf-driven
+    /// construction).
     pub fn set_degree(&mut self, degree: usize) -> &mut Self {
         self.degree = degree;
         self
@@ -433,52 +459,109 @@ impl BfvParametersBuilder {
         self
     }
 
-    /// Sets the error variance. Returns an error if the variance is not between
-    /// one and sixteen.
+    /// Sets the error variance. Returns an error if the variance is not
+    /// between one and sixteen (the domain accepted by `Poly::small` for the
+    /// CBD sampler).
     ///
-    /// CHANGE 3: Modified to sync error1_variance unless it was explicitly set
-    /// This ensures backward compatibility - if you only set variance,
-    /// error1_variance will match it (standard BFV behavior)
-    pub fn set_variance(&mut self, variance: usize) -> &mut Self {
+    /// Unless [`Self::set_error1_variance`], [`Self::set_error1_variance_usize`],
+    /// or [`Self::set_error1_variance_str`] has been called explicitly, the
+    /// error1 variance tracks this value (standard BFV behavior).
+    ///
+    /// Validation happens before any state is modified, so a rejected value
+    /// leaves the builder unchanged and reusable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParametersError::InvalidVariance`] when `variance` is outside
+    /// `1..=16`.
+    pub fn set_variance(&mut self, variance: usize) -> Result<&mut Self> {
+        if !(1..=16).contains(&variance) {
+            return Err(Error::ParametersError(ParametersError::InvalidVariance {
+                variance,
+                min: 1,
+                max: 16,
+            }));
+        }
         self.variance = variance;
         // Only update error1_variance if it hasn't been explicitly set
         // This maintains backward compatibility while allowing independent control
         if !self.error1_variance_explicitly_set {
             self.error1_variance = BigUint::from(variance as u32);
         }
-        self
+        Ok(self)
     }
 
-    /// Sets the error2 variance for threshold BFV using BigUint.
+    /// Sets the error1 variance for threshold BFV using BigUint.
     ///
-    /// CHANGE 4: Mark the flag as true when explicitly setting error1_variance
-    /// This prevents future set_variance() calls from overwriting this value
-    pub fn set_error1_variance(&mut self, error1_variance: BigUint) -> &mut Self {
+    /// The error1 variance has no fixed upper bound: values above 16 select
+    /// the uniform branch of `Poly::conditional_error` (used by trBFV
+    /// smudging); only zero is rejected. Once set explicitly, subsequent
+    /// [`Self::set_variance`] calls no longer overwrite this value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParametersError::InvalidError1Variance`] when
+    /// `error1_variance` is zero.
+    pub fn set_error1_variance(&mut self, error1_variance: BigUint) -> Result<&mut Self> {
+        if error1_variance == BigUint::from(0u32) {
+            return Err(Error::ParametersError(
+                ParametersError::InvalidError1Variance {
+                    variance: error1_variance,
+                    min: 1,
+                },
+            ));
+        }
         self.error1_variance = error1_variance;
         self.error1_variance_explicitly_set = true;
-        self
+        Ok(self)
     }
 
-    /// Sets the error2 variance for threshold BFV from a usize.
+    /// Sets the error1 variance for threshold BFV from a usize.
     /// Convenience method for smaller values.
     ///
-    /// CHANGE 5: Also marks the flag as true
-    pub fn set_error1_variance_usize(&mut self, error1_variance: usize) -> &mut Self {
+    /// Also marks the flag as true.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParametersError::InvalidError1Variance`] when
+    /// `error1_variance` is zero.
+    pub fn set_error1_variance_usize(&mut self, error1_variance: usize) -> Result<&mut Self> {
+        if error1_variance == 0 {
+            return Err(Error::ParametersError(
+                ParametersError::InvalidError1Variance {
+                    variance: BigUint::from(error1_variance),
+                    min: 1,
+                },
+            ));
+        }
         self.error1_variance = BigUint::from(error1_variance);
         self.error1_variance_explicitly_set = true;
-        self
+        Ok(self)
     }
 
-    /// Sets the error2 variance for threshold BFV from a string representation.
+    /// Sets the error1 variance for threshold BFV from a string representation.
     /// Useful for very large numbers that can't fit in standard integer types.
     ///
-    /// CHANGE 6: Also marks the flag as true
+    /// Also marks the flag as true.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the string is not a valid [`BigUint`] or when it
+    /// represents zero ([`ParametersError::InvalidError1Variance`]).
     pub fn set_error1_variance_str(&mut self, error1_variance: &str) -> Result<&mut Self> {
         let big_uint = error1_variance.parse::<BigUint>().map_err(|_| {
             Error::DefaultError(format!(
                 "Invalid BigUint string for error1_variance: {error1_variance}"
             ))
         })?;
+        if big_uint == BigUint::from(0u32) {
+            return Err(Error::ParametersError(
+                ParametersError::InvalidError1Variance {
+                    variance: big_uint,
+                    min: 1,
+                },
+            ));
+        }
         self.error1_variance = big_uint;
         self.error1_variance_explicitly_set = true;
         Ok(self)
@@ -527,29 +610,141 @@ impl BfvParametersBuilder {
         Ok(moduli)
     }
 
+    /// Validate the ciphertext moduli used by a context.
+    ///
+    /// Each modulus must be a valid u64 modulus (`Modulus::new`), the list
+    /// must be duplicate-free and pairwise coprime, and every modulus must
+    /// support the NTT of `degree`. Structural checks (distinctness,
+    /// coprimality) run before the NTT-operator construction so that
+    /// non-coprime pairs are reported as such even when a member is not
+    /// NTT-friendly.
+    fn validate_ciphertext_moduli(moduli: &[u64], degree: usize) -> Result<()> {
+        for (index, modulus) in moduli.iter().enumerate() {
+            Modulus::new(*modulus).map_err(|e| {
+                Error::ParametersError(ParametersError::InvalidCiphertextModulus {
+                    index,
+                    modulus: *modulus,
+                    reason: e.to_string(),
+                })
+            })?;
+        }
+
+        for (index, modulus) in moduli.iter().enumerate() {
+            if let Some(first) = moduli.iter().position(|m| m == modulus)
+                && first != index
+            {
+                return Err(Error::ParametersError(ParametersError::DuplicateModuli {
+                    modulus: *modulus,
+                    indices: vec![first, index],
+                }));
+            }
+        }
+
+        for (i, modulus1) in moduli.iter().enumerate() {
+            for modulus2 in moduli.iter().skip(i + 1) {
+                let gcd = gcd_u64(*modulus1, *modulus2);
+                if gcd > 1 {
+                    return Err(Error::ParametersError(ParametersError::ModuliNotCoprime {
+                        modulus1: *modulus1,
+                        modulus2: *modulus2,
+                        gcd,
+                    }));
+                }
+            }
+        }
+
+        for (index, modulus) in moduli.iter().enumerate() {
+            let q = Modulus::new(*modulus).map_err(|e| {
+                Error::ParametersError(ParametersError::InvalidCiphertextModulus {
+                    index,
+                    modulus: *modulus,
+                    reason: e.to_string(),
+                })
+            })?;
+            if NttOperator::new(&q, degree).is_none() {
+                return Err(Error::ParametersError(
+                    ParametersError::CiphertextModulusNotNttFriendly {
+                        index,
+                        modulus: *modulus,
+                        degree,
+                    },
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Build a new `BfvParameters` inside an `Arc`.
     pub fn build_arc(&self) -> Result<Arc<BfvParameters>> {
         self.build().map(Arc::new)
     }
 
     /// Build a new `BfvParameters`.
+    ///
+    /// Repeats the full validation of every setter (degree, variance, error1
+    /// variance, plaintext modulus, and ciphertext moduli) so that builder
+    /// reuse, deserialization, and internal construction can never produce
+    /// parameters carrying values rejected by the arithmetic layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParametersError`] when the degree is not a power of two in
+    /// `[8, 65536]`, the variance is outside `1..=16`, the error1 variance is
+    /// zero, the plaintext modulus is zero, or the ciphertext moduli are
+    /// empty, invalid for the NTT context, duplicated, or not pairwise
+    /// coprime.
     pub fn build(&self) -> Result<BfvParameters> {
-        // Check that the degree is a power of 2 (and large enough).
-        if self.degree < 8 || !self.degree.is_power_of_two() {
+        // Check that the degree is a power of 2 in [8, 65536]. The upper
+        // bound is a resource/API policy and is enforced before any context
+        // allocation (including protobuf-driven construction).
+        if self.degree < 8 || self.degree > 65536 || !self.degree.is_power_of_two() {
             return Err(Error::ParametersError(
                 ParametersError::invalid_degree_with_bounds(self.degree),
             ));
         }
 
+        // Standard BFV error is sampled with the CBD sampler (`Poly::small`),
+        // which accepts exactly 1..=16.
+        if !(1..=16).contains(&self.variance) {
+            return Err(Error::ParametersError(ParametersError::InvalidVariance {
+                variance: self.variance,
+                min: 1,
+                max: 16,
+            }));
+        }
+
+        // The threshold-BFV error1 variance has no fixed upper bound (values
+        // above 16 select the uniform branch of `Poly::conditional_error`);
+        // only zero is rejected.
+        if self.error1_variance == BigUint::from(0u32) {
+            return Err(Error::ParametersError(
+                ParametersError::InvalidError1Variance {
+                    variance: self.error1_variance.clone(),
+                    min: 1,
+                },
+            ));
+        }
+
+        // The plaintext modulus must be positive.
+        if self.plaintext == BigUint::from(0u32) {
+            return Err(Error::ParametersError(
+                ParametersError::InvalidPlaintextModulus {
+                    modulus: 0,
+                    reason: "plaintext modulus must be positive".into(),
+                },
+            ));
+        }
+
         let plaintext_modulus_struct = if let Some(p) = self.plaintext.to_u64() {
-            PlaintextModulus::Small {
-                modulus: Modulus::new(p).map_err(|e| {
-                    Error::ParametersError(ParametersError::InvalidPlaintextModulus {
-                        modulus: p,
-                        reason: e.to_string(),
-                    })
-                })?,
-                modulus_big: BigUint::from(p),
+            match Modulus::new(p) {
+                Ok(modulus) => PlaintextModulus::Small {
+                    modulus,
+                    modulus_big: BigUint::from(p),
+                },
+                // Values that fit in u64 but cannot construct the u64 modulus
+                // (>= 2^62) use the BigUint plaintext path.
+                Err(_) => PlaintextModulus::Large(self.plaintext.clone()),
             }
         } else {
             PlaintextModulus::Large(self.plaintext.clone())
@@ -573,6 +768,13 @@ impl BfvParametersBuilder {
         if !self.ciphertext_moduli_sizes.is_empty() {
             moduli = Self::generate_moduli(&self.ciphertext_moduli_sizes, self.degree)?
         }
+
+        // Validate the ciphertext moduli before any context allocation: each
+        // must be a valid u64 modulus, distinct, pairwise coprime, and
+        // NTT-friendly for the degree. `fhe-math` remains the arithmetic
+        // authority; this pass maps its checks to typed `ParametersError`
+        // variants so callers can react to the specific failure.
+        Self::validate_ciphertext_moduli(&moduli, self.degree)?;
 
         // Recomputes the moduli sizes
         let moduli_sizes = moduli
@@ -796,7 +998,7 @@ mod protobuf {
                 .set_degree(params.degree as usize)
                 .set_plaintext_modulus_biguint(plaintext_modulus)
                 .set_moduli(&params.moduli)
-                .set_variance(params.variance as usize)
+                .set_variance(params.variance as usize)?
                 .build()
         }
         type Error = Error;
@@ -831,6 +1033,7 @@ impl MultiplicationParameters {
 #[cfg(test)]
 mod tests {
     use super::{BfvParameters, BfvParametersBuilder};
+    use crate::{Error as FheError, ParametersError};
     use num_bigint::BigUint;
     use std::error::Error;
 
@@ -909,7 +1112,7 @@ mod tests {
                 .set_degree(16)
                 .set_plaintext_modulus(2)
                 .set_moduli_sizes(&[62, 62, 62, 61, 60, 11])
-                .set_variance(4)
+                .set_variance(4)?
                 .build()?;
             let bytes = params.to_bytes();
             let proto = Parameters::decode(bytes.as_slice())?;
@@ -924,7 +1127,7 @@ mod tests {
                 .set_degree(16)
                 .set_plaintext_modulus_biguint(p)
                 .set_moduli_sizes(&[62, 62, 62, 62, 62])
-                .set_variance(4)
+                .set_variance(4)?
                 .build()?;
             let bytes = params.to_bytes();
             let proto = Parameters::decode(bytes.as_slice())?;
@@ -955,6 +1158,41 @@ mod tests {
             let err = BfvParameters::try_deserialize(&bytes).unwrap_err();
             assert!(format!("{err}").contains("Missing required field"));
         }
+
+        #[test]
+        fn deserialize_rejects_invalid_variance() {
+            let proto = Parameters {
+                degree: 16,
+                moduli: vec![4611686018427387617, 4611686018427387329],
+                variance: 0,
+                plaintext_modulus: Some(PlaintextModulusProto::Plaintext(1153)),
+            };
+            let bytes = proto.encode_to_vec();
+            let err = BfvParameters::try_deserialize(&bytes).unwrap_err();
+            assert!(matches!(
+                err,
+                FheError::ParametersError(ParametersError::InvalidVariance { variance: 0, .. })
+            ));
+        }
+
+        #[test]
+        fn deserialize_rejects_oversized_degree_before_allocation() {
+            let proto = Parameters {
+                degree: u32::MAX,
+                moduli: vec![4611686018427387617],
+                variance: 4,
+                plaintext_modulus: Some(PlaintextModulusProto::Plaintext(1153)),
+            };
+            let bytes = proto.encode_to_vec();
+            let err = BfvParameters::try_deserialize(&bytes).unwrap_err();
+            assert!(matches!(
+                err,
+                FheError::ParametersError(ParametersError::InvalidDegree {
+                    degree: 4_294_967_295,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
@@ -981,44 +1219,44 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62])
-            .set_variance(10)
+            .set_variance(10)?
             .build()?;
         assert_eq!(params.get_error1_variance(), &BigUint::from(10u32));
 
-        let error2_big = BigUint::from(20u32);
+        let error1_big = BigUint::from(20u32);
         let params = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62])
-            .set_variance(10)
-            .set_error1_variance(error2_big.clone())
+            .set_variance(10)?
+            .set_error1_variance(error1_big.clone())?
             .build()?;
-        assert_eq!(params.get_error1_variance(), &error2_big);
+        assert_eq!(params.get_error1_variance(), &error1_big);
         assert_eq!(params.variance(), 10);
 
-        let large_error2 = BigUint::parse_bytes(
+        let large_error1 = BigUint::parse_bytes(
             b"57896044618658097711785492504343953926634992332820282019728792003956564819967",
             10,
         )
         .unwrap();
-        let params_with_large_error2 = BfvParametersBuilder::new()
+        let params_with_large_error1 = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62])
-            .set_variance(10)
-            .set_error1_variance(large_error2.clone())
+            .set_variance(10)?
+            .set_error1_variance(large_error1.clone())?
             .build()?;
         assert_eq!(
-            params_with_large_error2.get_error1_variance(),
-            &large_error2
+            params_with_large_error1.get_error1_variance(),
+            &large_error1
         );
 
         let params_usize = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62])
-            .set_variance(10)
-            .set_error1_variance_usize(15)
+            .set_variance(10)?
+            .set_error1_variance_usize(15)?
             .build()?;
         assert_eq!(params_usize.get_error1_variance(), &BigUint::from(15u32));
 
@@ -1027,7 +1265,7 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62])
-            .set_variance(10)
+            .set_variance(10)?
             .set_error1_variance_str(
                 "123456789012345678901234567890123456789012345678901234567890",
             )?;
@@ -1051,8 +1289,8 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62])
-            .set_variance(10)
-            .set_error1_variance(bit_155_number.clone())
+            .set_variance(10)?
+            .set_error1_variance(bit_155_number.clone())?
             .build()?;
 
         assert_eq!(params.get_error1_variance(), &bit_155_number);
@@ -1066,7 +1304,7 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62])
-            .set_variance(15)
+            .set_variance(15)?
             .build()?;
 
         assert_eq!(params.variance(), 15);
@@ -1081,8 +1319,8 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62])
-            .set_error1_variance_usize(20)
-            .set_variance(15)
+            .set_error1_variance_usize(20)?
+            .set_variance(15)?
             .build()?;
 
         assert_eq!(params.variance(), 15);
@@ -1092,8 +1330,8 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62])
-            .set_variance(15)
-            .set_error1_variance_usize(20)
+            .set_variance(15)?
+            .set_error1_variance_usize(20)?
             .build()?;
 
         assert_eq!(params2.variance(), 15);
@@ -1109,15 +1347,321 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62])
-            .set_variance(5)
-            .set_variance(10)
-            .set_variance(15);
+            .set_variance(5)?
+            .set_variance(10)?
+            .set_variance(15)?;
 
         let params = builder.build()?;
 
         assert_eq!(params.variance(), 15);
         assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
 
+        Ok(())
+    }
+
+    #[test]
+    fn set_variance_rejects_invalid_and_reuse_works() -> Result<(), Box<dyn Error>> {
+        let mut builder = BfvParametersBuilder::new();
+        // 0 and 17 are outside the CBD domain 1..=16.
+        assert!(matches!(
+            builder.set_variance(0),
+            Err(FheError::ParametersError(
+                ParametersError::InvalidVariance {
+                    variance: 0,
+                    min: 1,
+                    max: 16
+                }
+            ))
+        ));
+        assert!(matches!(
+            builder.set_variance(17),
+            Err(FheError::ParametersError(
+                ParametersError::InvalidVariance { variance: 17, .. }
+            ))
+        ));
+        // Endpoints are accepted.
+        builder.set_variance(1)?;
+        builder.set_variance(16)?;
+        // A rejected value leaves the builder unchanged and reusable.
+        assert!(builder.set_variance(0).is_err());
+        let params = builder
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .build()?;
+        assert_eq!(params.variance(), 16);
+        assert_eq!(params.get_error1_variance(), &BigUint::from(16u32));
+        Ok(())
+    }
+
+    #[test]
+    fn error1_variance_rejects_zero_through_every_setter() -> Result<(), Box<dyn Error>> {
+        let mut builder = BfvParametersBuilder::new();
+        assert!(matches!(
+            builder.set_error1_variance(BigUint::from(0u32)),
+            Err(FheError::ParametersError(ParametersError::InvalidError1Variance {
+                variance: ref v,
+                min: 1
+            })) if *v == BigUint::from(0u32)
+        ));
+        assert!(matches!(
+            builder.set_error1_variance_usize(0),
+            Err(FheError::ParametersError(ParametersError::InvalidError1Variance {
+                variance: ref v,
+                min: 1
+            })) if *v == BigUint::from(0u32)
+        ));
+        assert!(matches!(
+            builder.set_error1_variance_str("0"),
+            Err(FheError::ParametersError(ParametersError::InvalidError1Variance {
+                variance: ref v,
+                min: 1
+            })) if *v == BigUint::from(0u32)
+        ));
+        // A rejected setter must not mark the error1 variance as explicitly
+        // set, so the builder remains reusable with the default variance.
+        builder.set_degree(8);
+        let params = builder
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .build()?;
+        assert_eq!(params.get_error1_variance(), &BigUint::from(10u32));
+        Ok(())
+    }
+
+    #[test]
+    fn error1_variance_accepts_16_17_and_large() -> Result<(), Box<dyn Error>> {
+        for variance in [16usize, 17, 1000] {
+            let params = BfvParametersBuilder::new()
+                .set_degree(8)
+                .set_plaintext_modulus(1153)
+                .set_moduli_sizes(&[62])
+                .set_variance(10)?
+                .set_error1_variance_usize(variance)?
+                .build()?;
+            assert_eq!(params.get_error1_variance(), &BigUint::from(variance));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn build_rejects_invalid_degrees() {
+        for degree in [0usize, 7, 12, 131072] {
+            let err = BfvParametersBuilder::new()
+                .set_degree(degree)
+                .set_plaintext_modulus(1153)
+                .set_moduli_sizes(&[62])
+                .build()
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                FheError::ParametersError(ParametersError::InvalidDegree {
+                    degree: d,
+                    min: 8,
+                    max: 65536
+                }) if d == degree
+            ));
+        }
+    }
+
+    #[test]
+    fn build_rejects_invalid_variance_state() {
+        // Install invalid state directly (as internal construction or a
+        // non-setter path could): `build` repeats the full validation and
+        // must reject it.
+        let mut builder = BfvParametersBuilder::new();
+        builder.variance = 17;
+        let err = builder
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::InvalidVariance { variance: 17, .. })
+        ));
+
+        let mut builder = BfvParametersBuilder::new();
+        builder.error1_variance = BigUint::from(0u32);
+        let err = builder
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::InvalidError1Variance {
+                variance: ref v,
+                min: 1
+            }) if *v == BigUint::from(0u32)
+        ));
+    }
+
+    #[test]
+    fn build_accepts_degree_endpoints() -> Result<(), Box<dyn Error>> {
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .build()?;
+        assert_eq!(params.degree(), 8);
+
+        let params = BfvParametersBuilder::new()
+            .set_degree(65536)
+            .set_plaintext_modulus(2)
+            .set_moduli_sizes(&[62])
+            .build()?;
+        assert_eq!(params.degree(), 65536);
+        Ok(())
+    }
+
+    #[test]
+    fn build_rejects_zero_plaintext() {
+        let err = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(0)
+            .set_moduli_sizes(&[62])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::InvalidPlaintextModulus { modulus: 0, .. })
+        ));
+
+        let err = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus_biguint(BigUint::from(0u32))
+            .set_moduli_sizes(&[62])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::InvalidPlaintextModulus { modulus: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn build_rejects_invalid_ciphertext_moduli() {
+        // No modulus source specified.
+        let err = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::MissingParameter { .. })
+        ));
+
+        // Both modulus sources specified.
+        let err = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli(&[65537])
+            .set_moduli_sizes(&[62])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::ConflictingParameters { .. })
+        ));
+
+        // A modulus that cannot construct a `Modulus`.
+        let err = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli(&[1])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::InvalidCiphertextModulus {
+                index: 0,
+                modulus: 1,
+                ..
+            })
+        ));
+
+        // A modulus that is not NTT-friendly for the degree.
+        let err = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli(&[2])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::CiphertextModulusNotNttFriendly {
+                index: 0,
+                modulus: 2,
+                degree: 8
+            })
+        ));
+
+        // Duplicate moduli.
+        let err = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli(&[65537, 65537])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::DuplicateModuli { modulus: 65537, .. })
+        ));
+
+        // Moduli that are not pairwise coprime.
+        let err = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli(&[6, 10])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::ModuliNotCoprime {
+                modulus1: 6,
+                modulus2: 10,
+                gcd: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn try_plaintext_boundaries() -> Result<(), Box<dyn Error>> {
+        // Small plaintext modulus (u64 NTT path).
+        let params = BfvParameters::default_arc(1, 8);
+        assert_eq!(params.try_plaintext()?, 1153);
+        assert_eq!(params.plaintext_big(), &BigUint::from(1153u32));
+
+        // Exact u64::MAX is accepted by `try_plaintext` even though it cannot
+        // construct the u64 NTT modulus (it is classified as Large).
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus_biguint(BigUint::from(u64::MAX))
+            .set_moduli(&[4611686018427387617, 4611686018427387329])
+            .build()?;
+        assert_eq!(params.try_plaintext()?, u64::MAX);
+        assert_eq!(params.plaintext_big(), &BigUint::from(u64::MAX));
+
+        // Above u64::MAX, `try_plaintext` returns a typed error while
+        // `plaintext_big` round-trips the value.
+        let p = BigUint::parse_bytes(b"340282366920938463463374607431768211507", 10).unwrap();
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus_biguint(p.clone())
+            .set_moduli_sizes(&[62, 62, 62, 62, 62])
+            .build()?;
+        assert_eq!(params.plaintext_big(), &p);
+        let err = params.try_plaintext().unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::PlaintextModulusNotU64 {
+                plaintext_modulus: ref m
+            }) if *m == p
+        ));
         Ok(())
     }
 

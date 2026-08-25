@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus)
             .set_moduli(&moduli)
-            .set_variance(10)
+            .set_variance(10)?
             .build_arc()?
     );
     println!(

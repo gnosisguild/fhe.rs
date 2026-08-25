@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(2) // first parameters do not support key switching
         .unwrap();
     let sk = SecretKey::random(&params, &mut rng);
-    let pk = PublicKey::new(&sk, &mut rng);
+    let pk = PublicKey::new(&sk, &mut rng)?;
     let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
         .enable_inner_sum()?
         .build(&mut rng)?;

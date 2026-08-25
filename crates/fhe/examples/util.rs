@@ -102,7 +102,7 @@ pub fn encode_database(
     assert!(!database.is_empty());
 
     let elements_size = database[0].len();
-    let plaintext_nbits = params.plaintext().ilog2() as usize;
+    let plaintext_nbits = params.plaintext_big().bits() as usize - 1;
     let number_elements_per_plaintext =
         number_elements_per_plaintext(params.degree(), plaintext_nbits, elements_size);
     let number_rows = database.len().div_ceil(number_elements_per_plaintext);

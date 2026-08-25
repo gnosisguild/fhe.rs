@@ -537,7 +537,7 @@ mod tests {
         // The default test parameters support both Poly and Simd encodings
         let params = BfvParameters::default_arc(1, 16);
         // random_vec returns Vec<u64>
-        let a = params.plaintext();
+        let a = params.try_plaintext()?;
         // use modulus directly to generate random u64s
         let q = fhe_math::zq::Modulus::new(a).unwrap();
         let a_vec = q.random_vec(params.degree(), &mut rng);
@@ -665,7 +665,7 @@ mod tests {
     fn encode_decode() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 16);
-        let a = params.plaintext();
+        let a = params.try_plaintext()?;
         let q = fhe_math::zq::Modulus::new(a).unwrap();
         let mut a_vec = q.random_vec(params.degree(), &mut rng);
         // Always exercise the centering boundary values, which previously made
@@ -708,7 +708,7 @@ mod tests {
     fn partial_eq() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 16);
-        let a = params.plaintext();
+        let a = params.try_plaintext()?;
         let q = fhe_math::zq::Modulus::new(a).unwrap();
         let a_vec = q.random_vec(params.degree(), &mut rng);
 
@@ -730,7 +730,7 @@ mod tests {
     fn try_decode_errors() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 16);
-        let a = params.plaintext();
+        let a = params.try_plaintext()?;
         let q = fhe_math::zq::Modulus::new(a).unwrap();
         let a_vec = q.random_vec(params.degree(), &mut rng);
 
@@ -790,7 +790,7 @@ mod tests {
     fn zeroize() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 16);
-        let a = params.plaintext();
+        let a = params.try_plaintext()?;
         let q = fhe_math::zq::Modulus::new(a).unwrap();
         let a_vec = q.random_vec(params.degree(), &mut rng);
         let mut plaintext = Plaintext::try_encode(&a_vec, Encoding::poly(), &params)?;
@@ -807,7 +807,7 @@ mod tests {
         let mut rng = rng();
         // The default test parameters support both Poly and Simd encodings
         let params = BfvParameters::default_arc(10, 16);
-        let a = params.plaintext();
+        let a = params.try_plaintext()?;
         let q = fhe_math::zq::Modulus::new(a).unwrap();
         let a_vec = q.random_vec(params.degree(), &mut rng);
 

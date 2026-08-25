@@ -38,6 +38,7 @@ fn bench_data_sizes(c: &mut Criterion) {
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
             .set_variance(10)
+            .unwrap()
             .set_error1_variance_str(
                 "52309181128222339698631578526730685514457152477762943514050560000",
             )
@@ -59,6 +60,7 @@ fn bench_data_sizes(c: &mut Criterion) {
             .set_plaintext_modulus(plaintext_modulus_bfv)
             .set_moduli(&moduli_bfv)
             .set_variance(10)
+            .unwrap()
             .build()
             .unwrap(),
     );
@@ -127,7 +129,7 @@ fn bench_data_sizes(c: &mut Criterion) {
 
         // Generate BFV keys for share encryption
         let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
-        let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
+        let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng()).unwrap();
 
         parties.push((sk_share, pk_share, sk_bfv, pk_bfv, sk_sss, esi_sss));
     }
@@ -370,6 +372,7 @@ fn bench_timing_operations(c: &mut Criterion) {
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
             .set_variance(10)
+            .unwrap()
             .set_error1_variance_str(
                 "52309181128222339698631578526730685514457152477762943514050560000",
             )
@@ -387,6 +390,7 @@ fn bench_timing_operations(c: &mut Criterion) {
             .set_plaintext_modulus(plaintext_modulus_bfv)
             .set_moduli(&moduli_bfv)
             .set_variance(10)
+            .unwrap()
             .build()
             .unwrap(),
     );
@@ -399,7 +403,7 @@ fn bench_timing_operations(c: &mut Criterion) {
         b.iter(|| {
             let mut rng = make_rng();
             let sk = SecretKey::random(&params_bfv, &mut rng);
-            let pk = PublicKey::new(&sk, &mut make_rng());
+            let pk = PublicKey::new(&sk, &mut make_rng()).unwrap();
             (sk, pk)
         });
     });
@@ -425,7 +429,7 @@ fn bench_timing_operations(c: &mut Criterion) {
 
     // Benchmark: Encrypt a single share
     let sk_bfv = SecretKey::random(&params_bfv, &mut make_rng());
-    let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
+    let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng()).unwrap();
     let test_share: Vec<u64> = (0..degree).map(|i| i as u64 % 1000).collect();
 
     group.bench_function("encrypt_single_share", |b| {

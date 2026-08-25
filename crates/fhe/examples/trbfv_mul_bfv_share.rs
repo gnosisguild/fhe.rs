@@ -117,7 +117,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
-            .set_variance(10)
+            .set_variance(10)?
             // Var(e_1) from the earlier parameter-tool design point, retained
             // unchanged; the `preset_smudging_feasible` test pins the feasibility
             // of this configuration.
@@ -150,7 +150,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus_share_enc)
             .set_moduli(&moduli_share_enc)
-            .set_variance(10)
+            .set_variance(10)?
             .build_arc()?
     );
     println!(
@@ -310,7 +310,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Share-encryption key pair under the second parameter set.
                 let sk_share_enc = SecretKey::random(&params_share_enc, &mut rng);
-                let pk_share_enc = PublicKey::new(&sk_share_enc, &mut rng);
+                let pk_share_enc = PublicKey::new(&sk_share_enc, &mut rng)?;
 
                 Ok(Party {
                     sk_sss,
@@ -586,12 +586,12 @@ mod tests {
     /// the examples panicked inside Rayon worker closures instead of reporting the
     /// `SmudgingBoundInfeasible` error.
     #[test]
-    fn preset_smudging_feasible() {
+    fn preset_smudging_feasible() -> Result<(), Box<dyn Error>> {
         let params = bfv::BfvParametersBuilder::new()
             .set_degree(DEGREE)
             .set_plaintext_modulus(PLAINTEXT_MODULUS_TRBFV)
             .set_moduli(&MODULI_TRBFV)
-            .set_variance(10)
+            .set_variance(10)?
             .set_error1_variance_str("4326914048779023023775413607683413333")
             .unwrap()
             .build_arc()
@@ -613,5 +613,6 @@ mod tests {
             "the preset trBFV configuration must be smudging-feasible, got: {}",
             bound.unwrap_err()
         );
+        Ok(())
     }
 }

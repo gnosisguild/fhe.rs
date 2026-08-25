@@ -332,18 +332,16 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
             let c_pb = Zeroizing::new(c_inner.into_power_basis()?);
             let d = Zeroizing::new(c_pb.as_ref().scale(&ctx_lvl.cipher_plain_context.scaler)?);
 
-            let value = match self.params.plaintext {
-                PlaintextModulus::Small { .. } => {
+            let value = match &self.params.plaintext {
+                PlaintextModulus::Small { modulus: m, .. } => {
                     let mut v = Vec::<u64>::try_from(d.as_ref())?;
-                    let plaintext_modulus = self.params.plaintext();
+                    let plaintext_modulus = **m;
                     v.iter_mut().for_each(|vi| *vi += plaintext_modulus);
                     let mut w = v[..self.params.degree()].to_vec();
 
                     let q = Modulus::new(self.params.moduli[0]).map_err(Error::MathError)?;
                     q.reduce_vec(&mut w);
-                    if let PlaintextModulus::Small { modulus: m, .. } = &self.params.plaintext {
-                        m.reduce_vec(&mut w);
-                    }
+                    m.reduce_vec(&mut w);
                     PlaintextValues::Small(w.into_boxed_slice())
                 }
                 PlaintextModulus::Large(_) => {
@@ -429,7 +427,7 @@ mod tests {
             for level in 0..params.max_level() {
                 for _ in 0..20 {
                     let sk = SecretKey::random(&params, &mut rng);
-                    let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+                    let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
 
                     let pt = Plaintext::try_encode(
                         &q.random_vec(params.degree(), &mut rng),
@@ -453,7 +451,7 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(6, 8);
         let sk = SecretKey::random(&params, &mut rng);
-        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
+        let q = fhe_math::zq::Modulus::new(params.try_plaintext()?)?;
 
         let pt = Plaintext::try_encode(
             &q.random_vec(params.degree(), &mut rng),
@@ -482,7 +480,7 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 16);
         let sk = SecretKey::random(&params, &mut rng);
-        let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+        let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
 
         let pt = Plaintext::try_encode(
             &q.random_vec(params.degree(), &mut rng),
