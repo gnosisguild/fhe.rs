@@ -389,7 +389,7 @@ impl LBFVPublicKey {
 
         let ctx = self.params.context_at_level(ct.level)?;
         let u = Poly::<Ntt>::small(ctx, self.params.variance, rng)?;
-        let e1 = Poly::<Ntt>::small(ctx, self.params.variance, rng)?;
+        let e1 = Poly::<Ntt>::error_1(ctx, Representation::Ntt, &self.params.error1_variance, rng)?;
         let e2 = Poly::<Ntt>::small(ctx, self.params.variance, rng)?;
 
         let m = Zeroizing::new(pt.to_poly());
@@ -521,6 +521,12 @@ impl FheParametrized for LBFVPublicKey {
 impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
     type Error = Error;
 
+    /// Encrypt a plaintext using the public key.
+    ///
+    /// This method uses the configured `error1_variance` for the `e1` noise
+    /// term, mirroring `bfv::PublicKey::try_encrypt`: standard l-BFV keeps
+    /// `error1_variance == variance`, while threshold l-BFV can set a larger
+    /// `error1_variance` for the same reason threshold BFV does.
     fn try_encrypt<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
@@ -539,7 +545,12 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
 
         let ctx = self.params.context_at_level(ct.level)?;
         let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
-        let e1 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
+        let e1 = Zeroizing::new(Poly::<Ntt>::error_1(
+            ctx,
+            Representation::Ntt,
+            &self.params.error1_variance,
+            rng,
+        )?);
         let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
 
         let m = Zeroizing::new(pt.to_poly());
@@ -787,6 +798,79 @@ mod tests {
     use crate::proto::lbfv::LbfvPublicKey as LBFVPublicKeyProto;
     use fhe_traits::{DeserializeParametrized, Serialize};
     use prost::Message;
+    /// `try_encrypt` and `try_encrypt_extended` must sample `e1` from the
+    /// configured `error1_variance`, independently of `variance` (used for
+    /// `u` and `e2`), mirroring `bfv::PublicKey`.
+    #[test]
+    fn encrypt_decrypt_custom_error1_variance() -> Result<(), Box<dyn Error>> {
+        use crate::bfv::BfvParametersBuilder;
+        use num_bigint::BigUint;
+
+        let mut rng = rng();
+
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62usize; 3])
+            .set_variance(10)
+            .set_error1_variance_usize(15)
+            .build_arc()?;
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+        let pt = Plaintext::try_encode(
+            &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+
+        let ct = pk.try_encrypt(&pt, &mut rng)?;
+        let pt2 = sk.try_decrypt(&ct)?;
+        assert_eq!(pt2, pt);
+        assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
+        assert_eq!(params.variance(), 10);
+
+        let (ct_ext, _u, _e1, _e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let pt2_ext = sk.try_decrypt(&ct_ext)?;
+        assert_eq!(pt2_ext, pt);
+
+        Ok(())
+    }
+
+    /// `try_encrypt_extended` witness equations: `c0 = u·b + e1 + m` and
+    /// `c1 = u·a + e2`, per `.rules/witness.md`.
+    #[test]
+    fn extended_encrypt_witness_equations() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+        let pt = Plaintext::try_encode(
+            &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+
+        let (ct, u, e1, e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+
+        let b = pk.c[0].c[0].clone();
+        let a = pk.c[0].c[1].clone();
+        let m = pt.to_poly();
+
+        let mut expected_c0 = &u * &b;
+        expected_c0 += &e1;
+        expected_c0 += &m;
+        let mut expected_c1 = &u * &a;
+        expected_c1 += &e2;
+
+        assert_eq!(ct.c[0].coefficients(), expected_c0.coefficients());
+        assert_eq!(ct.c[1].coefficients(), expected_c1.coefficients());
+
+        Ok(())
+    }
+
 
     #[test]
     fn test_serialize() -> std::result::Result<(), Box<dyn std::error::Error>> {
