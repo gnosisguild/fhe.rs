@@ -99,7 +99,12 @@ impl LBFVPublicKey {
 
         let ctx = self.par.context_at_level(ct.level)?;
         let u = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
-        let e1 = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
+        let e1 = Poly::<Ntt>::error_1(
+            ctx,
+            Representation::Ntt,
+            &self.par.error1_variance,
+            rng,
+        )?;
         let e2 = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
 
         let m = Zeroizing::new(pt.to_poly());
@@ -211,6 +216,10 @@ impl FheParametrized for LBFVPublicKey {
 impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
     type Error = Error;
 
+    /// Encrypt a plaintext using the public key.
+    ///
+    /// This method samples the `e1` noise term from the configured
+    /// `error1_variance`, while `u` and `e2` use the standard `variance`.
     #[allow(clippy::indexing_slicing)] // ct.c always has exactly 2 components (BFV invariant)
     fn try_encrypt<R: RngCore + CryptoRng>(
         &self,
@@ -229,7 +238,12 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
 
         let ctx = self.par.context_at_level(ct.level)?;
         let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
-        let e1 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
+        let e1 = Zeroizing::new(Poly::<Ntt>::error_1(
+            ctx,
+            Representation::Ntt,
+            &self.par.error1_variance,
+            rng,
+        )?);
         let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
 
         let m = Zeroizing::new(pt.to_poly());
@@ -388,6 +402,174 @@ mod tests {
         Ok(())
     }
 
+    /// `try_encrypt` and `try_encrypt_extended` must sample `e1` from the
+    /// configured `error1_variance`, independently of `variance` (used for
+    /// `u` and `e2`), mirroring `bfv::PublicKey`.
+    #[test]
+    fn encrypt_decrypt_custom_error1_variance() -> Result<(), Box<dyn Error>> {
+        use crate::bfv::BfvParametersBuilder;
+        use num_bigint::BigUint;
+
+        let mut rng = rng();
+
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62usize; 3])
+            .set_variance(10)
+            .set_error1_variance_usize(15)
+            .build_arc()?;
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+        let pt = Plaintext::try_encode(
+            &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+
+        let ct = pk.try_encrypt(&pt, &mut rng)?;
+        let pt2 = sk.try_decrypt(&ct)?;
+        assert_eq!(pt2, pt);
+        assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
+        assert_eq!(params.variance(), 10);
+
+        let (ct_ext, _u, _e1, _e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let pt2_ext = sk.try_decrypt(&ct_ext)?;
+        assert_eq!(pt2_ext, pt);
+
+        Ok(())
+    }
+
+    /// `try_encrypt_extended` witness equations: `c0 = u·b + e1 + m` and
+    /// `c1 = u·a + e2`, per `.rules/witness.md`.
+    #[test]
+    fn extended_encrypt_witness_equations() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+        let pt = Plaintext::try_encode(
+            &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+
+        let (ct, u, e1, e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+
+        let b = pk.c[0].c[0].clone();
+        let a = pk.c[0].c[1].clone();
+        let m = pt.to_poly()?;
+
+        let mut expected_c0 = &u * &b;
+        expected_c0 += &e1;
+        expected_c0 += &m;
+        let mut expected_c1 = &u * &a;
+        expected_c1 += &e2;
+
+        assert_eq!(ct.c[0].coefficients(), expected_c0.coefficients());
+        assert_eq!(ct.c[1].coefficients(), expected_c1.coefficients());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "protobuf")]
+    mod protobuf {
+        use super::*;
+        use crate::proto::bfv::LbfvPublicKey as LBFVPublicKeyProto;
+        use fhe_traits::{DeserializeParametrized, Serialize};
+        use prost::Message;
+
+        #[test]
+        fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            for params in [
+                BfvParameters::default_arc(1, 8),
+                BfvParameters::default_arc(6, 8),
+            ] {
+                let sk = SecretKey::random(&params, &mut rng);
+                let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+                let bytes = pk.to_bytes();
+                assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn test_malformed_l_rejected() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            let params = BfvParameters::default_arc(6, 8);
+            let sk = SecretKey::random(&params, &mut rng);
+            let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+            let mut proto: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
+            proto.l = 1; // Malformed: l should be the number of moduli
+            let bytes = proto.encode_to_vec();
+            assert!(LBFVPublicKey::from_bytes(&bytes, &params).is_err());
+
+            // Also test: l doesn't match ciphertext count
+            let mut proto2: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
+            proto2.c.pop(); // Remove one ciphertext but leave l unchanged
+            let bytes2 = proto2.encode_to_vec();
+            assert!(LBFVPublicKey::from_bytes(&bytes2, &params).is_err());
+
+            Ok(())
+        }
+
+        /// A serialized public key with a tampered seed that does not match the
+        /// concrete `a` polynomials must be rejected during deserialization.
+        #[test]
+        fn test_tampered_seed_rejected() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            let params = BfvParameters::default_arc(6, 8);
+            let sk = SecretKey::random(&params, &mut rng);
+            let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+            // Serialize the valid PK to proto, then replace the seed with a
+            // different one that does not reproduce the concrete a_j.
+            let mut proto: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
+            proto.seed = vec![0u8; 32]; // A seed that does not match the a_j
+
+            let bytes = proto.encode_to_vec();
+            assert!(
+                LBFVPublicKey::from_bytes(&bytes, &params).is_err(),
+                "PK deserialization must reject a tampered seed"
+            );
+
+            // A seedless PK with no seed must still be accepted.
+            let mut seedless_proto = LBFVPublicKeyProto::from(&pk);
+            seedless_proto.seed.clear();
+            let seedless_bytes = seedless_proto.encode_to_vec();
+            let seedless_pk = LBFVPublicKey::from_bytes(&seedless_bytes, &params)?;
+            assert!(seedless_pk.seed.is_none(), "Seedless PK must carry no seed");
+
+            Ok(())
+        }
+
+        /// A serialized PK carrying a binding must be rejected — single-party
+        /// LBFVPublicKey does not carry bindings.
+        #[test]
+        fn test_binding_rejected() -> Result<(), Box<dyn std::error::Error>> {
+            let mut rng = rng();
+            let params = BfvParameters::default_arc(6, 8);
+            let sk = SecretKey::random(&params, &mut rng);
+            let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+            let mut proto: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
+            // Inject a binding field (any non-empty binding should be rejected).
+            proto.binding = Some(Default::default());
+
+            let bytes = proto.encode_to_vec();
+            assert!(
+                LBFVPublicKey::from_bytes(&bytes, &params).is_err(),
+                "PK deserialization must reject a binding field"
+            );
+
+            Ok(())
+        }
+    }
     #[test]
     fn test_serialize() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
