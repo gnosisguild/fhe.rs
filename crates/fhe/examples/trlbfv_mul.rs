@@ -24,9 +24,9 @@ mod util;
 use std::{error::Error, sync::Arc};
 
 use fhe::{
+    aggregate::AggregateIter,
     bfv::{self, CommonRandomPolyVec, Encoding, Plaintext, SecretKey},
     lbfv::LBFVRelinearizationKey,
-    mbfv::AggregateIter,
     trlbfv::{
         AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
         aggregate_relinearization_key,

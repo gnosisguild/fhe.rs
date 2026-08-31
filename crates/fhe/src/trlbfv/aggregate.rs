@@ -5,9 +5,9 @@
 //! is performed by [`aggregate_relinearization_key`], which combines
 //! [`RelinKeyShare`] values against the aggregated public key.
 
+use crate::aggregate::Aggregate;
 use crate::bfv::KeySwitchingKey;
 use crate::lbfv::{LBFVPublicKey, LBFVRelinearizationKey};
-use crate::mbfv::Aggregate;
 use crate::{Error, Result};
 use fhe_math::rq::{Ntt, NttShoup, Poly, Representation};
 
@@ -517,8 +517,8 @@ mod tests {
     #![allow(clippy::expect_used, clippy::indexing_slicing, clippy::unwrap_used)]
 
     use super::*;
+    use crate::aggregate::AggregateIter;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
-    use crate::mbfv::AggregateIter;
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{RngCore, SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;

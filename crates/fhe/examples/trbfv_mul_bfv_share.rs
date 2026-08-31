@@ -34,9 +34,9 @@ use std::{env, error::Error, process::exit, sync::Arc};
 
 use console::style;
 use fhe::{
+    aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::LBFVRelinearizationKey,
-    mbfv::AggregateIter,
     trbfv::{Lambda, ShareManager, TRBFV},
     trlbfv::{
         AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,

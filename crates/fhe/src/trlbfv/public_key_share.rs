@@ -108,8 +108,8 @@ impl fhe_traits::FheParametrized for PublicKeyShare {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use crate::aggregate::{Aggregate, AggregateIter};
     use crate::bfv::{BfvParameters, CommonRandomPolyVec, SecretKey};
-    use crate::mbfv::{Aggregate, AggregateIter};
     use crate::trlbfv::{AggregatedPublicKey, ContributionBinding, ParticipantSet};
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{SeedableRng, rng};

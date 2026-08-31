@@ -11,8 +11,8 @@
 
 use std::sync::Arc;
 
+use fhe::aggregate::AggregateIter;
 use fhe::bfv::{BfvParameters, BfvParametersBuilder, Ciphertext, Encoding, Plaintext, SecretKey};
-use fhe::mbfv::AggregateIter;
 use fhe::trbfv::{Lambda, ShareManager, TRBFV};
 use fhe::trlbfv::{
     AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,

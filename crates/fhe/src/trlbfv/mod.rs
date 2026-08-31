@@ -34,8 +34,8 @@ pub mod binding;
 mod public_key_share;
 mod relin_key_share;
 
+pub use crate::aggregate::{Aggregate, AggregateIter};
 pub use crate::lbfv::{LBFVPublicKey, LBFVRelinearizationKey};
-pub use crate::mbfv::{Aggregate, AggregateIter};
 pub use aggregate::{
     AggregatedPublicKey, aggregate_relinearization_key, aggregate_relinearization_key_unbound,
 };

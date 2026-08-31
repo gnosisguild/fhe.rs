@@ -256,8 +256,8 @@ impl RelinKeyShare {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use crate::aggregate::AggregateIter;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
-    use crate::mbfv::AggregateIter;
     use crate::trlbfv::{
         AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare,
         aggregate_relinearization_key,
