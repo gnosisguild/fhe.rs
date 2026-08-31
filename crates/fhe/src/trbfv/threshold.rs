@@ -587,7 +587,7 @@ mod tests {
 
         // Create a test ciphertext
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
 
         let plaintext_data = vec![42u64];
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
@@ -636,7 +636,7 @@ mod tests {
             .collect();
 
         // Create a test ciphertext (using first party's key for simplicity)
-        let pk = PublicKey::new(&secret_keys[0], &mut rng);
+        let pk = PublicKey::new(&secret_keys[0], &mut rng).unwrap();
         let plaintext_data = vec![123u64];
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());

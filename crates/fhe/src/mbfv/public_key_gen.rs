@@ -495,7 +495,7 @@ mod tests {
 
                     // Use it to encrypt a random polynomial
                     let pt = Plaintext::try_encode(
-                        &fhe_math::zq::Modulus::new(params.plaintext())
+                        &fhe_math::zq::Modulus::new(params.try_plaintext()?)
                             .unwrap()
                             .random_vec(params.degree(), &mut rng),
                         Encoding::poly_at_level(level),

@@ -59,6 +59,7 @@ fn trbfv_params() -> Arc<BfvParameters> {
         .set_plaintext_modulus(PLAINTEXT_MODULUS_TRBFV)
         .set_moduli(TRBFV_MODULI)
         .set_variance(10)
+        .unwrap()
         .set_error1_variance_str(TRBFV_ERROR1_VARIANCE)
         .unwrap()
         .build_arc()

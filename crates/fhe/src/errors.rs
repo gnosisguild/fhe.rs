@@ -3,6 +3,7 @@
     reason = "error enums rely on variant docs and error messages"
 )]
 
+use num_bigint::BigUint;
 use thiserror::Error;
 
 /// The Result type for this library.
@@ -510,6 +511,18 @@ pub enum ParametersError {
         min: usize,
         max: usize,
     },
+
+    /// Indicates an invalid error1 variance (threshold BFV).
+    ///
+    /// The error1 variance has no fixed upper bound (values above 16 select
+    /// the uniform branch of `Poly::conditional_error`); only zero is
+    /// rejected.
+    #[error("Invalid error1 variance {variance}: must be at least {min}")]
+    InvalidError1Variance { variance: BigUint, min: u64 },
+
+    /// Indicates the plaintext modulus does not fit in a `u64`.
+    #[error("Plaintext modulus {plaintext_modulus} does not fit in a u64")]
+    PlaintextModulusNotU64 { plaintext_modulus: BigUint },
 
     /// Indicates conflicting parameter specifications
     #[error("Conflicting parameters: {conflict}")]

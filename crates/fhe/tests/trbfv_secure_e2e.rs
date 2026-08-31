@@ -43,6 +43,7 @@ fn trbfv_params() -> Arc<BfvParameters> {
         .set_plaintext_modulus(TRBFV_PLAINTEXT_MODULUS)
         .set_moduli(TRBFV_MODULI)
         .set_variance(10)
+        .unwrap()
         .set_error1_variance_str(TRBFV_ERROR1_VARIANCE)
         .unwrap()
         .build_arc()
@@ -55,6 +56,7 @@ fn dkg_params() -> Arc<BfvParameters> {
         .set_plaintext_modulus(DKG_PLAINTEXT_MODULUS)
         .set_moduli(DKG_MODULI)
         .set_variance(10)
+        .unwrap()
         .build_arc()
         .unwrap()
 }
@@ -150,7 +152,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                 .unwrap();
 
             let sk_dkg = SecretKey::random(&params_dkg, &mut rng);
-            let pk_dkg = PublicKey::new(&sk_dkg, &mut rng);
+            let pk_dkg = PublicKey::new(&sk_dkg, &mut rng).unwrap();
 
             Party {
                 pk_share,
