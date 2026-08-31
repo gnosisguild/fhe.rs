@@ -174,7 +174,7 @@ mod tests {
         ] {
             for _ in 0..30 {
                 let sk = SecretKey::random(&params, &mut rng);
-                let v = fhe_math::zq::Modulus::new(params.plaintext())
+                let v = fhe_math::zq::Modulus::new(params.try_plaintext()?)
                     .unwrap()
                     .random_vec(params.degree(), &mut rng);
                 let row_size = params.degree() >> 1;

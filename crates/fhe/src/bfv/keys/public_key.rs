@@ -25,17 +25,23 @@ pub struct PublicKey {
 
 impl PublicKey {
     /// Generate a new [`PublicKey`] from a [`SecretKey`].
-    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Self {
-        let zero = Plaintext::zero(Encoding::poly(), &sk.params).unwrap();
-        let mut c: Ciphertext = sk.try_encrypt(&zero, rng).unwrap();
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the zero plaintext cannot be created or encrypted
+    /// for the secret key's parameters (for example when the plaintext
+    /// modulus or ciphertext moduli are invalid).
+    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
+        let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
+        let mut c: Ciphertext = sk.try_encrypt(&zero, rng)?;
         // The polynomials of a public key should not allow for variable time
         // computation.
         c.iter_mut()
             .for_each(|p| p.disallow_variable_time_computations());
-        Self {
+        Ok(Self {
             params: sk.params.clone(),
             c,
-        }
+        })
     }
 
     /// Generate a new [`PublicKey`] and return all components for testing.
@@ -276,7 +282,7 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 16);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
         assert_eq!(pk.params, params);
         assert_eq!(
             sk.try_decrypt(&pk.c)?,
@@ -295,10 +301,10 @@ mod tests {
             for level in 0..params.max_level() {
                 for _ in 0..20 {
                     let sk = SecretKey::random(&params, &mut rng);
-                    let pk = PublicKey::new(&sk, &mut rng);
+                    let pk = PublicKey::new(&sk, &mut rng)?;
 
                     let pt = Plaintext::try_encode(
-                        &fhe_math::zq::Modulus::new(params.plaintext())
+                        &fhe_math::zq::Modulus::new(params.try_plaintext()?)
                             .unwrap()
                             .random_vec(params.degree(), &mut rng),
                         Encoding::poly_at_level(level),
@@ -329,7 +335,7 @@ mod tests {
                 BfvParameters::default_arc(6, 16),
             ] {
                 let sk = SecretKey::random(&params, &mut rng);
-                let pk = PublicKey::new(&sk, &mut rng);
+                let pk = PublicKey::new(&sk, &mut rng)?;
                 let bytes = pk.to_bytes();
                 assert_eq!(pk, PublicKey::from_bytes(&bytes, &params)?);
             }
@@ -342,8 +348,8 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
+        let pk = PublicKey::new(&sk, &mut rng)?;
+        let q = fhe_math::zq::Modulus::new(params.try_plaintext()?)?;
 
         let pt = Plaintext::try_encode(
             &q.random_vec(params.degree(), &mut rng),
@@ -374,13 +380,13 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62usize; 1])
-            .set_variance(10)
-            .set_error1_variance_usize(15)
+            .set_variance(10)?
+            .set_error1_variance_usize(15)?
             .build_arc()?;
 
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
+        let pk = PublicKey::new(&sk, &mut rng)?;
+        let q = fhe_math::zq::Modulus::new(params.try_plaintext()?)?;
 
         let pt = Plaintext::try_encode(
             &q.random_vec(params.degree(), &mut rng),
@@ -402,12 +408,39 @@ mod tests {
     }
 
     #[test]
+    fn new_succeeds_with_large_plaintext_modulus() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let p = BigUint::parse_bytes(b"340282366920938463463374607431768211507", 10).unwrap();
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus_biguint(p)
+            .set_moduli_sizes(&[62, 62, 62, 62, 62])
+            .build_arc()?;
+        let sk = SecretKey::random(&params, &mut rng);
+        // Large plaintext moduli remain supported and generate a public key.
+        let pk = PublicKey::new(&sk, &mut rng)?;
+        assert_eq!(pk.params, params);
+        Ok(())
+    }
+
+    #[test]
+    fn new_rejects_malformed_secret_key() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 16);
+        // A coefficient length that does not match the polynomial degree makes
+        // encryption fail with a typed error rather than panicking.
+        let malformed_sk = SecretKey::new(vec![0i64; params.degree() + 1], &params);
+        assert!(PublicKey::new(&malformed_sk, &mut rng).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn extended_encrypt_returns_noise_polynomials() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
+        let pk = PublicKey::new(&sk, &mut rng)?;
+        let q = fhe_math::zq::Modulus::new(params.try_plaintext()?)?;
 
         let pt = Plaintext::try_encode(
             &q.random_vec(params.degree(), &mut rng),
@@ -432,13 +465,13 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62usize; 1])
-            .set_variance(10)
-            .set_error1_variance_usize(20)
+            .set_variance(10)?
+            .set_error1_variance_usize(20)?
             .build_arc()?;
 
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
+        let pk = PublicKey::new(&sk, &mut rng)?;
+        let q = fhe_math::zq::Modulus::new(params.try_plaintext()?)?;
 
         let pt = Plaintext::try_encode(
             &q.random_vec(params.degree(), &mut rng),
@@ -466,15 +499,15 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62usize; 1])
-            .set_variance(10)
+            .set_variance(10)?
             .build_arc()?;
 
         let params_threshold = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62usize; 1])
-            .set_variance(10)
-            .set_error1_variance_usize(15)
+            .set_variance(10)?
+            .set_error1_variance_usize(15)?
             .build_arc()?;
 
         assert_eq!(
@@ -494,8 +527,8 @@ mod tests {
 
         for params in [params_standard, params_threshold] {
             let sk = SecretKey::random(&params, &mut rng);
-            let pk = PublicKey::new(&sk, &mut rng);
-            let q = fhe_math::zq::Modulus::new(params.plaintext())?;
+            let pk = PublicKey::new(&sk, &mut rng)?;
+            let q = fhe_math::zq::Modulus::new(params.try_plaintext()?)?;
 
             let pt = Plaintext::try_encode(
                 &q.random_vec(params.degree(), &mut rng),
@@ -568,7 +601,7 @@ mod tests {
 
         let sk = SecretKey::random(&params, &mut rng);
 
-        let pk1 = PublicKey::new(&sk, &mut rng);
+        let pk1 = PublicKey::new(&sk, &mut rng)?;
         let (pk2, _, _, _) = PublicKey::new_extended(&sk, &mut rng)?;
 
         assert_eq!(pk1.params, pk2.params);

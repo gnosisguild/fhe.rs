@@ -237,7 +237,6 @@ mod tests {
         zq::primes::generate_prime,
     };
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-    use num_bigint::BigUint;
     use rand::rng;
     use rand::{CryptoRng, RngCore};
     use std::error::Error;
@@ -275,7 +274,7 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         // We will encode `values` in an Simd format, and check that the product is
         // computed correctly.
-        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
+        let q = fhe_math::zq::Modulus::new(params.try_plaintext()?)?;
         let values = q.random_vec(params.degree(), rng);
         let mut expected = values.clone();
         q.mul_vec(&mut expected, &values);
@@ -348,7 +347,7 @@ mod tests {
         use_lbfv: bool,
         rng: &mut R,
     ) -> Result<(), Box<dyn Error>> {
-        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
+        let q = fhe_math::zq::Modulus::new(params.try_plaintext()?)?;
         let values = q.random_vec(params.degree(), rng);
         let mut expected = values.clone();
         q.mul_vec(&mut expected, &values);
@@ -401,7 +400,7 @@ mod tests {
     fn mul_no_relin() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(6, 16);
-        let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+        let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
         for _ in 0..30 {
             // We will encode `values` in an Simd format, and check that the product is
             // computed correctly.
@@ -439,7 +438,7 @@ mod tests {
 
         let mut rng = rng();
         let params = BfvParameters::default_arc(3, 16);
-        let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+        let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
         let mut extended_basis = params.moduli().to_vec();
         extended_basis
             .push(generate_prime(62, 2 * params.degree() as u64, extended_basis[2]).unwrap());
@@ -465,7 +464,7 @@ mod tests {
                 ScalingFactor::one(),
                 ScalingFactor::new(rns.modulus(), params.context_at_level(0)?.modulus()).unwrap(),
                 &extended_basis,
-                ScalingFactor::new(&BigUint::from(params.plaintext()), rns.modulus()).unwrap(),
+                ScalingFactor::new(params.plaintext_big(), rns.modulus()).unwrap(),
                 &params,
             )?;
 

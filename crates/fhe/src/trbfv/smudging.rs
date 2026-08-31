@@ -308,7 +308,7 @@ impl SmudgingBoundCalculator {
     /// Returns error if:
     /// - Inputs are invalid (zero n/m, empty moduli, zero plaintext, zero variance)
     /// - Accepted participant count is zero or exceeds n
-    /// - Lambda exceeds [`MAX_FEASIBLE_LAMBDA`]
+    /// - Lambda exceeds `MAX_FEASIBLE_LAMBDA`
     /// - `2 * B_C >= Delta` (circuit too deep or parameters too small)
     /// - `2 * (B_C + n * B_sm) >= Delta` (security requirement infeasible)
     pub fn calculate_sm_bound(&self) -> Result<BigUint, Error> {
@@ -337,7 +337,7 @@ impl SmudgingBoundCalculator {
         if moduli.is_empty() {
             return Err(Error::smudging_bound_infeasible("moduli slice is empty"));
         }
-        let t = BigUint::from(self.config.params.plaintext());
+        let t = self.config.params.plaintext_big().clone();
         if t == BigUint::from(0_u64) {
             return Err(Error::smudging_bound_infeasible(
                 "plaintext modulus must be positive",
@@ -395,7 +395,7 @@ impl SmudgingBoundCalculator {
                     .max()
                     .ok_or_else(|| Error::smudging_bound_infeasible("moduli slice is empty"))?,
             );
-            let k = BigUint::from(self.config.params.plaintext());
+            let k = self.config.params.plaintext_big().clone();
             let n_sk = BigUint::from(self.config.secret_key_bound);
 
             // Aggregate RLK error: |S| * B_e
@@ -637,6 +637,7 @@ mod tests {
             .set_plaintext_modulus(16384)
             .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
             .set_error1_variance_usize(20)
+            .unwrap()
             .build_arc()
             .unwrap()
     }
@@ -659,6 +660,7 @@ mod tests {
             .set_plaintext_modulus(16384)
             .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
             .set_error1_variance_usize(15)
+            .unwrap() // CBD, B_enc = 30
             .build_arc()
             .unwrap();
         let b_enc15 = compute_b_enc(params15.get_error1_variance()).unwrap();
@@ -676,6 +678,7 @@ mod tests {
             .set_plaintext_modulus(16384)
             .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
             .set_error1_variance_usize(16)
+            .unwrap() // CBD, B_enc = 32
             .build_arc()
             .unwrap();
         let b_enc = compute_b_enc(params16.get_error1_variance()).unwrap();
@@ -744,25 +747,6 @@ mod tests {
     }
 
     #[test]
-    fn config_new_rejects_zero_error1_variance() {
-        // Zero variance can never be sampled from; configuration
-        // construction must reject it before a calculator is created.
-        let params = BfvParametersBuilder::new()
-            .set_degree(8192)
-            .set_plaintext_modulus(16384)
-            .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
-            .set_error1_variance_usize(0)
-            .build_arc()
-            .unwrap();
-        let result = SmudgingBoundCalculatorConfig::new(params, 3, 1, Lambda::insecure(2));
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().to_lowercase().contains("variance"),
-            "zero-variance rejection should mention the variance; got: {err}"
-        );
-    }
-
-    #[test]
     fn zero_party_or_ciphertext_config_is_rejected() {
         let params = test_params();
         assert!(
@@ -799,7 +783,7 @@ mod tests {
     fn delta_is_q_div_t_floor() {
         let params = test_params();
         let q = modulus_product(params.moduli());
-        let t = BigUint::from(params.plaintext());
+        let t = params.plaintext_big().clone();
         let delta = compute_delta(&q, &t);
 
         // Delta = floor(Q / t), not Q/(2t).
@@ -821,10 +805,11 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(2)
             .set_moduli(&[65537])
-            .set_error1_variance_usize(1) // CBD, B_enc=2
+            .set_error1_variance_usize(1)
+            .unwrap() // CBD, B_enc=2
             .build_arc()
             .unwrap();
-        let t = BigUint::from(params.plaintext());
+        let t = params.plaintext_big().clone();
         let q = modulus_product(params.moduli());
         let delta = compute_delta(&q, &t); // floor(65537/2) = 32768
 

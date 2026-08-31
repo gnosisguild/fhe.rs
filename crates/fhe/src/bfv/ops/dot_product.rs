@@ -177,7 +177,7 @@ mod tests {
             for size in 1..128 {
                 let ct = (0..size)
                     .map(|_| {
-                        let v = fhe_math::zq::Modulus::new(params.plaintext())
+                        let v = fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                             .unwrap()
                             .random_vec(params.degree(), &mut rng);
                         let pt = Plaintext::try_encode(&v, Encoding::simd(), &params).unwrap();
@@ -186,7 +186,7 @@ mod tests {
                     .collect_vec();
                 let pt = (0..size)
                     .map(|_| {
-                        let v = fhe_math::zq::Modulus::new(params.plaintext())
+                        let v = fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                             .unwrap()
                             .random_vec(params.degree(), &mut rng);
                         Plaintext::try_encode(&v, Encoding::simd(), &params).unwrap()

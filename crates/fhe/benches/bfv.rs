@@ -14,7 +14,6 @@ use fhe_math::rns::{RnsContext, ScalingFactor};
 use fhe_math::zq::primes::generate_prime;
 use fhe_traits::{FheEncoder, FheEncrypter};
 use itertools::Itertools;
-use num_bigint::BigUint;
 use rand::rng;
 use std::time::Duration;
 
@@ -69,7 +68,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("keygen_pk", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| PublicKey::new(&sk, &mut rng));
+                b.iter(|| PublicKey::new(&sk, &mut rng).unwrap());
             },
         );
 
@@ -294,7 +293,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                 ScalingFactor::one(),
                 ScalingFactor::new(rns_p.modulus(), rns_q.modulus()).unwrap(),
                 &extended_basis,
-                ScalingFactor::new(&BigUint::from(params.plaintext()), rns_p.modulus()).unwrap(),
+                ScalingFactor::new(params.plaintext_big(), rns_p.modulus()).unwrap(),
                 &params,
             )
             .unwrap();

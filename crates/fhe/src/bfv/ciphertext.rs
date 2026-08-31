@@ -270,7 +270,7 @@ mod tests {
                 BfvParameters::default_arc(6, 16),
             ] {
                 let sk = SecretKey::random(&params, &mut rng);
-                let v = fhe_math::zq::Modulus::new(params.plaintext())
+                let v = fhe_math::zq::Modulus::new(params.try_plaintext()?)
                     .unwrap()
                     .random_vec(params.degree(), &mut rng);
                 let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
@@ -293,7 +293,7 @@ mod tests {
                 BfvParameters::default_arc(6, 16),
             ] {
                 let sk = SecretKey::random(&params, &mut rng);
-                let v = fhe_math::zq::Modulus::new(params.plaintext())
+                let v = fhe_math::zq::Modulus::new(params.try_plaintext()?)
                     .unwrap()
                     .random_vec(params.degree(), &mut rng);
                 let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
@@ -313,7 +313,7 @@ mod tests {
             BfvParameters::default_arc(6, 16),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
-            let v = fhe_math::zq::Modulus::new(params.plaintext())
+            let v = fhe_math::zq::Modulus::new(params.try_plaintext()?)
                 .unwrap()
                 .random_vec(params.degree(), &mut rng);
             let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
@@ -353,7 +353,7 @@ mod tests {
             BfvParameters::default_arc(6, 16),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
-            let v = fhe_math::zq::Modulus::new(params.plaintext())
+            let v = fhe_math::zq::Modulus::new(params.try_plaintext()?)
                 .unwrap()
                 .random_vec(params.degree(), &mut rng);
             let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
@@ -376,7 +376,7 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(2, 16);
         let sk = SecretKey::random(&params, &mut rng);
-        let v = fhe_math::zq::Modulus::new(params.plaintext())
+        let v = fhe_math::zq::Modulus::new(params.try_plaintext()?)
             .unwrap()
             .random_vec(params.degree(), &mut rng);
         let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
