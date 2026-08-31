@@ -9,6 +9,10 @@ use crate::lbfv::LBFVPublicKey;
 use fhe_math::rq::{Ntt, Poly};
 
 use super::ContributionBinding;
+use crate::SerializationError;
+use crate::proto::bfv::{LbfvBinding, LbfvPublicKey as LbfvPublicKeyProto};
+use fhe_traits::{DeserializeParametrized, Serialize};
+use prost::Message;
 
 /// A party's bound contribution to threshold l-BFV public-key generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,6 +261,141 @@ mod tests {
 
         let result: Result<AggregatedPublicKey> = vec![share1, share2].into_iter().aggregate();
         assert!(result.is_err(), "Aggregation must reject unbound shares");
+        Ok(())
+    }
+}
+
+impl Serialize for PublicKeyShare {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut proto: LbfvPublicKeyProto = LbfvPublicKeyProto::from(&self.key);
+        if let Some(ref binding) = self.binding {
+            proto.binding = Some(LbfvBinding {
+                session_id: binding.participant_set().session_id().to_vec(),
+                participant_ids: binding.participant_set().participant_ids().to_vec(),
+                participant_id: binding.participant_id(),
+                aggregate: false,
+            });
+        }
+        proto.encode_to_vec()
+    }
+}
+
+impl DeserializeParametrized for PublicKeyShare {
+    type Error = crate::Error;
+
+    fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self> {
+        let proto: LbfvPublicKeyProto = Message::decode(bytes).map_err(|e| {
+            crate::Error::SerializationError(SerializationError::ProtobufError {
+                message: e.to_string(),
+            })
+        })?;
+
+        let binding = match proto.binding {
+            Some(ref b) => {
+                if b.aggregate {
+                    return Err(crate::Error::SerializationError(
+                        SerializationError::InvalidFormat {
+                            reason:
+                                "PublicKeyShare binding has aggregate=true; expected contribution binding"
+                                    .to_string(),
+                        },
+                    ));
+                }
+                let session_id: [u8; 32] = b.session_id.as_slice().try_into().map_err(|_| {
+                    crate::Error::SerializationError(SerializationError::InvalidFormat {
+                        reason: "Invalid session_id length in binding".to_string(),
+                    })
+                })?;
+                let participant_set =
+                    super::ParticipantSet::new(session_id, b.participant_ids.clone())?;
+                let contribution_binding =
+                    super::ContributionBinding::new(participant_set, b.participant_id)?;
+                Some(contribution_binding)
+            }
+            None => None,
+        };
+
+        // Build the inner key from the proto, clearing the binding first.
+        let mut key_proto = proto.clone();
+        key_proto.binding = None;
+        let key_bytes = key_proto.encode_to_vec();
+        let key = LBFVPublicKey::from_bytes(&key_bytes, params)?;
+
+        Ok(Self { key, binding })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod proto_tests {
+    use super::*;
+
+    use crate::bfv::{BfvParameters, SecretKey};
+    use crate::trlbfv::{ContributionBinding, ParticipantSet};
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use rand::SeedableRng;
+    use rand::rng;
+    use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn bound_public_key_share_roundtrip() -> Result<()> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        let participant_set = ParticipantSet::new([1u8; 32], vec![1, 2, 3])?;
+        let binding = ContributionBinding::new(participant_set, 2)?;
+
+        let share =
+            PublicKeyShare::new_with_seed_and_binding(&sk, seed, binding.clone(), &mut rng)?;
+        let bytes = share.to_bytes();
+        let restored = PublicKeyShare::from_bytes(&bytes, &params)?;
+        assert_eq!(restored.key, share.key);
+        assert_eq!(restored.binding, Some(binding));
+        Ok(())
+    }
+
+    #[test]
+    fn unbound_public_key_share_roundtrip() -> Result<()> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+
+        // An unbound share doesn't carry binding.
+        let unbounded = PublicKeyShare {
+            key: LBFVPublicKey::new_with_seed(&sk, seed, &mut rng)?,
+            binding: None,
+        };
+        let bytes = unbounded.to_bytes();
+        let restored = PublicKeyShare::from_bytes(&bytes, &params)?;
+        assert_eq!(restored.key, unbounded.key);
+        assert_eq!(restored.binding, None);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_aggregate_binding() -> Result<()> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+
+        let participant_set = ParticipantSet::new([1u8; 32], vec![1, 2])?;
+        let binding = ContributionBinding::new(participant_set, 1)?;
+        let share = PublicKeyShare::new_with_seed_and_binding(&sk, seed, binding, &mut rng)?;
+        let mut proto: LbfvPublicKeyProto = LbfvPublicKeyProto::from(&share.key);
+        proto.binding = Some(LbfvBinding {
+            session_id: vec![1u8; 32],
+            participant_ids: vec![1, 2],
+            participant_id: 0,
+            aggregate: true,
+        });
+        let bytes = proto.encode_to_vec();
+        assert!(
+            PublicKeyShare::from_bytes(&bytes, &params).is_err(),
+            "Deserialization must reject aggregate binding on a PublicKeyShare"
+        );
         Ok(())
     }
 }

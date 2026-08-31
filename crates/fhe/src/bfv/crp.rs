@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::Result;
 use crate::bfv::BfvParameters;
 use fhe_math::rq::{Ntt, Poly};
+use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -87,7 +88,7 @@ impl CommonRandomPoly {
 /// the associated [`BfvParameters`]. This is the common random material used by:
 ///
 /// - **MBFV** relinearization key generation (Protocol 2, <https://eprint.iacr.org/2020/304>),
-///   where the CRP vector is passed to [`RelinKeyGenerator`](crate::mbfv::RelinKeyGenerator).
+///   where the CRP vector is passed to [`RelinKeyGenerator`](crate::aggregate::RelinKeyGenerator).
 /// - **l-BFV** public-key and relinearization-key generation, where two
 ///   independent vectors (the CRS `a` and the URS `d1`) serve as the shared
 ///   polynomials `a_j` and `d1_j` in the linear-key protocol
@@ -267,9 +268,24 @@ impl CommonRandomPolyVec {
 // Tests
 // ---------------------------------------------------------------------------
 
+impl CommonRandomPoly {
+    /// Deserialize a CRP from bytes.
+    pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
+        let ctx = par.context_at_level(0)?;
+        let poly = Poly::<Ntt>::from_bytes(bytes, ctx)?;
+        Ok(Self { poly })
+    }
+}
+
+impl Serialize for CommonRandomPoly {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.poly.to_bytes()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
+mod proto_tests {
     use super::*;
     use crate::bfv::BfvParameters;
     use rand::rng;

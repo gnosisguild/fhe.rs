@@ -9,6 +9,12 @@ use fhe_math::rq::{NttShoup, Poly};
 use fhe_traits::FheParametrized;
 
 use super::ContributionBinding;
+use crate::SerializationError;
+use crate::bfv::traits::TryConvertFrom;
+use crate::proto::bfv::{KeySwitchingKey as KeySwitchingKeyProto, LbfvBinding, LbfvRelinKeyShare};
+use fhe_traits::{DeserializeParametrized, Serialize};
+use prost::Message;
+use std::sync::Arc;
 
 /// Witness material produced alongside an [`RelinKeyShare`] for ZK proof generation.
 ///
@@ -527,6 +533,175 @@ mod tests {
         let joint_sk = SecretKey::new(joint_coeffs, &params);
         let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
         assert_eq!(decoded.first(), Some(&25));
+        Ok(())
+    }
+}
+
+impl Serialize for RelinKeyShare {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut proto = LbfvRelinKeyShare {
+            ksk_r_to_s: Some(KeySwitchingKeyProto::from(&self.ksk_r_to_s)),
+            ksk_s_to_r: Some(KeySwitchingKeyProto::from(&self.ksk_s_to_r)),
+            binding: None,
+        };
+        if let Some(ref binding) = self.binding {
+            proto.binding = Some(LbfvBinding {
+                session_id: binding.participant_set().session_id().to_vec(),
+                participant_ids: binding.participant_set().participant_ids().to_vec(),
+                participant_id: binding.participant_id(),
+                aggregate: false,
+            });
+        }
+        proto.encode_to_vec()
+    }
+}
+
+impl DeserializeParametrized for RelinKeyShare {
+    type Error = crate::Error;
+
+    fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self> {
+        let proto: LbfvRelinKeyShare = Message::decode(bytes).map_err(|e| {
+            crate::Error::SerializationError(SerializationError::ProtobufError {
+                message: e.to_string(),
+            })
+        })?;
+
+        let ksk_r_to_s = proto
+            .ksk_r_to_s
+            .as_ref()
+            .ok_or_else(|| {
+                crate::Error::SerializationError(SerializationError::InvalidFormat {
+                    reason: "Missing ksk_r_to_s in RelinKeyShare proto".to_string(),
+                })
+            })
+            .and_then(|ksk| KeySwitchingKey::try_convert_from(ksk, params))?;
+        let ksk_s_to_r = proto
+            .ksk_s_to_r
+            .as_ref()
+            .ok_or_else(|| {
+                crate::Error::SerializationError(SerializationError::InvalidFormat {
+                    reason: "Missing ksk_s_to_r in RelinKeyShare proto".to_string(),
+                })
+            })
+            .and_then(|ksk| KeySwitchingKey::try_convert_from(ksk, params))?;
+
+        let binding = match proto.binding {
+            Some(ref b) => {
+                if b.aggregate {
+                    return Err(crate::Error::SerializationError(
+                        SerializationError::InvalidFormat {
+                            reason:
+                                "RelinKeyShare binding has aggregate=true; expected contribution binding"
+                                    .to_string(),
+                        },
+                    ));
+                }
+                let session_id: [u8; 32] = b.session_id.as_slice().try_into().map_err(|_| {
+                    crate::Error::SerializationError(SerializationError::InvalidFormat {
+                        reason: "Invalid session_id length in RelinKeyShare binding".to_string(),
+                    })
+                })?;
+                let participant_set =
+                    super::ParticipantSet::new(session_id, b.participant_ids.clone())?;
+                let contribution_binding =
+                    super::ContributionBinding::new(participant_set, b.participant_id)?;
+                Some(contribution_binding)
+            }
+            None => None,
+        };
+
+        Ok(Self {
+            ksk_r_to_s,
+            ksk_s_to_r,
+            binding,
+        })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod proto_tests {
+    use super::*;
+
+    use crate::bfv::{BfvParameters, SecretKey};
+    use crate::trlbfv::{ContributionBinding, ParticipantSet};
+    use fhe_traits::{DeserializeParametrized, Serialize};
+    use rand::SeedableRng;
+    use rand::rng;
+    use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn bound_rlk_share_roundtrip() -> Result<()> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        let d1_seed = <ChaCha8Rng as SeedableRng>::Seed::from([2u8; 32]);
+        let participant_set = ParticipantSet::new([1u8; 32], vec![1, 2, 3])?;
+        let binding = ContributionBinding::new(participant_set, 2)?;
+
+        let share = RelinKeyShare::contribution_with_binding(
+            &sk,
+            d1_seed,
+            a_seed,
+            binding.clone(),
+            0,
+            0,
+            &mut rng,
+        )?;
+        let bytes = share.to_bytes();
+        let restored = RelinKeyShare::from_bytes(&bytes, &params)?;
+        assert_eq!(restored.ksk_r_to_s, share.ksk_r_to_s);
+        assert_eq!(restored.ksk_s_to_r, share.ksk_s_to_r);
+        assert_eq!(restored.binding, Some(binding));
+        Ok(())
+    }
+
+    #[test]
+    fn unbound_rlk_share_roundtrip() -> Result<()> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        let d1_seed = <ChaCha8Rng as SeedableRng>::Seed::from([2u8; 32]);
+
+        let share = RelinKeyShare::contribution(&sk, d1_seed, a_seed, 0, 0, &mut rng)?;
+        let bytes = share.to_bytes();
+        let restored = RelinKeyShare::from_bytes(&bytes, &params)?;
+        assert_eq!(restored.ksk_r_to_s, share.ksk_r_to_s);
+        assert_eq!(restored.ksk_s_to_r, share.ksk_s_to_r);
+        assert_eq!(restored.binding, None);
+        Ok(())
+    }
+
+    #[test]
+    fn rlk_share_rejects_aggregate_binding() -> Result<()> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        let d1_seed = <ChaCha8Rng as SeedableRng>::Seed::from([2u8; 32]);
+        let participant_set = ParticipantSet::new([1u8; 32], vec![1, 2])?;
+        let binding = ContributionBinding::new(participant_set, 1)?;
+
+        let share = RelinKeyShare::contribution_with_binding(
+            &sk, d1_seed, a_seed, binding, 0, 0, &mut rng,
+        )?;
+        let proto = LbfvRelinKeyShare {
+            ksk_r_to_s: Some(KeySwitchingKeyProto::from(&share.ksk_r_to_s)),
+            ksk_s_to_r: Some(KeySwitchingKeyProto::from(&share.ksk_s_to_r)),
+            binding: Some(LbfvBinding {
+                session_id: vec![1u8; 32],
+                participant_ids: vec![1, 2],
+                participant_id: 0,
+                aggregate: true,
+            }),
+        };
+        let bytes = proto.encode_to_vec();
+        assert!(
+            RelinKeyShare::from_bytes(&bytes, &params).is_err(),
+            "Deserialization must reject aggregate binding on a RelinKeyShare"
+        );
         Ok(())
     }
 }
