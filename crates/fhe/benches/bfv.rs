@@ -50,8 +50,10 @@ pub fn bfv_benchmark(c: &mut Criterion) {
             None
         };
 
-        let pt1 = Plaintext::try_encode(&(1..16u64).collect_vec(), Encoding::simd(), &params).unwrap();
-        let pt2 = Plaintext::try_encode(&(3..39u64).collect_vec(), Encoding::simd(), &params).unwrap();
+        let pt1 =
+            Plaintext::try_encode(&(1..16u64).collect_vec(), Encoding::simd(), &params).unwrap();
+        let pt2 =
+            Plaintext::try_encode(&(3..39u64).collect_vec(), Encoding::simd(), &params).unwrap();
         let mut c1: Ciphertext = sk.try_encrypt(&pt1, &mut rng).unwrap();
         let c2: Ciphertext = sk.try_encrypt(&pt2, &mut rng).unwrap();
 
@@ -81,14 +83,18 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("encode_poly", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| Plaintext::try_encode(&(1..16u64).collect_vec(), Encoding::poly(), &params));
+                b.iter(|| {
+                    Plaintext::try_encode(&(1..16u64).collect_vec(), Encoding::poly(), &params)
+                });
             },
         );
 
         group.bench_function(
             BenchmarkId::new("encode_simd", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| Plaintext::try_encode(&(1..16u64).collect_vec(), Encoding::simd(), &params));
+                b.iter(|| {
+                    Plaintext::try_encode(&(1..16u64).collect_vec(), Encoding::simd(), &params)
+                });
             },
         );
 
@@ -109,7 +115,10 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         );
 
         group.bench_function(
-            BenchmarkId::new("add_assign_ct", format!("n={}/log(q)={}", params.degree(), q)),
+            BenchmarkId::new(
+                "add_assign_ct",
+                format!("n={}/log(q)={}", params.degree(), q),
+            ),
             |b| {
                 b.iter(|| c1 += &c2);
             },
@@ -123,7 +132,10 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         );
 
         group.bench_function(
-            BenchmarkId::new("add_assign_pt", format!("n={}/log(q)={}", params.degree(), q)),
+            BenchmarkId::new(
+                "add_assign_pt",
+                format!("n={}/log(q)={}", params.degree(), q),
+            ),
             |b| {
                 b.iter(|| c1 += &pt2);
             },
@@ -137,7 +149,10 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         );
 
         group.bench_function(
-            BenchmarkId::new("sub_assign_ct", format!("n={}/log(q)={}", params.degree(), q)),
+            BenchmarkId::new(
+                "sub_assign_ct",
+                format!("n={}/log(q)={}", params.degree(), q),
+            ),
             |b| {
                 b.iter(|| c1 -= &c2);
             },
@@ -151,7 +166,10 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         );
 
         group.bench_function(
-            BenchmarkId::new("sub_assign_pt", format!("n={}/log(q)={}", params.degree(), q)),
+            BenchmarkId::new(
+                "sub_assign_pt",
+                format!("n={}/log(q)={}", params.degree(), q),
+            ),
             |b| {
                 b.iter(|| c1 -= &pt2);
             },
@@ -187,7 +205,10 @@ pub fn bfv_benchmark(c: &mut Criterion) {
             );
 
             group.bench_function(
-                BenchmarkId::new("rotate_columns", format!("n={}/log(q)={}", params.degree(), q)),
+                BenchmarkId::new(
+                    "rotate_columns",
+                    format!("n={}/log(q)={}", params.degree(), q),
+                ),
                 |b| {
                     b.iter(|| c1 = ek.rotates_columns_by(&c1, 1).unwrap());
                 },
@@ -248,7 +269,10 @@ pub fn bfv_benchmark(c: &mut Criterion) {
             let multiplicator = Multiplicator::default(rk).unwrap();
 
             group.bench_function(
-                BenchmarkId::new("mul_and_relin", format!("n={}/log(q)={}", params.degree(), q)),
+                BenchmarkId::new(
+                    "mul_and_relin",
+                    format!("n={}/log(q)={}", params.degree(), q),
+                ),
                 |b| {
                     b.iter(|| assert!(multiplicator.multiply(&c1, &c2).is_ok()));
                 },

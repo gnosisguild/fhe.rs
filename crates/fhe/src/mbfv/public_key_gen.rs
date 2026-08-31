@@ -57,7 +57,11 @@ impl PublicKeyShare {
             fhe_traits::PublicData::assert_public(),
         ));
 
-        Ok(Self { params, crp, p0_share })
+        Ok(Self {
+            params,
+            crp,
+            p0_share,
+        })
     }
 
     /// Extended version of `new` that returns intermediate values for debugging/testing.

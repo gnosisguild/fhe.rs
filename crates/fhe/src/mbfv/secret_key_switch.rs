@@ -92,7 +92,11 @@ impl SecretKeySwitchShare {
         h_share *= &ct[1];
         h_share += e.as_ref();
 
-        Ok(Self { params, ct, h_share })
+        Ok(Self {
+            params,
+            ct,
+            h_share,
+        })
     }
 
     /// Deserialize a SecretKeySwitchShare from bytes with the given parameters

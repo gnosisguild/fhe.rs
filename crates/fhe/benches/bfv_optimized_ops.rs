@@ -18,8 +18,8 @@ pub fn bfv_benchmark(c: &mut Criterion) {
     for params in BfvParameters::default_parameters_128(20).unwrap() {
         for size in [10, 128, 1000] {
             let sk = SecretKey::random(&params, &mut rng);
-            let pt1 =
-                Plaintext::try_encode(&(1..16u64).collect_vec(), Encoding::poly(), &params).unwrap();
+            let pt1 = Plaintext::try_encode(&(1..16u64).collect_vec(), Encoding::poly(), &params)
+                .unwrap();
             let mut c1: Ciphertext = sk.try_encrypt(&pt1, &mut rng).unwrap();
 
             let ct_vec = (0..size)

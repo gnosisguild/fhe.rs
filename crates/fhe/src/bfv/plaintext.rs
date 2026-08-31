@@ -272,7 +272,11 @@ where
     Plaintext: FheEncoder<&'a [T], Error = Error>,
 {
     type Error = Error;
-    fn try_encode(value: &'a [T; N], encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_encode(
+        value: &'a [T; N],
+        encoding: Encoding,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
         Plaintext::try_encode(value.as_ref(), encoding, params)
     }
 }
@@ -282,7 +286,11 @@ where
     Plaintext: FheEncoder<&'a [T], Error = Error>,
 {
     type Error = Error;
-    fn try_encode(value: &'a Vec<T>, encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_encode(
+        value: &'a Vec<T>,
+        encoding: Encoding,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
         Plaintext::try_encode(value.as_ref(), encoding, params)
     }
 }
@@ -309,7 +317,11 @@ impl<'a> FheEncoder<&'a [BigUint]> for Plaintext {
 
 impl<'a> FheEncoder<&'a [u64]> for Plaintext {
     type Error = Error;
-    fn try_encode(value: &'a [u64], encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_encode(
+        value: &'a [u64],
+        encoding: Encoding,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
         if value.len() > params.degree() {
             return Err(crate::PlaintextError::TooManyValues {
                 actual: value.len(),
@@ -345,7 +357,11 @@ impl<'a> FheEncoderVariableTime<&'a [u64]> for Plaintext {
 
 impl<'a> FheEncoder<&'a [i64]> for Plaintext {
     type Error = Error;
-    fn try_encode(value: &'a [i64], encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_encode(
+        value: &'a [i64],
+        encoding: Encoding,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
         match params.plaintext.small() {
             Some(m) => {
                 let w = Zeroizing::new(m.reduce_vec_i64(value));

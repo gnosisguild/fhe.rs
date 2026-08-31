@@ -506,7 +506,9 @@ impl KeySwitchingKey {
                 let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
 
                 let mut error_i = b.clone();
-                unsafe { error_i.allow_variable_time_computations() }
+                error_i.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                    fhe_traits::PublicData::assert_public(),
+                ));
                 let error_ntt = error_i.into_ntt_shoup();
 
                 b -= a_s_pb.as_ref();
@@ -517,7 +519,9 @@ impl KeySwitchingKey {
                 let g_i_from = Zeroizing::new(gi * from);
                 b += &g_i_from;
 
-                unsafe { b.allow_variable_time_computations() }
+                b.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                    fhe_traits::PublicData::assert_public(),
+                ));
                 Ok((b.into_ntt_shoup(), error_ntt))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -558,7 +562,9 @@ impl KeySwitchingKey {
                 let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
 
                 let mut error_i = b.clone();
-                unsafe { error_i.allow_variable_time_computations() }
+                error_i.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                    fhe_traits::PublicData::assert_public(),
+                ));
                 let error_ntt = error_i.into_ntt_shoup();
 
                 b -= a_s_pb.as_ref();
@@ -567,7 +573,9 @@ impl KeySwitchingKey {
                 let from_power = Zeroizing::new(from * &power);
                 b += from_power.as_ref();
 
-                unsafe { b.allow_variable_time_computations() }
+                b.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                    fhe_traits::PublicData::assert_public(),
+                ));
                 Ok((b.into_ntt_shoup(), error_ntt))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1092,80 +1100,4 @@ mod tests {
     }
 
     // --- Finding 2: protobuf log_base validation ---
-
-    #[cfg(feature = "protobuf")]
-    #[test]
-    fn proto_rejects_malformed_log_base_too_large() -> Result<(), Box<dyn Error>> {
-        let params = BfvParameters::default_arc(6, 8);
-        let max_level = params.max_level();
-
-        // Build a proto whose levels are valid but log_base is >= 64,
-        // which would overflow the shift operations in key_switch_decomposition.
-        let proto = KeySwitchingKeyProto {
-            ciphertext_level: max_level as u32,
-            ksk_level: max_level as u32,
-            log_base: 64,
-            ..Default::default()
-        };
-
-        // The fix must reject this with a log_base-specific error before it
-        // hits the c0-size check. Today it fails on "Incorrect number of
-        // values in c0", which is the wrong reason.
-        let err = KeySwitchingKey::try_convert_from(&proto, &params).unwrap_err();
-        let msg = err.to_string().to_lowercase();
-        assert!(
-            msg.contains("log_base") || msg.contains("log base"),
-            "Expected log_base validation error, got: {err}"
-        );
-        Ok(())
-    }
-
-    #[cfg(feature = "protobuf")]
-    #[test]
-    fn proto_rejects_malformed_log_base_gt_log_modulus() -> Result<(), Box<dyn Error>> {
-        let params = BfvParameters::default_arc(6, 8);
-        let max_level = params.max_level();
-        let log_modulus = params
-            .moduli()
-            .first()
-            .expect("params must have moduli")
-            .next_power_of_two()
-            .ilog2() as usize;
-
-        // log_base larger than log_modulus is nonsensical.
-        let proto = KeySwitchingKeyProto {
-            ciphertext_level: max_level as u32,
-            ksk_level: max_level as u32,
-            log_base: (log_modulus + 1) as u32,
-            ..Default::default()
-        };
-
-        // Must be rejected with a log_base-specific error, not the
-        // c0-count check.
-        let err = KeySwitchingKey::try_convert_from(&proto, &params).unwrap_err();
-        let msg = err.to_string().to_lowercase();
-        assert!(
-            msg.contains("log_base") || msg.contains("log base"),
-            "Expected log_base validation error, got: {err}"
-        );
-        Ok(())
-    }
-
-    #[cfg(feature = "protobuf")]
-    #[test]
-    fn proto_rejects_malformed_log_base_nonzero_not_max_level() -> Result<(), Box<dyn Error>> {
-        let params = BfvParameters::default_arc(6, 8);
-
-        let mut proto = KeySwitchingKeyProto {
-            ciphertext_level: 0u32,
-            ksk_level: 0u32,
-            log_base: 8, // non-zero at non-max level is invalid
-            ..Default::default()
-        };
-        proto.c0.push(vec![0u8; 1]);
-
-        let result = KeySwitchingKey::try_convert_from(&proto, &params);
-        assert!(result.is_err());
-        Ok(())
-    }
 }

@@ -707,7 +707,7 @@ impl LBFVRelinearizationKey {
                 ));
             }
 
-            let poly_i = unsafe {
+            let poly_i =
                 Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
                     poly_i_coefficients.as_slice().ok_or_else(|| {
                         Error::DefaultError(
@@ -716,8 +716,8 @@ impl LBFVRelinearizationKey {
                         )
                     })?,
                     &ksk_ctx,
-                )
-            };
+                    fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public()),
+                );
             out += &(&poly_i * arr_i);
         }
         Ok(out)
@@ -731,8 +731,7 @@ impl FheParametrized for LBFVRelinearizationKey {
 
 use crate::bfv::traits::TryConvertFrom;
 use crate::proto::bfv::{
-    KeySwitchingKey as KeySwitchingKeyProto,
-    LbfvRelinearizationKey as LBFVRelinearizationKeyProto,
+    KeySwitchingKey as KeySwitchingKeyProto, LbfvRelinearizationKey as LBFVRelinearizationKeyProto,
 };
 use fhe_traits::{DeserializeParametrized, DeserializeWithContext, Serialize};
 use prost::Message;
@@ -882,46 +881,45 @@ mod tests {
     use std::error::Error;
     use std::result::Result;
 
-use super::*;
-use fhe_traits::{DeserializeParametrized, Serialize};
+    use fhe_traits::{DeserializeParametrized, Serialize};
 
-#[test]
-fn test_serialize_deserialize() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rng = rng();
-    let params = BfvParameters::default_arc(6, 8);
-    let sk = SecretKey::random(&params, &mut rng);
-    let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+    #[test]
+    fn test_serialize_deserialize() -> Result<(), Box<dyn std::error::Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
 
-    // Create relinearization key
-    let relin_key = LBFVRelinearizationKey::new(&sk, &pk, None, &mut rng)?;
+        // Create relinearization key
+        let relin_key = LBFVRelinearizationKey::new(&sk, &pk, None, &mut rng)?;
 
-    // Serialize and deserialize
-    let bytes = relin_key.to_bytes();
-    let deserialized_key = LBFVRelinearizationKey::from_bytes(&bytes, &params)?;
+        // Serialize and deserialize
+        let bytes = relin_key.to_bytes();
+        let deserialized_key = LBFVRelinearizationKey::from_bytes(&bytes, &params)?;
 
-    // Test that the deserialized key works correctly
-    let pt = Plaintext::try_encode(&[2u64], Encoding::poly(), &params)?;
-    let ct = pk.try_encrypt(&pt, &mut rng)?;
-    let mut ct_squared = &ct.clone() * &ct;
+        // Test that the deserialized key works correctly
+        let pt = Plaintext::try_encode(&[2u64], Encoding::poly(), &params)?;
+        let ct = pk.try_encrypt(&pt, &mut rng)?;
+        let mut ct_squared = &ct.clone() * &ct;
 
-    // Relinearize with original key
-    let mut ct_squared_original = ct_squared.clone();
-    relin_key.relinearizes(&mut ct_squared_original)?;
+        // Relinearize with original key
+        let mut ct_squared_original = ct_squared.clone();
+        relin_key.relinearizes(&mut ct_squared_original)?;
 
-    // Relinearize with deserialized key
-    deserialized_key.relinearizes(&mut ct_squared)?;
+        // Relinearize with deserialized key
+        deserialized_key.relinearizes(&mut ct_squared)?;
 
-    // Decrypt and verify both give the same result
-    let pt_original = sk.try_decrypt(&ct_squared_original)?;
-    let pt_deserialized = sk.try_decrypt(&ct_squared)?;
+        // Decrypt and verify both give the same result
+        let pt_original = sk.try_decrypt(&ct_squared_original)?;
+        let pt_deserialized = sk.try_decrypt(&ct_squared)?;
 
-    assert_eq!(pt_original, pt_deserialized);
+        assert_eq!(pt_original, pt_deserialized);
 
-    let result = Vec::<u64>::try_decode(&pt_deserialized, Encoding::poly())?;
-    assert_eq!(result[0], 4);
+        let result = Vec::<u64>::try_decode(&pt_deserialized, Encoding::poly())?;
+        assert_eq!(result[0], 4);
 
-    Ok(())
-}
+        Ok(())
+    }
 
     #[test]
     fn test_multiplication() -> Result<(), Box<dyn Error>> {

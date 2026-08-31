@@ -149,7 +149,11 @@ impl FheEncoderVariableTime<&[u64]> for PlaintextVec {
 
 impl FheEncoder<&[BigUint]> for PlaintextVec {
     type Error = Error;
-    fn try_encode(value: &[BigUint], encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_encode(
+        value: &[BigUint],
+        encoding: Encoding,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
         Self::try_encode_with(value, encoding, params, Self::encode_biguint_chunk)
     }
 }

@@ -263,27 +263,6 @@ impl CommonRandomPolyVec {
 // Protobuf serialization (feature-gated)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "protobuf")]
-mod protobuf {
-    use super::*;
-    use fhe_traits::{DeserializeWithContext, Serialize};
-
-    impl CommonRandomPoly {
-        /// Deserialize a CRP from bytes.
-        pub fn deserialize(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
-            let ctx = par.context_at_level(0)?;
-            let poly = Poly::<Ntt>::from_bytes(bytes, ctx)?;
-            Ok(Self { poly })
-        }
-    }
-
-    impl Serialize for CommonRandomPoly {
-        fn to_bytes(&self) -> Vec<u8> {
-            self.poly.to_bytes()
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -428,18 +407,5 @@ mod tests {
         // Different concrete polys → must be unequal.
         let different = CommonRandomPolyVec::new(&params, &mut rng).unwrap();
         assert_ne!(seeded, different);
-    }
-
-    #[cfg(feature = "protobuf")]
-    #[test]
-    fn common_random_poly_serialize_roundtrip() {
-        use fhe_traits::Serialize;
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
-
-        let bytes = crp.to_bytes();
-        let crp2 = CommonRandomPoly::deserialize(&bytes, &params).unwrap();
-        assert_eq!(crp.poly(), crp2.poly());
     }
 }

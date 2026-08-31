@@ -180,7 +180,10 @@ impl From<&RelinearizationKey> for RelinearizationKeyProto {
 }
 
 impl TryConvertFrom<&RelinearizationKeyProto> for RelinearizationKey {
-    fn try_convert_from(value: &RelinearizationKeyProto, params: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_convert_from(
+        value: &RelinearizationKeyProto,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
         if let Some(ksk) = &value.ksk {
             Ok(RelinearizationKey {
                 ksk: KeySwitchingKey::try_convert_from(ksk, params)?,

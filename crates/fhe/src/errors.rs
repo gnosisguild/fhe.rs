@@ -20,6 +20,10 @@ pub enum Error {
     #[error("Math library error: {0}")]
     MathError(#[from] fhe_math::Error),
 
+    /// Legacy catch-all error (deprecated).
+    #[error("{0}")]
+    DefaultError(String),
+
     /// Cryptographic objects were constructed with incompatible parameters.
     #[error("Parameter mismatch between {left:?} and {right:?}")]
     ParameterMismatch {
@@ -399,6 +403,14 @@ pub enum SerializationError {
     /// An I/O operation failed.
     #[error("Serialization I/O error: {kind:?}")]
     Io { kind: std::io::ErrorKind },
+
+    /// Indicates invalid serialized data format
+    #[error("Invalid serialized format: {reason}")]
+    InvalidFormat { reason: String },
+
+    /// Indicates protobuf encoding/decoding error
+    #[error("Protobuf error: {message}")]
+    ProtobufError { message: String },
 }
 
 impl From<std::io::Error> for SerializationError {
