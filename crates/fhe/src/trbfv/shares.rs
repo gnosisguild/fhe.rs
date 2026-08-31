@@ -66,7 +66,7 @@ impl ShareManager {
             .moduli()
             .iter()
             .min()
-            .ok_or_else(|| Error::DefaultError("parameters have no moduli".to_string()))?;
+            .ok_or(fhe_math::Error::EmptyModuli)?;
         if n >= usize::try_from(*min_modulus).unwrap_or(usize::MAX) {
             return Err(Error::party_count_exceeds_modulus(n, *min_modulus));
         }
@@ -126,10 +126,7 @@ impl ShareManager {
     ) -> Result<Vec<Array2<u64>>, Error> {
         let moduli: Vec<u64> = poly.ctx().moduli().to_vec();
 
-        let min_modulus = moduli
-            .iter()
-            .min()
-            .ok_or_else(|| Error::DefaultError("moduli vector is empty".to_string()))?;
+        let min_modulus = moduli.iter().min().ok_or(fhe_math::Error::EmptyModuli)?;
 
         if self.n >= usize::try_from(*min_modulus).unwrap_or(usize::MAX) {
             return Err(Error::party_count_exceeds_modulus(self.n, *min_modulus));
@@ -172,7 +169,10 @@ impl ShareManager {
                     let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
                     for (_, c_share) in c_shares.iter() {
                         c_vec.push(c_share.to_u64().ok_or_else(|| {
-                            Error::DefaultError("Shamir share does not fit in u64".to_string())
+                            Error::malformed_shares(
+                                0,
+                                "Shamir share does not fit in u64".to_string(),
+                            )
                         })?);
                     }
                     m_data.extend_from_slice(&c_vec);
@@ -181,7 +181,10 @@ impl ShareManager {
                 // convert flat vector of coeffs to array2
                 let arr_matrix = Array2::from_shape_vec((self.params.degree(), self.n), m_data)
                     .map_err(|_| {
-                        Error::DefaultError("Failed to create coefficient matrix".to_string())
+                        Error::malformed_shares(
+                            0,
+                            "Failed to create coefficient matrix".to_string(),
+                        )
                     })?;
                 // reverse the columns and rows
                 let reversed_axes = arr_matrix.t();
@@ -238,20 +241,18 @@ impl ShareManager {
         // contribution into its own Poly and adding those).
         let mut sum = Array2::<u64>::zeros(expected_shape);
         for (row, mut acc_row) in sum.outer_iter_mut().enumerate() {
-            let &modulus = self
-                .params
-                .moduli()
-                .get(row)
-                .ok_or_else(|| Error::DefaultError("modulus index out of range".to_string()))?;
+            let &modulus = self.params.moduli().get(row).ok_or_else(|| {
+                Error::malformed_shares(row, "modulus index out of range".to_string())
+            })?;
             let q = Modulus::new(modulus).map_err(Error::MathError)?;
             let acc = acc_row
                 .as_slice_mut()
-                .ok_or_else(|| Error::DefaultError("non-contiguous row".to_string()))?;
+                .ok_or(fhe_math::Error::NonContiguousCoefficients)?;
             for item in sk_sss_collected {
                 let item_row = item.row(row);
                 let share = item_row
                     .as_slice()
-                    .ok_or_else(|| Error::DefaultError("non-contiguous row".to_string()))?;
+                    .ok_or(fhe_math::Error::NonContiguousCoefficients)?;
                 q.add_vec(acc, share);
             }
         }
@@ -283,26 +284,28 @@ impl ShareManager {
         es_i: Poly<PowerBasis>,
     ) -> Result<Poly<PowerBasis>, Error> {
         if ciphertext.par != self.params {
-            return Err(Error::invalid_ciphertext(
-                "ciphertext parameters do not match this ShareManager's parameters",
-            ));
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Ciphertext,
+                right: crate::ParameterSource::Parameters,
+            });
         }
         // A degree-2 (unrelinearized) ciphertext has 3 components; silently
         // ignoring c[2] would produce a wrong plaintext.
         if ciphertext.c.len() != 2 {
-            return Err(Error::invalid_ciphertext(format!(
-                "expected 2 ciphertext components, got {}; relinearize before threshold \
-                 decryption",
-                ciphertext.c.len()
-            )));
+            return Err(crate::CiphertextError::InvalidPolynomialCount {
+                operation: crate::CiphertextOperation::MultipartyKeySwitch,
+                actual: ciphertext.c.len(),
+                expected: 2,
+            }
+            .into());
         }
         let c0 = ciphertext.c[0].clone().into_power_basis();
         let c1 = ciphertext.c[1].clone();
         if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
-            return Err(Error::context_mismatch(
-                &"share polynomial context",
-                &"ciphertext context",
-            ));
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::Ciphertext,
+            });
         }
         let c1sk = (&c1 * &sk_i).into_power_basis();
         let d_share_poly = c0 + c1sk + es_i;
@@ -331,9 +334,10 @@ impl ShareManager {
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
         if ciphertext.par != self.params {
-            return Err(Error::invalid_ciphertext(
-                "ciphertext parameters do not match this ShareManager's parameters",
-            ));
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Ciphertext,
+                right: crate::ParameterSource::Parameters,
+            });
         }
         // Reconstruction consumes exactly threshold + 1 shares; requiring
         // exactness (rather than truncating extras) avoids silently depending
@@ -405,7 +409,8 @@ impl ShareManager {
                         }
                         let shamir_result = shamir_ss.recover(&shamir_open_vec_mod)?;
                         shamir_result.to_u64().ok_or_else(|| {
-                            Error::DefaultError(
+                            Error::malformed_shares(
+                                0,
                                 "recovered Shamir coefficient does not fit in u64".to_string(),
                             )
                         })
@@ -419,7 +424,10 @@ impl ShareManager {
         let arr_matrix =
             Array2::from_shape_vec((self.params.moduli().len(), self.params.degree()), m_data)
                 .map_err(|_| {
-                    Error::DefaultError("Failed to assemble recovered coefficients".to_string())
+                    Error::malformed_shares(
+                        0,
+                        "Failed to assemble recovered coefficients".to_string(),
+                    )
                 })?;
         let ctx = self.params.context_at_level(0)?;
         let mut result_poly = Poly::<PowerBasis>::zero(ctx);
@@ -450,9 +458,10 @@ impl ShareManager {
 
         let par = ciphertext.par.clone();
         let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
-            Error::DefaultError(
-                "threshold BFV decrypt_from_shares requires a u64 plaintext modulus".to_string(),
-            )
+            Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
+                reason: "threshold BFV decrypt_from_shares requires a u64 plaintext modulus"
+                    .to_string(),
+            })
         })?;
 
         let d = Zeroizing::new(
@@ -479,10 +488,8 @@ impl ShareManager {
 
         let pt = Plaintext {
             par: par.clone(),
-            value: crate::bfv::PlaintextValues::Small(w.into_boxed_slice()),
             encoding: None,
             poly_ntt: poly,
-            level: ciphertext.level,
         };
         Ok(pt)
     }

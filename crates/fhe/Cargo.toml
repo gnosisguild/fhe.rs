@@ -15,10 +15,11 @@ workspace = true
 bench = false # Disable default bench (we use criterion)
 
 [features]
+experimental-mbfv = []
 tfhe-ntt = ["fhe-math/tfhe-ntt"]
 
 [dependencies]
-num-bigint = { workspace = true, features = ["rand"] }
+num-bigint = { workspace = true, features = ["rand_0_9"] }
 fhe-math = { version = "=0.2.1", path = "../fhe-math" }
 fhe-traits = { version = "=0.2.1", path = "../fhe-traits" }
 fhe-util = { version = "=0.2.1", path = "../fhe-util" }
@@ -67,6 +68,7 @@ harness = false
 [[bench]]
 name = "trbfv_bfv_share"
 harness = false
+required-features = ["experimental-mbfv"]
 
 [[example]]
 name = "bfv_basic"
@@ -85,3 +87,20 @@ name = "rgsw"
 
 [[example]]
 name = "voting"
+required-features = ["experimental-mbfv"]
+
+[[example]]
+name = "trbfv_add"
+required-features = ["experimental-mbfv"]
+
+[[example]]
+name = "trbfv_add_bfv_share"
+required-features = ["experimental-mbfv"]
+
+[[example]]
+name = "trbfv_add_bfv_share_insecure"
+required-features = ["experimental-mbfv"]
+
+[[test]]
+name = "trbfv_secure_e2e"
+required-features = ["experimental-mbfv"]

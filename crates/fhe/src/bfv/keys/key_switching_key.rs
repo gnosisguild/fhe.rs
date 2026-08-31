@@ -4,7 +4,7 @@
 
 use crate::bfv::{BfvParameters, SecretKey, traits::TryConvertFrom as BfvTryConvertFrom};
 use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
-use crate::{Error, Result};
+use crate::{Error, Result, SerializationError};
 use fhe_math::rq::Context;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::{
@@ -14,7 +14,7 @@ use fhe_math::{
 use fhe_traits::{DeserializeWithContext, Serialize};
 use itertools::{Itertools, izip};
 use num_bigint::BigUint;
-use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use rand::{CryptoRng, Rng, Rng as RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
@@ -54,6 +54,27 @@ pub struct KeySwitchingKey {
 }
 
 impl KeySwitchingKey {
+    fn permits_variable_time_with(&self, p: &Poly<PowerBasis>) -> bool {
+        p.allows_variable_time_computations()
+            && self
+                .c0
+                .iter()
+                .chain(self.c1.iter())
+                .all(Poly::allows_variable_time_computations)
+    }
+
+    fn configure_accumulators(&self, p: &Poly<PowerBasis>, c0: &mut Poly<Ntt>, c1: &mut Poly<Ntt>) {
+        if self.permits_variable_time_with(p) {
+            let variable_time =
+                fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+            c0.allow_variable_time_computations(variable_time);
+            c1.allow_variable_time_computations(variable_time);
+        } else {
+            c0.disallow_variable_time_computations();
+            c1.disallow_variable_time_computations();
+        }
+    }
+
     /// Generate a [`KeySwitchingKey`] to this [`SecretKey`] from a polynomial
     /// `from` using a random seed for generating c1 values.
     pub fn new<R: RngCore + CryptoRng>(
@@ -84,9 +105,10 @@ impl KeySwitchingKey {
         let ctx_ciphertext = par.context_at_level(ciphertext_level)?.clone();
 
         if from.ctx() != &ctx_ksk {
-            return Err(Error::DefaultError(
-                "Incorrect context for polynomial from".to_string(),
-            ));
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::KeySwitchingKey,
+            });
         }
 
         if ctx_ksk.moduli().len() == 1 {
@@ -139,11 +161,12 @@ impl KeySwitchingKey {
     ) -> Vec<Poly<NttShoup>> {
         let mut c1 = Vec::with_capacity(size);
         let mut rng = ChaCha8Rng::from_seed(seed);
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
         (0..size).for_each(|_| {
             let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
             rng.fill(&mut seed_i);
             let mut a = Poly::<NttShoup>::random_from_seed(ctx, seed_i);
-            unsafe { a.allow_variable_time_computations() }
+            a.allow_variable_time_computations(variable_time);
             c1.push(a);
         });
         c1
@@ -159,7 +182,7 @@ impl KeySwitchingKey {
         rng: &mut R,
     ) -> Result<Vec<Poly<NttShoup>>> {
         if c1.is_empty() {
-            return Err(Error::DefaultError("Empty number of c1's".to_string()));
+            return Err(crate::EvaluationKeyError::EmptyKeySwitchingComponents.into());
         }
 
         let s = Zeroizing::new(
@@ -188,7 +211,10 @@ impl KeySwitchingKey {
 
                 b += &g_i_from;
 
-                unsafe { b.allow_variable_time_computations() }
+                // It is now safe to enable variable time computations.
+                b.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                    fhe_traits::PublicData::assert_public(),
+                ));
                 Ok(b.into_ntt_shoup())
             })
             .collect::<Result<Vec<Poly<NttShoup>>>>()?;
@@ -206,7 +232,7 @@ impl KeySwitchingKey {
         log_base: usize,
     ) -> Result<Vec<Poly<NttShoup>>> {
         if c1.is_empty() {
-            return Err(Error::DefaultError("Empty number of c1's".to_string()));
+            return Err(crate::EvaluationKeyError::EmptyKeySwitchingComponents.into());
         }
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c1[0].ctx(), false)?
@@ -230,7 +256,10 @@ impl KeySwitchingKey {
                 let power = BigUint::from(1u64 << (i * log_base));
                 b += &(from * &power);
 
-                unsafe { b.allow_variable_time_computations() }
+                // It is now safe to enable variable time computations.
+                b.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                    fhe_traits::PublicData::assert_public(),
+                ));
                 Ok(b.into_ntt_shoup())
             })
             .collect::<Result<Vec<Poly<NttShoup>>>>()?;
@@ -245,22 +274,24 @@ impl KeySwitchingKey {
         }
 
         if p.ctx().as_ref() != self.ctx_ciphertext.as_ref() {
-            return Err(Error::DefaultError(
-                "The input polynomial does not have the correct context. Its RNS representation needs to match that of the key switching key decomposition context, or in other words, the key switching key ciphertext context.".to_string(),
-            ));
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::KeySwitchingKey,
+            });
         }
         let mut c0 = Poly::<Ntt>::zero(&self.ctx_ksk);
         let mut c1 = Poly::<Ntt>::zero(&self.ctx_ksk);
+        self.configure_accumulators(p, &mut c0, &mut c1);
         let p_coefficients = p.coefficients();
         for (c2_i_coefficients, c0_i, c1_i) in
             izip!(p_coefficients.outer_iter(), self.c0.iter(), self.c1.iter())
         {
-            let mut c2_i = unsafe {
+            let mut c2_i =
                 Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
                     c2_i_coefficients.as_slice().unwrap(),
                     &self.ctx_ksk,
-                )
-            };
+                    fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public()),
+                );
             c0 += &(&c2_i * c0_i);
 
             c2_i *= c1_i;
@@ -284,9 +315,10 @@ impl KeySwitchingKey {
         }
 
         if p.ctx().as_ref() != self.ctx_ciphertext.as_ref() {
-            return Err(Error::DefaultError(
-                "The input polynomial does not have the correct context.".to_string(),
-            ));
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::KeySwitchingKey,
+            });
         }
         if c0.ctx().as_ref() != self.ctx_ksk.as_ref() {
             *c0 = Poly::<Ntt>::zero(&self.ctx_ksk);
@@ -299,17 +331,18 @@ impl KeySwitchingKey {
         } else {
             c1.zeroize();
         }
+        self.configure_accumulators(p, c0, c1);
 
         let p_coefficients = p.coefficients();
         for (c2_i_coefficients, c0_i, c1_i) in
             izip!(p_coefficients.outer_iter(), self.c0.iter(), self.c1.iter())
         {
-            let mut c2_i = unsafe {
+            let mut c2_i =
                 Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
                     c2_i_coefficients.as_slice().unwrap(),
                     &self.ctx_ksk,
-                )
-            };
+                    fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public()),
+                );
             *c0 += &(&c2_i * c0_i);
             c2_i *= c1_i;
             *c1 += &c2_i;
@@ -320,9 +353,10 @@ impl KeySwitchingKey {
     /// Key switch a polynomial using base decomposition.
     fn key_switch_decomposition(&self, p: &Poly<PowerBasis>) -> Result<(Poly<Ntt>, Poly<Ntt>)> {
         if p.ctx().as_ref() != self.ctx_ciphertext.as_ref() {
-            return Err(Error::DefaultError(
-                "The input polynomial does not have the correct context.".to_string(),
-            ));
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::KeySwitchingKey,
+            });
         }
 
         let log_modulus = p
@@ -343,13 +377,14 @@ impl KeySwitchingKey {
 
         let mut c0 = Poly::<Ntt>::zero(&self.ctx_ksk);
         let mut c1 = Poly::<Ntt>::zero(&self.ctx_ksk);
+        self.configure_accumulators(p, &mut c0, &mut c1);
         for (c2_i_coefficients, c0_i, c1_i) in izip!(c2i.iter(), self.c0.iter(), self.c1.iter()) {
-            let mut c2_i = unsafe {
+            let mut c2_i =
                 Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
                     c2_i_coefficients.as_slice(),
                     &self.ctx_ksk,
-                )
-            };
+                    fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public()),
+                );
             c0 += &(&c2_i * c0_i);
             c2_i *= c1_i;
             c1 += &c2_i;
@@ -391,8 +426,12 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
         let log_base = value.log_base as usize;
         if log_base != 0 {
             if ksk_level != par.max_level() || ciphertext_level != par.max_level() {
-                return Err(Error::DefaultError(
-                    "A decomposition size is specified but the levels are not maximal".to_string(),
+                return Err(Error::SerializationError(
+                    SerializationError::InvalidKeySwitchingDecompositionLevels {
+                        ciphertext_level,
+                        key_level: ksk_level,
+                        expected: par.max_level(),
+                    },
                 ));
             } else {
                 let log_modulus: usize =
@@ -404,27 +443,38 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
         }
 
         if value.c0.len() != c0_size {
-            return Err(Error::DefaultError(
-                "Incorrect number of values in c0".to_string(),
+            return Err(Error::SerializationError(
+                SerializationError::WrongPolynomialCount {
+                    component: crate::SerializedPolynomialComponent::KeySwitchingKeyC0,
+                    expected: c0_size,
+                    actual: value.c0.len(),
+                },
             ));
         }
 
         let seed = if value.seed.is_empty() {
             if value.c1.len() != c0_size {
-                return Err(Error::DefaultError(
-                    "Incorrect number of values in c1".to_string(),
+                return Err(Error::SerializationError(
+                    SerializationError::WrongPolynomialCount {
+                        component: crate::SerializedPolynomialComponent::KeySwitchingKeyC1,
+                        expected: c0_size,
+                        actual: value.c1.len(),
+                    },
                 ));
             }
             None
         } else {
-            let unwrapped = <ChaCha8Rng as SeedableRng>::Seed::try_from(value.seed.clone());
-            if unwrapped.is_err() {
-                return Err(Error::DefaultError("Invalid seed".to_string()));
-            }
-            Some(unwrapped.unwrap())
+            Some(
+                <ChaCha8Rng as SeedableRng>::Seed::try_from(value.seed.clone()).map_err(|_| {
+                    Error::SerializationError(SerializationError::InvalidKeySwitchingSeedLength {
+                        actual: value.seed.len(),
+                        expected: std::mem::size_of::<<ChaCha8Rng as SeedableRng>::Seed>(),
+                    })
+                })?,
+            )
         };
 
-        let c1 = if let Some(seed) = seed {
+        let mut c1 = if let Some(seed) = seed {
             Self::generate_c1(&ctx_ksk, seed, value.c0.len())
         } else {
             value
@@ -434,11 +484,19 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
                 .collect::<Result<Vec<Poly<NttShoup>>>>()?
         };
 
-        let c0 = value
+        let mut c0 = value
             .c0
             .iter()
             .map(|c0i| Poly::<NttShoup>::from_bytes(c0i, &ctx_ksk).map_err(Error::MathError))
             .collect::<Result<Vec<Poly<NttShoup>>>>()?;
+
+        // Key-switching keys are public cryptographic material. Grant timing
+        // permission at this trusted type boundary; the polynomial wire flag
+        // itself remains ignored.
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+        c0.iter_mut()
+            .chain(c1.iter_mut())
+            .for_each(|poly| poly.allow_variable_time_computations(variable_time));
 
         Ok(Self {
             par: par.clone(),
@@ -542,7 +600,10 @@ mod tests {
             let ctx = params.context_at_level(0)?;
             let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
             let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
-            let input = Poly::<PowerBasis>::random(ctx, &mut rng);
+            let mut input = Poly::<PowerBasis>::random(ctx, &mut rng);
+            input.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                fhe_traits::PublicData::assert_public(),
+            ));
 
             let (c0, c1) = ksk.key_switch(&input)?;
 
@@ -552,6 +613,13 @@ mod tests {
 
             assert_eq!(c0, a0);
             assert_eq!(c1, a1);
+            assert!(c0.allows_variable_time_computations());
+            assert!(c1.allows_variable_time_computations());
+
+            input.disallow_variable_time_computations();
+            ksk.key_switch_assign(&input, &mut a0, &mut a1)?;
+            assert!(!a0.allows_variable_time_computations());
+            assert!(!a1.allows_variable_time_computations());
         }
         Ok(())
     }
@@ -602,7 +670,15 @@ mod tests {
             let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
             let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
             let ksk_proto = KeySwitchingKeyProto::from(&ksk);
-            assert_eq!(ksk, KeySwitchingKey::try_convert_from(&ksk_proto, &params)?);
+            let decoded = KeySwitchingKey::try_convert_from(&ksk_proto, &params)?;
+            assert_eq!(ksk, decoded);
+            assert!(
+                decoded
+                    .c0
+                    .iter()
+                    .chain(decoded.c1.iter())
+                    .all(Poly::allows_variable_time_computations)
+            );
         }
         Ok(())
     }

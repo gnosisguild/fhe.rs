@@ -4,11 +4,10 @@ use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
 use fhe_traits::{DeserializeWithContext, Serialize};
 use itertools::Itertools;
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng as RngCore};
 use zeroize::Zeroizing;
 
-use crate::bfv::{BfvParameters, Ciphertext, Plaintext, PlaintextValues, SecretKey};
+use crate::bfv::{BfvParameters, Ciphertext, Plaintext, SecretKey};
 use crate::{Error, Result};
 
 use super::Aggregate;
@@ -43,17 +42,26 @@ impl SecretKeySwitchShare {
         ct: Arc<Ciphertext>,
         rng: &mut R,
     ) -> Result<Self> {
-        if sk_input_share.par != sk_output_share.par || sk_output_share.par != ct.par {
-            return Err(Error::DefaultError(
-                "Incompatible BFV parameters".to_string(),
-            ));
+        if sk_input_share.par != sk_output_share.par {
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::InputSecretKey,
+                right: crate::ParameterSource::OutputSecretKey,
+            });
+        }
+        if sk_output_share.par != ct.par {
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::OutputSecretKey,
+                right: crate::ParameterSource::Ciphertext,
+            });
         }
         // Note: M-BFV implementation only supports ciphertext of length 2
         if ct.len() != 2 {
-            return Err(Error::TooManyValues {
+            return Err(crate::CiphertextError::InvalidPolynomialCount {
+                operation: crate::CiphertextOperation::MultipartyKeySwitch,
                 actual: ct.len(),
-                limit: 2,
-            });
+                expected: 2,
+            }
+            .into());
         }
 
         let par = sk_input_share.par.clone();
@@ -110,10 +118,7 @@ impl Aggregate<SecretKeySwitchShare> for Ciphertext {
         T: IntoIterator<Item = SecretKeySwitchShare>,
     {
         let mut shares = iter.into_iter();
-        let share = shares.next().ok_or(Error::TooFewValues {
-            actual: 0,
-            minimum: 1,
-        })?;
+        let share = shares.next().ok_or(crate::MultipartyError::NoShares)?;
         let mut h = share.h_share;
         for sh in shares {
             h += &sh.h_share;
@@ -211,22 +216,10 @@ impl Aggregate<DecryptionShare> for Plaintext {
         let poly =
             Poly::<PowerBasis>::try_convert_from(w.as_slice(), ct[0].ctx(), false)?.into_ntt();
 
-        let value = match ct.par.plaintext {
-            crate::bfv::PlaintextModulus::Small { .. } => PlaintextValues::Small(
-                w.iter()
-                    .map(|x| x.to_u64().unwrap())
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            ),
-            crate::bfv::PlaintextModulus::Large(_) => PlaintextValues::Large(w.into_boxed_slice()),
-        };
-
         let pt = Plaintext {
             par: ct.par.clone(),
-            value,
             encoding: None,
             poly_ntt: poly,
-            level: ct.level,
         };
 
         Ok(pt)

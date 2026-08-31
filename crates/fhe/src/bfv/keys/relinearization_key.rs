@@ -26,13 +26,13 @@ use crate::bfv::{BfvParameters, Ciphertext, SecretKey, traits::TryConvertFrom};
 use crate::proto::bfv::{
     KeySwitchingKey as KeySwitchingKeyProto, RelinearizationKey as RelinearizationKeyProto,
 };
-use crate::{Error, Result};
+use crate::{Error, Result, SerializationError};
 use fhe_math::rq::{
     Ntt, Poly, PowerBasis, switcher::Switcher, traits::TryConvertFrom as TryConvertFromPoly,
 };
 use fhe_traits::{DeserializeParametrized, FheParametrized, Serialize};
 use prost::Message;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng as RngCore};
 use zeroize::Zeroizing;
 
 /// A relinearization key in the BFV encryption scheme is fundamentally a key
@@ -91,9 +91,7 @@ impl RelinearizationKey {
         let ctx_ciphertext = sk.par.context_at_level(ciphertext_level)?;
 
         if ctx_relin_key.moduli().len() == 1 {
-            return Err(Error::DefaultError(
-                "These parameters do not support key switching".to_string(),
-            ));
+            return Err(crate::EvaluationKeyError::KeySwitchingNotSupported.into());
         }
 
         let s = Zeroizing::new(
@@ -114,14 +112,20 @@ impl RelinearizationKey {
     /// `c₀' + c₁'·s ≈ m + e'` by key-switching `c₂` under `s² → s` and adding
     /// the result to `(c₀, c₁)`.
     pub fn relinearizes(&self, ct: &mut Ciphertext) -> Result<()> {
+        ct.validate_for(&self.ksk.par)?;
         if ct.len() != 3 {
-            Err(Error::DefaultError(
-                "Only supports relinearization of ciphertext with 3 parts".to_string(),
-            ))
+            Err(crate::CiphertextError::InvalidPolynomialCount {
+                operation: crate::CiphertextOperation::Relinearization,
+                actual: ct.len(),
+                expected: 3,
+            }
+            .into())
         } else if ct.level != self.ksk.ciphertext_level {
-            Err(Error::DefaultError(
-                "Ciphertext has incorrect level".to_string(),
-            ))
+            Err(Error::InvalidLevel {
+                level: ct.level,
+                min_level: self.ksk.ciphertext_level,
+                max_level: self.ksk.ciphertext_level,
+            })
         } else {
             let c2 = ct[2].clone().into_power_basis();
             let (mut c0, mut c1) = self.relinearizes_poly(&c2)?;
@@ -182,7 +186,11 @@ impl TryConvertFrom<&RelinearizationKeyProto> for RelinearizationKey {
                 ksk: KeySwitchingKey::try_convert_from(ksk, par)?,
             })
         } else {
-            Err(Error::DefaultError("Invalid serialization".to_string()))
+            Err(Error::SerializationError(
+                SerializationError::MissingField {
+                    field: crate::SerializedField::RelinearizationKeySwitchingKey,
+                },
+            ))
         }
     }
 }
@@ -201,12 +209,12 @@ impl DeserializeParametrized for RelinearizationKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-        let rk = Message::decode(bytes);
-        if let Ok(rk) = rk {
-            RelinearizationKey::try_convert_from(&rk, par)
-        } else {
-            Err(Error::DefaultError("Invalid serialization".to_string()))
-        }
+        let rk = Message::decode(bytes).map_err(|_| {
+            Error::SerializationError(SerializationError::Decode {
+                object: crate::SerializedObject::RelinearizationKey,
+            })
+        })?;
+        RelinearizationKey::try_convert_from(&rk, par)
     }
 }
 

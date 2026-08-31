@@ -1,10 +1,9 @@
 use crate::Error;
-use fhe_util::rng08;
 /// Shamir Secret Sharing implementation for threshold BFV.
 ///
 /// This module provides a complete Shamir Secret Sharing implementation that integrates
 /// with the BFV parameter system.
-use num_bigint::{BigInt, RandBigInt};
+use num_bigint::{BigInt, BigRng09};
 use num_traits::{One, Zero};
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -136,7 +135,7 @@ impl ShamirSecretSharing {
     ) -> Vec<BigInt> {
         let mut coefficients: Vec<BigInt> = vec![secret];
         let low = BigInt::from(0);
-        // gen_bigint_range samples from [low, high), so this covers all of Z_p.
+        // random_bigint_range samples from [low, high), so this covers all of Z_p.
         let high = self.prime.clone();
 
         // Generate seeds deterministically from the input RNG
@@ -148,7 +147,7 @@ impl ShamirSecretSharing {
             .into_par_iter()
             .map(|seed| {
                 let mut rng = ChaCha20Rng::from_seed(seed);
-                rng08::adapt(&mut rng).gen_bigint_range(&low, &high)
+                rng.random_bigint_range(&low, &high)
             })
             .collect();
         coefficients.extend(random_coefficients);

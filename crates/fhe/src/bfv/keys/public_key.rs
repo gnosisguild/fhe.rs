@@ -3,14 +3,14 @@
 use crate::bfv::traits::TryConvertFrom;
 use crate::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext};
 use crate::proto::bfv::{Ciphertext as CiphertextProto, PublicKey as PublicKeyProto};
-use crate::{Error, Result, SerializationError};
+use crate::{Error, ParametersError, Result, SerializationError};
 use fhe_math::rq::{
     Ntt, Poly, PowerBasis, Representation, traits::TryConvertFrom as PolyTryConvertFrom,
 };
 use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 use fhe_util::sample_vec_cbd_f32;
 use prost::Message;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng as RngCore};
 use std::borrow::Cow;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -83,15 +83,18 @@ impl PublicKey {
         rng: &mut R,
     ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
         let mut ct = self.c.clone();
-        while ct.level != pt.level {
+        while ct.level != pt.level() {
             ct.switch_down()?;
         }
 
         let ctx = self.par.context_at_level(ct.level)?.clone();
 
         let u_coefficients = Zeroizing::new(
-            sample_vec_cbd_f32(ctx.degree, SecretKey::SK_VARIANCE, rng)
-                .map_err(|e| Error::UnspecifiedInput(e.to_string()))?,
+            sample_vec_cbd_f32(ctx.degree, SecretKey::SK_VARIANCE, rng).map_err(|e| {
+                Error::ParametersError(ParametersError::InvalidSamplingVariance {
+                    reason: e.to_string(),
+                })
+            })?,
         );
         let u = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(u_coefficients.as_ref() as &[i64], &ctx, false)?
@@ -118,10 +121,9 @@ impl PublicKey {
         let mut c1 = u.as_ref() * &ct[1];
         c1 += e2.as_ref();
 
-        unsafe {
-            c0.allow_variable_time_computations();
-            c1.allow_variable_time_computations()
-        }
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+        c0.allow_variable_time_computations(variable_time);
+        c1.allow_variable_time_computations(variable_time);
 
         let ciphertext = Ciphertext {
             par: self.par.clone(),
@@ -151,10 +153,21 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        let needs_switch = self.c.level != pt.level;
+        pt.validate_for(&self.par)?;
+        self.c.validate_for(&self.par)?;
+        let plaintext_level = pt.level();
+        if plaintext_level < self.c.level {
+            return Err(Error::InvalidLevel {
+                level: plaintext_level,
+                min_level: self.c.level,
+                max_level: self.par.max_level(),
+            });
+        }
+
+        let needs_switch = self.c.level != plaintext_level;
         let ct: Cow<'_, Ciphertext> = if needs_switch {
             let mut owned = self.c.clone();
-            while owned.level != pt.level {
+            while owned.level != plaintext_level {
                 owned.switch_down()?;
             }
             Cow::Owned(owned)
@@ -165,8 +178,11 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
         let ctx = self.par.context_at_level(ct.level)?.clone();
 
         let u_coefficients = Zeroizing::new(
-            sample_vec_cbd_f32(ctx.degree, SecretKey::SK_VARIANCE, rng)
-                .map_err(|e| Error::UnspecifiedInput(e.to_string()))?,
+            sample_vec_cbd_f32(ctx.degree, SecretKey::SK_VARIANCE, rng).map_err(|e| {
+                Error::ParametersError(ParametersError::InvalidSamplingVariance {
+                    reason: e.to_string(),
+                })
+            })?,
         );
         let u = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(u_coefficients.as_ref() as &[i64], &ctx, false)?
@@ -188,10 +204,10 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
         let mut c1 = u.as_ref() * &ct[1];
         c1 += e2.as_ref();
 
-        unsafe {
-            c0.allow_variable_time_computations();
-            c1.allow_variable_time_computations()
-        }
+        // It is now safe to enable variable time computations.
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+        c0.allow_variable_time_computations(variable_time);
+        c1.allow_variable_time_computations(variable_time);
 
         Ok(Ciphertext {
             par: self.par.clone(),
@@ -221,16 +237,17 @@ impl DeserializeParametrized for PublicKey {
 
     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
         let proto: PublicKeyProto = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: "PublicKey decode".into(),
+            Error::SerializationError(SerializationError::Decode {
+                object: crate::SerializedObject::PublicKey,
             })
         })?;
         if let Some(proto_c) = &proto.c {
             let mut c = Ciphertext::try_convert_from(proto_c, par)?;
             if c.level != 0 {
                 Err(Error::SerializationError(
-                    SerializationError::InvalidFormat {
-                        reason: "ciphertext level must be 0".into(),
+                    SerializationError::InvalidPublicKeyLevel {
+                        actual: c.level,
+                        expected: 0,
                     },
                 ))
             } else {
@@ -244,7 +261,7 @@ impl DeserializeParametrized for PublicKey {
         } else {
             Err(Error::SerializationError(
                 SerializationError::MissingField {
-                    field_name: "c".into(),
+                    field: crate::SerializedField::PublicKeyCiphertext,
                 },
             ))
         }
@@ -306,6 +323,19 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn encrypt_rejects_mismatched_parameters() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 16);
+        let other_params = BfvParameters::default_arc(1, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let pt = Plaintext::try_encode(&[1u64][..], Encoding::poly(), &other_params)?;
+
+        assert!(pk.try_encrypt(&pt, &mut rng).is_err());
         Ok(())
     }
 

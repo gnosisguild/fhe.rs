@@ -3,12 +3,12 @@
 use super::key_switching_key::KeySwitchingKey;
 use crate::bfv::{BfvParameters, Ciphertext, SecretKey, traits::TryConvertFrom};
 use crate::proto::bfv::{GaloisKey as GaloisKeyProto, KeySwitchingKey as KeySwitchingKeyProto};
-use crate::{Error, Result};
+use crate::{Error, Result, SerializationError};
 use fhe_math::rq::{
     Ntt, Poly, PowerBasis, SubstitutionExponent, switcher::Switcher,
     traits::TryConvertFrom as TryConvertFromPoly,
 };
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng as RngCore};
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -61,8 +61,7 @@ impl GaloisKey {
 
     /// Relinearize a [`Ciphertext`] using the [`GaloisKey`]
     pub fn relinearize(&self, ct: &Ciphertext) -> Result<Ciphertext> {
-        // assert_eq!(ct.par, self.ksk.par);
-        assert_eq!(ct.len(), 2);
+        self.validate_ciphertext(ct)?;
 
         let c2 = ct[1].substitute(&self.element)?.into_power_basis();
         let (mut c0, mut c1) = self.ksk.key_switch(&c2)?;
@@ -88,7 +87,7 @@ impl GaloisKey {
 
     /// Relinearize a [`Ciphertext`] writing the result into `out`.
     pub fn relinearize_into(&self, ct: &Ciphertext, out: &mut Ciphertext) -> Result<()> {
-        assert_eq!(ct.len(), 2);
+        self.validate_ciphertext(ct)?;
 
         if out.len() != 2 || out[0].ctx() != ct[0].ctx() || out[1].ctx() != ct[1].ctx() {
             out.c = vec![
@@ -122,6 +121,26 @@ impl GaloisKey {
         *out0 += &ct[0].substitute(&self.element)?;
         Ok(())
     }
+
+    fn validate_ciphertext(&self, ct: &Ciphertext) -> Result<()> {
+        ct.validate_for(&self.ksk.par)?;
+        if ct.len() != 2 {
+            return Err(crate::CiphertextError::InvalidPolynomialCount {
+                operation: crate::CiphertextOperation::Galois,
+                actual: ct.len(),
+                expected: 2,
+            }
+            .into());
+        }
+        if ct.level != self.ksk.ciphertext_level {
+            return Err(Error::InvalidLevel {
+                level: ct.level,
+                min_level: self.ksk.ciphertext_level,
+                max_level: self.ksk.ciphertext_level,
+            });
+        }
+        Ok(())
+    }
 }
 
 impl From<&GaloisKey> for GaloisKeyProto {
@@ -144,7 +163,11 @@ impl TryConvertFrom<&GaloisKeyProto> for GaloisKey {
 
             Ok(GaloisKey { element, ksk })
         } else {
-            Err(Error::DefaultError("Invalid serialization".to_string()))
+            Err(Error::SerializationError(
+                SerializationError::MissingField {
+                    field: crate::SerializedField::GaloisKeySwitchingKey,
+                },
+            ))
         }
     }
 }
@@ -231,6 +254,26 @@ mod tests {
 
             assert_eq!(ct_expected, out);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn relinearization_rejects_invalid_ciphertexts() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(3, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let gk = GaloisKey::new(&sk, 3, 0, 0, &mut rng)?;
+        let invalid = Ciphertext::zero(&params);
+
+        assert!(matches!(
+            gk.relinearize(&invalid),
+            Err(crate::Error::Ciphertext(_))
+        ));
+        let mut out = Ciphertext::zero(&params);
+        assert!(matches!(
+            gk.relinearize_into(&invalid, &mut out),
+            Err(crate::Error::Ciphertext(_))
+        ));
         Ok(())
     }
 

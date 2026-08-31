@@ -87,14 +87,12 @@ impl LBFVPublicKey {
         rng: &mut R,
     ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
         if self.c.is_empty() {
-            return Err(Error::DefaultError(
-                "Public key has no ciphertexts available".to_string(),
-            ));
+            return Err(crate::EvaluationKeyError::EmptyPublicKey.into());
         }
 
         // Use only the first ciphertext from the array
         let mut ct = self.c[0].clone();
-        while ct.level != pt.level {
+        while ct.level != pt.level() {
             ct.switch_down()?;
         }
 
@@ -111,10 +109,9 @@ impl LBFVPublicKey {
         c1 += &e2;
 
         // It is now safe to enable variable time computations.
-        unsafe {
-            c0.allow_variable_time_computations();
-            c1.allow_variable_time_computations()
-        }
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+        c0.allow_variable_time_computations(variable_time);
+        c1.allow_variable_time_computations(variable_time);
 
         let ciphertext = Ciphertext {
             par: self.par.clone(),
@@ -153,22 +150,29 @@ impl LBFVPublicKey {
     ) -> Result<Vec<Poly<NttShoup>>> {
         // Necessary checks
         if ciphertext_level > self.par.max_level() {
-            return Err(Error::DefaultError(
-                "Level is greater than the maximum level".to_string(),
-            ));
+            return Err(Error::InvalidLevel {
+                level: ciphertext_level,
+                min_level: 0,
+                max_level: self.par.max_level(),
+            });
         }
 
         // Note: this may seem redundant, but it's because in the future, we want to experiment with different key levels
         // for the public key.
         if key_level != 0 {
-            return Err(Error::DefaultError("Key level must be 0".to_string()));
+            return Err(Error::InvalidLevel {
+                level: key_level,
+                min_level: 0,
+                max_level: 0,
+            });
         }
 
         let key_ctx = self.par.context_at_level(key_level)?;
         if self.c[0].c[0].ctx() != key_ctx {
-            return Err(Error::DefaultError(
-                "Public key is not at level 0".to_string(),
-            ));
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::PublicKey,
+                right: crate::ParameterSource::Parameters,
+            });
         }
 
         // Note: key switching is redundant for now.
@@ -187,9 +191,10 @@ impl LBFVPublicKey {
             let poly = match rep {
                 Representation::NttShoup => poly.into_ntt_shoup(),
                 Representation::PowerBasis | Representation::Ntt => {
-                    return Err(Error::DefaultError(
-                        "l-BFV extract_b_polynomials requires NttShoup representation".to_string(),
-                    ));
+                    return Err(crate::EvaluationKeyError::UnsupportedRepresentation {
+                        found: format!("{rep:?}"),
+                    }
+                    .into());
                 }
             };
             b_polynomials.push(poly);
@@ -212,14 +217,12 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         rng: &mut R,
     ) -> Result<Ciphertext> {
         if self.c.is_empty() {
-            return Err(Error::DefaultError(
-                "Public key has no ciphertexts available".to_string(),
-            ));
+            return Err(crate::EvaluationKeyError::EmptyPublicKey.into());
         }
 
         // Use only the first ciphertext from the array
         let mut ct = self.c[0].clone();
-        while ct.level != pt.level {
+        while ct.level != pt.level() {
             ct.switch_down()?;
         }
 
@@ -236,10 +239,9 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         c1 += &e2;
 
         // It is now safe to enable variable time computations.
-        unsafe {
-            c0.allow_variable_time_computations();
-            c1.allow_variable_time_computations()
-        }
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+        c0.allow_variable_time_computations(variable_time);
+        c1.allow_variable_time_computations(variable_time);
 
         Ok(Ciphertext {
             par: self.par.clone(),
@@ -270,16 +272,16 @@ impl DeserializeParametrized for LBFVPublicKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: LBFVPublicKeyProto = Message::decode(bytes).map_err(|e| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: e.to_string(),
+        let proto: LBFVPublicKeyProto = Message::decode(bytes).map_err(|_| {
+            Error::SerializationError(SerializationError::Decode {
+                object: crate::SerializedObject::PublicKey,
             })
         })?;
 
         if proto.c.is_empty() {
             return Err(Error::SerializationError(
-                SerializationError::InvalidFormat {
-                    reason: "LBFV public key has no ciphertexts".to_string(),
+                SerializationError::MissingField {
+                    field: crate::SerializedField::PublicKeyCiphertext,
                 },
             ));
         }
@@ -288,11 +290,11 @@ impl DeserializeParametrized for LBFVPublicKey {
         for ct_proto in proto.c {
             let mut ct = Ciphertext::try_convert_from(&ct_proto, par)?;
             if ct.level != 0 {
-                return Err(Error::SerializationError(
-                    SerializationError::InvalidFormat {
-                        reason: "LBFV public key ciphertext must be at level 0".to_string(),
-                    },
-                ));
+                return Err(SerializationError::InvalidPublicKeyLevel {
+                    actual: ct.level,
+                    expected: 0,
+                }
+                .into());
             }
             // The polynomials of a public key should not allow for variable time
             // computation.
@@ -305,11 +307,11 @@ impl DeserializeParametrized for LBFVPublicKey {
         let seed = if !proto.seed.is_empty() {
             let mut seed_array = <ChaCha8Rng as SeedableRng>::Seed::default();
             if proto.seed.len() != seed_array.len() {
-                return Err(Error::SerializationError(
-                    SerializationError::InvalidFormat {
-                        reason: "Invalid LBFV public key seed length".to_string(),
-                    },
-                ));
+                return Err(SerializationError::InvalidPublicKeySeedLength {
+                    actual: proto.seed.len(),
+                    expected: seed_array.len(),
+                }
+                .into());
             }
             seed_array.copy_from_slice(&proto.seed);
             Some(seed_array)
