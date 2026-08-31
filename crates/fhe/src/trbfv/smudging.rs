@@ -660,6 +660,7 @@ mod tests {
             .set_plaintext_modulus(16384)
             .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
             .set_error1_variance_usize(15)
+            .unwrap() // CBD, B_enc = 30
             .build_arc()
             .unwrap();
         let b_enc15 = compute_b_enc(params15.get_error1_variance()).unwrap();
@@ -677,6 +678,7 @@ mod tests {
             .set_plaintext_modulus(16384)
             .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
             .set_error1_variance_usize(16)
+            .unwrap() // CBD, B_enc = 32
             .build_arc()
             .unwrap();
         let b_enc = compute_b_enc(params16.get_error1_variance()).unwrap();
@@ -741,25 +743,6 @@ mod tests {
         assert_eq!(
             config.b_enc,
             compute_b_enc(params.get_error1_variance()).unwrap()
-        );
-    }
-
-    #[test]
-    fn config_new_rejects_zero_error1_variance() {
-        // Zero variance can never be sampled from; configuration
-        // construction must reject it before a calculator is created.
-        let params = BfvParametersBuilder::new()
-            .set_degree(8192)
-            .set_plaintext_modulus(16384)
-            .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
-            .set_error1_variance_usize(0)
-            .build_arc()
-            .unwrap();
-        let result = SmudgingBoundCalculatorConfig::new(params, 3, 1, Lambda::insecure(2));
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().to_lowercase().contains("variance"),
-            "zero-variance rejection should mention the variance; got: {err}"
         );
     }
 
