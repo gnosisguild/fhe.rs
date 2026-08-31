@@ -329,6 +329,13 @@ impl ShareManager {
                 right: crate::ParameterSource::Parameters,
             });
         }
+        if ciphertext.level != 0 {
+            return Err(Error::InvalidLevel {
+                level: ciphertext.level,
+                min_level: 0,
+                max_level: 0,
+            });
+        }
         // A degree-2 (unrelinearized) ciphertext has 3 components; silently
         // ignoring c[2] would produce a wrong plaintext.
         if ciphertext.c.len() != 2 {
@@ -377,6 +384,13 @@ impl ShareManager {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Ciphertext,
                 right: crate::ParameterSource::Parameters,
+            });
+        }
+        if ciphertext.level != 0 {
+            return Err(Error::InvalidLevel {
+                level: ciphertext.level,
+                min_level: 0,
+                max_level: 0,
             });
         }
         // Reconstruction consumes exactly threshold + 1 shares; requiring
@@ -651,6 +665,62 @@ mod tests {
             .expect("Decoding plaintext failed");
 
         assert_eq!(decoded, plaintext_data);
+    }
+
+    #[test]
+    fn test_decryption_share_rejects_nonzero_ciphertext_level() {
+        let mut rng = rng();
+        let params = test_params();
+        let manager = ShareManager::new(3, 0, params.clone()).unwrap();
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
+        ciphertext.switch_down().unwrap();
+
+        let secret_poly = manager
+            .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
+            .unwrap();
+        let context = params.context_at_level(0).unwrap();
+        let result = manager.decryption_share(
+            Arc::new(ciphertext),
+            (*secret_poly).clone().into_ntt(),
+            Poly::<PowerBasis>::zero(context),
+        );
+
+        assert_eq!(
+            result,
+            Err(Error::InvalidLevel {
+                level: 1,
+                min_level: 0,
+                max_level: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn test_decrypt_from_shares_rejects_nonzero_ciphertext_level() {
+        let mut rng = rng();
+        let params = test_params();
+        let manager = ShareManager::new(3, 0, params.clone()).unwrap();
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
+        ciphertext.switch_down().unwrap();
+
+        let context = params.context_at_level(0).unwrap();
+        let shares = vec![Poly::<PowerBasis>::zero(context)];
+        let result = manager.decrypt_from_shares(shares, vec![1], Arc::new(ciphertext));
+
+        assert_eq!(
+            result,
+            Err(Error::InvalidLevel {
+                level: 1,
+                min_level: 0,
+                max_level: 0,
+            })
+        );
     }
 
     #[test]
