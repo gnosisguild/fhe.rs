@@ -10,71 +10,72 @@ use fhe_math::{
     zq::{Modulus, primes::generate_prime},
 };
 use fhe_traits::{Deserialize, FheParameters, Serialize};
+use fhe_util::is_prime;
 use itertools::Itertools;
-use num_bigint::{BigInt, BigUint};
+use num_bigint::BigUint;
 use num_traits::{PrimInt as _, ToPrimitive};
 use prost::Message;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-/// Enum to support both small (u64) and large (BigUint) plaintext moduli.
+/// A plaintext modulus with an optional machine-word fast path.
+///
+/// The `BigUint` value is canonical. `small` caches the equivalent `Modulus`
+/// when it fits, allowing performance-sensitive encoding and decryption to
+/// keep using specialized `u64` arithmetic without exposing two independent
+/// representations to the rest of the BFV implementation.
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub(crate) enum PlaintextModulus {
-    Small {
-        modulus: Modulus,
-        modulus_big: BigUint,
-    },
-    Large(BigUint),
+pub(crate) struct PlaintextModulus {
+    value: BigUint,
+    small: Option<Modulus>,
 }
 
 impl PlaintextModulus {
-    pub fn as_biguint(&self) -> &BigUint {
-        match self {
-            Self::Small { modulus_big, .. } => modulus_big,
-            Self::Large(m) => m,
-        }
+    fn try_new(value: BigUint) -> Result<Self> {
+        let small = value
+            .to_u64()
+            .map(|modulus| {
+                Modulus::new(modulus).map_err(|source| {
+                    Error::ParametersError(ParametersError::InvalidPlaintextModulus {
+                        modulus,
+                        source,
+                    })
+                })
+            })
+            .transpose()?;
+        Ok(Self { value, small })
     }
 
-    pub fn as_u64(&self) -> Option<u64> {
-        match self {
-            Self::Small { modulus, .. } => Some(**modulus),
-            Self::Large(_) => None,
-        }
+    pub(crate) fn as_biguint(&self) -> &BigUint {
+        &self.value
     }
 
-    pub fn reduce_vec(&self, v: &mut [BigUint]) {
-        match self {
-            Self::Small { modulus_big, .. } => {
-                v.iter_mut().for_each(|vi| *vi %= modulus_big);
-            }
-            Self::Large(m) => v.iter_mut().for_each(|vi| *vi %= m),
-        }
+    pub(crate) fn as_u64(&self) -> Option<u64> {
+        self.small.as_ref().map(|modulus| **modulus)
     }
 
-    // Helper to reduce BigUint vector to i64 (centered), returning as Vec<BigUint>
-    // or similar? The previous implementation used center_vec_vt returning
-    // Vec<i64>. If modulus is large, we can't fit in i64.
-
-    // We need a scalar multiplication for Plaintext::to_poly
-    pub fn scalar_mul_vec(&self, a: &mut [BigUint], b: &BigUint) {
-        match self {
-            Self::Small { modulus_big, .. } => {
-                a.iter_mut()
-                    .for_each(|ai| *ai = (ai as &BigUint * b) % modulus_big);
-            }
-            Self::Large(m) => a.iter_mut().for_each(|ai| *ai = (ai as &BigUint * b) % m),
-        }
+    pub(crate) fn small(&self) -> Option<&Modulus> {
+        self.small.as_ref()
     }
 
-    /// Center a coefficient modulo the plaintext modulus using threshold `(p + 1) / 2`.
-    pub fn center_biguint(&self, x: &BigUint, threshold: &BigUint) -> BigInt {
-        let modulus = self.as_biguint();
-        if x >= threshold {
-            BigInt::from(x.clone()) - BigInt::from(modulus.clone())
-        } else {
-            BigInt::from(x.clone())
-        }
+    pub(crate) fn reduce_vec(&self, v: &mut [BigUint]) {
+        v.iter_mut().for_each(|vi| *vi %= &self.value);
+    }
+
+    pub(crate) fn scalar_mul_vec(&self, a: &mut [BigUint], b: &BigUint) {
+        a.iter_mut()
+            .for_each(|ai| *ai = (ai as &BigUint * b) % &self.value);
+    }
+
+    fn ntt_operator(&self, degree: usize) -> Option<Arc<NttOperator>> {
+        self.small
+            .as_ref()
+            .and_then(|modulus| NttOperator::new(modulus, degree).map(Arc::new))
+    }
+
+    fn upper_half_threshold(&self) -> BigUint {
+        (&self.value + 1u32) >> 1
     }
 }
 
@@ -100,8 +101,8 @@ pub struct BfvParameters {
     /// Error variance for e1 in threshold BFV (supports large values via `BigUint`).
     pub(crate) error1_variance: BigUint,
 
-    /// Head of the context chain for modulus switching
-    pub(crate) context_chain: Arc<ContextLevel>,
+    /// Precomputed contexts indexed by modulus-switching level.
+    pub(crate) context_levels: Vec<ContextLevel>,
 
     /// NTT operator for SIMD plaintext operations, if possible
     pub(crate) ntt_operator: Option<Arc<NttOperator>>,
@@ -173,65 +174,55 @@ impl BfvParameters {
     /// Returns the maximum level allowed by these parameters.
     #[must_use]
     pub fn max_level(&self) -> usize {
-        self.moduli.len() - 1
+        self.context_levels.len() - 1
     }
 
     /// Returns the context corresponding to the level.
     /// Returns the context corresponding to the level.
     pub fn context_at_level(&self, level: usize) -> Result<&Arc<Context>> {
-        let mut current: &ContextLevel = &self.context_chain;
-        while current.level < level {
-            current = current
-                .next
-                .get()
-                .ok_or_else(|| Error::InvalidLevel {
-                    level,
-                    min_level: 0,
-                    max_level: self.max_level(),
-                })?
-                .as_ref();
-        }
-        if current.level == level {
-            Ok(&current.poly_context)
-        } else {
-            Err(Error::InvalidLevel {
+        self.context_levels
+            .get(level)
+            .map(|context_level| &context_level.poly_context)
+            .ok_or_else(|| Error::InvalidLevel {
                 level,
                 min_level: 0,
                 max_level: self.max_level(),
             })
-        }
     }
 
     /// Returns the level of a given context
     pub fn level_of_context(&self, ctx: &Arc<Context>) -> Result<usize> {
-        self.context_chain
-            .poly_context
-            .niterations_to(ctx)
-            .map_err(Error::MathError)
-    }
-
-    /// Return head of context chain
-    #[must_use]
-    pub fn context_chain(&self) -> Arc<ContextLevel> {
-        self.context_chain.clone()
-    }
-
-    /// Get context level at a specific depth
-    pub fn context_level_at(&self, level: usize) -> Result<Arc<ContextLevel>> {
-        let mut current = self.context_chain.clone();
-        while current.level < level {
-            match current.next.get() {
-                Some(n) => current = n.clone(),
-                None => {
-                    return Err(Error::InvalidLevel {
-                        level,
-                        min_level: 0,
-                        max_level: self.max_level(),
-                    });
-                }
-            }
+        let level = self
+            .moduli
+            .len()
+            .checked_sub(ctx.moduli().len())
+            .ok_or(Error::MathError(fhe_math::Error::ContextNotReachable))?;
+        let context_level = self
+            .context_levels
+            .get(level)
+            .ok_or(Error::MathError(fhe_math::Error::ContextNotReachable))?;
+        if Arc::ptr_eq(&context_level.poly_context, ctx) || &context_level.poly_context == ctx {
+            Ok(level)
+        } else {
+            Err(Error::MathError(fhe_math::Error::ContextNotReachable))
         }
-        Ok(current)
+    }
+
+    /// Return all contexts in modulus-switching order.
+    #[must_use]
+    pub fn context_levels(&self) -> &[ContextLevel] {
+        &self.context_levels
+    }
+
+    /// Get the precomputed data for a specific modulus-switching level.
+    pub fn context_level_at(&self, level: usize) -> Result<&ContextLevel> {
+        self.context_levels
+            .get(level)
+            .ok_or_else(|| Error::InvalidLevel {
+                level,
+                min_level: 0,
+                max_level: self.max_level(),
+            })
     }
 
     /// Iterator over default parameters providing about 128 bits of security.
@@ -328,10 +319,8 @@ impl BfvParameters {
         // Check if we have any valid parameters after filtering
         if parameters.is_empty() {
             return Err(Error::ParametersError(
-                ParametersError::NoParametersAvailable {
-                    reason: format!(
-                        "No default parameters available for plaintext modulus of {plaintext_nbits} bits. All parameter sets have modulus product bitlength smaller than the plaintext modulus."
-                    ),
+                ParametersError::NoDefaultParameters {
+                    plaintext_bits: plaintext_nbits,
                 },
             ));
         }
@@ -364,6 +353,11 @@ impl BfvParameters {
 }
 
 /// Builder for parameters for the Bfv encryption scheme.
+///
+/// [`Self::build`] validates the structural and arithmetic invariants required
+/// by the implementation. It does not estimate the security of arbitrary
+/// parameter sets. Use [`BfvParameters::default_parameters_128`] when a
+/// preselected 128-bit parameter set is appropriate.
 #[derive(Debug)]
 pub struct BfvParametersBuilder {
     degree: usize,
@@ -379,6 +373,11 @@ pub struct BfvParametersBuilder {
 }
 
 impl BfvParametersBuilder {
+    const MIN_DEGREE: usize = 8;
+    const MAX_DEGREE: usize = 65536;
+    const MIN_VARIANCE: usize = 1;
+    const MAX_VARIANCE: usize = 32;
+
     /// Creates a new instance of the builder
     #[expect(
         clippy::new_without_default,
@@ -400,8 +399,8 @@ impl BfvParametersBuilder {
         }
     }
 
-    /// Sets the polynomial degree. Returns an error if the degree is not
-    /// a power of two larger or equal to 8.
+    /// Sets the polynomial degree. [`Self::build`] returns an error unless the
+    /// degree is a power of two between 8 and 65536, inclusive.
     pub fn set_degree(&mut self, degree: usize) -> &mut Self {
         self.degree = degree;
         self
@@ -435,12 +434,7 @@ impl BfvParametersBuilder {
         self
     }
 
-    /// Sets the error variance. Returns an error if the variance is not between
-    /// one and sixteen.
-    ///
-    /// CHANGE 3: Modified to sync error1_variance unless it was explicitly set
-    /// This ensures backward compatibility - if you only set variance,
-    /// error1_variance will match it (standard BFV behavior)
+    /// Sets the error variance. Valid variances are between one and thirty-two.
     pub fn set_variance(&mut self, variance: usize) -> &mut Self {
         self.variance = variance;
         // Only update error1_variance if it hasn't been explicitly set
@@ -477,9 +471,9 @@ impl BfvParametersBuilder {
     /// CHANGE 6: Also marks the flag as true
     pub fn set_error1_variance_str(&mut self, error1_variance: &str) -> Result<&mut Self> {
         let big_uint = error1_variance.parse::<BigUint>().map_err(|_| {
-            Error::DefaultError(format!(
-                "Invalid BigUint string for error1_variance: {error1_variance}"
-            ))
+            Error::ParametersError(ParametersError::InvalidError1Variance {
+                value: error1_variance.to_string(),
+            })
         })?;
         self.error1_variance = big_uint;
         self.error1_variance_explicitly_set = true;
@@ -529,6 +523,127 @@ impl BfvParametersBuilder {
         Ok(moduli)
     }
 
+    fn gcd(mut a: u64, mut b: u64) -> u64 {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    }
+
+    fn validate_configuration(&self) -> Result<()> {
+        if !(Self::MIN_DEGREE..=Self::MAX_DEGREE).contains(&self.degree)
+            || !self.degree.is_power_of_two()
+        {
+            return Err(Error::ParametersError(
+                ParametersError::invalid_degree_with_bounds(self.degree),
+            ));
+        }
+
+        if !(Self::MIN_VARIANCE..=Self::MAX_VARIANCE).contains(&self.variance) {
+            return Err(Error::ParametersError(ParametersError::InvalidVariance {
+                variance: self.variance,
+                min: Self::MIN_VARIANCE,
+                max: Self::MAX_VARIANCE,
+            }));
+        }
+
+        if !self.ciphertext_moduli.is_empty() && !self.ciphertext_moduli_sizes.is_empty() {
+            return Err(Error::ParametersError(
+                ParametersError::ConflictingCiphertextModulusSpecifications,
+            ));
+        }
+        if self.ciphertext_moduli.is_empty() && self.ciphertext_moduli_sizes.is_empty() {
+            return Err(Error::ParametersError(
+                ParametersError::MissingCiphertextModulusSpecification,
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_moduli(&self, moduli: &[u64], plaintext: &BigUint) -> Result<()> {
+        for (index, modulus) in moduli.iter().copied().enumerate() {
+            Modulus::new(modulus).map_err(|error| {
+                Error::ParametersError(ParametersError::InvalidCiphertextModulus {
+                    index,
+                    modulus,
+                    source: error,
+                })
+            })?;
+
+            let indices = moduli
+                .iter()
+                .enumerate()
+                .filter_map(|(i, candidate)| (*candidate == modulus).then_some(i))
+                .collect_vec();
+            if indices.len() > 1 {
+                return Err(Error::ParametersError(ParametersError::DuplicateModuli {
+                    modulus,
+                    indices,
+                }));
+            }
+        }
+
+        for (i, modulus1) in moduli.iter().copied().enumerate() {
+            for modulus2 in moduli.iter().copied().skip(i + 1) {
+                let gcd = Self::gcd(modulus1, modulus2);
+                if gcd != 1 {
+                    return Err(Error::ParametersError(ParametersError::ModuliNotCoprime {
+                        modulus1,
+                        modulus2,
+                        gcd,
+                    }));
+                }
+            }
+        }
+
+        for (index, modulus) in moduli.iter().copied().enumerate() {
+            if modulus % (2 * self.degree as u64) != 1 || !is_prime(modulus) {
+                return Err(Error::ParametersError(
+                    ParametersError::CiphertextModulusNotNttFriendly {
+                        index,
+                        modulus,
+                        degree: self.degree,
+                    },
+                ));
+            }
+        }
+
+        let ciphertext_modulus = moduli
+            .iter()
+            .map(|m| BigUint::from(*m))
+            .product::<BigUint>();
+        if plaintext >= &ciphertext_modulus {
+            return Err(Error::ParametersError(
+                ParametersError::PlaintextModulusExceedsCiphertextModulus {
+                    plaintext_modulus: plaintext.clone(),
+                    ciphertext_modulus,
+                },
+            ));
+        }
+
+        for (index, modulus) in moduli.iter().copied().enumerate() {
+            let plaintext_mod_modulus = (plaintext % modulus).to_u64().ok_or({
+                Error::ParametersError(ParametersError::PlaintextReductionFailed {
+                    ciphertext_modulus: modulus,
+                })
+            })?;
+            let gcd = Self::gcd(plaintext_mod_modulus, modulus);
+            if gcd != 1 {
+                return Err(Error::ParametersError(
+                    ParametersError::PlaintextModulusNotCoprime {
+                        plaintext_modulus: plaintext.clone(),
+                        ciphertext_modulus: modulus,
+                        index,
+                        gcd,
+                    },
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Build a new `BfvParameters` inside an `Arc`.
     pub fn build_arc(&self) -> Result<Arc<BfvParameters>> {
         self.build().map(Arc::new)
@@ -536,45 +651,17 @@ impl BfvParametersBuilder {
 
     /// Build a new `BfvParameters`.
     pub fn build(&self) -> Result<BfvParameters> {
-        // Check that the degree is a power of 2 (and large enough).
-        if self.degree < 8 || !self.degree.is_power_of_two() {
-            return Err(Error::ParametersError(
-                ParametersError::invalid_degree_with_bounds(self.degree),
-            ));
-        }
+        self.validate_configuration()?;
 
-        let plaintext_modulus_struct = if let Some(p) = self.plaintext.to_u64() {
-            PlaintextModulus::Small {
-                modulus: Modulus::new(p).map_err(|e| {
-                    Error::ParametersError(ParametersError::InvalidPlaintextModulus {
-                        modulus: p,
-                        reason: e.to_string(),
-                    })
-                })?,
-                modulus_big: BigUint::from(p),
-            }
-        } else {
-            PlaintextModulus::Large(self.plaintext.clone())
-        };
+        let plaintext_modulus_struct = PlaintextModulus::try_new(self.plaintext.clone())?;
         let plaintext_big = plaintext_modulus_struct.as_biguint();
-
-        // Check that one of `ciphertext_moduli` and `ciphertext_moduli_sizes` is
-        // specified.
-        if !self.ciphertext_moduli.is_empty() && !self.ciphertext_moduli_sizes.is_empty() {
-            return Err(Error::ParametersError(ParametersError::ConflictingParameters {
-                conflict: "Only one of `ciphertext_moduli` and `ciphertext_moduli_sizes` can be specified".into(),
-            }));
-        } else if self.ciphertext_moduli.is_empty() && self.ciphertext_moduli_sizes.is_empty() {
-            return Err(Error::ParametersError(ParametersError::MissingParameter {
-                parameter: "ciphertext_moduli or ciphertext_moduli_sizes".into(),
-            }));
-        }
 
         // Get or generate the moduli
         let mut moduli = self.ciphertext_moduli.clone();
         if !self.ciphertext_moduli_sizes.is_empty() {
             moduli = Self::generate_moduli(&self.ciphertext_moduli_sizes, self.degree)?
         }
+        self.validate_moduli(&moduli, plaintext_big)?;
 
         // Recomputes the moduli sizes
         let moduli_sizes = moduli
@@ -600,19 +687,13 @@ impl BfvParametersBuilder {
         // Create plaintext context using sufficient moduli
         let plaintext_context = Context::new_arc(&moduli[..plaintext_moduli_count], self.degree)?;
 
-        // Create NTT operator for SIMD operations if possible
-        // Only if plaintext modulus fits in u64 for now
-        let ntt_operator = match &plaintext_modulus_struct {
-            PlaintextModulus::Small { modulus, .. } => {
-                NttOperator::new(modulus, self.degree).map(Arc::new)
-            }
-            PlaintextModulus::Large(_) => None,
-        };
+        // SIMD currently uses the cached machine-word representation.
+        let ntt_operator = plaintext_modulus_struct.ntt_operator(self.degree);
 
         // Create cipher-plain bridge contexts
         let mut cipher_plain_contexts = Vec::with_capacity(moduli.len());
 
-        // Build contexts in reverse order to establish the chain
+        // Build ciphertext/plaintext bridges for every modulus-switching level.
         for i in (0..moduli.len()).rev() {
             let level_moduli = &moduli[..moduli.len() - i];
             let cipher_ctx = Context::new_arc(level_moduli, self.degree)?;
@@ -625,9 +706,10 @@ impl BfvParametersBuilder {
                 if let Some(inv) = q.inv(neg_t_mod_q) {
                     delta_rests.push(inv);
                 } else {
-                    Err(Error::MathError(fhe_math::Error::Default(
-                        "Inverse failed".to_string(),
-                    )))?;
+                    return Err(Error::MathError(fhe_math::Error::NonInvertible {
+                        value: neg_t_mod_q,
+                        modulus: *m,
+                    }));
                 }
             }
 
@@ -644,10 +726,7 @@ impl BfvParametersBuilder {
             let q_mod_t = rns.modulus() % plaintext_big;
 
             // Compute plain_threshold
-            let plain_threshold = match &plaintext_modulus_struct {
-                PlaintextModulus::Small { modulus, .. } => BigUint::from((**modulus + 1) >> 1),
-                PlaintextModulus::Large(m) => (m + 1u32) >> 1,
-            };
+            let plain_threshold = plaintext_modulus_struct.upper_half_threshold();
 
             // Scaler from ciphertext to plaintext context
             let scaler = Scaler::new(
@@ -671,52 +750,56 @@ impl BfvParametersBuilder {
         // Reverse to get correct order (level 0 first)
         cipher_plain_contexts.reverse();
 
-        // Build linked context chain
-        let nodes: Vec<Arc<ContextLevel>> = cipher_plain_contexts
-            .iter()
-            .enumerate()
-            .map(|(lvl, cp_ctx)| {
-                Arc::new(ContextLevel::new(
-                    cp_ctx.ciphertext_context.clone(),
-                    cp_ctx.clone(),
-                    lvl,
-                ))
-            })
-            .collect();
-        for i in 0..nodes.len() - 1 {
-            let (prev, rest) = nodes.split_at(i + 1);
-            ContextLevel::chain(&prev[i], &rest[0]);
-        }
-        let context_chain = nodes.first().unwrap().clone();
-
         // Create n+1 moduli of 62 bits for multiplication.
         let mut extended_basis = Vec::with_capacity(moduli.len() + 1);
         let mut upper_bound = 1 << 62;
         while extended_basis.len() != moduli.len() + 1 {
-            upper_bound = generate_prime(62, 2 * self.degree as u64, upper_bound).unwrap();
+            upper_bound =
+                generate_prime(62, 2 * self.degree as u64, upper_bound).ok_or_else(|| {
+                    Error::ParametersError(ParametersError::NotEnoughPrimes {
+                        size: 62,
+                        degree: self.degree,
+                        needed: moduli.len() + 1,
+                        available: extended_basis.len(),
+                    })
+                })?;
             if !extended_basis.contains(&upper_bound) && !moduli.contains(&upper_bound) {
                 extended_basis.push(upper_bound)
             }
         }
 
-        // Compute multiplication parameters for each level
-        for (i, node) in nodes.iter().enumerate() {
-            // For the first multiplication, we want to extend to a context that
-            // is ~60 bits larger.
-            let modulus_size = moduli_sizes[..moduli_sizes.len() - i].iter().sum::<usize>();
-            let n_moduli = (modulus_size + 60).div_ceil(62);
-            let mut mul_1_moduli = vec![];
-            mul_1_moduli.append(&mut moduli[..moduli_sizes.len() - i].to_vec());
-            mul_1_moduli.append(&mut extended_basis[..n_moduli].to_vec());
-            let mul_1_ctx = Context::new_arc(&mul_1_moduli, self.degree)?;
-            let mp = MultiplicationParameters::new(
-                &node.poly_context,
-                &mul_1_ctx,
-                ScalingFactor::one(),
-                ScalingFactor::new(plaintext_big, node.poly_context.modulus()),
-            )?;
-            node.mul_params.set(mp).unwrap();
-        }
+        // Build a fully initialized context for each level. The vector index is
+        // the level, so lookups do not need to walk or initialize a chain.
+        let context_levels = cipher_plain_contexts
+            .into_iter()
+            .enumerate()
+            .map(|(level, cipher_plain_context)| {
+                let poly_context = cipher_plain_context.ciphertext_context.clone();
+
+                // For the first multiplication, extend to a context that is
+                // approximately 60 bits larger.
+                let modulus_size = moduli_sizes[..moduli_sizes.len() - level]
+                    .iter()
+                    .sum::<usize>();
+                let n_moduli = (modulus_size + 60).div_ceil(62);
+                let mut multiplication_moduli = moduli[..moduli_sizes.len() - level].to_vec();
+                multiplication_moduli.extend_from_slice(&extended_basis[..n_moduli]);
+                let multiplication_context = Context::new_arc(&multiplication_moduli, self.degree)?;
+                let mul_params = MultiplicationParameters::new(
+                    &poly_context,
+                    &multiplication_context,
+                    ScalingFactor::one(),
+                    ScalingFactor::new(plaintext_big, poly_context.modulus()),
+                )?;
+
+                Ok(ContextLevel::new(
+                    poly_context,
+                    cipher_plain_context,
+                    level,
+                    mul_params,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         // We use the same code as SEAL
         // https://github.com/microsoft/SEAL/blob/82b07db635132e297282649e2ab5908999089ad2/native/src/seal/batchencoder.cpp
@@ -741,7 +824,7 @@ impl BfvParametersBuilder {
             moduli_sizes: moduli_sizes.into(),
             variance: self.variance,
             error1_variance: self.error1_variance.clone(),
-            context_chain,
+            context_levels,
             ntt_operator,
             plaintext: plaintext_modulus_struct,
             matrix_reps_index_map: matrix_reps_index_map.into(),
@@ -772,8 +855,8 @@ impl Serialize for BfvParameters {
 impl Deserialize for BfvParameters {
     fn try_deserialize(bytes: &[u8]) -> Result<Self> {
         let params: Parameters = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: "Parameters decode".into(),
+            Error::SerializationError(SerializationError::Decode {
+                object: crate::SerializedObject::Parameters,
             })
         })?;
 
@@ -783,7 +866,7 @@ impl Deserialize for BfvParameters {
             None => {
                 return Err(Error::SerializationError(
                     SerializationError::MissingField {
-                        field_name: "Parameters.plaintext_modulus".into(),
+                        field: crate::SerializedField::ParametersPlaintextModulus,
                     },
                 ));
             }
@@ -828,6 +911,7 @@ impl MultiplicationParameters {
 mod tests {
     use super::{BfvParameters, BfvParametersBuilder};
     use crate::proto::bfv::{Parameters, parameters::PlaintextModulus as PlaintextModulusProto};
+    use crate::{Error as FheError, ParametersError};
     use fhe_traits::{Deserialize, Serialize};
     use num_bigint::BigUint;
     use prost::Message;
@@ -838,6 +922,8 @@ mod tests {
         let params = BfvParameters::default_arc(1, 16);
         assert_eq!(params.moduli.len(), 1);
         assert_eq!(params.degree(), 16);
+        assert!(params.plaintext.small().is_some());
+        assert_eq!(params.plaintext.as_u64(), Some(params.plaintext()));
 
         let params = BfvParameters::default_arc(2, 16);
         assert_eq!(params.moduli.len(), 2);
@@ -890,6 +976,8 @@ mod tests {
             .build()?;
 
         assert_eq!(params.plaintext_big(), &p);
+        assert!(params.plaintext.small().is_none());
+        assert_eq!(params.plaintext.as_u64(), None);
         Ok(())
     }
 
@@ -943,7 +1031,177 @@ mod tests {
         };
         let bytes = proto.encode_to_vec();
         let err = BfvParameters::try_deserialize(&bytes).unwrap_err();
-        assert!(format!("{err}").contains("Missing required field"));
+        assert_eq!(
+            err,
+            FheError::SerializationError(crate::SerializationError::MissingField {
+                field: crate::SerializedField::ParametersPlaintextModulus,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_degree() {
+        for degree in [0, 10, 131072] {
+            let err = BfvParametersBuilder::new()
+                .set_degree(degree)
+                .set_plaintext_modulus(2)
+                .set_moduli(&[97])
+                .build()
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                FheError::ParametersError(ParametersError::InvalidDegree {
+                    degree: actual,
+                    min: 8,
+                    max: 65536,
+                }) if actual == degree
+            ));
+        }
+    }
+
+    #[test]
+    fn validates_variance_bounds() -> Result<(), Box<dyn Error>> {
+        for variance in [0, 33] {
+            let err = BfvParametersBuilder::new()
+                .set_degree(16)
+                .set_plaintext_modulus(2)
+                .set_moduli(&[97])
+                .set_variance(variance)
+                .build()
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                FheError::ParametersError(ParametersError::InvalidVariance {
+                    variance: actual,
+                    min: 1,
+                    max: 32,
+                }) if actual == variance
+            ));
+        }
+
+        for variance in [1, 32] {
+            BfvParametersBuilder::new()
+                .set_degree(16)
+                .set_plaintext_modulus(2)
+                .set_moduli(&[97])
+                .set_variance(variance)
+                .build()?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn deserialization_rejects_invalid_variance() {
+        let proto = Parameters {
+            degree: 16,
+            moduli: vec![97],
+            variance: 33,
+            plaintext_modulus: Some(PlaintextModulusProto::Plaintext(2)),
+        };
+        let err = BfvParameters::try_deserialize(&proto.encode_to_vec()).unwrap_err();
+        assert!(matches!(
+            err,
+            FheError::ParametersError(ParametersError::InvalidVariance {
+                variance: 33,
+                min: 1,
+                max: 32,
+            })
+        ));
+    }
+
+    #[test]
+    fn validates_explicit_ciphertext_moduli() {
+        let invalid = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(2)
+            .set_moduli(&[1])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            invalid,
+            FheError::ParametersError(ParametersError::InvalidCiphertextModulus {
+                index: 0,
+                modulus: 1,
+                ..
+            })
+        ));
+
+        let duplicate = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(2)
+            .set_moduli(&[97, 97])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            duplicate,
+            FheError::ParametersError(ParametersError::DuplicateModuli {
+                modulus: 97,
+                indices,
+            }) if indices == [0, 1]
+        ));
+
+        let not_coprime = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(2)
+            .set_moduli(&[9, 15])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            not_coprime,
+            FheError::ParametersError(ParametersError::ModuliNotCoprime {
+                modulus1: 9,
+                modulus2: 15,
+                gcd: 3,
+            })
+        ));
+
+        let not_ntt_friendly = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(2)
+            .set_moduli(&[17])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            not_ntt_friendly,
+            FheError::ParametersError(ParametersError::CiphertextModulusNotNttFriendly {
+                index: 0,
+                modulus: 17,
+                degree: 16,
+            })
+        ));
+    }
+
+    #[test]
+    fn validates_plaintext_against_ciphertext_moduli() {
+        let too_large = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(98)
+            .set_moduli(&[97])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            too_large,
+            FheError::ParametersError(
+                ParametersError::PlaintextModulusExceedsCiphertextModulus { .. }
+            )
+        ));
+
+        let not_coprime = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(194)
+            .set_moduli(&[97, 193])
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            not_coprime,
+            FheError::ParametersError(ParametersError::PlaintextModulusNotCoprime {
+                ciphertext_modulus: 97,
+                index: 0,
+                gcd: 97,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1128,14 +1386,11 @@ mod tests {
         let result = BfvParameters::default_parameters_128(10);
         assert!(result.is_err());
 
-        #[expect(clippy::panic, reason = "panic indicates violated internal invariant")]
-        match result {
-            Err(e) => {
-                let error_string = format!("{e}");
-                assert!(error_string.contains("No parameters available"));
-                assert!(error_string.contains("10 bits"));
-            }
-            Ok(_) => panic!("Expected error"),
-        }
+        assert_eq!(
+            result.err(),
+            Some(FheError::ParametersError(
+                ParametersError::NoDefaultParameters { plaintext_bits: 10 }
+            ))
+        );
     }
 }

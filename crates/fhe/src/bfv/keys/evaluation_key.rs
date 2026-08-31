@@ -2,12 +2,12 @@
 
 use crate::bfv::{BfvParameters, Ciphertext, SecretKey, keys::GaloisKey, traits::TryConvertFrom};
 use crate::proto::bfv::{EvaluationKey as EvaluationKeyProto, GaloisKey as GaloisKeyProto};
-use crate::{Error, Result};
-use fhe_math::rq::{NttShoup, Poly, PowerBasis, traits::TryConvertFrom as TryConvertFromPoly};
+use crate::{Error, Result, SerializationError};
+use fhe_math::rq::{NttShoup, Poly, PowerBasis};
 use fhe_math::zq::Modulus;
 use fhe_traits::{DeserializeParametrized, FheParametrized, Serialize};
 use prost::Message;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng as RngCore};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -54,26 +54,44 @@ impl EvaluationKey {
 
     /// Computes the homomorphic inner sum.
     pub fn computes_inner_sum(&self, ct: &Ciphertext) -> Result<Ciphertext> {
+        self.validate_ciphertext(ct)?;
         if !self.supports_inner_sum() {
-            Err(Error::DefaultError(
-                "This key does not support the inner sum functionality".to_string(),
-            ))
+            Err(crate::EvaluationKeyError::Unsupported {
+                operation: crate::EvaluationOperation::InnerSum,
+            }
+            .into())
         } else {
             let mut out = ct.clone();
             let mut tmp = Ciphertext::zero(&ct.par);
 
             let mut i = 1;
             while i < ct.par.degree() / 2 {
+                let exponent =
+                    self.rot_to_gk_exponent
+                        .get(&i)
+                        .ok_or(crate::EvaluationKeyError::Missing {
+                            component: crate::EvaluationKeyComponent::GaloisExponent { step: i },
+                        })?;
                 let gk = self
                     .gk
-                    .get(self.rot_to_gk_exponent.get(&i).unwrap())
-                    .unwrap();
+                    .get(exponent)
+                    .ok_or(crate::EvaluationKeyError::Missing {
+                        component: crate::EvaluationKeyComponent::GaloisKey { element: *exponent },
+                    })?;
                 gk.relinearize_into(&out, &mut tmp)?;
                 out += &tmp;
                 i *= 2
             }
 
-            let gk = self.gk.get(&(self.par.degree() * 2 - 1)).unwrap();
+            let row_rotation_element = self.par.degree() * 2 - 1;
+            let gk =
+                self.gk
+                    .get(&row_rotation_element)
+                    .ok_or(crate::EvaluationKeyError::Missing {
+                        component: crate::EvaluationKeyComponent::GaloisKey {
+                            element: row_rotation_element,
+                        },
+                    })?;
             gk.relinearize_into(&out, &mut tmp)?;
             out += &tmp;
 
@@ -90,12 +108,22 @@ impl EvaluationKey {
 
     /// Homomorphically rotate the rows of the plaintext
     pub fn rotates_rows(&self, ct: &Ciphertext) -> Result<Ciphertext> {
+        self.validate_ciphertext(ct)?;
         if !self.supports_row_rotation() {
-            Err(Error::DefaultError(
-                "This key does not support the row rotation functionality".to_string(),
-            ))
+            Err(crate::EvaluationKeyError::Unsupported {
+                operation: crate::EvaluationOperation::RowRotation,
+            }
+            .into())
         } else {
-            let gk = self.gk.get(&(self.par.degree() * 2 - 1)).unwrap();
+            let row_rotation_element = self.par.degree() * 2 - 1;
+            let gk =
+                self.gk
+                    .get(&row_rotation_element)
+                    .ok_or(crate::EvaluationKeyError::Missing {
+                        component: crate::EvaluationKeyComponent::GaloisKey {
+                            element: row_rotation_element,
+                        },
+                    })?;
             let mut out = Ciphertext::zero(&ct.par);
             gk.relinearize_into(ct, &mut out)?;
             Ok(out)
@@ -115,15 +143,26 @@ impl EvaluationKey {
 
     /// Homomorphically rotate the columns of the plaintext
     pub fn rotates_columns_by(&self, ct: &Ciphertext, i: usize) -> Result<Ciphertext> {
+        self.validate_ciphertext(ct)?;
         if !self.supports_column_rotation_by(i) {
-            Err(Error::DefaultError(
-                "This key does not support rotating the columns by this index".to_string(),
-            ))
+            Err(crate::EvaluationKeyError::Unsupported {
+                operation: crate::EvaluationOperation::ColumnRotation { step: i },
+            }
+            .into())
         } else {
+            let exponent = self.rot_to_gk_exponent.get(&i).ok_or_else(|| {
+                crate::EvaluationKeyError::InvalidRotationStep {
+                    step: i,
+                    min: 1,
+                    max: self.par.degree() / 2 - 1,
+                }
+            })?;
             let gk = self
                 .gk
-                .get(self.rot_to_gk_exponent.get(&i).unwrap())
-                .unwrap();
+                .get(exponent)
+                .ok_or(crate::EvaluationKeyError::Missing {
+                    component: crate::EvaluationKeyComponent::GaloisKey { element: *exponent },
+                })?;
             let mut out = Ciphertext::zero(&ct.par);
             gk.relinearize_into(ct, &mut out)?;
             Ok(out)
@@ -138,7 +177,7 @@ impl EvaluationKey {
         } else if self.evaluation_key_level == self.par.moduli().len() {
             false
         } else {
-            let mut ret = level < self.par.degree().leading_zeros() as usize;
+            let mut ret = level <= self.par.degree().ilog2() as usize;
             for l in 0..level {
                 ret &= self.gk.contains_key(&((self.par.degree() >> l) + 1));
             }
@@ -151,12 +190,24 @@ impl EvaluationKey {
     /// ciphertext does not have size 2. The output is a vector of `size`
     /// ciphertexts.
     pub fn expands(&self, ct: &Ciphertext, size: usize) -> Result<Vec<Ciphertext>> {
+        self.validate_ciphertext(ct)?;
+        if size == 0 {
+            return Err(crate::EvaluationKeyError::InvalidExpansionSize {
+                size,
+                degree: self.par.degree(),
+            }
+            .into());
+        }
+        if size > self.par.degree() {
+            return Err(crate::EvaluationKeyError::InvalidExpansionSize {
+                size,
+                degree: self.par.degree(),
+            }
+            .into());
+        }
+
         let level = size.next_power_of_two().ilog2() as usize;
-        if ct.len() != 2 {
-            Err(Error::DefaultError(
-                "The ciphertext is not of size 2".to_string(),
-            ))
-        } else if level == 0 {
+        if level == 0 {
             Ok(vec![ct.clone()])
         } else if self.supports_expansion(level) {
             let mut out = vec![Ciphertext::zero(&ct.par); 1 << level];
@@ -166,8 +217,19 @@ impl EvaluationKey {
             // We use the Oblivious expansion algorithm of
             // https://eprint.iacr.org/2019/1483.pdf
             for l in 0..level {
-                let monomial = &self.monomials[l];
-                let gk = self.gk.get(&((self.par.degree() >> l) + 1)).unwrap();
+                let monomial = self
+                    .monomials
+                    .get(l)
+                    .ok_or(crate::EvaluationKeyError::Missing {
+                        component: crate::EvaluationKeyComponent::ExpansionMonomial { level: l },
+                    })?;
+                let element = (self.par.degree() >> l) + 1;
+                let gk = self
+                    .gk
+                    .get(&element)
+                    .ok_or(crate::EvaluationKeyError::Missing {
+                        component: crate::EvaluationKeyComponent::GaloisKey { element },
+                    })?;
                 let step = 1 << l;
                 let (low, high) = out.split_at_mut(step);
                 for i in 0..step {
@@ -186,10 +248,31 @@ impl EvaluationKey {
             out.truncate(size);
             Ok(out)
         } else {
-            Err(Error::DefaultError(
-                "This key does not support expansion at this level".to_string(),
-            ))
+            Err(crate::EvaluationKeyError::Unsupported {
+                operation: crate::EvaluationOperation::Expansion { level },
+            }
+            .into())
         }
+    }
+
+    fn validate_ciphertext(&self, ct: &Ciphertext) -> Result<()> {
+        ct.validate_for(&self.par)?;
+        if ct.len() != 2 {
+            return Err(crate::CiphertextError::InvalidPolynomialCount {
+                operation: crate::CiphertextOperation::EvaluationKey,
+                actual: ct.len(),
+                expected: 2,
+            }
+            .into());
+        }
+        if ct.level != self.ciphertext_level {
+            return Err(Error::InvalidLevel {
+                level: ct.level,
+                min_level: self.ciphertext_level,
+                max_level: self.ciphertext_level,
+            });
+        }
+        Ok(())
     }
 
     fn construct_rot_to_gk_exponent(par: &Arc<BfvParameters>) -> HashMap<usize, usize> {
@@ -217,12 +300,12 @@ impl DeserializeParametrized for EvaluationKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self> {
-        let gkp = Message::decode(bytes);
-        if let Ok(gkp) = gkp {
-            EvaluationKey::try_convert_from(&gkp, par)
-        } else {
-            Err(Error::DefaultError("Invalid serialization".to_string()))
-        }
+        let gkp = Message::decode(bytes).map_err(|_| {
+            Error::SerializationError(SerializationError::Decode {
+                object: crate::SerializedObject::EvaluationKey,
+            })
+        })?;
+        EvaluationKey::try_convert_from(&gkp, par)
     }
 }
 
@@ -272,8 +355,19 @@ impl EvaluationKeyBuilder {
         ciphertext_level: usize,
         evaluation_key_level: usize,
     ) -> Result<Self> {
-        if ciphertext_level < evaluation_key_level || ciphertext_level > sk.par.max_level() {
-            return Err(Error::DefaultError("Unexpected levels".to_string()));
+        if ciphertext_level > sk.par.max_level() {
+            return Err(Error::InvalidLevel {
+                level: ciphertext_level,
+                min_level: 0,
+                max_level: sk.par.max_level(),
+            });
+        }
+        if evaluation_key_level > ciphertext_level {
+            return Err(Error::InvalidLevel {
+                level: evaluation_key_level,
+                min_level: 0,
+                max_level: ciphertext_level,
+            });
         }
 
         Ok(Self {
@@ -290,8 +384,13 @@ impl EvaluationKeyBuilder {
 
     /// Allow expansion by this evaluation key.
     pub fn enable_expansion(&mut self, level: usize) -> Result<&mut Self> {
-        if level >= 64 - self.sk.par.degree().leading_zeros() as usize {
-            Err(Error::DefaultError("Invalid level 2".to_string()))
+        let max_level = self.sk.par.degree().ilog2() as usize;
+        if level > max_level {
+            Err(Error::InvalidLevel {
+                level,
+                min_level: 0,
+                max_level,
+            })
         } else {
             self.expansion_level = level;
             Ok(self)
@@ -317,7 +416,12 @@ impl EvaluationKeyBuilder {
             self.column_rotation.insert(*exp);
             Ok(self)
         } else {
-            Err(Error::DefaultError("Invalid column index".to_string()))
+            Err(crate::EvaluationKeyError::InvalidRotationStep {
+                step: i,
+                min: 1,
+                max: self.sk.par.degree() / 2 - 1,
+            }
+            .into())
         }
     }
 
@@ -343,7 +447,13 @@ impl EvaluationKeyBuilder {
             indices.insert(self.sk.par.degree() * 2 - 1);
             let mut i = 1;
             while i < self.sk.par.degree() / 2 {
-                indices.insert(*ek.rot_to_gk_exponent.get(&i).unwrap());
+                let exponent =
+                    ek.rot_to_gk_exponent
+                        .get(&i)
+                        .ok_or(crate::EvaluationKeyError::Missing {
+                            component: crate::EvaluationKeyComponent::GaloisExponent { step: i },
+                        })?;
+                indices.insert(*exponent);
                 i *= 2
             }
         }
@@ -356,9 +466,11 @@ impl EvaluationKeyBuilder {
         for l in 0..self.sk.par.degree().ilog2() {
             let mut monomial = vec![0i64; self.sk.par.degree()];
             monomial[self.sk.par.degree() - (1 << l)] = -1;
-            let mut monomial =
-                Poly::<PowerBasis>::try_convert_from(&monomial, ciphertext_ctx, true)?;
-            unsafe { monomial.allow_variable_time_computations() }
+            let monomial = Poly::<PowerBasis>::try_convert_from_public(
+                &monomial,
+                ciphertext_ctx,
+                fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public()),
+            )?;
             ek.monomials.push(monomial.into_ntt_shoup());
         }
 
@@ -382,7 +494,7 @@ impl EvaluationKeyBuilder {
 impl From<&EvaluationKey> for EvaluationKeyProto {
     fn from(ek: &EvaluationKey) -> Self {
         let mut proto = EvaluationKeyProto::default();
-        for (_, gk) in ek.gk.iter() {
+        for gk in ek.gk.values() {
             proto.gk.push(GaloisKeyProto::from(gk))
         }
         proto.ciphertext_level = ek.ciphertext_level as u32;
@@ -397,14 +509,18 @@ impl TryConvertFrom<&EvaluationKeyProto> for EvaluationKey {
         for gkp in &value.gk {
             let key = GaloisKey::try_convert_from(gkp, par)?;
             if key.ksk.ciphertext_level != value.ciphertext_level as usize {
-                return Err(Error::DefaultError(
-                    "Galois key has incorrect ciphertext level".to_string(),
-                ));
+                return Err(Error::InvalidLevel {
+                    level: key.ksk.ciphertext_level,
+                    min_level: value.ciphertext_level as usize,
+                    max_level: value.ciphertext_level as usize,
+                });
             }
             if key.ksk.ksk_level != value.evaluation_key_level as usize {
-                return Err(Error::DefaultError(
-                    "Galois key has incorrect evaluation key level".to_string(),
-                ));
+                return Err(Error::InvalidLevel {
+                    level: key.ksk.ksk_level,
+                    min_level: value.evaluation_key_level as usize,
+                    max_level: value.evaluation_key_level as usize,
+                });
             }
             gk.insert(key.element.exponent, key);
         }
@@ -414,9 +530,11 @@ impl TryConvertFrom<&EvaluationKeyProto> for EvaluationKey {
         for l in 0..par.degree().ilog2() {
             let mut monomial = vec![0i64; par.degree()];
             monomial[par.degree() - (1 << l)] = -1;
-            let mut monomial =
-                Poly::<PowerBasis>::try_convert_from(&monomial, ciphertext_ctx, true)?;
-            unsafe { monomial.allow_variable_time_computations() }
+            let monomial = Poly::<PowerBasis>::try_convert_from_public(
+                &monomial,
+                ciphertext_ctx,
+                fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public()),
+            )?;
             monomials.push(monomial.into_ntt_shoup());
         }
 
@@ -516,7 +634,11 @@ mod tests {
         assert!(e.is_err());
         assert_eq!(
             e.unwrap_err(),
-            crate::Error::DefaultError("Unexpected levels".to_string())
+            crate::Error::InvalidLevel {
+                level: 1,
+                min_level: 0,
+                max_level: 0,
+            }
         );
 
         Ok(())
@@ -727,6 +849,38 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn expansion_rejects_invalid_sizes() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(3, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ek = EvaluationKeyBuilder::new(&sk)?
+            .enable_expansion(1)?
+            .build(&mut rng)?;
+        let pt = Plaintext::try_encode(&[1u64][..], Encoding::poly(), &params)?;
+        let ct = sk.try_encrypt(&pt, &mut rng)?;
+
+        assert_eq!(
+            ek.expands(&ct, 0),
+            Err(crate::Error::EvaluationKey(
+                crate::EvaluationKeyError::InvalidExpansionSize {
+                    size: 0,
+                    degree: params.degree(),
+                }
+            ))
+        );
+        assert_eq!(
+            ek.expands(&ct, params.degree() + 1),
+            Err(crate::Error::EvaluationKey(
+                crate::EvaluationKeyError::InvalidExpansionSize {
+                    size: params.degree() + 1,
+                    degree: params.degree(),
+                }
+            ))
+        );
         Ok(())
     }
 

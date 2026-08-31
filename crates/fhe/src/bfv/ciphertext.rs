@@ -3,7 +3,7 @@
 use crate::bfv::{parameters::BfvParameters, traits::TryConvertFrom};
 use crate::proto::bfv::Ciphertext as CiphertextProto;
 use crate::{Error, Result, SerializationError};
-use fhe_math::rq::{Ntt, Poly};
+use fhe_math::rq::{Context, Ntt, Poly};
 use fhe_traits::{
     DeserializeParametrized, DeserializeWithContext, FheCiphertext, FheParametrized, Serialize,
 };
@@ -50,10 +50,11 @@ impl Ciphertext {
     #[expect(clippy::expect_used, reason = "bounds are validated before use")]
     pub fn new(c: Vec<Poly<Ntt>>, par: &Arc<BfvParameters>) -> Result<Self> {
         if c.len() < 2 {
-            return Err(Error::TooFewValues {
+            return Err(crate::CiphertextError::TooFewPolynomials {
                 actual: c.len(),
                 minimum: 2,
-            });
+            }
+            .into());
         }
 
         let ctx = c
@@ -65,7 +66,7 @@ impl Ciphertext {
         // Check that all polynomials have the expected context.
         for ci in c.iter() {
             if ci.ctx() != ctx {
-                return Err(Error::MathError(fhe_math::Error::InvalidContext));
+                return Err(crate::CiphertextError::PolynomialContextMismatch { level: 0 }.into());
             }
         }
 
@@ -77,22 +78,85 @@ impl Ciphertext {
         })
     }
 
+    /// Validate the structure and context of a ciphertext used as an input.
+    #[inline]
+    pub(crate) fn validate_for(&self, par: &Arc<BfvParameters>) -> Result<()> {
+        if !Arc::ptr_eq(&self.par, par) {
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Ciphertext,
+                right: crate::ParameterSource::Parameters,
+            });
+        }
+        let expected_ctx = par.context_at_level(self.level)?;
+        self.validate_context(self.level, expected_ctx)
+    }
+
+    /// Validate against a context that the caller has already resolved.
+    #[inline]
+    pub(crate) fn validate_for_context(
+        &self,
+        par: &Arc<BfvParameters>,
+        expected_level: usize,
+        expected_ctx: &Arc<Context>,
+    ) -> Result<()> {
+        if !Arc::ptr_eq(&self.par, par) {
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Ciphertext,
+                right: crate::ParameterSource::Parameters,
+            });
+        }
+        self.validate_context(expected_level, expected_ctx)
+    }
+
+    #[inline]
+    fn validate_context(&self, expected_level: usize, expected_ctx: &Arc<Context>) -> Result<()> {
+        if self.c.len() < 2 {
+            return Err(crate::CiphertextError::TooFewPolynomials {
+                actual: self.c.len(),
+                minimum: 2,
+            }
+            .into());
+        }
+        if self.level != expected_level {
+            return Err(Error::InvalidLevel {
+                level: self.level,
+                min_level: expected_level,
+                max_level: expected_level,
+            });
+        }
+        if self
+            .c
+            .iter()
+            .any(|poly| !Arc::ptr_eq(poly.ctx(), expected_ctx) && poly.ctx() != expected_ctx)
+        {
+            return Err(crate::CiphertextError::PolynomialContextMismatch {
+                level: expected_level,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// Truncate the underlying vector of polynomials.
     pub(crate) fn truncate(&mut self, len: usize) {
         self.c.truncate(len)
     }
 
     /// Switch to the next level in the chain.
+    ///
+    /// Returns an error if the ciphertext is already at the last level.
     pub fn switch_down(&mut self) -> Result<()> {
-        if self.level < self.max_switchable_level() {
-            self.seed = None;
-            for ci in self.c.iter_mut() {
-                let mut pb = ci.clone().into_power_basis();
-                pb.switch_down()?;
-                *ci = pb.into_ntt();
-            }
-            self.level += 1
+        if self.level >= self.max_switchable_level() {
+            return Err(fhe_math::Error::NoMoreContext.into());
         }
+
+        self.seed = None;
+        for ci in self.c.iter_mut() {
+            let mut pb = ci.clone().into_power_basis();
+            pb.switch_down()?;
+            *ci = pb.into_ntt();
+        }
+        self.level += 1;
         Ok(())
     }
 
@@ -140,8 +204,8 @@ impl Serialize for Ciphertext {
 impl DeserializeParametrized for Ciphertext {
     fn from_bytes(bytes: &[u8], par: &Arc<BfvParameters>) -> Result<Self> {
         let ctp = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: "Ciphertext decode".into(),
+            Error::SerializationError(SerializationError::Decode {
+                object: crate::SerializedObject::Ciphertext,
             })
         })?;
         Ciphertext::try_convert_from(&ctp, par)
@@ -197,9 +261,12 @@ impl From<&Ciphertext> for CiphertextProto {
 impl TryConvertFrom<&CiphertextProto> for Ciphertext {
     fn try_convert_from(value: &CiphertextProto, par: &Arc<BfvParameters>) -> Result<Self> {
         if value.c.is_empty() || (value.c.len() == 1 && value.seed.is_empty()) {
-            return Err(Error::InvalidCiphertext {
-                reason: "Not enough polynomials".into(),
-            });
+            return Err(Error::SerializationError(
+                SerializationError::InvalidCiphertextPolynomialCount {
+                    actual: value.c.len(),
+                    seed_present: !value.seed.is_empty(),
+                },
+            ));
         }
 
         if value.level as usize > par.max_level() {
@@ -228,9 +295,17 @@ impl TryConvertFrom<&CiphertextProto> for Ciphertext {
                 })?;
             seed = Some(try_seed);
             let mut c1 = Poly::<Ntt>::random_from_seed(ctx, try_seed);
-            unsafe { c1.allow_variable_time_computations() }
+            c1.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                fhe_traits::PublicData::assert_public(),
+            ));
             c.push(c1)
         }
+
+        // Ciphertexts are public once received. Grant timing permission only
+        // at this trusted type boundary; polynomial wire data cannot grant it.
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+        c.iter_mut()
+            .for_each(|ci| ci.allow_variable_time_computations(variable_time));
 
         Ok(Ciphertext {
             par: par.clone(),
@@ -248,8 +323,9 @@ mod tests {
         BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
     };
     use crate::proto::bfv::Ciphertext as CiphertextProto;
-    use fhe_traits::FheDecrypter;
-    use fhe_traits::{DeserializeParametrized, FheEncoder, FheEncrypter, Serialize};
+    use fhe_traits::{
+        DeserializeParametrized, FheDecoder, FheDecrypter, FheEncoder, FheEncrypter, Serialize,
+    };
     use rand::rng;
     use std::error::Error as StdError;
 
@@ -354,9 +430,28 @@ mod tests {
             assert_eq!(ct.level, params.max_level());
 
             let decrypted = sk.try_decrypt(&ct)?;
-            assert_eq!(decrypted.value, pt.value);
+            assert_eq!(
+                Vec::<u64>::try_decode(&decrypted, Encoding::simd())?,
+                Vec::<u64>::try_decode(&pt, Encoding::simd())?
+            );
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn switch_down_from_last_level_returns_error() -> Result<(), Box<dyn StdError>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(2, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pt = Plaintext::try_encode(&[1u64][..], Encoding::poly(), &params)?;
+        let mut ct: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
+        ct.switch_to_level(params.max_level())?;
+
+        assert!(matches!(
+            ct.switch_down(),
+            Err(FheError::MathError(fhe_math::Error::NoMoreContext))
+        ));
         Ok(())
     }
 

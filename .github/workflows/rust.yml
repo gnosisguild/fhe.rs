@@ -8,26 +8,50 @@ on:
       - main
 
 jobs:
-  ci:
+  check:
+    name: Check (${{ matrix.features }})
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [default, all]
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: actions-rs/toolchain@v1
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions-rs/toolchain@v1
         with:
-          toolchain: 1.85.0
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions/checkout@v6
+      - uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --workspace ${{ matrix.features == 'all' && '--all-features' || '' }}
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Check code format
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Run tests
-        # Release profile: one compile pass, and the trBFV secure-preset e2e
-        # tests (tests/trbfv_secure_e2e.rs) run in seconds instead of minutes.
-        run: cargo test --release --all-features
+  test:
+    name: Test Suite (${{ matrix.features }})
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [default, all]
+    steps:
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions/checkout@v6
+       - uses: actions-rs/cargo@v1
+         with:
+           command: test
+           args: --release --workspace ${{ matrix.features == 'all' && '--all-features' || '' }}

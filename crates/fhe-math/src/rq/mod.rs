@@ -23,10 +23,10 @@ pub use context::Context;
 use fhe_util::sample_vec_cbd;
 use itertools::{Itertools, izip};
 use ndarray::{Array2, ArrayView2, Axis, s};
-use num_bigint::{BigInt, BigUint, RandBigInt, ToBigInt};
+use num_bigint::{BigInt, BigRng09, BigUint};
 use num_traits::{Signed, ToPrimitive};
 pub use ops::dot_product;
-use rand::{CryptoRng, RngCore, SeedableRng};
+use rand::{CryptoRng, Rng as RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -101,9 +101,10 @@ impl SubstitutionExponent {
     pub fn new(ctx: &Arc<Context>, exponent: usize) -> Result<Self> {
         let exponent = exponent % (2 * ctx.degree);
         if exponent & 1 == 0 {
-            return Err(Error::Default(
-                "The exponent should be odd modulo 2 * degree".to_string(),
-            ));
+            return Err(Error::InvalidSubstitutionExponent {
+                exponent,
+                degree: ctx.degree,
+            });
         }
         let mut power = (exponent - 1) / 2;
         let mask = ctx.degree - 1;
@@ -123,7 +124,7 @@ impl SubstitutionExponent {
 }
 
 /// Struct that holds a polynomial for a specific context.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Poly<R: RepresentationTag> {
     /// The context containing the polynomial's parameters
     ctx: Arc<Context>,
@@ -157,6 +158,20 @@ pub struct PolyRaw {
     pub coefficients_shoup: Option<Vec<u64>>,
 }
 
+impl<R: RepresentationTag> PartialEq for Poly<R> {
+    fn eq(&self, other: &Self) -> bool {
+        // Variable-time permission is local execution policy, not part of the
+        // polynomial's mathematical value.
+        self.ctx == other.ctx
+            && self.has_lazy_coefficients == other.has_lazy_coefficients
+            && self.coefficients == other.coefficients
+            && self.coefficients_shoup == other.coefficients_shoup
+    }
+}
+
+impl<R: RepresentationTag> Eq for Poly<R> {}
+
+// Implements zeroization of polynomials
 impl<R: RepresentationTag> Zeroize for Poly<R> {
     fn zeroize(&mut self) {
         if let Some(coeffs) = self.coefficients.as_slice_mut() {
@@ -179,6 +194,22 @@ impl<R: RepresentationTag> AsMut<Poly<R>> for Poly<R> {
 }
 
 impl<R: RepresentationTag> Poly<R> {
+    /// Convert explicitly public values into a polynomial using variable-time
+    /// reduction when available.
+    ///
+    /// Passing [`fhe_traits::VariableTime`] asserts that `value` is public.
+    /// Classifying secret values as public may expose them through timing.
+    pub fn try_convert_from_public<T>(
+        value: T,
+        ctx: &Arc<Context>,
+        _variable_time: fhe_traits::VariableTime,
+    ) -> Result<Self>
+    where
+        Self: traits::TryConvertFrom<T>,
+    {
+        Self::try_convert_from(value, ctx, true)
+    }
+
     /// Creates a polynomial holding the constant 0.
     #[must_use]
     pub fn zero(ctx: &Arc<Context>) -> Self {
@@ -198,14 +229,19 @@ impl<R: RepresentationTag> Poly<R> {
         }
     }
 
-    /// Enable variable time computations when this polynomial is involved.
+    /// Enable variable-time computations for this public polynomial.
     ///
-    /// # Safety
-    ///
-    /// By default, this is marked as unsafe, but is usually safe when only
-    /// public data is processed.
-    pub unsafe fn allow_variable_time_computations(&mut self) {
+    /// Passing [`fhe_traits::VariableTime`] asserts that every coefficient is
+    /// public. Classifying secret coefficients as public may expose them
+    /// through timing.
+    pub fn allow_variable_time_computations(&mut self, _variable_time: fhe_traits::VariableTime) {
         self.allow_variable_time_computations = true
+    }
+
+    /// Return whether this polynomial permits variable-time computations.
+    #[must_use]
+    pub const fn allows_variable_time_computations(&self) -> bool {
+        self.allow_variable_time_computations
     }
 
     /// Disable variable time computations when this polynomial is involved.
@@ -282,20 +318,28 @@ impl<R: RepresentationTag> Poly<R> {
     }
     /// Generate a small polynomial and convert into the specified
     /// representation.
+    ///
+    /// Returns an error if the variance does not belong to [1, ..., 32].
     pub fn small<T: RngCore + CryptoRng>(
         ctx: &Arc<Context>,
         variance: usize,
         rng: &mut T,
     ) -> Result<Self> {
-        if !(1..=16).contains(&variance) {
-            return Err(Error::Default(
-                "The variance should be an integer between 1 and 16".to_string(),
-            ));
+        if !(1..=32).contains(&variance) {
+            return Err(Error::InvalidVariance {
+                variance,
+                minimum: 1,
+                maximum: 32,
+            });
         }
 
-        let coeffs = Zeroizing::new(
-            sample_vec_cbd(ctx.degree, variance, rng).map_err(|e| Error::Default(e.to_string()))?,
-        );
+        let coeffs = Zeroizing::new(sample_vec_cbd(ctx.degree, variance, rng).map_err(|_| {
+            Error::InvalidVariance {
+                variance,
+                minimum: 1,
+                maximum: 32,
+            }
+        })?);
         let p = Poly::<PowerBasis>::try_convert_from(coeffs.as_ref() as &[i64], ctx, false)?;
         if R::REPRESENTATION == Representation::PowerBasis {
             Ok(Poly::from_parts(p))
@@ -326,10 +370,10 @@ impl<R: RepresentationTag> Poly<R> {
         rng: &mut T,
     ) -> Result<Self> {
         if representation != R::REPRESENTATION {
-            return Err(Error::IncorrectRepresentation(
-                representation,
-                R::REPRESENTATION,
-            ));
+            return Err(Error::RepresentationMismatch {
+                found: representation,
+                expected: R::REPRESENTATION,
+            });
         }
 
         let coefficients = sample_uniform_coefficients_bigint(bound, ctx.degree, rng);
@@ -357,10 +401,10 @@ impl<R: RepresentationTag> Poly<R> {
         rng: &mut T,
     ) -> Result<Self> {
         if representation != R::REPRESENTATION {
-            return Err(Error::IncorrectRepresentation(
-                representation,
-                R::REPRESENTATION,
-            ));
+            return Err(Error::RepresentationMismatch {
+                found: representation,
+                expected: R::REPRESENTATION,
+            });
         }
 
         let variance_u64 = variance.to_u64().unwrap_or(u64::MAX);
@@ -391,11 +435,12 @@ impl<R: RepresentationTag> Poly<R> {
     pub fn from_bigints(bigints: &[BigInt], ctx: &Arc<Context>) -> Result<Zeroizing<Self>> {
         let degree = ctx.degree;
         if bigints.len() != degree {
-            return Err(Error::Default(format!(
-                "Expected {} coefficients, got {}",
+            return Err(Error::InvalidCoefficientCount {
+                representation: Representation::PowerBasis,
+                actual: bigints.len(),
                 degree,
-                bigints.len()
-            )));
+                moduli: ctx.moduli().len(),
+            });
         }
 
         // Moduli from context
@@ -412,17 +457,27 @@ impl<R: RepresentationTag> Poly<R> {
                 if reduced.is_negative() {
                     reduced += BigInt::from(modulus);
                 }
-                let u64_value = reduced
-                    .to_u64()
-                    .ok_or_else(|| Error::Default("Residue doesn't fit in u64".to_string()))?;
+                let u64_value = reduced.to_u64().ok_or(Error::InvalidCoefficientCount {
+                    representation: Representation::PowerBasis,
+                    actual: bigints.len(),
+                    degree,
+                    moduli: moduli.len(),
+                })?;
 
                 coeffs_rns[row * degree + col] = u64_value;
             }
         }
 
         // Convert flat vector into Array2<u64> with shape (num_moduli, degree)
-        let coeff_matrix = Array2::from_shape_vec((moduli.len(), degree), coeffs_rns)
-            .map_err(|_| Error::Default("Failed to create coefficient matrix".to_string()))?;
+        let coeff_matrix =
+            Array2::from_shape_vec((moduli.len(), degree), coeffs_rns).map_err(|_| {
+                Error::InvalidCoefficientCount {
+                    representation: Representation::PowerBasis,
+                    actual: moduli.len() * degree,
+                    degree,
+                    moduli: moduli.len(),
+                }
+            })?;
 
         // Create polynomial from coefficients matrix
         Self::from_coeffs_matrix(coeff_matrix, ctx)
@@ -489,7 +544,9 @@ impl<R: RepresentationTag> Poly<R> {
     pub fn substitute(&self, i: &SubstitutionExponent) -> Result<Poly<R>> {
         let mut q = Poly::<R>::zero(&self.ctx);
         if self.allow_variable_time_computations {
-            unsafe { q.allow_variable_time_computations() }
+            q.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                fhe_traits::PublicData::assert_public(),
+            ));
         }
         match R::REPRESENTATION {
             Representation::Ntt | Representation::NttShoup => {
@@ -627,7 +684,9 @@ impl Poly<PowerBasis> {
         for _ in 0..niterations {
             self.switch_down()?;
         }
-        assert_eq!(&self.ctx, context);
+        if &self.ctx != context {
+            return Err(Error::ContextNotReachable);
+        }
         Ok(())
     }
 
@@ -681,13 +740,14 @@ impl Poly<Ntt> {
     /// Create a polynomial which can only be multiplied by a polynomial in
     /// NttShoup representation. All other operations may panic.
     ///
-    /// # Safety
-    /// This operation also creates a polynomial that allows variable time
-    /// operations.
+    /// Passing [`fhe_traits::VariableTime`] asserts that the coefficients are
+    /// public. Classifying secret coefficients as public may expose them
+    /// through timing.
     #[must_use]
-    pub unsafe fn create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
+    pub fn create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
         power_basis_coefficients: &[u64],
         ctx: &Arc<Context>,
+        _variable_time: fhe_traits::VariableTime,
     ) -> Poly<Ntt> {
         let mut coefficients = Array2::zeros((ctx.q.len(), ctx.degree));
         izip!(coefficients.outer_iter_mut(), ctx.q.iter(), ctx.ops.iter()).for_each(
@@ -803,10 +863,8 @@ pub fn sample_uniform_coefficients_bigint<T: RngCore + CryptoRng>(
 ) -> Vec<BigInt> {
     let lower_bound = -bound;
     let upper_bound = bound + 1;
-    let mut adapted = fhe_util::rng08::adapt(rng);
-
     (0..count)
-        .map(|_| adapted.gen_bigint_range(&lower_bound, &upper_bound))
+        .map(|_| rng.random_bigint_range(&lower_bound, &upper_bound))
         .collect()
 }
 
@@ -814,9 +872,7 @@ pub fn sample_uniform_coefficients_bigint<T: RngCore + CryptoRng>(
 /// For uniform distribution on `[-B, B]`, variance = B²/3, so B = sqrt(3 * variance).
 fn variance_to_uniform_bound(variance: &BigUint) -> Result<BigInt> {
     let bound_uint = (variance * 3u32).sqrt();
-    bound_uint
-        .to_bigint()
-        .ok_or_else(|| Error::Default("Failed to convert bound to BigInt".to_string()))
+    Ok(BigInt::from(bound_uint))
 }
 
 #[cfg(test)]
@@ -965,12 +1021,13 @@ mod tests {
     #[test]
     fn allow_variable_time_computations() -> Result<(), Box<dyn Error>> {
         let mut rng = rand::rng();
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
         for modulus in MODULI {
             let ctx = Arc::new(Context::new(&[*modulus], 16)?);
             let mut p = Poly::<PowerBasis>::random(&ctx, &mut rng);
             assert!(!p.allow_variable_time_computations);
 
-            unsafe { p.allow_variable_time_computations() }
+            p.allow_variable_time_computations(variable_time);
             assert!(p.allow_variable_time_computations);
 
             let q = p.clone();
@@ -984,28 +1041,29 @@ mod tests {
         let mut p = Poly::<PowerBasis>::random(&ctx, &mut rng);
         assert!(!p.allow_variable_time_computations);
 
-        unsafe { p.allow_variable_time_computations() }
+        p.allow_variable_time_computations(variable_time);
         assert!(p.allow_variable_time_computations);
 
         let q = p.clone();
         assert!(q.allow_variable_time_computations);
 
-        // Allowing variable time propagates.
+        // Variable-time permission propagates only when every operand permits
+        // it. Mixing public and potentially secret data is constant-time.
         let mut p = Poly::<Ntt>::random(&ctx, &mut rng);
-        unsafe { p.allow_variable_time_computations() }
+        p.allow_variable_time_computations(variable_time);
         let mut q = Poly::<Ntt>::random(&ctx, &mut rng);
 
         assert!(!q.allow_variable_time_computations);
         q *= &p;
-        assert!(q.allow_variable_time_computations);
+        assert!(!q.allow_variable_time_computations);
 
-        q.disallow_variable_time_computations();
+        q.allow_variable_time_computations(variable_time);
         q += &p;
         assert!(q.allow_variable_time_computations);
 
         q.disallow_variable_time_computations();
         q -= &p;
-        assert!(q.allow_variable_time_computations);
+        assert!(!q.allow_variable_time_computations);
 
         q = -&p;
         assert!(q.allow_variable_time_computations);
@@ -1022,11 +1080,12 @@ mod tests {
             .map(|i| (i as u64).wrapping_mul(modulus).wrapping_add(i as u64))
             .collect();
 
-        let poly = unsafe {
+        let poly =
             Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
-                &coeffs, &ctx,
-            )
-        };
+                &coeffs,
+                &ctx,
+                fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public()),
+            );
 
         assert_eq!(poly.representation(), Representation::Ntt);
         assert!(poly.allow_variable_time_computations);
@@ -1048,19 +1107,25 @@ mod tests {
             let q = Modulus::new(*modulus).unwrap();
 
             let e = Poly::<PowerBasis>::small(&ctx, 0, &mut rng);
-            assert!(e.is_err());
             assert_eq!(
-                e.unwrap_err().to_string(),
-                "The variance should be an integer between 1 and 16"
+                e.unwrap_err(),
+                crate::Error::InvalidVariance {
+                    variance: 0,
+                    minimum: 1,
+                    maximum: 32,
+                }
             );
-            let e = Poly::<PowerBasis>::small(&ctx, 17, &mut rng);
-            assert!(e.is_err());
+            let e = Poly::<PowerBasis>::small(&ctx, 33, &mut rng);
             assert_eq!(
-                e.unwrap_err().to_string(),
-                "The variance should be an integer between 1 and 16"
+                e.unwrap_err(),
+                crate::Error::InvalidVariance {
+                    variance: 33,
+                    minimum: 1,
+                    maximum: 32,
+                }
             );
 
-            for i in 1..=16 {
+            for i in 1..=32 {
                 let p = Poly::<PowerBasis>::small(&ctx, i, &mut rng)?;
                 let coefficients = p.coefficients().to_slice().unwrap();
                 let v = q.center_vec(coefficients);

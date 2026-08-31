@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use crate::Result;
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
-use crate::{Error, Result};
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
 use fhe_traits::{DeserializeWithContext, Serialize};
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng as RngCore};
 use zeroize::Zeroizing;
 //use serde::{Serialize, Deserialize};
 
@@ -51,7 +51,9 @@ impl PublicKeyShare {
         p0_share.disallow_variable_time_computations();
         p0_share *= s.as_ref();
         p0_share += e.as_ref();
-        unsafe { p0_share.allow_variable_time_computations() }
+        p0_share.allow_variable_time_computations(fhe_traits::VariableTime::new(
+            fhe_traits::PublicData::assert_public(),
+        ));
 
         Ok(Self { par, crp, p0_share })
     }
@@ -81,7 +83,9 @@ impl PublicKeyShare {
         pk_0.disallow_variable_time_computations();
         pk_0 *= s.as_ref();
         pk_0 += e.as_ref();
-        unsafe { pk_0.allow_variable_time_computations() }
+        pk_0.allow_variable_time_computations(fhe_traits::VariableTime::new(
+            fhe_traits::PublicData::assert_public(),
+        ));
 
         let pk_1 = crp.poly.clone();
 
@@ -149,10 +153,7 @@ impl Aggregate<PublicKeyShare> for PublicKey {
         T: IntoIterator<Item = PublicKeyShare>,
     {
         let mut shares = iter.into_iter();
-        let share = shares.next().ok_or(Error::TooFewValues {
-            actual: 0,
-            minimum: 1,
-        })?;
+        let share = shares.next().ok_or(crate::MultipartyError::NoShares)?;
         let mut p0 = share.p0_share;
         for sh in shares {
             p0 += &sh.p0_share;
@@ -277,7 +278,9 @@ mod tests {
             expected.disallow_variable_time_computations();
             expected *= &s;
             expected += &e;
-            unsafe { expected.allow_variable_time_computations() }
+            expected.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                fhe_traits::PublicData::assert_public(),
+            ));
 
             assert_eq!(pk_0, expected, "pk_0 should equal -a*s + e");
 
@@ -318,7 +321,9 @@ mod tests {
             expected.disallow_variable_time_computations();
             expected *= s;
             expected += e;
-            unsafe { expected.allow_variable_time_computations() }
+            expected.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                fhe_traits::PublicData::assert_public(),
+            ));
             assert_eq!(*pk_0, expected, "pk_0 should equal -a*s + e for each party");
         }
     }

@@ -4,7 +4,7 @@ use crate::Result;
 use crate::bfv::BfvParameters;
 use fhe_math::rq::{Ntt, Poly};
 use fhe_traits::{DeserializeWithContext, Serialize};
-use rand::{CryptoRng, RngCore, SeedableRng};
+use rand::{CryptoRng, Rng as RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 /// A polynomial sampled from a random _common reference string_.

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::rq::{Ntt, Poly, PowerBasis};
 
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng as RngCore};
 use zeroize::Zeroizing;
 
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
@@ -36,10 +36,17 @@ impl PublicKeySwitchShare {
         ct: &Ciphertext,
         rng: &mut R,
     ) -> Result<Self> {
-        if sk_share.par != public_key.par || public_key.par != ct.par {
-            return Err(Error::DefaultError(
-                "Incompatible BFV parameters".to_string(),
-            ));
+        if sk_share.par != public_key.par {
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::SecretKey,
+                right: crate::ParameterSource::PublicKey,
+            });
+        }
+        if public_key.par != ct.par {
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::PublicKey,
+                right: crate::ParameterSource::Ciphertext,
+            });
         }
         let par = sk_share.par.clone();
 
@@ -72,10 +79,9 @@ impl PublicKeySwitchShare {
         h1 *= u.as_ref();
         h1 += e1.as_ref();
 
-        unsafe {
-            h0.allow_variable_time_computations();
-            h1.allow_variable_time_computations();
-        }
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+        h0.allow_variable_time_computations(variable_time);
+        h1.allow_variable_time_computations(variable_time);
 
         Ok(Self {
             par,
@@ -92,10 +98,7 @@ impl Aggregate<PublicKeySwitchShare> for Ciphertext {
         T: IntoIterator<Item = PublicKeySwitchShare>,
     {
         let mut shares = iter.into_iter();
-        let share = shares.next().ok_or(Error::TooFewValues {
-            actual: 0,
-            minimum: 1,
-        })?;
+        let share = shares.next().ok_or(crate::MultipartyError::NoShares)?;
         let mut h0 = share.h0_share;
         let mut h1 = share.h1_share;
         for sh in shares {

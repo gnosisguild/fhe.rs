@@ -10,10 +10,10 @@ impl Error {
     /// Create an invalid party count error.
     #[must_use]
     pub fn invalid_party_count(got: usize, min: usize) -> Self {
-        Error::TooFewValues {
+        Error::Threshold(ThresholdError::InvalidPartyCount {
             actual: got,
             minimum: min,
-        }
+        })
     }
 
     /// Create an insufficient shares error.
@@ -47,36 +47,6 @@ impl Error {
         Error::Threshold(ThresholdError::DuplicatePartyId { party_id })
     }
 
-    /// Create a secret sharing error.
-    pub fn secret_sharing<S: Into<String>>(msg: S) -> Self {
-        let msg = msg.into();
-        Error::UnspecifiedInput(format!("Secret sharing error: {msg}"))
-    }
-
-    /// Create a smudging error.
-    #[must_use]
-    pub fn smudging(msg: String) -> Self {
-        Error::UnspecifiedInput(msg)
-    }
-
-    /// Create a share operation error.
-    pub fn share_operation<S: Into<String>>(msg: S) -> Self {
-        let msg = msg.into();
-        Error::UnspecifiedInput(format!("Share operation error: {msg}"))
-    }
-
-    /// Create a decryption share error.
-    pub fn decryption_share<S: Into<String>>(msg: S) -> Self {
-        let msg = msg.into();
-        Error::UnspecifiedInput(format!("Decryption share computation failed: {msg}"))
-    }
-
-    /// Create a decryption reconstruction error.
-    pub fn decryption_reconstruction<S: Into<String>>(msg: S) -> Self {
-        let msg = msg.into();
-        Error::UnspecifiedInput(format!("Decryption reconstruction failed: {msg}"))
-    }
-
     /// Create a malformed shares error.
     #[must_use]
     pub fn malformed_shares(party_id: usize, reason: String) -> Self {
@@ -107,22 +77,6 @@ impl Error {
     pub fn party_count_exceeds_modulus(n: usize, min_modulus: u64) -> Self {
         Error::Threshold(ThresholdError::PartyCountExceedsModulus { n, min_modulus })
     }
-
-    /// Create an inconsistent degree error.
-    #[must_use]
-    pub fn inconsistent_degree(expected: usize, got: usize) -> Self {
-        Error::UnspecifiedInput(format!(
-            "Inconsistent polynomial degree: expected {expected}, found {got}"
-        ))
-    }
-
-    /// Create an inconsistent moduli error.
-    #[must_use]
-    pub fn inconsistent_moduli(expected: usize, got: usize) -> Self {
-        Error::UnspecifiedInput(format!(
-            "Inconsistent moduli: expected {expected} moduli, found {got}"
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -134,7 +88,7 @@ mod tests {
         let error = Error::invalid_party_count(2, 3);
         assert_eq!(
             error.to_string(),
-            "Too few values provided: 2 is below minimum 3"
+            "Threshold error: invalid party count: got 2, minimum is 3"
         );
 
         let error = Error::invalid_threshold(5, 20);
@@ -212,17 +166,5 @@ mod tests {
                 min_modulus: 65537
             })
         ));
-
-        // Legacy string helpers still produce errors
-        let error = Error::secret_sharing("Test secret sharing error");
-        assert_eq!(
-            error.to_string(),
-            "Secret sharing error: Test secret sharing error"
-        );
-        let error = Error::inconsistent_degree(2048, 1024);
-        assert_eq!(
-            error.to_string(),
-            "Inconsistent polynomial degree: expected 2048, found 1024"
-        );
     }
 }

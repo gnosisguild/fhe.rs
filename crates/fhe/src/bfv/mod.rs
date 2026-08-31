@@ -21,13 +21,10 @@ pub mod traits;
 pub use ciphertext::Ciphertext;
 pub use context::{CipherPlainContext, ContextLevel};
 pub use encoding::Encoding;
-pub use keys::{
-    EvaluationKey, EvaluationKeyBuilder, KeySwitchingKey, PublicKey, RelinearizationKey, SecretKey,
-};
+pub(crate) use keys::KeySwitchingKey;
+pub use keys::{EvaluationKey, EvaluationKeyBuilder, PublicKey, RelinearizationKey, SecretKey};
 pub use ops::{Multiplicator, dot_product_scalar};
-pub(crate) use parameters::PlaintextModulus;
 pub use parameters::{BfvParameters, BfvParametersBuilder};
 pub use plaintext::Plaintext;
-pub(crate) use plaintext::PlaintextValues;
 pub use plaintext_vec::PlaintextVec;
 pub use rgsw_ciphertext::RGSWCiphertext;

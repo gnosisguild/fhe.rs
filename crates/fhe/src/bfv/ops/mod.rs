@@ -90,7 +90,7 @@ impl AddAssign<&Plaintext> for Ciphertext {
     fn add_assign(&mut self, rhs: &Plaintext) {
         assert!(Arc::ptr_eq(&self.par, &rhs.par));
         assert!(!self.is_empty());
-        assert_eq!(self.level, rhs.level);
+        assert_eq!(self.level, rhs.level());
 
         let poly = rhs.to_poly();
         self[0] += &poly;
@@ -185,7 +185,7 @@ impl SubAssign<&Plaintext> for Ciphertext {
     fn sub_assign(&mut self, rhs: &Plaintext) {
         assert!(Arc::ptr_eq(&self.par, &rhs.par));
         assert!(!self.is_empty());
-        assert_eq!(self.level, rhs.level);
+        assert_eq!(self.level, rhs.level());
 
         let poly = rhs.to_poly();
         self.c[0] -= &poly;
@@ -230,7 +230,7 @@ impl MulAssign<&Plaintext> for Ciphertext {
     fn mul_assign(&mut self, rhs: &Plaintext) {
         assert!(Arc::ptr_eq(&self.par, &rhs.par));
         if !self.is_empty() {
-            assert_eq!(self.level, rhs.level);
+            assert_eq!(self.level, rhs.level());
             self.iter_mut().for_each(|ci| *ci *= &rhs.poly_ntt);
         }
         self.seed = None
@@ -278,6 +278,12 @@ impl Mul<&Ciphertext> for &Ciphertext {
 
             // Multiply
             let mut c = vec![Poly::<Ntt>::zero(&mp.to); 2 * self_c.len() - 1];
+            if self_c.iter().all(Poly::allows_variable_time_computations) {
+                let variable_time =
+                    fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+                c.iter_mut()
+                    .for_each(|ci| ci.allow_variable_time_computations(variable_time));
+            }
             for i in 0..self_c.len() {
                 for j in 0..self_c.len() {
                     c[i + j] += &(&self_c[i] * &self_c[j])
@@ -318,6 +324,16 @@ impl Mul<&Ciphertext> for &Ciphertext {
 
             // Multiply
             let mut c = vec![Poly::<Ntt>::zero(&mp.to); self_c.len() + other_c.len() - 1];
+            if self_c
+                .iter()
+                .chain(other_c.iter())
+                .all(Poly::allows_variable_time_computations)
+            {
+                let variable_time =
+                    fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+                c.iter_mut()
+                    .for_each(|ci| ci.allow_variable_time_computations(variable_time));
+            }
             for i in 0..self_c.len() {
                 for j in 0..other_c.len() {
                     c[i + j] += &(&self_c[i] * &other_c[j])
@@ -660,6 +676,20 @@ mod tests {
                 let ct2: Ciphertext = sk.try_encrypt(&pt2, &mut rng)?;
                 let ct3 = &ct1 * &ct2;
                 let ct4 = &ct3 * &ct3;
+                assert!(
+                    ct3.iter()
+                        .chain(ct4.iter())
+                        .all(|poly| poly.allows_variable_time_computations())
+                );
+
+                let mut mixed = ct2.clone();
+                mixed[0].disallow_variable_time_computations();
+                let mixed_product = &ct1 * &mixed;
+                assert!(
+                    mixed_product
+                        .iter()
+                        .all(|poly| !poly.allows_variable_time_computations())
+                );
 
                 println!("Noise: {}", unsafe { sk.measure_noise(&ct3)? });
                 let pt = sk.try_decrypt(&ct3)?;

@@ -16,7 +16,6 @@ num-bigint-dig = { workspace = true, features = ["prime"] }
 num-traits.workspace = true
 prime_factorization.workspace = true
 rand.workspace = true
-rand_v08 = { package = "rand", version = "0.8" }
 rayon.workspace = true
 rand_distr.workspace = true
 

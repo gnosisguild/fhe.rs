@@ -18,7 +18,7 @@ use itertools::{Itertools, izip};
 use num_bigint::BigUint;
 use num_traits::cast::ToPrimitive;
 use pulp::Arch;
-use rand::{CryptoRng, Rng, RngCore, distr::Uniform};
+use rand::{CryptoRng, Rng, Rng as RngCore, distr::Uniform};
 
 /// cond ? on_true : on_false
 const fn const_time_cond_select(on_true: u64, on_false: u64, cond: bool) -> u64 {
