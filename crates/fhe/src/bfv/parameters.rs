@@ -34,13 +34,6 @@ impl PlaintextModulus {
         }
     }
 
-    pub fn as_u64(&self) -> Option<u64> {
-        match self {
-            Self::Small { modulus, .. } => Some(**modulus),
-            Self::Large(_) => None,
-        }
-    }
-
     pub fn reduce_vec(&self, v: &mut [BigUint]) {
         match self {
             Self::Small { modulus_big, .. } => {
