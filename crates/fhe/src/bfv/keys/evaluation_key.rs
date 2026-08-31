@@ -742,6 +742,27 @@ mod tests {
         use crate::proto::bfv::EvaluationKey as LeveledEvaluationKeyProto;
         use fhe_traits::{DeserializeParametrized, Serialize};
 
+        /// Clear variable-time state on the wire-decoded key-switching
+        /// components, matching what deserialization guarantees under the
+        /// caller-wins policy (#99): seed-regenerated c1 components keep the
+        /// local variable-time policy on both construction and deserialization.
+        /// Monomials are rebuilt identically on both sides and keep their
+        /// flags.
+        fn disallow_ek_variable_time(ek: &mut EvaluationKey) {
+            for gk in ek.gk.values_mut() {
+                gk.ksk
+                    .c0
+                    .iter_mut()
+                    .for_each(|p| p.disallow_variable_time_computations());
+                if gk.ksk.seed.is_none() {
+                    gk.ksk
+                        .c1
+                        .iter_mut()
+                        .for_each(|p| p.disallow_variable_time_computations());
+                }
+            }
+        }
+
         #[test]
         fn proto_conversion() -> Result<(), Box<dyn std::error::Error>> {
             let mut rng = rng();
@@ -752,35 +773,40 @@ mod tests {
             ] {
                 let sk = SecretKey::random(&params, &mut rng);
 
-                let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?.build(&mut rng)?;
+                let mut ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?.build(&mut rng)?;
 
                 let proto = LeveledEvaluationKeyProto::from(&ek);
+                disallow_ek_variable_time(&mut ek);
                 assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
 
-                let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                let mut ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                     .enable_row_rotation()?
                     .build(&mut rng)?;
 
                 let proto = LeveledEvaluationKeyProto::from(&ek);
+                disallow_ek_variable_time(&mut ek);
                 assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
 
-                let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                let mut ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                     .enable_inner_sum()?
                     .build(&mut rng)?;
                 let proto = LeveledEvaluationKeyProto::from(&ek);
+                disallow_ek_variable_time(&mut ek);
                 assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
 
-                let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                let mut ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                     .enable_expansion(params.degree().ilog2() as usize)?
                     .build(&mut rng)?;
                 let proto = LeveledEvaluationKeyProto::from(&ek);
+                disallow_ek_variable_time(&mut ek);
                 assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
 
-                let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                let mut ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                     .enable_inner_sum()?
                     .enable_expansion(params.degree().ilog2() as usize)?
                     .build(&mut rng)?;
                 let proto = LeveledEvaluationKeyProto::from(&ek);
+                disallow_ek_variable_time(&mut ek);
                 assert_eq!(ek, EvaluationKey::try_convert_from(&proto, &params)?);
             }
             Ok(())
@@ -795,34 +821,39 @@ mod tests {
             ] {
                 let sk = SecretKey::random(&params, &mut rng);
 
-                let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?.build(&mut rng)?;
+                let mut ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?.build(&mut rng)?;
                 let bytes = ek.to_bytes();
+                disallow_ek_variable_time(&mut ek);
                 assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
 
                 if params.moduli.len() > 1 {
-                    let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                    let mut ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                         .enable_row_rotation()?
                         .build(&mut rng)?;
                     let bytes = ek.to_bytes();
+                    disallow_ek_variable_time(&mut ek);
                     assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
 
-                    let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                    let mut ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                         .enable_inner_sum()?
                         .build(&mut rng)?;
                     let bytes = ek.to_bytes();
+                    disallow_ek_variable_time(&mut ek);
                     assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
 
-                    let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                    let mut ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                         .enable_expansion(params.degree().ilog2() as usize)?
                         .build(&mut rng)?;
                     let bytes = ek.to_bytes();
+                    disallow_ek_variable_time(&mut ek);
                     assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
 
-                    let ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
+                    let mut ek = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)?
                         .enable_inner_sum()?
                         .enable_expansion(params.degree().ilog2() as usize)?
                         .build(&mut rng)?;
                     let bytes = ek.to_bytes();
+                    disallow_ek_variable_time(&mut ek);
                     assert_eq!(ek, EvaluationKey::from_bytes(&bytes, &params)?);
                 }
             }

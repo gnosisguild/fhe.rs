@@ -242,8 +242,24 @@ mod tests {
     #[cfg(feature = "protobuf")]
     mod protobuf {
         use super::*;
+        use crate::bfv::KeySwitchingKey;
         use crate::bfv::traits::TryConvertFrom;
         use crate::proto::bfv::GaloisKey as GaloisKeyProto;
+
+        /// Clear variable-time state on the wire-decoded key-switching
+        /// components, matching what deserialization guarantees under the
+        /// caller-wins policy (#99): seed-regenerated c1 components keep the
+        /// local variable-time policy on both construction and deserialization.
+        fn disallow_ksk_variable_time(ksk: &mut KeySwitchingKey) {
+            ksk.c0
+                .iter_mut()
+                .for_each(|p| p.disallow_variable_time_computations());
+            if ksk.seed.is_none() {
+                ksk.c1
+                    .iter_mut()
+                    .for_each(|p| p.disallow_variable_time_computations());
+            }
+        }
 
         #[test]
         fn proto_conversion() -> Result<(), Box<dyn Error>> {
@@ -253,8 +269,12 @@ mod tests {
                 BfvParameters::default_arc(4, 16),
             ] {
                 let sk = SecretKey::random(&params, &mut rng);
-                let gk = GaloisKey::new(&sk, 9, 0, 0, &mut rng)?;
+                let mut gk = GaloisKey::new(&sk, 9, 0, 0, &mut rng)?;
                 let proto = GaloisKeyProto::from(&gk);
+                // Caller-wins policy (#99): the wire cannot carry variable-time
+                // state, so the round trip preserves values with the timing
+                // flags cleared.
+                disallow_ksk_variable_time(&mut gk.ksk);
                 assert_eq!(gk, GaloisKey::try_convert_from(&proto, &params)?);
             }
             Ok(())
