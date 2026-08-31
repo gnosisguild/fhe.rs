@@ -43,14 +43,14 @@ impl LBFVPublicKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Self {
-        let zero = Plaintext::zero(Encoding::poly(), &sk.par).unwrap();
-        let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.par.moduli().len());
+        let zero = Plaintext::zero(Encoding::poly(), &sk.params).unwrap();
+        let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.params.moduli().len());
         let mut seed_rng = ChaCha8Rng::from_seed(seed); // This is used to generate the seeds for the ciphertexts by creating a new
         // ChaCha8Rng from the input seed
 
         // Create a vector of ciphertexts, each encrypting zero, for each RNS modulus
         // [(b₁, a₁), ..., (bₗ, aₗ)].
-        for _ in 0..sk.par.moduli().len() {
+        for _ in 0..sk.params.moduli().len() {
             let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
             seed_rng.fill(&mut seed_i);
             let mut ct = sk.try_encrypt_with_seed(&zero, seed_i, rng).unwrap();
@@ -62,19 +62,19 @@ impl LBFVPublicKey {
         }
 
         Self {
-            par: sk.par.clone(),
+            par: sk.params.clone(),
             c,
-            l: sk.par.moduli().len(),
+            l: sk.params.moduli().len(),
             seed: Some(seed),
         }
     }
 
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a random
     /// seed.
-    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Self {
+    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
-        Self::new_with_seed(sk, seed, rng)
+        Ok(Self::new_with_seed(sk, seed, rng))
     }
 
     /// Encrypt a plaintext with the public key.
@@ -114,7 +114,7 @@ impl LBFVPublicKey {
         c1.allow_variable_time_computations(variable_time);
 
         let ciphertext = Ciphertext {
-            par: self.par.clone(),
+            params: self.par.clone(),
             seed: None,
             c: vec![c0, c1],
             level: ct.level,
@@ -244,7 +244,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         c1.allow_variable_time_computations(variable_time);
 
         Ok(Ciphertext {
-            par: self.par.clone(),
+            params: self.par.clone(),
             seed: None,
             c: vec![c0, c1],
             level: ct.level,
@@ -344,7 +344,7 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = LBFVPublicKey::new(&sk, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng).unwrap();
         assert_eq!(pk.par, params);
         // Check that l matches number of moduli
         assert_eq!(pk.l, params.moduli().len());
@@ -368,7 +368,7 @@ mod tests {
             for level in 0..params.max_level() {
                 for _ in 0..20 {
                     let sk = SecretKey::random(&params, &mut rng);
-                    let pk = LBFVPublicKey::new(&sk, &mut rng);
+                    let pk = LBFVPublicKey::new(&sk, &mut rng).unwrap();
 
                     let pt = Plaintext::try_encode(
                         &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
@@ -395,7 +395,7 @@ mod tests {
             BfvParameters::default_arc(6, 8),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
-            let pk = LBFVPublicKey::new(&sk, &mut rng);
+            let pk = LBFVPublicKey::new(&sk, &mut rng).unwrap();
             let bytes = pk.to_bytes();
             assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
         }

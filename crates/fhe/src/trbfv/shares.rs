@@ -323,7 +323,7 @@ impl ShareManager {
         sk_i: Poly<Ntt>,
         es_i: Poly<PowerBasis>,
     ) -> Result<Poly<PowerBasis>, Error> {
-        if ciphertext.par != self.params {
+        if ciphertext.params != self.params {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Ciphertext,
                 right: crate::ParameterSource::Parameters,
@@ -373,7 +373,7 @@ impl ShareManager {
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
-        if ciphertext.par != self.params {
+        if ciphertext.params != self.params {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Ciphertext,
                 right: crate::ParameterSource::Parameters,
@@ -496,7 +496,7 @@ impl ShareManager {
             .collect();
         let scalers = scalers?;
 
-        let par = ciphertext.par.clone();
+        let par = ciphertext.params.clone();
         let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
             Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
                 reason: "threshold BFV decrypt_from_shares requires a u64 plaintext modulus"
@@ -527,7 +527,7 @@ impl ShareManager {
             Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt();
 
         let pt = Plaintext {
-            par: par.clone(),
+            params: par.clone(),
             encoding: None,
             poly_ntt: poly,
         };

@@ -83,15 +83,15 @@ impl LBFVRelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx_relin_key = sk.par.context_at_level(key_level)?;
-        let ctx_ciphertext = sk.par.context_at_level(ciphertext_level)?;
+        let ctx_relin_key = sk.params.context_at_level(key_level)?;
+        let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
         let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
 
         if ciphertext_level < key_level {
             return Err(Error::InvalidLevel {
                 level: ciphertext_level,
                 min_level: key_level,
-                max_level: sk.par.max_level(),
+                max_level: sk.params.max_level(),
             });
         }
 
@@ -104,7 +104,7 @@ impl LBFVRelinearizationKey {
         }
 
         // Generate random polynomial 'r' from the key distribution
-        let r: SecretKey = SecretKey::random(&sk.par, rng);
+        let r: SecretKey = SecretKey::random(&sk.params, rng);
         let r_poly =
             Poly::<PowerBasis>::try_convert_from(r.coeffs.as_ref(), ctx_ciphertext, false)?;
         let r_switched_up = r_poly.switch(&switcher_up)?;
@@ -168,7 +168,7 @@ impl LBFVRelinearizationKey {
     /// * `Err` if the number of moduli in the ciphertext context is not equal
     ///   to the number of polynomials in `b_vec`, which should be equal to "l".
     pub fn l(&self) -> Result<usize> {
-        let expected = self.ksk_r_to_s.par.max_level() + 1 - self.ciphertext_level();
+        let expected = self.ksk_r_to_s.params.max_level() + 1 - self.ciphertext_level();
         if expected != self.b_vec.len() {
             return Err(crate::EvaluationKeyError::InvalidDecompositionLength {
                 actual: self.b_vec.len(),
@@ -310,7 +310,7 @@ impl LBFVRelinearizationKey {
     ///   as the BFV parameters of the key switching key.
     #[must_use]
     pub fn parameters(&self) -> Arc<BfvParameters> {
-        self.ksk_r_to_s.par.clone()
+        self.ksk_r_to_s.params.clone()
     }
 
     /// Decomposes a polynomial into its RNS components and computes the product-sum with an array of polynomials.
@@ -489,7 +489,7 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(6, 8);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = LBFVPublicKey::new(&sk, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng).unwrap();
 
         // Create relinearization key
         let relin_key = LBFVRelinearizationKey::new(&sk, &pk, None, &mut rng)?;
@@ -527,7 +527,7 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(6, 8);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = LBFVPublicKey::new(&sk, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng).unwrap();
 
         // Create relinearization key
         let relin_key = LBFVRelinearizationKey::new(&sk, &pk, None, &mut rng)?;

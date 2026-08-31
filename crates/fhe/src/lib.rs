@@ -11,7 +11,6 @@ pub mod lbfv;
 pub mod mbfv;
 pub mod proto;
 pub mod trbfv;
-pub mod trlbfv;
 pub use errors::{
     CiphertextError, CiphertextOperation, DotProductError, EncodingError, Error,
     EvaluationKeyComponent, EvaluationKeyError, EvaluationOperation, MultipartyError,
