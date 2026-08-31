@@ -12,11 +12,13 @@ use crate::Error;
 /// - Correctness enforced via strict `2 * (B_C + n * B_sm) < Delta` with `Delta = floor(Q / t)`
 /// - Multiplicative-depth noise recursion via Prop.&nbsp;20
 /// - Distributed RLK error accounting via `accepted_participant_count * B_e`
-/// - Sampler-aligned `B_enc` (CBD support for small variance, `sqrt(3*var)` for large)
+/// - Sampler-aligned `B_enc` via [`fhe_math::rq::error_support_bound`] (CBD
+///   support `2v` for variances `1..=16`, the exact minimal uniform bound
+///   otherwise)
 use crate::bfv::BfvParameters;
 
 use num_bigint::{BigInt, BigUint};
-use num_traits::{ToPrimitive, Zero};
+use num_traits::Zero;
 use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -104,10 +106,13 @@ pub struct SmudgingBoundCalculatorConfig {
     pub m: usize,
     /// Encryption error1 infinity-norm bound (BigUint for arbitrary precision).
     ///
-    /// Derived from the actual configured error sampler:
-    /// - CBD branch (error1_variance < 16 as u64): `B_enc = 2 * error1_variance`
-    ///   (support bound of CBD(2·variance)).
-    /// - Uniform branch (larger or non-u64 variance): `B_enc = floor(sqrt(3 * error1_variance))`.
+    /// Derived from the actual configured error sampler through
+    /// [`fhe_math::rq::error_support_bound`], which shares the branch
+    /// selection of `Poly::conditional_error`:
+    /// - CBD branch (error1_variance in `1..=16`): `B_enc = 2 *
+    ///   error1_variance` (support bound of CBD(variance)).
+    /// - Uniform branch (error1_variance > 16, including arbitrarily large
+    ///   values): the smallest `B` with `B(B+1)/3 >= error1_variance`.
     pub b_enc: BigUint,
     /// Encryption error2 bound (u64 for standard integers)
     pub b_e: u64,
@@ -126,21 +131,15 @@ pub struct SmudgingBoundCalculatorConfig {
 
 /// Compute B_enc from the configured error sampler variance.
 ///
-/// Matches the branch chosen by `Poly::conditional_error`:
-/// - CBD for variance fitting in u64 and < 16 → support bound `2 * variance`.
-/// - Uniform otherwise → `floor(sqrt(3 * variance))`.
-fn compute_b_enc(error1_variance: &BigUint) -> BigUint {
-    match error1_variance.to_u64() {
-        Some(v) if v < 16 => {
-            // CBD(2*v): maximum absolute coefficient = 2 * variance.
-            BigUint::from(2u32 * v as u32)
-        }
-        _ => {
-            // Uniform branch: bound = floor(sqrt(3 * variance)).  This
-            // mirrors `variance_to_uniform_bound` in fhe-math.
-            (BigUint::from(3u32) * error1_variance).sqrt()
-        }
-    }
+/// Thin fallible adapter over [`fhe_math::rq::error_support_bound`], which
+/// shares the exact branch selection of `Poly::conditional_error`:
+/// - CBD for integer variances `1..=16` → support bound `2 * variance`;
+/// - uniform otherwise (including arbitrarily large variances beyond
+///   `u64`) → the smallest `B` with `B(B+1)/3 >= variance`, so the achieved
+///   uniform variance never undershoots the requested one;
+/// - zero variance is rejected.
+fn compute_b_enc(error1_variance: &BigUint) -> crate::Result<BigUint> {
+    fhe_math::rq::error_support_bound(error1_variance).map_err(Error::from)
 }
 
 /// Compute Q = product of all moduli as a BigUint.
@@ -167,7 +166,9 @@ impl SmudgingBoundCalculatorConfig {
     /// * `lambda` - Statistical security level
     ///
     /// # Errors
-    /// Returns an error when `n` or `m` is zero.
+    /// Returns an error when `n` or `m` is zero, or when the configured
+    /// encryption error variance is invalid (e.g. zero), so a calculator is
+    /// never built on an unusable sampler.
     pub fn new(
         params: Arc<BfvParameters>,
         n: usize,
@@ -185,7 +186,7 @@ impl SmudgingBoundCalculatorConfig {
             ));
         }
         let variance = params.variance();
-        let b_enc = compute_b_enc(params.get_error1_variance());
+        let b_enc = compute_b_enc(params.get_error1_variance())?;
 
         Ok(Self {
             params,
@@ -210,7 +211,9 @@ impl SmudgingBoundCalculatorConfig {
     /// * `lambda` - Statistical security level
     ///
     /// # Errors
-    /// Returns an error when `n` or `m` is zero.
+    /// Returns an error when `n` or `m` is zero, or when the configured
+    /// encryption error variance is invalid (e.g. zero) — the latter is
+    /// forwarded from [`Self::new`] before the depth is applied.
     pub fn new_multiplicative(
         params: Arc<BfvParameters>,
         n: usize,
@@ -229,7 +232,9 @@ impl SmudgingBoundCalculatorConfig {
 /// Implements the trBFV security formulas with:
 /// - `Delta = floor(Q / t)` (exact plaintext scaling factor, not `Q/(2t)`).
 /// - Strict correctness inequality: `2 * (B_C + n * B_sm) < Delta`.
-/// - Sampler-aligned `B_enc` (CBD support for small variance, `sqrt(3*var)` for large).
+/// - Sampler-aligned `B_enc` via [`fhe_math::rq::error_support_bound`] (CBD
+///   support `2v` for variances `1..=16`, the exact minimal uniform bound
+///   otherwise).
 /// - Distributed RLK error accounting via [`with_accepted_participant_count`].
 /// - Injectible initial ciphertext noise bound via [`with_initial_ciphertext_noise_bound`].
 ///
@@ -625,7 +630,7 @@ mod tests {
     }
 
     /// Parameters with a large error1_variance so the uniform sampler branch
-    /// is exercised (variance >= 16 as u64).
+    /// is exercised (variance > 16).
     fn test_params_large_error1() -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
             .set_degree(8192)
@@ -645,28 +650,85 @@ mod tests {
         assert_eq!(params.variance(), 10);
         assert_eq!(params.get_error1_variance(), &BigUint::from(10_u32));
 
-        let b_enc = compute_b_enc(params.get_error1_variance());
+        let b_enc = compute_b_enc(params.get_error1_variance()).unwrap();
         assert_eq!(b_enc, BigUint::from(20_u32));
+
+        // Variance=15 stays on the CBD branch: support bound 30.
+        let params15 = BfvParametersBuilder::new()
+            .set_degree(8192)
+            .set_plaintext_modulus(16384)
+            .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
+            .set_error1_variance_usize(15)
+            .build_arc()
+            .unwrap();
+        let b_enc15 = compute_b_enc(params15.get_error1_variance()).unwrap();
+        assert_eq!(b_enc15, BigUint::from(30_u32));
     }
 
     #[test]
-    fn b_enc_uniform_branch_is_sqrt_3var() {
-        // Variance=20 (>= 16) takes the uniform branch.
+    fn b_enc_cbd_boundary_v16_is_support_32() {
+        // Variance=16 is the last CBD value (the sampler boundary is
+        // inclusive: `conditional_error` uses CBD for 1..=16), so B_enc must
+        // be the CBD support bound 2 * 16 = 32. The old implementation used
+        // the uniform branch here and reported floor(sqrt(48)) = 6.
+        let params16 = BfvParametersBuilder::new()
+            .set_degree(8192)
+            .set_plaintext_modulus(16384)
+            .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
+            .set_error1_variance_usize(16)
+            .build_arc()
+            .unwrap();
+        let b_enc = compute_b_enc(params16.get_error1_variance()).unwrap();
+        assert_eq!(b_enc, BigUint::from(32_u32));
+    }
+
+    #[test]
+    fn b_enc_uniform_branch_is_exact_minimal_bound() {
+        // Variance=20 takes the uniform branch: the exact sampler-aligned
+        // bound is the smallest B with B(B+1)/3 >= 20, i.e. B = 8 (the old
+        // square-root approximation reported 7).
         let params = test_params_large_error1();
         assert_eq!(params.get_error1_variance(), &BigUint::from(20_u32));
 
-        let b_enc = compute_b_enc(params.get_error1_variance());
-        let expected = (BigUint::from(3_u32) * BigUint::from(20_u32)).sqrt();
-        assert_eq!(b_enc, expected);
+        let b_enc = compute_b_enc(params.get_error1_variance()).unwrap();
+        assert_eq!(b_enc, BigUint::from(8_u32));
+        assert_eq!(
+            fhe_math::rq::error_support_bound(params.get_error1_variance()).unwrap(),
+            b_enc
+        );
     }
 
     #[test]
     fn b_enc_large_biguint_uses_uniform_branch() {
-        // A 128-bit variance does not fit in u64, so the uniform branch is used.
+        // A 128-bit variance does not fit in u64, so the uniform branch is
+        // used and yields the exact minimal uniform bound.
         let var = BigUint::from_str("340282366920938463463374607431768211456").unwrap(); // 2^128
-        let b_enc = compute_b_enc(&var);
-        let expected = (BigUint::from(3_u32) * &var).sqrt();
+        let b_enc = compute_b_enc(&var).unwrap();
+        let expected = fhe_math::rq::error_support_bound(&var).unwrap();
         assert_eq!(b_enc, expected);
+        // The minimal-bound contract: B(B+1)/3 >= v and (B-1)*B/3 < v.
+        let three_v = BigUint::from(3_u32) * &var;
+        assert!(b_enc.clone() * (&b_enc + 1_u32) >= three_v);
+        if !b_enc.is_zero() {
+            let prev = &b_enc - 1_u32;
+            assert!(prev * &b_enc < three_v);
+        }
+    }
+
+    /// `compute_b_enc` must delegate to the shared sampler-aligned helper in
+    /// `fhe-math` across both branches, including boundary values.
+    #[test]
+    fn b_enc_delegates_to_shared_error_support_bound() {
+        for variance in [1_u32, 10, 15, 16, 17, 20, u32::MAX] {
+            let v = BigUint::from(variance);
+            assert_eq!(
+                compute_b_enc(&v).unwrap(),
+                fhe_math::rq::error_support_bound(&v).unwrap(),
+                "variance={variance} must match the shared helper"
+            );
+        }
+        // Zero variance is rejected by the shared helper itself.
+        assert!(compute_b_enc(&BigUint::zero()).is_err());
     }
 
     #[test]
@@ -675,7 +737,29 @@ mod tests {
         let config =
             SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2, Lambda::secure(80).unwrap())
                 .unwrap();
-        assert_eq!(config.b_enc, compute_b_enc(params.get_error1_variance()));
+        assert_eq!(
+            config.b_enc,
+            compute_b_enc(params.get_error1_variance()).unwrap()
+        );
+    }
+
+    #[test]
+    fn config_new_rejects_zero_error1_variance() {
+        // Zero variance can never be sampled from; configuration
+        // construction must reject it before a calculator is created.
+        let params = BfvParametersBuilder::new()
+            .set_degree(8192)
+            .set_plaintext_modulus(16384)
+            .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
+            .set_error1_variance_usize(0)
+            .build_arc()
+            .unwrap();
+        let result = SmudgingBoundCalculatorConfig::new(params, 3, 1, Lambda::insecure(2));
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("variance"),
+            "zero-variance rejection should mention the variance; got: {err}"
+        );
     }
 
     #[test]
@@ -909,7 +993,10 @@ mod tests {
         assert_eq!(config.n, 5);
         assert_eq!(config.m, 2);
         assert_eq!(config.lambda.value(), 80);
-        assert_eq!(config.b_enc, compute_b_enc(params.get_error1_variance()));
+        assert_eq!(
+            config.b_enc,
+            compute_b_enc(params.get_error1_variance()).unwrap()
+        );
         assert_eq!(config.b_e, (params.variance() * 2) as u64);
         assert_eq!(
             config.public_key_error,
