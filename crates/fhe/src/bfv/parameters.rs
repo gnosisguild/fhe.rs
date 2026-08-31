@@ -27,6 +27,16 @@ pub(crate) enum PlaintextModulus {
 }
 
 impl PlaintextModulus {
+    /// Return the plaintext modulus as a `u64` when it is stored in the small
+    /// (u64-backed) variant, and `None` for the large (`BigUint`) variant.
+    #[cfg(feature = "protobuf")]
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Self::Small { modulus, .. } => Some(**modulus),
+            Self::Large(_) => None,
+        }
+    }
+
     pub fn as_biguint(&self) -> &BigUint {
         match self {
             Self::Small { modulus_big, .. } => modulus_big,
