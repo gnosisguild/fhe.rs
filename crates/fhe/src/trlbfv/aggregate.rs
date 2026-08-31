@@ -16,7 +16,7 @@ use super::public_key_share::PublicKeyShare;
 use super::relin_key_share::RelinKeyShare;
 use crate::SerializationError;
 use crate::bfv::BfvParameters;
-use crate::proto::bfv::{LbfvBinding, LbfvPublicKey as LbfvPublicKeyProto};
+use crate::proto::lbfv::{LbfvBinding, LbfvPublicKey as LbfvPublicKeyProto};
 use fhe_traits::FheParametrized;
 use fhe_traits::{DeserializeParametrized as DeserParam, Serialize};
 use prost::Message;

@@ -22,21 +22,9 @@ message KeySwitchingKey {
   uint32 log_base = 6;
 }
 
+
 message RelinearizationKey {
   KeySwitchingKey ksk = 1;
-}
-
-message LBFVRelinearizationKey {
-  KeySwitchingKey ksk_r_to_s = 1;
-  KeySwitchingKey ksk_s_to_r = 2;
-  repeated bytes b_vec = 3;
-  LbfvBinding binding = 4;
-}
-
-message LBFVRelinKeyShare {
-  KeySwitchingKey ksk_r_to_s = 1;
-  KeySwitchingKey ksk_s_to_r = 2;
-  LbfvBinding binding = 3;
 }
 
 message GaloisKey {
@@ -64,27 +52,6 @@ message PublicKey {
   Ciphertext c = 1;
 }
 
-message LbfvBinding {
-  bytes session_id = 1;
-  repeated uint32 participant_ids = 2;
-  uint32 participant_id = 3;
-  bool aggregate = 4;
-}
-
-message LBFVPublicKey {
-  repeated Ciphertext c = 1;
-  uint32 l = 2;
-  bytes seed = 3;
-  LbfvBinding binding = 4;
-}
-
-message PublicKeyShare {
-  Poly p0 = 1;
-}
-
-message Poly {
-  Poly p0 = 1;
-}
 message SecretKey {
   repeated sint64 coeffs = 1;
 }

@@ -576,7 +576,8 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
 
 use crate::SerializationError;
 use crate::bfv::traits::TryConvertFrom as BfvTryConvertFrom;
-use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
+use crate::proto::bfv::Ciphertext as CiphertextProto;
+use crate::proto::lbfv::LbfvPublicKey as LBFVPublicKeyProto;
 use fhe_traits::{DeserializeParametrized, Serialize};
 use prost::Message;
 
@@ -783,7 +784,7 @@ mod tests {
         Ok(())
     }
 
-    use crate::proto::bfv::LbfvPublicKey as LBFVPublicKeyProto;
+    use crate::proto::lbfv::LbfvPublicKey as LBFVPublicKeyProto;
     use fhe_traits::{DeserializeParametrized, Serialize};
     use prost::Message;
 

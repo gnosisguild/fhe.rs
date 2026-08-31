@@ -16,12 +16,29 @@ fn main() -> Result<()> {
     let temp_dir = PathBuf::from(env::var("OUT_DIR").unwrap()).join("proto_temp");
     fs::create_dir_all(&temp_dir)?;
 
-    // BFV first: TRBFV imports from it.
+    // BFV first: LBFV imports from it.
     compile_proto_file(
         "src/proto/bfv/bfv.proto",
         &["src/proto"],
         &proto_dir.join("bfv").join("generated.rs"),
         &temp_dir,
+        &[],
+    )?;
+
+    compile_proto_file(
+        "src/proto/lbfv/lbfv.proto",
+        &["src/proto"],
+        &proto_dir.join("lbfv").join("generated.rs"),
+        &temp_dir,
+        &[(".fhers.bfv", "crate::proto::bfv")],
+    )?;
+
+    compile_proto_file(
+        "src/proto/trlbfv/trlbfv.proto",
+        &["src/proto"],
+        &proto_dir.join("trlbfv").join("generated.rs"),
+        &temp_dir,
+        &[],
     )?;
 
     compile_proto_file(
@@ -29,10 +46,26 @@ fn main() -> Result<()> {
         &["src/proto"],
         &proto_dir.join("trbfv").join("generated.rs"),
         &temp_dir,
+        &[],
     )?;
 
-    println!("cargo:rerun-if-changed=src/proto/bfv/bfv.proto");
-    println!("cargo:rerun-if-changed=src/proto/trbfv/trbfv.proto");
+    compile_proto_file(
+        "src/proto/mbfv/mbfv.proto",
+        &["src/proto"],
+        &proto_dir.join("mbfv").join("generated.rs"),
+        &temp_dir,
+        &[],
+    )?;
+
+    for proto in [
+        "src/proto/bfv/bfv.proto",
+        "src/proto/lbfv/lbfv.proto",
+        "src/proto/trlbfv/trlbfv.proto",
+        "src/proto/trbfv/trbfv.proto",
+        "src/proto/mbfv/mbfv.proto",
+    ] {
+        println!("cargo:rerun-if-changed={proto}");
+    }
     Ok(())
 }
 
@@ -45,15 +78,19 @@ fn compile_proto_file(
     include_paths: &[&str],
     target_path: &PathBuf,
     temp_dir: &PathBuf,
+    extern_paths: &[(&str, &str)],
 ) -> Result<()> {
     if temp_dir.exists() {
         fs::remove_dir_all(temp_dir)?;
     }
     fs::create_dir_all(temp_dir)?;
 
-    prost_build::Config::new()
-        .out_dir(temp_dir)
-        .compile_protos(&[proto_file], include_paths)?;
+    let mut config = prost_build::Config::new();
+    config.out_dir(temp_dir);
+    for (proto_path, rust_path) in extern_paths {
+        config.extern_path((*proto_path).to_string(), (*rust_path).to_string());
+    }
+    config.compile_protos(&[proto_file], include_paths)?;
 
     for entry in fs::read_dir(temp_dir)? {
         let entry = entry?;

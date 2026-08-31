@@ -37,26 +37,6 @@ pub struct RelinearizationKey {
     pub ksk: ::core::option::Option<KeySwitchingKey>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct LbfvRelinearizationKey {
-    #[prost(message, optional, tag = "1")]
-    pub ksk_r_to_s: ::core::option::Option<KeySwitchingKey>,
-    #[prost(message, optional, tag = "2")]
-    pub ksk_s_to_r: ::core::option::Option<KeySwitchingKey>,
-    #[prost(bytes = "vec", repeated, tag = "3")]
-    pub b_vec: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
-    #[prost(message, optional, tag = "4")]
-    pub binding: ::core::option::Option<LbfvBinding>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct LbfvRelinKeyShare {
-    #[prost(message, optional, tag = "1")]
-    pub ksk_r_to_s: ::core::option::Option<KeySwitchingKey>,
-    #[prost(message, optional, tag = "2")]
-    pub ksk_s_to_r: ::core::option::Option<KeySwitchingKey>,
-    #[prost(message, optional, tag = "3")]
-    pub binding: ::core::option::Option<LbfvBinding>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GaloisKey {
     #[prost(message, optional, tag = "1")]
     pub ksk: ::core::option::Option<KeySwitchingKey>,
@@ -97,38 +77,6 @@ pub mod parameters {
 pub struct PublicKey {
     #[prost(message, optional, tag = "1")]
     pub c: ::core::option::Option<Ciphertext>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct LbfvBinding {
-    #[prost(bytes = "vec", tag = "1")]
-    pub session_id: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint32, repeated, tag = "2")]
-    pub participant_ids: ::prost::alloc::vec::Vec<u32>,
-    #[prost(uint32, tag = "3")]
-    pub participant_id: u32,
-    #[prost(bool, tag = "4")]
-    pub aggregate: bool,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct LbfvPublicKey {
-    #[prost(message, repeated, tag = "1")]
-    pub c: ::prost::alloc::vec::Vec<Ciphertext>,
-    #[prost(uint32, tag = "2")]
-    pub l: u32,
-    #[prost(bytes = "vec", tag = "3")]
-    pub seed: ::prost::alloc::vec::Vec<u8>,
-    #[prost(message, optional, tag = "4")]
-    pub binding: ::core::option::Option<LbfvBinding>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PublicKeyShare {
-    #[prost(message, optional, tag = "1")]
-    pub p0: ::core::option::Option<Poly>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Poly {
-    #[prost(message, optional, boxed, tag = "1")]
-    pub p0: ::core::option::Option<::prost::alloc::boxed::Box<Poly>>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SecretKey {

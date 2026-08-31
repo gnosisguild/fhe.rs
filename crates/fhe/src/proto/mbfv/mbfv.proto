@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package fhers.mbfv;
+
+// MBFV share envelopes (experimental crate).
+message PublicKeyShare {
+  Poly p0 = 1;
+}
+
+message Poly {
+  Poly p0 = 1;
+}

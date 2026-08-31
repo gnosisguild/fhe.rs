@@ -730,9 +730,8 @@ impl FheParametrized for LBFVRelinearizationKey {
 }
 
 use crate::bfv::traits::TryConvertFrom;
-use crate::proto::bfv::{
-    KeySwitchingKey as KeySwitchingKeyProto, LbfvRelinearizationKey as LBFVRelinearizationKeyProto,
-};
+use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
+use crate::proto::lbfv::LbfvRelinearizationKey as LBFVRelinearizationKeyProto;
 use fhe_traits::{DeserializeParametrized, DeserializeWithContext, Serialize};
 use prost::Message;
 

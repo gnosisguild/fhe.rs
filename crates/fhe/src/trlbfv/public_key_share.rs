@@ -10,7 +10,7 @@ use fhe_math::rq::{Ntt, Poly};
 
 use super::ContributionBinding;
 use crate::SerializationError;
-use crate::proto::bfv::{LbfvBinding, LbfvPublicKey as LbfvPublicKeyProto};
+use crate::proto::lbfv::{LbfvBinding, LbfvPublicKey as LbfvPublicKeyProto};
 use fhe_traits::{DeserializeParametrized, Serialize};
 use prost::Message;
 
