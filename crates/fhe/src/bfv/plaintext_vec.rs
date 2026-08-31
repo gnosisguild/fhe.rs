@@ -258,7 +258,7 @@ mod tests {
         for _ in 0..20 {
             for i in 1..5 {
                 let params = BfvParameters::default_arc(1, 16);
-                let a = params.plaintext();
+                let a = params.try_plaintext()?;
                 let q = fhe_math::zq::Modulus::new(a).unwrap();
                 let a_vec = q.random_vec(params.degree() * i, &mut rng);
 

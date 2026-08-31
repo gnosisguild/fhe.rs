@@ -738,10 +738,10 @@ mod tests {
                     .unwrap();
 
                 // Create a couple random encrypted polynomials
-                let v1 = fhe_math::zq::Modulus::new(params.plaintext())
+                let v1 = fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                     .unwrap()
                     .random_vec(params.degree(), &mut rng);
-                let v2 = fhe_math::zq::Modulus::new(params.plaintext())
+                let v2 = fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                     .unwrap()
                     .random_vec(params.degree(), &mut rng);
                 let pt1 =
@@ -775,7 +775,7 @@ mod tests {
                     .unwrap();
 
                 let mut expected = v1.clone();
-                fhe_math::zq::Modulus::new(params.plaintext())
+                fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                     .unwrap()
                     .mul_vec(&mut expected, &v2);
                 assert_eq!(

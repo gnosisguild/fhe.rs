@@ -188,7 +188,7 @@ fn test_small_modulus_with_biguint_input() -> Result<(), Box<dyn Error>> {
 
     // Let's just pick a value larger than t, but small enough to verify reduction.
     // t = 1153 (default for default_arc(1, 16) in parameters.rs)
-    let t = params.plaintext();
+    let t = params.try_plaintext()?;
     let val = BigUint::from(t) + 5u32; // Should reduce to 5
 
     let mut values = vec![BigUint::from(0u32); params.degree()];

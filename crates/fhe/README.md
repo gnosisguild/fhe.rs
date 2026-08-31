@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .build_arc()?;
     let mut rng = rng();
     let secret_key = SecretKey::random(&parameters, &mut rng);
-    let public_key = PublicKey::new(&secret_key, &mut rng);
+    let public_key = PublicKey::new(&secret_key, &mut rng)?;
 
     let plaintext_1 = Plaintext::try_encode(&[20_u64], Encoding::poly(), &parameters)?;
     let plaintext_2 = Plaintext::try_encode(&[-7_i64], Encoding::poly(), &parameters)?;
@@ -66,6 +66,22 @@ fn main() -> Result<(), Box<dyn Error>> {
 ```
 
 Note that operations actually happen modulo the `plaintext_modulus`, here set to `1024 (= 1 << 10)`; for example, we would have had that the homomorphic multiplication of `805` and `-7` is `509 = (805 * (-7)) mod 1024`. Additionally, the `poly()` encoding means that the vector being encoded corresponds to the coefficients of a polynomial in `(ZZ / (1024))[x] / (x^2048+1)` (and homomorphic multiplication happens in that ring); here since only one coefficient is provided, the value is placed in the constant coefficient. The library also contains a `simd()` encoding, which enables component-wise operation on the values of the vector, provided the technical limitation that the plaintext modulus is congruent to `1` modulo twice the polynomial degree.
+
+## Migrating to the fallible builder and plaintext accessors
+
+The builder now validates parameters at the setters and again at `build`:
+
+- `set_variance` returns `Result<&mut Self>` and accepts exactly `1..=16` (the CBD sampler domain). Use `set_variance(10)?` in a `Result`-returning function.
+- `set_error1_variance`, `set_error1_variance_usize`, and `set_error1_variance_str` return `Result<&mut Self>` and accept every positive `BigUint`; only `0` is rejected. There is no fixed upper bound — values above `16` select the uniform branch of `Poly::conditional_error`.
+- `build` rejects a polynomial degree outside `[8, 65536]` (power of two), a zero plaintext modulus, and empty, duplicated, non-coprime, or non-NTT-friendly ciphertext moduli with typed [`ParametersError`](https://docs.rs/fhe/latest/fhe/enum.ParametersError.html) variants.
+- The `with_error1_variance` convenience method has been removed; use the validated `set_error1_variance*` setters instead.
+
+Plaintext modulus access is now fallible:
+
+- `plaintext()` (which panicked on large moduli) is removed. Use [`try_plaintext`](https://docs.rs/fhe/latest/fhe/struct.BfvParameters.html#method.try_plaintext) → `Result<u64>` at real `u64`-only interfaces (`zq::Modulus`, fixtures, the threshold-decryption u64 contract), and [`plaintext_big`](https://docs.rs/fhe/latest/fhe/struct.BfvParameters.html#method.plaintext_big) → `&BigUint` for arbitrary-precision scaling, smudging, and bit-length calculations.
+- `try_plaintext` succeeds up to and including `u64::MAX` regardless of internal Small/Large classification and returns `ParametersError::PlaintextModulusNotU64` above it.
+
+`PublicKey::new` is now fallible: it returns `Result<PublicKey>` and propagates plaintext/encryption errors. Use `PublicKey::new(&secret_key, &mut rng)?` in a `Result`-returning function.
 
 ## Examples
 

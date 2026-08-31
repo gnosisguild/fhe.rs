@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus)
             .set_moduli(&moduli)
-            .set_variance(10)
+            .set_variance(10)?
             .set_error1_variance_str(
                 "52309181128222339698631578526730685514457152477762943514050560000"
             )?

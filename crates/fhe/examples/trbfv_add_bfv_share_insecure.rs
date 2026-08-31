@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
-            .set_variance(3)
+            .set_variance(3)?
             .set_error1_variance_str("3")?
             .build_arc()?
     );
@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus_bfv)
             .set_moduli(&moduli_bfv)
-            .set_variance(3)
+            .set_variance(3)?
             .build_arc()?
     );
     println!("✓ BFV parameters built successfully");
@@ -190,7 +190,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
         (0..num_parties)
             .into_par_iter()
-            .map(|party_idx| {
+            .map(|party_idx| -> Result<Party, fhe::Error> {
                 let mut rng = rand::rng();
 
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
@@ -222,9 +222,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
 
                 let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
-                let pk_bfv = PublicKey::new(&sk_bfv, &mut rng);
+                let pk_bfv = PublicKey::new(&sk_bfv, &mut rng)?;
 
-                Party {
+                Ok(Party {
                     pk_share,
                     sk_sss,
                     esi_sss,
@@ -235,9 +235,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     d_share_poly: None,
                     sk_bfv,
                     pk_bfv,
-                }
+                })
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?
     });
 
     let pk_bfv_list: Vec<PublicKey> = parties.iter().map(|p| p.pk_bfv.clone()).collect();

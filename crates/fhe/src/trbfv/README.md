@@ -81,20 +81,29 @@ Let `mult_depth` be the number of multiplication levels.
 
 ### Sampler-specific `B_enc`
 
-`B_enc` is derived from the actual BFV error sampler configuration, not from a
+When constructed via `SmudgingBoundCalculatorConfig`, `B_enc` is derived from
+the actual BFV error sampler configuration through
+[`fhe_math::rq::error_support_bound`](../../../fhe-math/src/rq/mod.rs), not from a
 fixed formula:
 
 | Error sampler branch                     | `B_enc` bound                    |
 | ---------------------------------------- | -------------------------------- |
-| CBD (error1 variance `< 16` as `u64`)     | `2 &middot; error1_variance`    |
-| Uniform (large / non-`u64` variance)      | `&lfloor;sqrt(3 &middot; error1_variance)&rfloor;` |
+| CBD (error1 variance `<= 16`)             | `2 &middot; error1_variance`    |
+| Uniform (error1 variance `> 16`, including arbitrarily large values) | the smallest `B` with `B(B+1)/3 &ge; error1_variance` (the exact minimal uniform bound) |
 
-This matches the branches chosen by `Poly::conditional_error` in `fhe-math`.
+This matches the branches chosen by `Poly::conditional_error` in `fhe-math`;
+both the sampler and this constructor-time derivation consume one canonical
+selection specification, so the constructor-derived `B_enc` never undershoots
+the noise the sampler actually produces. Note that `b_enc` is a publicly
+mutable field: callers who overwrite it after construction own its
+sampler-alignment; the config constructors derive it once and do not
+re-validate later mutations.
 
 `SmudgingBoundCalculatorConfig::new` and
 `SmudgingBoundCalculatorConfig::new_multiplicative` are fallible: they reject
-zero parties or zero ciphertexts before a calculator is created. The calculator
-also revalidates these counts before performing the bound computation.
+zero parties, zero ciphertexts, or an invalid encryption error variance (e.g.
+zero) before a calculator is created. The calculator also revalidates these
+counts before performing the bound computation.
 
 ## Known Limitations
 
