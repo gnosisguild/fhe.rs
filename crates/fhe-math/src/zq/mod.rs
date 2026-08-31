@@ -147,12 +147,32 @@ impl Modulus {
     /// Optimized modular multiplication of a and b in constant time.
     ///
     /// Aborts if a >= p or b >= p in debug mode.
-    #[must_use]
-    pub const fn mul_opt(&self, a: u64, b: u64) -> u64 {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedOptimizedReduction`] if the modulus does not
+    /// support the optimized reduction.
+    pub const fn mul_opt(&self, a: u64, b: u64) -> Result<u64> {
+        if !self.supports_opt {
+            return Err(Error::UnsupportedOptimizedReduction { modulus: self.p });
+        }
+        debug_assert!(a < self.p && b < self.p);
+        Ok(self.mul_opt_kernel(a, b))
+    }
+
+    /// Internal optimized modular multiplication kernel.
+    ///
+    /// # Invariants
+    /// The modulus must support the optimized reduction and `a, b < p` must
+    /// hold.
+    const fn mul_opt_kernel(&self, a: u64, b: u64) -> u64 {
         debug_assert!(self.supports_opt);
         debug_assert!(a < self.p && b < self.p);
-
-        self.reduce_opt_u128((a as u128) * (b as u128))
+        // `a * b < p^2` holds because `a, b < p`.
+        Self::reduce1(
+            self.lazy_reduce_opt_u128_kernel((a as u128) * (b as u128)),
+            self.p,
+        )
     }
 
     /// Optimized modular multiplication of a and b in variable time.
@@ -161,6 +181,10 @@ impl Modulus {
     /// # Safety
     /// This function is not constant time and its timing may reveal information
     /// about the values being multiplied.
+    ///
+    /// # Invariants
+    /// The caller must establish that the modulus supports the optimized
+    /// reduction before calling this kernel.
     const unsafe fn mul_opt_vt(&self, a: u64, b: u64) -> u64 {
         debug_assert!(self.supports_opt);
         debug_assert!(a < self.p && b < self.p);
@@ -334,7 +358,8 @@ impl Modulus {
 
         if self.supports_opt {
             self.arch.dispatch(|| {
-                izip!(a.iter_mut(), b.iter()).for_each(|(ai, bi)| *ai = self.mul_opt(*ai, *bi))
+                izip!(a.iter_mut(), b.iter())
+                    .for_each(|(ai, bi)| *ai = self.mul_opt_kernel(*ai, *bi))
             })
         } else {
             self.arch.dispatch(|| {
@@ -650,26 +675,52 @@ impl Modulus {
     }
 
     /// Optimized modular reduction of a u128 in constant time.
-    #[must_use]
-    pub const fn reduce_opt_u128(&self, a: u128) -> u64 {
-        debug_assert!(self.supports_opt);
-        Self::reduce1(self.lazy_reduce_opt_u128(a), self.p)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedOptimizedReduction`] if the modulus does not
+    /// support the optimized reduction, and
+    /// [`Error::InvalidOptimizedReductionInput`] if `a >= p^2`.
+    pub const fn reduce_opt_u128(&self, a: u128) -> Result<u64> {
+        if !self.supports_opt {
+            return Err(Error::UnsupportedOptimizedReduction { modulus: self.p });
+        }
+        if a >= (self.p as u128) * (self.p as u128) {
+            return Err(Error::InvalidOptimizedReductionInput {
+                modulus: self.p,
+                value: a,
+            });
+        }
+        Ok(Self::reduce1(self.lazy_reduce_opt_u128_kernel(a), self.p))
     }
 
-    /// Optimized modular reduction of a u128 in constant time.
+    /// Optimized modular reduction of a u128 in variable time (internal
+    /// kernel).
     ///
     /// # Safety
     /// This function is not constant time and its timing may reveal information
     /// about the value being reduced.
+    ///
+    /// # Invariants
+    /// The caller must establish that the modulus supports the optimized
+    /// reduction and that `a < p^2` before calling this kernel.
     pub(crate) const unsafe fn reduce_opt_u128_vt(&self, a: u128) -> u64 {
         debug_assert!(self.supports_opt);
-        unsafe { Self::reduce1_vt(self.lazy_reduce_opt_u128(a), self.p) }
+        debug_assert!(a < (self.p as u128) * (self.p as u128));
+        unsafe { Self::reduce1_vt(self.lazy_reduce_opt_u128_kernel(a), self.p) }
     }
 
     /// Optimized modular reduction of a u64 in constant time.
-    #[must_use]
-    pub const fn reduce_opt(&self, a: u64) -> u64 {
-        Self::reduce1(self.lazy_reduce_opt(a), self.p)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedOptimizedReduction`] if the modulus does not
+    /// support the optimized reduction.
+    pub const fn reduce_opt(&self, a: u64) -> Result<u64> {
+        if !self.supports_opt {
+            return Err(Error::UnsupportedOptimizedReduction { modulus: self.p });
+        }
+        Ok(Self::reduce1(self.lazy_reduce_opt(a), self.p))
     }
 
     /// Optimized modular reduction of a u64 in variable time.
@@ -677,9 +728,16 @@ impl Modulus {
     /// # Safety
     /// This function is not constant time and its timing may reveal information
     /// about the value being reduced.
-    #[must_use]
-    pub const unsafe fn reduce_opt_vt(&self, a: u64) -> u64 {
-        unsafe { Self::reduce1_vt(self.lazy_reduce_opt(a), self.p) }
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedOptimizedReduction`] if the modulus does not
+    /// support the optimized reduction.
+    pub const unsafe fn reduce_opt_vt(&self, a: u64) -> Result<u64> {
+        if !self.supports_opt {
+            return Err(Error::UnsupportedOptimizedReduction { modulus: self.p });
+        }
+        Ok(unsafe { Self::reduce1_vt(self.lazy_reduce_opt(a), self.p) })
     }
 
     /// Return x mod p in constant time.
@@ -750,12 +808,34 @@ impl Modulus {
         r
     }
 
-    /// Lazy optimized modular reduction of a in constant time.
+    /// Lazy optimized modular reduction of a u128 in constant time.
     /// The output is in the interval [0, 2 * p).
     ///
-    /// Aborts if the input is >= p ^ 2 in debug mode.
-    #[must_use]
-    pub const fn lazy_reduce_opt_u128(&self, a: u128) -> u64 {
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedOptimizedReduction`] if the modulus does not
+    /// support the optimized reduction, and
+    /// [`Error::InvalidOptimizedReductionInput`] if `a >= p^2`.
+    pub const fn lazy_reduce_opt_u128(&self, a: u128) -> Result<u64> {
+        if !self.supports_opt {
+            return Err(Error::UnsupportedOptimizedReduction { modulus: self.p });
+        }
+        if a >= (self.p as u128) * (self.p as u128) {
+            return Err(Error::InvalidOptimizedReductionInput {
+                modulus: self.p,
+                value: a,
+            });
+        }
+        Ok(self.lazy_reduce_opt_u128_kernel(a))
+    }
+
+    /// Internal optimized u128 lazy-reduction kernel.
+    ///
+    /// # Invariants
+    /// The modulus must support the optimized reduction and `a < p^2` must
+    /// hold.
+    const fn lazy_reduce_opt_u128_kernel(&self, a: u128) -> u64 {
+        debug_assert!(self.supports_opt);
         debug_assert!(a < (self.p as u128) * (self.p as u128));
 
         let q = (((self.barrett_lo as u128) * (a >> 64)) + (a << self.leading_zeros)) >> 64;
@@ -769,6 +849,9 @@ impl Modulus {
 
     /// Lazy optimized modular reduction of a in constant time.
     /// The output is in the interval [0, 2 * p).
+    ///
+    /// # Invariants
+    /// The modulus must support the optimized reduction.
     const fn lazy_reduce_opt(&self, a: u64) -> u64 {
         let q = a >> (64 - self.leading_zeros);
         let r = ((a as u128) - (q as u128) * (self.p as u128)) as u64;
@@ -984,8 +1067,8 @@ mod tests {
             prop_assert_eq!(p.reduce(a), a % *p);
             unsafe { prop_assert_eq!(p.reduce_vt(a), a % *p) }
             if p.supports_opt {
-                prop_assert_eq!(p.reduce_opt(a), a % *p);
-                unsafe { prop_assert_eq!(p.reduce_opt_vt(a), a % *p) }
+                prop_assert_eq!(p.reduce_opt(a).unwrap(), a % *p);
+                unsafe { prop_assert_eq!(p.reduce_opt_vt(a).unwrap(), a % *p) }
             }
         }
 
@@ -1009,7 +1092,7 @@ mod tests {
             if p.supports_opt {
                 let p_square = (*p as u128) * (*p as u128);
                 a %= p_square;
-                prop_assert_eq!(p.reduce_opt_u128(a) as u128, a % (*p as u128));
+                prop_assert_eq!(p.reduce_opt_u128(a).unwrap() as u128, a % (*p as u128));
                 unsafe { prop_assert_eq!(p.reduce_opt_u128_vt(a) as u128, a % (*p as u128)) }
             }
         }
@@ -1174,7 +1257,7 @@ mod tests {
             a = p.reduce(a);
             b = p.reduce(b);
 
-            prop_assert_eq!(p.mul_opt(a, b) as u128, ((a as u128) * (b as u128)) % (*p as u128));
+            prop_assert_eq!(p.mul_opt(a, b).unwrap() as u128, ((a as u128) * (b as u128)) % (*p as u128));
             unsafe { prop_assert_eq!(p.mul_opt_vt(a, b) as u128, ((a as u128) * (b as u128)) % (*p as u128)) }
 
             #[cfg(debug_assertions)]
@@ -1183,6 +1266,40 @@ mod tests {
                 prop_assert!(std::panic::catch_unwind(|| p.mul_opt(a, *p)).is_err());
                 prop_assert!(std::panic::catch_unwind(|| p.mul_opt(*p + 1, a)).is_err());
                 prop_assert!(std::panic::catch_unwind(|| p.mul_opt(a, *p + 1)).is_err());
+            }
+        }
+
+        #[test]
+        fn reduce_opt_agrees_with_reduce(p in valid_moduli_opt(), a: u64) {
+            prop_assert_eq!(p.reduce_opt(a).unwrap(), p.reduce(a));
+            unsafe { prop_assert_eq!(p.reduce_opt_vt(a).unwrap(), p.reduce(a)) }
+        }
+
+        #[test]
+        fn reduce_opt_u128_agrees_with_reduce_u128(p in valid_moduli_opt(), a: u128) {
+            let p_square = (*p as u128) * (*p as u128);
+            let a = a % p_square;
+            let expected = (a % (*p as u128)) as u64;
+            prop_assert_eq!(p.reduce_opt_u128(a).unwrap(), expected);
+            unsafe { prop_assert_eq!(p.reduce_opt_u128_vt(a), expected) }
+            let lazy = p.lazy_reduce_opt_u128(a).unwrap();
+            prop_assert!(lazy < 2 * *p);
+            prop_assert_eq!(lazy % *p, expected);
+        }
+
+        #[test]
+        fn mul_opt_agrees_with_mul(p in valid_moduli(), mut a: u64, mut b: u64) {
+            a = p.reduce(a);
+            b = p.reduce(b);
+            let expected = p.mul(a, b);
+            if p.supports_opt {
+                prop_assert_eq!(p.mul_opt(a, b).unwrap(), expected);
+                unsafe { prop_assert_eq!(p.mul_opt_vt(a, b), expected) }
+            } else {
+                prop_assert_eq!(
+                    p.mul_opt(a, b),
+                    Err(Error::UnsupportedOptimizedReduction { modulus: *p })
+                );
             }
         }
 
@@ -1212,6 +1329,50 @@ mod tests {
                 prop_assert!(std::panic::catch_unwind(|| p.pow(0, *p << 1)).is_err());
             }
         }
+    }
+
+    #[test]
+    fn unsupported_opt_returns_typed_errors() -> crate::Result<()> {
+        // Small primes do not support the optimized reduction, so the optimized
+        // scalar entry points must report a typed error instead of silently
+        // using the optimized arithmetic.
+        let p = Modulus::new(17)?;
+        assert!(!p.supports_opt);
+        let expected = Err(Error::UnsupportedOptimizedReduction { modulus: 17 });
+
+        assert_eq!(p.reduce_opt(5), expected);
+        assert_eq!(unsafe { p.reduce_opt_vt(5) }, expected);
+        assert_eq!(p.reduce_opt_u128(25), expected);
+        assert_eq!(p.lazy_reduce_opt_u128(25), expected);
+        assert_eq!(p.mul_opt(3, 5), expected);
+        Ok(())
+    }
+
+    #[test]
+    fn reduce_opt_u128_rejects_out_of_range_input() -> crate::Result<()> {
+        // 4611686018326724609 supports the optimized reduction.
+        let p = Modulus::new(4611686018326724609)?;
+        assert!(p.supports_opt);
+        let p_square = (4611686018326724609u128) * (4611686018326724609u128);
+
+        assert_eq!(
+            p.reduce_opt_u128(p_square),
+            Err(Error::InvalidOptimizedReductionInput {
+                modulus: 4611686018326724609,
+                value: p_square,
+            })
+        );
+        assert_eq!(
+            p.lazy_reduce_opt_u128(p_square),
+            Err(Error::InvalidOptimizedReductionInput {
+                modulus: 4611686018326724609,
+                value: p_square,
+            })
+        );
+        // Just below p^2 is a valid input.
+        assert!(p.reduce_opt_u128(p_square - 1).is_ok());
+        assert!(p.lazy_reduce_opt_u128(p_square - 1).is_ok());
+        Ok(())
     }
 
     // TODO: Make a proptest.

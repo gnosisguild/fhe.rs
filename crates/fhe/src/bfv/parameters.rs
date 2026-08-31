@@ -893,7 +893,15 @@ impl BfvParametersBuilder {
         let mut extended_basis = Vec::with_capacity(moduli.len() + 1);
         let mut upper_bound = 1 << 62;
         while extended_basis.len() != moduli.len() + 1 {
-            upper_bound = generate_prime(62, 2 * self.degree as u64, upper_bound).unwrap();
+            let Some(prime) = generate_prime(62, 2 * self.degree as u64, upper_bound) else {
+                return Err(Error::ParametersError(ParametersError::NotEnoughPrimes {
+                    size: 62,
+                    degree: self.degree,
+                    needed: moduli.len() + 1,
+                    available: extended_basis.len(),
+                }));
+            };
+            upper_bound = prime;
             if !extended_basis.contains(&upper_bound) && !moduli.contains(&upper_bound) {
                 extended_basis.push(upper_bound)
             }

@@ -98,6 +98,26 @@ pub enum Error {
     #[error("The scaling denominator cannot be zero.")]
     ZeroScalingDenominator,
 
+    /// Indicates that an optimized reduction was requested for a modulus that
+    /// does not support the optimized arithmetic.
+    #[error("Optimized reduction is not supported for modulus {modulus}.")]
+    UnsupportedOptimizedReduction {
+        /// The modulus for which the optimized reduction is unsupported.
+        modulus: u64,
+    },
+
+    /// Indicates that a u128 input to an optimized reduction is not below the
+    /// square of the modulus.
+    #[error(
+        "Invalid optimized reduction input: {value} is not below the square of modulus {modulus}."
+    )]
+    InvalidOptimizedReductionInput {
+        /// The modulus of the reduction.
+        modulus: u64,
+        /// The out-of-range input value.
+        value: u128,
+    },
+
     /// Indicates a default error
     /// TODO: To delete when transition is over
     #[error("{0}")]
@@ -171,6 +191,18 @@ mod tests {
         assert_eq!(
             Error::ZeroScalingDenominator.to_string(),
             "The scaling denominator cannot be zero."
+        );
+        assert_eq!(
+            Error::UnsupportedOptimizedReduction { modulus: 17 }.to_string(),
+            "Optimized reduction is not supported for modulus 17."
+        );
+        assert_eq!(
+            Error::InvalidOptimizedReductionInput {
+                modulus: 17,
+                value: 300,
+            }
+            .to_string(),
+            "Invalid optimized reduction input: 300 is not below the square of modulus 17."
         );
     }
 }
