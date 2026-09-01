@@ -798,6 +798,7 @@ mod tests {
     use crate::proto::lbfv::LbfvPublicKey as LBFVPublicKeyProto;
     use fhe_traits::{DeserializeParametrized, Serialize};
     use prost::Message;
+
     /// `try_encrypt` and `try_encrypt_extended` must sample `e1` from the
     /// configured `error1_variance`, independently of `variance` (used for
     /// `u` and `e2`), mirroring `bfv::PublicKey`.
@@ -838,8 +839,8 @@ mod tests {
         Ok(())
     }
 
-    /// `try_encrypt_extended` witness equations: `c0 = u·b + e1 + m` and
-    /// `c1 = u·a + e2`, per `.rules/witness.md`.
+    /// `try_encrypt_extended` witness equations: `c0 = u*b + e1 + m` and
+    /// `c1 = u*a + e2`.
     #[test]
     fn extended_encrypt_witness_equations() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
@@ -870,7 +871,6 @@ mod tests {
 
         Ok(())
     }
-
 
     #[test]
     fn test_serialize() -> std::result::Result<(), Box<dyn std::error::Error>> {
