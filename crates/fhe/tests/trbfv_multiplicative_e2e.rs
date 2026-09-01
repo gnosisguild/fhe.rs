@@ -134,7 +134,7 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
         sk_sss_collected: Vec<Array2<u64>>,
         es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
+        es_poly_sum: Option<fhe::trbfv::OneTimeNoiseShare>,
     }
 
     let ctx_level0 = params.context_at_level(0).expect("level-0 context");
@@ -165,7 +165,7 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
                 sk_sss_collected: Vec::with_capacity(N),
                 es_sss_collected: Vec::with_capacity(N),
                 sk_poly_sum: Poly::<PowerBasis>::zero(ctx_level0),
-                es_poly_sum: Poly::<PowerBasis>::zero(ctx_level0),
+                es_poly_sum: None,
             }
         })
         .collect();
@@ -197,9 +197,11 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
         party.sk_poly_sum = trbfv
             .aggregate_collected_shares(&party.sk_sss_collected)
             .expect("aggregate sk shares");
-        party.es_poly_sum = trbfv
-            .aggregate_collected_shares(&party.es_sss_collected)
-            .expect("aggregate es shares");
+        party.es_poly_sum = Some(
+            trbfv
+                .aggregate_noise_shares(std::mem::take(&mut party.es_sss_collected))
+                .expect("aggregate es shares"),
+        );
     }
 
     // ── Encrypt, multiply, relinearize ╌───────────────────────────────
@@ -231,12 +233,12 @@ fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
     let d_share_polys: Vec<Poly<PowerBasis>> = reconstructing
         .iter()
         .map(|&party_id| {
-            let party = &parties[party_id - 1];
+            let party = &mut parties[party_id - 1];
             trbfv
                 .decryption_share(
                     tally.clone(),
                     party.sk_poly_sum.clone().into_ntt(),
-                    party.es_poly_sum.clone(),
+                    party.es_poly_sum.take().unwrap(),
                 )
                 .expect("decryption share")
         })
