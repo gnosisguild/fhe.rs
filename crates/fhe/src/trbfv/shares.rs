@@ -364,8 +364,15 @@ impl ShareManager {
             }
             .into());
         }
-        let c0 = ciphertext.c[0].clone().into_power_basis();
-        let c1 = ciphertext.c[1].clone();
+        let mut c0 = ciphertext.c[0].clone();
+        c0.disallow_variable_time_computations();
+        let c0 = c0.into_power_basis();
+        let mut c1 = ciphertext.c[1].clone();
+        c1.disallow_variable_time_computations();
+        let mut sk_i = sk_i;
+        sk_i.disallow_variable_time_computations();
+        let mut es_i = es_i;
+        es_i.disallow_variable_time_computations();
         if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Polynomial,
@@ -724,16 +731,20 @@ mod tests {
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct: Arc<Ciphertext> = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
-        // Generate polynomials for decryption share
-        let sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        // Generate polynomials for decryption share.
+        let mut sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
         let ctx = params.context_at_level(0).unwrap();
-        //Setting smuding noise to be zero in this test
-        let es_poly = Poly::<PowerBasis>::zero(ctx);
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+        sk_poly.allow_variable_time_computations(variable_time);
+        let mut es_poly = Poly::<PowerBasis>::zero(ctx);
+        es_poly.allow_variable_time_computations(variable_time);
+        assert!(ct.c[1].allows_variable_time_computations());
 
-        // Compute decryption share
+        // Compute decryption share.
         let decryption_share = manager
             .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
             .unwrap();
+        assert!(!decryption_share.allows_variable_time_computations());
 
         // This test uses the full secret as the "aggregate" for both parties;
         // two identical values at distinct Shamir x-coordinates reconstruct the
