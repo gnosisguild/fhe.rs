@@ -37,7 +37,7 @@ use fhe::{
     aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::LBFVRelinearizationKey,
-    trbfv::{Lambda, OneTimeNoiseShare, ShareManager, TRBFV},
+    trbfv::{Lambda, ShareManager, TRBFV},
     trlbfv::{
         AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
         aggregate_relinearization_key,
@@ -212,7 +212,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sk_sss_collected: Vec<Array2<u64>>, // collected from all senders; each (num_moduli, degree)
         es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Option<OneTimeNoiseShare>,
+        es_poly_sum: Poly<PowerBasis>,
         d_share_poly: Poly<PowerBasis>,
         pk_lbfv_share: PublicKeyShare, // l-BFV PK contribution (shared crs_a)
         rlk_share: RelinKeyShare,
@@ -293,7 +293,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sk_sss_collected: Vec::with_capacity(num_parties),
                     es_sss_collected: Vec::with_capacity(num_parties),
                     sk_poly_sum: Poly::<PowerBasis>::zero(ctx0),
-                    es_poly_sum: None,
+                    es_poly_sum: Poly::<PowerBasis>::zero(ctx0),
                     d_share_poly: Poly::<PowerBasis>::zero(ctx0),
                     pk_lbfv_share,
                     rlk_share,
@@ -409,11 +409,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             party.sk_poly_sum = temp_trbfv
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
-            party.es_poly_sum = Some(
-                temp_trbfv
-                    .aggregate_noise_shares(std::mem::take(&mut party.es_sss_collected))
-                    .unwrap(),
-            );
+            party.es_poly_sum = temp_trbfv
+                .aggregate_collected_shares(&party.es_sss_collected)
+                .unwrap();
         });
     });
 
@@ -462,7 +460,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .decryption_share(
                 product.clone(),
                 party.sk_poly_sum.clone().into_ntt(),
-                party.es_poly_sum.take().unwrap(),
+                party.es_poly_sum.clone(),
             )
             .unwrap();
     });
