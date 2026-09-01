@@ -4,6 +4,7 @@ use crate::Error;
 /// This module provides the ShareManager struct that handles aggregation of secret shares
 /// and computation of decryption shares in the threshold BFV scheme.
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
+use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::shamir::ShamirSecretSharing;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
@@ -28,6 +29,14 @@ use zeroize::Zeroizing;
 /// ShareManager coordinates the collection and processing of secret shares in the threshold BFV scheme.
 /// It handles both the aggregation of collected shares and the computation of decryption shares.
 ///
+/// # Threshold semantics
+///
+/// `threshold` is the degree `T` of the Shamir sharing polynomial, read as the
+/// maximum number of corrupted parties the deployment tolerates. Reconstruction
+/// requires `T + 1` shares. As a trBFV type, `ShareManager` enforces the same
+/// invariants as [`TRBFV`](crate::trbfv::TRBFV): `n >= 3` and `T = (n - 1) / 2`
+/// (see [`validate_threshold_config`]).
+///
 /// # Protocol Flow
 /// 1. Each party generates secret shares using secret sharing
 /// 2. Parties exchange shares through secure channels
@@ -36,9 +45,11 @@ use zeroize::Zeroizing;
 /// 5. Finally, threshold number of decryption shares are combined to decrypt
 #[derive(Debug)]
 pub struct ShareManager {
-    /// Number of parties in the threshold scheme
+    /// Number of parties in the threshold scheme (must be `>= 3`)
     pub n: usize,
-    /// Threshold for reconstruction (minimum shares needed)
+    /// Degree `T` of the Shamir sharing polynomial, i.e. the maximum number of
+    /// corrupted parties the deployment tolerates (must equal `(n - 1) / 2`).
+    /// Reconstruction requires `T + 1` shares.
     pub threshold: usize,
     /// BFV parameters (degree, moduli, etc.)
     pub params: Arc<BfvParameters>,
@@ -48,15 +59,22 @@ impl ShareManager {
     /// Create a new share manager.
     ///
     /// # Arguments
-    /// - `n`: Total number of parties
-    /// - `threshold`: Minimum number of shares required for reconstruction
+    /// - `n`: Total number of parties (must be `>= 3`)
+    /// - `threshold`: Degree `T` of the Shamir sharing polynomial, i.e. the
+    ///   maximum number of corrupted parties the deployment tolerates. Must
+    ///   equal `(n - 1) / 2`; reconstruction requires `T + 1` shares.
     /// - `params`: BFV parameters
     ///
     /// # Errors
-    /// Returns an error if the parameters have no moduli, or if `n` is not
-    /// smaller than the smallest modulus (the MPC protocol assumes the Shamir
-    /// evaluation points `1..=n` are distinct units modulo every modulus).
+    /// Returns an error if `n < 3` or `threshold != (n - 1) / 2` (a degree-0
+    /// sharing polynomial would reveal the secret to every party), if the
+    /// parameters have no moduli, or if `n` is not smaller than the smallest
+    /// modulus (the MPC protocol assumes the Shamir evaluation points `1..=n`
+    /// are distinct units modulo every modulus).
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
+        // Enforce the same `n >= 3` and `T = (n - 1) / 2` invariants as TRBFV.
+        validate_threshold_config(n, threshold)?;
+
         //Note that in case we consider in the future using qi's that are not prime numbers (so
         //they would be only satisfying the condition of being coprime to each other which is
         //sufficient for Greco etc), we can use the utility get_smallest_prime_factor implemented
@@ -582,6 +600,70 @@ mod tests {
     }
 
     #[test]
+    fn test_share_manager_rejects_threshold_zero() {
+        // A degree-0 Shamir sharing polynomial is the secret itself, so every
+        // party would hold the full secret.
+        let params = test_params();
+        let err = ShareManager::new(5, 0, params)
+            .expect_err("threshold 0 must be rejected (degree-0 sharing reveals the secret)");
+        assert!(matches!(
+            err,
+            Error::Threshold(ThresholdError::InvalidThreshold {
+                threshold: 0,
+                n: 5,
+                expected: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn test_share_manager_rejects_invalid_threshold_config() {
+        let params = test_params();
+
+        for (n, threshold) in [(0usize, 1usize), (1, 0), (1, 1), (2, 0), (2, 1)] {
+            assert!(
+                ShareManager::new(n, threshold, params.clone()).is_err(),
+                "ShareManager::new({n}, {threshold}) must be rejected"
+            );
+        }
+
+        for n in [3usize, 5, 20] {
+            assert!(
+                ShareManager::new(n, 0, params.clone()).is_err(),
+                "ShareManager::new({n}, 0) must be rejected"
+            );
+        }
+
+        for (n, threshold) in [(5usize, 3usize), (5, 4), (5, 5), (5, 6), (3, 2)] {
+            assert!(
+                ShareManager::new(n, threshold, params.clone()).is_err(),
+                "ShareManager::new({n}, {threshold}) must be rejected"
+            );
+        }
+
+        for (n, threshold) in [(20usize, 8usize), (20, 7), (10, 3)] {
+            assert!(
+                ShareManager::new(n, threshold, params.clone()).is_err(),
+                "ShareManager::new({n}, {threshold}) must be rejected"
+            );
+        }
+
+        assert!(ShareManager::new(20, 10, params.clone()).is_err());
+        assert!(ShareManager::new(4, 2, params.clone()).is_err());
+    }
+
+    #[test]
+    fn test_share_manager_accepts_valid_threshold_config() {
+        let params = test_params();
+        for (n, threshold) in [(3usize, 1usize), (4, 1), (5, 2), (10, 4), (20, 9), (21, 10)] {
+            let manager = ShareManager::new(n, threshold, params.clone())
+                .expect("a valid threshold config must be accepted");
+            assert_eq!(manager.n, n);
+            assert_eq!(manager.threshold, threshold);
+        }
+    }
+
+    #[test]
     fn test_coeffs_to_poly_utility() {
         let params = test_params();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
@@ -601,7 +683,7 @@ mod tests {
     #[test]
     fn test_bigints_to_poly() {
         let params = test_params();
-        let manager = ShareManager::new(5, 3, params.clone()).unwrap();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
 
         // Create BigInt coefficients (full degree)
         let degree = params.degree();
@@ -628,10 +710,10 @@ mod tests {
         let mut rng = rng();
         let params = test_params();
         let n = 3;
-        //Fix threshold to be 0 for the purpose of this test so that any single party can decrypt.
-        //I.e., the secret key is given to all parties and not secret shared
-        let threshold = 0;
-        let manager = ShareManager::new(n.try_into().unwrap(), threshold, params.clone()).unwrap();
+        // ShareManager now enforces T = (n - 1) / 2, so the minimal valid
+        // configuration is (n = 3, threshold = 1), requiring two shares.
+        let threshold = 1;
+        let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
 
         // Setup: Generate keys and encrypt a plaintext
         let sk = SecretKey::random(&params, &mut rng);
@@ -641,7 +723,6 @@ mod tests {
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct: Arc<Ciphertext> = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
-        //let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
 
         // Generate polynomials for decryption share
         let sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
@@ -654,10 +735,13 @@ mod tests {
             .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
             .unwrap();
 
-        let shares = vec![decryption_share.clone()];
+        // This test uses the full secret as the "aggregate" for both parties;
+        // two identical values at distinct Shamir x-coordinates reconstruct the
+        // same value needed for plaintext recovery.
+        let shares = vec![decryption_share.clone(), decryption_share];
 
-        // Only party 1 participates (since threshold = 0, one share is enough). Parties are 1-based.
-        let reconstructing = vec![1];
+        // Parties are 1-based; reconstruction needs threshold + 1 = 2 shares.
+        let reconstructing = vec![1, 2];
         let result = manager.decrypt_from_shares(shares, reconstructing, ct);
         let plaintext_found = result.expect("Failed to decrypt from shares");
 
@@ -671,7 +755,7 @@ mod tests {
     fn test_decryption_share_rejects_nonzero_ciphertext_level() {
         let mut rng = rng();
         let params = test_params();
-        let manager = ShareManager::new(3, 0, params.clone()).unwrap();
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
         let public_key = PublicKey::new(&secret_key, &mut rng);
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
@@ -702,7 +786,7 @@ mod tests {
     fn test_decrypt_from_shares_rejects_nonzero_ciphertext_level() {
         let mut rng = rng();
         let params = test_params();
-        let manager = ShareManager::new(3, 0, params.clone()).unwrap();
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
         let public_key = PublicKey::new(&secret_key, &mut rng);
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
@@ -893,7 +977,7 @@ mod tests {
         let mut rng = rng();
         let params = test_params();
         let n = 20;
-        let threshold = 7; // need 8 parties
+        let threshold = 9; // (n - 1) / 2 for n = 20; need 10 parties
 
         let ctx = params.context_at_level(0).unwrap();
 
@@ -938,10 +1022,11 @@ mod tests {
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
-        // Choose arbitrary reconstructing parties (1-based indices): {2,5,7,11,13,17,19,20}
-        // Corresponding 0-based indices: {1,4,6,10,12,16,18,19}
+        // Choose arbitrary reconstructing parties (1-based indices):
+        // {2,4,5,7,11,13,15,17,19,20}
+        // Corresponding 0-based indices: {1,3,4,6,10,12,14,16,18,19}
         let chosen_indices = vec![
-            1usize, 4usize, 6usize, 10usize, 12usize, 16usize, 18usize, 19usize,
+            1usize, 3usize, 4usize, 6usize, 10usize, 12usize, 14usize, 16usize, 18usize, 19usize,
         ];
         let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
 
