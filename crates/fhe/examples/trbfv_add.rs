@@ -13,8 +13,8 @@ use std::{env, error::Error, process::exit, sync::Arc};
 
 use console::style;
 use fhe::{
-    bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
-    mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
+    bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
+    mbfv::{AggregateIter, PublicKeyShare},
     trbfv::{Lambda, ShareManager, TRBFV},
 };
 
@@ -51,13 +51,8 @@ fn print_notice_and_exit(error: Option<String>) {
 fn main() -> Result<(), Box<dyn Error>> {
     // BFV parameters
     let degree = 8192;
-    let plaintext_modulus: u64 = 1000;
-    let moduli = vec![
-        0x00800000022a0001,
-        0x00800000021a0001,
-        0x0080000002120001,
-        0x0080000001f60001,
-    ];
+    let plaintext_modulus: u64 = 1_000_000;
+    let moduli = vec![0x0400000000c00001, 0x0400000000a40001, 0x0400000000990001];
 
     let params = timeit!(
         "Parameters generation",
@@ -66,9 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_plaintext_modulus(plaintext_modulus)
             .set_moduli(&moduli)
             .set_variance(10)
-            .set_error1_variance_str(
-                "52309181128222339698631578526730685514457152477762943514050560000"
-            )?
+            .set_error1_variance_str("17723039943798878305384094137071261013333")?
             .build_arc()?
     );
 
@@ -81,10 +74,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 100;
-    let mut num_parties = 10;
-    let mut threshold = 4;
-    let mut lambda = 80;
+    let mut num_summed = 50;
+    let mut num_parties = 7;
+    let mut threshold = 3;
+    let mut lambda = 45;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.
@@ -197,7 +190,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
 
                 let esi_coeffs = trbfv
-                    .generate_smudging_error(num_summed, security, &mut rng)
+                    .generate_smudging_error(num_summed, 0, security, &mut rng)
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager

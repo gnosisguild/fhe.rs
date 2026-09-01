@@ -4,6 +4,7 @@ use crate::Error;
 /// This module provides the ShareManager struct that handles aggregation of secret shares
 /// and computation of decryption shares in the threshold BFV scheme.
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
+use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::shamir::ShamirSecretSharing;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
@@ -28,6 +29,14 @@ use zeroize::Zeroizing;
 /// ShareManager coordinates the collection and processing of secret shares in the threshold BFV scheme.
 /// It handles both the aggregation of collected shares and the computation of decryption shares.
 ///
+/// # Threshold semantics
+///
+/// `threshold` is the degree `T` of the Shamir sharing polynomial, read as the
+/// maximum number of corrupted parties the deployment tolerates. Reconstruction
+/// requires `T + 1` shares. As a trBFV type, `ShareManager` enforces the same
+/// invariants as [`TRBFV`](crate::trbfv::TRBFV): `n >= 3` and `T = (n - 1) / 2`
+/// (see [`validate_threshold_config`]).
+///
 /// # Protocol Flow
 /// 1. Each party generates secret shares using secret sharing
 /// 2. Parties exchange shares through secure channels
@@ -36,9 +45,11 @@ use zeroize::Zeroizing;
 /// 5. Finally, threshold number of decryption shares are combined to decrypt
 #[derive(Debug)]
 pub struct ShareManager {
-    /// Number of parties in the threshold scheme
+    /// Number of parties in the threshold scheme (must be `>= 3`)
     pub n: usize,
-    /// Threshold for reconstruction (minimum shares needed)
+    /// Degree `T` of the Shamir sharing polynomial, i.e. the maximum number of
+    /// corrupted parties the deployment tolerates (must equal `(n - 1) / 2`).
+    /// Reconstruction requires `T + 1` shares.
     pub threshold: usize,
     /// BFV parameters (degree, moduli, etc.)
     pub params: Arc<BfvParameters>,
@@ -48,15 +59,22 @@ impl ShareManager {
     /// Create a new share manager.
     ///
     /// # Arguments
-    /// - `n`: Total number of parties
-    /// - `threshold`: Minimum number of shares required for reconstruction
+    /// - `n`: Total number of parties (must be `>= 3`)
+    /// - `threshold`: Degree `T` of the Shamir sharing polynomial, i.e. the
+    ///   maximum number of corrupted parties the deployment tolerates. Must
+    ///   equal `(n - 1) / 2`; reconstruction requires `T + 1` shares.
     /// - `params`: BFV parameters
     ///
     /// # Errors
-    /// Returns an error if the parameters have no moduli, or if `n` is not
-    /// smaller than the smallest modulus (the MPC protocol assumes the Shamir
-    /// evaluation points `1..=n` are distinct units modulo every modulus).
+    /// Returns an error if `n < 3` or `threshold != (n - 1) / 2` (a degree-0
+    /// sharing polynomial would reveal the secret to every party), if the
+    /// parameters have no moduli, or if `n` is not smaller than the smallest
+    /// modulus (the MPC protocol assumes the Shamir evaluation points `1..=n`
+    /// are distinct units modulo every modulus).
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
+        // Enforce the same `n >= 3` and `T = (n - 1) / 2` invariants as TRBFV.
+        validate_threshold_config(n, threshold)?;
+
         //Note that in case we consider in the future using qi's that are not prime numbers (so
         //they would be only satisfying the condition of being coprime to each other which is
         //sufficient for Greco etc), we can use the utility get_smallest_prime_factor implemented
@@ -201,6 +219,16 @@ impl ShareManager {
     /// to compute this party's share of the joint secret (the sum of the dealt
     /// secrets) needed for decryption.
     ///
+    /// # Input invariant
+    ///
+    /// Every entry of every contribution matrix must be a canonical residue in
+    /// `[0, q_i)`, where `q_i` is the modulus of the entry's row. Shares produced
+    /// by [`ShareManager::generate_secret_shares_from_poly`] already satisfy this
+    /// invariant, but aggregation re-checks it because it is an input boundary for
+    /// externally supplied matrices. Out-of-range entries are treated as malformed
+    /// and rejected with `Error::Threshold(ThresholdError::MalformedShares { .. })`;
+    /// they are never reduced or otherwise repaired.
+    ///
     /// # Arguments
     /// - `sk_sss_collected`: One share matrix per contributing party (at most `n`;
     ///   fewer is allowed, e.g. when some parties aborted during dealing).
@@ -211,16 +239,18 @@ impl ShareManager {
     ///
     /// # Errors
     /// Returns an error if no shares are provided, if more than `n` matrices are
-    /// provided, or if any matrix does not have shape `[moduli, degree]`.
+    /// provided, if any matrix does not have shape `[moduli, degree]`, or if any
+    /// coefficient is not a canonical residue below its row's modulus (`>= q_i` is
+    /// malformed, never reduced).
     pub fn aggregate_collected_shares(
         &self,
         sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
     ) -> Result<Poly<PowerBasis>, Error> {
         if sk_sss_collected.is_empty() {
-            return Err(Error::insufficient_shares(0, 1));
+            return Err(Error::share_count_mismatch(0, 1));
         }
         if sk_sss_collected.len() > self.n {
-            return Err(Error::insufficient_shares(sk_sss_collected.len(), self.n));
+            return Err(Error::share_count_mismatch(sk_sss_collected.len(), self.n));
         }
         let expected_shape = (self.params.moduli().len(), self.params.degree());
         for (party_idx, item) in sk_sss_collected.iter().enumerate() {
@@ -235,6 +265,34 @@ impl ShareManager {
             }
         }
         let ctx = self.params.context_at_level(0)?;
+
+        // Every coefficient of every contribution must be a canonical residue
+        // below its own row's modulus `q_i` before anything is accumulated:
+        // Modulus::add_vec below requires canonical inputs (it aborts or wraps
+        // otherwise). Reducing here would silently accept malformed share
+        // material and could change the represented share, so values `>= q_i`
+        // are rejected instead. Shape was validated above, so the fallible
+        // `moduli().get(row)` lookup is expected to succeed, but in keeping with
+        // the workspace convention it stays fallible rather than indexed.
+        for (party_idx, item) in sk_sss_collected.iter().enumerate() {
+            for (row, item_row) in item.rows().into_iter().enumerate() {
+                let q_i =
+                    self.params.moduli().get(row).copied().ok_or_else(|| {
+                        Error::DefaultError("modulus index out of range".to_string())
+                    })?;
+                for (col, &value) in item_row.iter().enumerate() {
+                    if value >= q_i {
+                        return Err(Error::malformed_shares(
+                            party_idx,
+                            format!(
+                                "share coefficient at row {row} (modulus q_i = {q_i}), column \
+                                 {col} is {value}; expected a canonical residue in [0, {q_i})"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
 
         // Sum the share matrices row-wise modulo each RNS modulus, copying
         // only once into the result polynomial (instead of cloning each
@@ -283,10 +341,17 @@ impl ShareManager {
         sk_i: Poly<Ntt>,
         es_i: Poly<PowerBasis>,
     ) -> Result<Poly<PowerBasis>, Error> {
-        if ciphertext.par != self.params {
+        if ciphertext.params != self.params {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Ciphertext,
                 right: crate::ParameterSource::Parameters,
+            });
+        }
+        if ciphertext.level != 0 {
+            return Err(Error::InvalidLevel {
+                level: ciphertext.level,
+                min_level: 0,
+                max_level: 0,
             });
         }
         // A degree-2 (unrelinearized) ciphertext has 3 components; silently
@@ -299,8 +364,15 @@ impl ShareManager {
             }
             .into());
         }
-        let c0 = ciphertext.c[0].clone().into_power_basis();
-        let c1 = ciphertext.c[1].clone();
+        let mut c0 = ciphertext.c[0].clone();
+        c0.disallow_variable_time_computations();
+        let c0 = c0.into_power_basis();
+        let mut c1 = ciphertext.c[1].clone();
+        c1.disallow_variable_time_computations();
+        let mut sk_i = sk_i;
+        sk_i.disallow_variable_time_computations();
+        let mut es_i = es_i;
+        es_i.disallow_variable_time_computations();
         if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Polynomial,
@@ -333,24 +405,31 @@ impl ShareManager {
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
-        if ciphertext.par != self.params {
+        if ciphertext.params != self.params {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Ciphertext,
                 right: crate::ParameterSource::Parameters,
+            });
+        }
+        if ciphertext.level != 0 {
+            return Err(Error::InvalidLevel {
+                level: ciphertext.level,
+                min_level: 0,
+                max_level: 0,
             });
         }
         // Reconstruction consumes exactly threshold + 1 shares; requiring
         // exactness (rather than truncating extras) avoids silently depending
         // on the order of the provided shares.
         if d_share_polys.len() != self.threshold + 1 {
-            return Err(Error::insufficient_shares(
+            return Err(Error::share_count_mismatch(
                 d_share_polys.len(),
                 self.threshold + 1,
             ));
         }
         // The number of reconstructing parties must match the provided shares
         if reconstructing_parties.len() != d_share_polys.len() {
-            return Err(Error::insufficient_shares(
+            return Err(Error::share_count_mismatch(
                 reconstructing_parties.len(),
                 d_share_polys.len(),
             ));
@@ -456,7 +535,7 @@ impl ShareManager {
             .collect();
         let scalers = scalers?;
 
-        let par = ciphertext.par.clone();
+        let par = ciphertext.params.clone();
         let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
             Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
                 reason: "threshold BFV decrypt_from_shares requires a u64 plaintext modulus"
@@ -487,7 +566,7 @@ impl ShareManager {
             Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt();
 
         let pt = Plaintext {
-            par: par.clone(),
+            params: par.clone(),
             encoding: None,
             poly_ntt: poly,
         };
@@ -504,6 +583,7 @@ impl ShareManager {
 )]
 mod tests {
     use super::*;
+    use crate::ThresholdError;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
@@ -527,6 +607,70 @@ mod tests {
     }
 
     #[test]
+    fn test_share_manager_rejects_threshold_zero() {
+        // A degree-0 Shamir sharing polynomial is the secret itself, so every
+        // party would hold the full secret.
+        let params = test_params();
+        let err = ShareManager::new(5, 0, params)
+            .expect_err("threshold 0 must be rejected (degree-0 sharing reveals the secret)");
+        assert!(matches!(
+            err,
+            Error::Threshold(ThresholdError::InvalidThreshold {
+                threshold: 0,
+                n: 5,
+                expected: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn test_share_manager_rejects_invalid_threshold_config() {
+        let params = test_params();
+
+        for (n, threshold) in [(0usize, 1usize), (1, 0), (1, 1), (2, 0), (2, 1)] {
+            assert!(
+                ShareManager::new(n, threshold, params.clone()).is_err(),
+                "ShareManager::new({n}, {threshold}) must be rejected"
+            );
+        }
+
+        for n in [3usize, 5, 20] {
+            assert!(
+                ShareManager::new(n, 0, params.clone()).is_err(),
+                "ShareManager::new({n}, 0) must be rejected"
+            );
+        }
+
+        for (n, threshold) in [(5usize, 3usize), (5, 4), (5, 5), (5, 6), (3, 2)] {
+            assert!(
+                ShareManager::new(n, threshold, params.clone()).is_err(),
+                "ShareManager::new({n}, {threshold}) must be rejected"
+            );
+        }
+
+        for (n, threshold) in [(20usize, 8usize), (20, 7), (10, 3)] {
+            assert!(
+                ShareManager::new(n, threshold, params.clone()).is_err(),
+                "ShareManager::new({n}, {threshold}) must be rejected"
+            );
+        }
+
+        assert!(ShareManager::new(20, 10, params.clone()).is_err());
+        assert!(ShareManager::new(4, 2, params.clone()).is_err());
+    }
+
+    #[test]
+    fn test_share_manager_accepts_valid_threshold_config() {
+        let params = test_params();
+        for (n, threshold) in [(3usize, 1usize), (4, 1), (5, 2), (10, 4), (20, 9), (21, 10)] {
+            let manager = ShareManager::new(n, threshold, params.clone())
+                .expect("a valid threshold config must be accepted");
+            assert_eq!(manager.n, n);
+            assert_eq!(manager.threshold, threshold);
+        }
+    }
+
+    #[test]
     fn test_coeffs_to_poly_utility() {
         let params = test_params();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
@@ -546,7 +690,7 @@ mod tests {
     #[test]
     fn test_bigints_to_poly() {
         let params = test_params();
-        let manager = ShareManager::new(5, 3, params.clone()).unwrap();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
 
         // Create BigInt coefficients (full degree)
         let degree = params.degree();
@@ -573,10 +717,10 @@ mod tests {
         let mut rng = rng();
         let params = test_params();
         let n = 3;
-        //Fix threshold to be 0 for the purpose of this test so that any single party can decrypt.
-        //I.e., the secret key is given to all parties and not secret shared
-        let threshold = 0;
-        let manager = ShareManager::new(n.try_into().unwrap(), threshold, params.clone()).unwrap();
+        // ShareManager now enforces T = (n - 1) / 2, so the minimal valid
+        // configuration is (n = 3, threshold = 1), requiring two shares.
+        let threshold = 1;
+        let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
 
         // Setup: Generate keys and encrypt a plaintext
         let sk = SecretKey::random(&params, &mut rng);
@@ -586,23 +730,29 @@ mod tests {
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct: Arc<Ciphertext> = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
-        //let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
 
-        // Generate polynomials for decryption share
-        let sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        // Generate polynomials for decryption share.
+        let mut sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
         let ctx = params.context_at_level(0).unwrap();
-        //Setting smuding noise to be zero in this test
-        let es_poly = Poly::<PowerBasis>::zero(ctx);
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+        sk_poly.allow_variable_time_computations(variable_time);
+        let mut es_poly = Poly::<PowerBasis>::zero(ctx);
+        es_poly.allow_variable_time_computations(variable_time);
+        assert!(ct.c[1].allows_variable_time_computations());
 
-        // Compute decryption share
+        // Compute decryption share.
         let decryption_share = manager
             .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
             .unwrap();
+        assert!(!decryption_share.allows_variable_time_computations());
 
-        let shares = vec![decryption_share.clone()];
+        // This test uses the full secret as the "aggregate" for both parties;
+        // two identical values at distinct Shamir x-coordinates reconstruct the
+        // same value needed for plaintext recovery.
+        let shares = vec![decryption_share.clone(), decryption_share];
 
-        // Only party 1 participates (since threshold = 0, one share is enough). Parties are 1-based.
-        let reconstructing = vec![1];
+        // Parties are 1-based; reconstruction needs threshold + 1 = 2 shares.
+        let reconstructing = vec![1, 2];
         let result = manager.decrypt_from_shares(shares, reconstructing, ct);
         let plaintext_found = result.expect("Failed to decrypt from shares");
 
@@ -610,6 +760,62 @@ mod tests {
             .expect("Decoding plaintext failed");
 
         assert_eq!(decoded, plaintext_data);
+    }
+
+    #[test]
+    fn test_decryption_share_rejects_nonzero_ciphertext_level() {
+        let mut rng = rng();
+        let params = test_params();
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
+        ciphertext.switch_down().unwrap();
+
+        let secret_poly = manager
+            .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
+            .unwrap();
+        let context = params.context_at_level(0).unwrap();
+        let result = manager.decryption_share(
+            Arc::new(ciphertext),
+            (*secret_poly).clone().into_ntt(),
+            Poly::<PowerBasis>::zero(context),
+        );
+
+        assert_eq!(
+            result,
+            Err(Error::InvalidLevel {
+                level: 1,
+                min_level: 0,
+                max_level: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn test_decrypt_from_shares_rejects_nonzero_ciphertext_level() {
+        let mut rng = rng();
+        let params = test_params();
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
+        ciphertext.switch_down().unwrap();
+
+        let context = params.context_at_level(0).unwrap();
+        let shares = vec![Poly::<PowerBasis>::zero(context)];
+        let result = manager.decrypt_from_shares(shares, vec![1], Arc::new(ciphertext));
+
+        assert_eq!(
+            result,
+            Err(Error::InvalidLevel {
+                level: 1,
+                min_level: 0,
+                max_level: 0,
+            })
+        );
     }
 
     #[test]
@@ -782,7 +988,7 @@ mod tests {
         let mut rng = rng();
         let params = test_params();
         let n = 20;
-        let threshold = 7; // need 8 parties
+        let threshold = 9; // (n - 1) / 2 for n = 20; need 10 parties
 
         let ctx = params.context_at_level(0).unwrap();
 
@@ -827,10 +1033,11 @@ mod tests {
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
-        // Choose arbitrary reconstructing parties (1-based indices): {2,5,7,11,13,17,19,20}
-        // Corresponding 0-based indices: {1,4,6,10,12,16,18,19}
+        // Choose arbitrary reconstructing parties (1-based indices):
+        // {2,4,5,7,11,13,15,17,19,20}
+        // Corresponding 0-based indices: {1,3,4,6,10,12,14,16,18,19}
         let chosen_indices = vec![
-            1usize, 4usize, 6usize, 10usize, 12usize, 16usize, 18usize, 19usize,
+            1usize, 3usize, 4usize, 6usize, 10usize, 12usize, 14usize, 16usize, 18usize, 19usize,
         ];
         let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
 
@@ -985,6 +1192,116 @@ mod tests {
         // Valid: between 1 and n well-formed matrices
         let ok: Vec<Array2<u64>> = (0..3).map(|_| Array2::zeros(shape)).collect();
         assert!(manager.aggregate_collected_shares(&ok).is_ok());
+    }
+
+    #[test]
+    fn test_aggregate_collected_shares_rejects_non_canonical_q_at_each_row() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let moduli = params.moduli().to_vec();
+        let shape = (moduli.len(), params.degree());
+
+        // A coefficient equal to its row's modulus q_i is not a canonical
+        // residue and must be rejected against that row's own modulus, not a
+        // global bound shared across rows.
+        for (row, &q_i) in moduli.iter().enumerate() {
+            let mut shares = Array2::zeros(shape);
+            shares[[row, 3]] = q_i;
+            let err = manager
+                .aggregate_collected_shares(std::slice::from_ref(&shares))
+                .expect_err("coefficient equal to the row modulus must be rejected");
+            let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err
+            else {
+                panic!("expected MalformedShares, got: {err}");
+            };
+            assert_eq!(*party_id, 0, "contribution index must be reported");
+            assert!(
+                reason.contains(&format!("row {row}")),
+                "row index missing from reason: {reason}"
+            );
+            assert!(
+                reason.contains("column 3"),
+                "column index missing from reason: {reason}"
+            );
+            assert!(
+                reason.contains(&q_i.to_string()),
+                "expected row modulus (and offending value) missing from reason: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_aggregate_collected_shares_rejects_u64_max() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let moduli = params.moduli().to_vec();
+        let shape = (moduli.len(), params.degree());
+
+        // u64::MAX would wrap to a small residue if reduced; it must be
+        // rejected as malformed instead of being reduced.
+        let mut shares = Array2::zeros(shape);
+        shares[[0, 0]] = u64::MAX;
+        let err = manager
+            .aggregate_collected_shares(std::slice::from_ref(&shares))
+            .expect_err("u64::MAX share entry must be rejected");
+        let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err else {
+            panic!("expected MalformedShares, got: {err}");
+        };
+        assert_eq!(*party_id, 0);
+        assert!(
+            reason.contains(&u64::MAX.to_string()),
+            "offending value missing from reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_collected_shares_accepts_q_minus_one_boundary() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let moduli = params.moduli().to_vec();
+        let shape = (moduli.len(), params.degree());
+
+        // q_i - 1 is the largest valid canonical residue for each row; all
+        // rows must be accepted against their own distinct moduli.
+        let mut shares = Array2::zeros(shape);
+        for (row, &q_i) in moduli.iter().enumerate() {
+            shares.row_mut(row).fill(q_i - 1);
+        }
+        let result = manager
+            .aggregate_collected_shares(std::slice::from_ref(&shares))
+            .expect("maximal canonical residues must be accepted");
+
+        // A single aggregate preserves the input values exactly (the sum of a
+        // single matrix is the matrix itself) and the accumulator does not
+        // reduce them beyond the canonical residues supplied.
+        assert_eq!(result.coefficients().into_owned(), shares);
+    }
+
+    #[test]
+    fn test_aggregate_collected_shares_rejects_invalid_after_valid() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let moduli = params.moduli().to_vec();
+        let shape = (moduli.len(), params.degree());
+        let q1 = moduli[1];
+
+        // A valid first contribution followed by a malformed later one must
+        // still surface the later contribution's error rather than reaching
+        // Modulus::add_vec with the bad entry.
+        let valid = Array2::zeros(shape);
+        let mut invalid = Array2::zeros(shape);
+        invalid[[1, 5]] = q1;
+        let err = manager
+            .aggregate_collected_shares(&[valid, invalid])
+            .expect_err("out-of-range entry in a later contribution must be rejected");
+        let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err else {
+            panic!("expected MalformedShares, got: {err}");
+        };
+        assert_eq!(*party_id, 1, "the invalid contribution must be identified");
+        assert!(
+            reason.contains("row 1") && reason.contains("column 5"),
+            "row/column context missing from reason: {reason}"
+        );
     }
 
     #[test]

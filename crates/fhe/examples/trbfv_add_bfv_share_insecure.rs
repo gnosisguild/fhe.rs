@@ -12,8 +12,8 @@ use std::{env, error::Error, process::exit, sync::Arc};
 
 use console::style;
 use fhe::{
-    bfv::{self, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
-    mbfv::{AggregateIter, CommonRandomPoly, PublicKeyShare},
+    bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
+    mbfv::{AggregateIter, PublicKeyShare},
     trbfv::{Lambda, ShareManager, TRBFV},
 };
 
@@ -49,9 +49,9 @@ fn print_notice_and_exit(error: Option<String>) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Parameters for threshold BFV computation
-    let degree = 512;
-    let moduli_trbfv = vec![0xffffee001, 0xffffc4001];
-    let plaintext_modulus_trbfv: u64 = 10;
+    let degree = 8192;
+    let moduli_trbfv = vec![0x0400000000c00001, 0x0400000000a40001, 0x0400000000990001];
+    let plaintext_modulus_trbfv: u64 = 1_000_000;
 
     println!("Building trBFV parameters...");
     let params_trbfv: Arc<bfv::BfvParameters> = timeit!(
@@ -60,23 +60,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
-            .set_variance(3)
-            .set_error1_variance_str("3")?
+            .set_variance(10)
+            .set_error1_variance_str("17723039943798878305384094137071261013333")?
             .build_arc()?
     );
     println!("✓ trBFV parameters built successfully");
 
     // BFV parameters for share encryption (plaintext must be larger than trBFV moduli)
     println!("\nBuilding BFV parameters for share encryption...");
-    let moduli_bfv = vec![0x7fffffffe0001];
-    let plaintext_modulus_bfv: u64 = 0xffffee001;
+    let moduli_bfv = vec![0x1000000000024001, 0x1000000000054001];
+    let plaintext_modulus_bfv: u64 = 288230376164294657;
     let params_bfv: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share encryption BFV)",
         bfv::BfvParametersBuilder::new()
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus_bfv)
             .set_moduli(&moduli_bfv)
-            .set_variance(3)
+            .set_variance(10)
             .build_arc()?
     );
     println!("✓ BFV parameters built successfully");
@@ -205,7 +205,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
 
                 let esi_coeffs = trbfv
-                    .generate_smudging_error(num_summed, security, &mut rng)
+                    .generate_smudging_error(num_summed, 0, security, &mut rng)
                     .unwrap();
                 let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager

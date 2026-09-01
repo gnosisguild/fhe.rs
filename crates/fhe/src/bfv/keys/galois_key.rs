@@ -30,8 +30,8 @@ impl GaloisKey {
         galois_key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx_galois_key = sk.par.context_at_level(galois_key_level)?;
-        let ctx_ciphertext = sk.par.context_at_level(ciphertext_level)?;
+        let ctx_galois_key = sk.params.context_at_level(galois_key_level)?;
+        let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
 
         let ciphertext_exponent =
             SubstitutionExponent::new(ctx_ciphertext, exponent).map_err(Error::MathError)?;
@@ -78,7 +78,7 @@ impl GaloisKey {
         c0 += &ct[0].substitute(&self.element)?;
 
         Ok(Ciphertext {
-            par: ct.par.clone(),
+            params: ct.params.clone(),
             seed: None,
             c: vec![c0, c1],
             level: self.ksk.ciphertext_level,
@@ -95,7 +95,7 @@ impl GaloisKey {
                 Poly::<Ntt>::zero(ct[1].ctx()),
             ];
         }
-        out.par = ct.par.clone();
+        out.params = ct.params.clone();
         out.seed = None;
         out.level = self.ksk.ciphertext_level;
 
@@ -123,7 +123,7 @@ impl GaloisKey {
     }
 
     fn validate_ciphertext(&self, ct: &Ciphertext) -> Result<()> {
-        ct.validate_for(&self.ksk.par)?;
+        ct.validate_for(&self.ksk.params)?;
         if ct.len() != 2 {
             return Err(crate::CiphertextError::InvalidPolynomialCount {
                 operation: crate::CiphertextOperation::Galois,
@@ -153,11 +153,11 @@ impl From<&GaloisKey> for GaloisKeyProto {
 }
 
 impl TryConvertFrom<&GaloisKeyProto> for GaloisKey {
-    fn try_convert_from(value: &GaloisKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
+    fn try_convert_from(value: &GaloisKeyProto, params: &Arc<BfvParameters>) -> Result<Self> {
         if let Some(ksk) = &value.ksk {
-            let ksk = KeySwitchingKey::try_convert_from(ksk, par)?;
+            let ksk = KeySwitchingKey::try_convert_from(ksk, params)?;
 
-            let ctx = par.context_at_level(ksk.ciphertext_level)?;
+            let ctx = params.context_at_level(ksk.ciphertext_level)?;
             let element = SubstitutionExponent::new(ctx, value.exponent as usize)
                 .map_err(Error::MathError)?;
 
@@ -249,7 +249,7 @@ mod tests {
 
             let ct_expected = gk.relinearize(&ct)?;
 
-            let mut out = Ciphertext::zero(&ct.par);
+            let mut out = Ciphertext::zero(&ct.params);
             gk.relinearize_into(&ct, &mut out)?;
 
             assert_eq!(ct_expected, out);

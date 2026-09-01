@@ -13,7 +13,8 @@ use zeroize::Zeroizing;
 use crate::bfv::{
     BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
 };
-use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
+use crate::proto::bfv::Ciphertext as CiphertextProto;
+use crate::proto::lbfv::LbfvPublicKey as LBFVPublicKeyProto;
 use fhe_math::rq::{Ntt, NttShoup, Poly, Representation, switcher::Switcher};
 use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 
@@ -43,14 +44,14 @@ impl LBFVPublicKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Self {
-        let zero = Plaintext::zero(Encoding::poly(), &sk.par).unwrap();
-        let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.par.moduli().len());
+        let zero = Plaintext::zero(Encoding::poly(), &sk.params).unwrap();
+        let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.params.moduli().len());
         let mut seed_rng = ChaCha8Rng::from_seed(seed); // This is used to generate the seeds for the ciphertexts by creating a new
         // ChaCha8Rng from the input seed
 
         // Create a vector of ciphertexts, each encrypting zero, for each RNS modulus
         // [(b₁, a₁), ..., (bₗ, aₗ)].
-        for _ in 0..sk.par.moduli().len() {
+        for _ in 0..sk.params.moduli().len() {
             let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
             seed_rng.fill(&mut seed_i);
             let mut ct = sk.try_encrypt_with_seed(&zero, seed_i, rng).unwrap();
@@ -62,19 +63,19 @@ impl LBFVPublicKey {
         }
 
         Self {
-            par: sk.par.clone(),
+            par: sk.params.clone(),
             c,
-            l: sk.par.moduli().len(),
+            l: sk.params.moduli().len(),
             seed: Some(seed),
         }
     }
 
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a random
     /// seed.
-    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Self {
+    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
-        Self::new_with_seed(sk, seed, rng)
+        Ok(Self::new_with_seed(sk, seed, rng))
     }
 
     /// Encrypt a plaintext with the public key.
@@ -98,7 +99,7 @@ impl LBFVPublicKey {
 
         let ctx = self.par.context_at_level(ct.level)?;
         let u = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
-        let e1 = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
+        let e1 = Poly::<Ntt>::error_1(ctx, Representation::Ntt, &self.par.error1_variance, rng)?;
         let e2 = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
 
         let m = Zeroizing::new(pt.to_poly());
@@ -114,7 +115,7 @@ impl LBFVPublicKey {
         c1.allow_variable_time_computations(variable_time);
 
         let ciphertext = Ciphertext {
-            par: self.par.clone(),
+            params: self.par.clone(),
             seed: None,
             c: vec![c0, c1],
             level: ct.level,
@@ -210,6 +211,10 @@ impl FheParametrized for LBFVPublicKey {
 impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
     type Error = Error;
 
+    /// Encrypt a plaintext using the public key.
+    ///
+    /// This method samples the `e1` noise term from the configured
+    /// `error1_variance`, while `u` and `e2` use the standard `variance`.
     #[allow(clippy::indexing_slicing)] // ct.c always has exactly 2 components (BFV invariant)
     fn try_encrypt<R: RngCore + CryptoRng>(
         &self,
@@ -228,7 +233,12 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
 
         let ctx = self.par.context_at_level(ct.level)?;
         let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
-        let e1 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
+        let e1 = Zeroizing::new(Poly::<Ntt>::error_1(
+            ctx,
+            Representation::Ntt,
+            &self.par.error1_variance,
+            rng,
+        )?);
         let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
 
         let m = Zeroizing::new(pt.to_poly());
@@ -244,7 +254,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         c1.allow_variable_time_computations(variable_time);
 
         Ok(Ciphertext {
-            par: self.par.clone(),
+            params: self.par.clone(),
             seed: None,
             c: vec![c0, c1],
             level: ct.level,
@@ -344,7 +354,7 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = LBFVPublicKey::new(&sk, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng).unwrap();
         assert_eq!(pk.par, params);
         // Check that l matches number of moduli
         assert_eq!(pk.l, params.moduli().len());
@@ -368,7 +378,7 @@ mod tests {
             for level in 0..params.max_level() {
                 for _ in 0..20 {
                     let sk = SecretKey::random(&params, &mut rng);
-                    let pk = LBFVPublicKey::new(&sk, &mut rng);
+                    let pk = LBFVPublicKey::new(&sk, &mut rng).unwrap();
 
                     let pt = Plaintext::try_encode(
                         &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
@@ -387,6 +397,79 @@ mod tests {
         Ok(())
     }
 
+    /// `try_encrypt` and `try_encrypt_extended` must sample `e1` from the
+    /// configured `error1_variance`, independently of `variance` (used for
+    /// `u` and `e2`), mirroring `bfv::PublicKey`.
+    #[test]
+    fn encrypt_decrypt_custom_error1_variance() -> Result<(), Box<dyn Error>> {
+        use crate::bfv::BfvParametersBuilder;
+        use num_bigint::BigUint;
+
+        let mut rng = rng();
+
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62usize; 3])
+            .set_variance(10)
+            .set_error1_variance_usize(15)
+            .build_arc()?;
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+        let pt = Plaintext::try_encode(
+            &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+
+        let ct = pk.try_encrypt(&pt, &mut rng)?;
+        let pt2 = sk.try_decrypt(&ct)?;
+        assert_eq!(pt2, pt);
+        assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
+        assert_eq!(params.variance(), 10);
+
+        let (ct_ext, _u, _e1, _e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let pt2_ext = sk.try_decrypt(&ct_ext)?;
+        assert_eq!(pt2_ext, pt);
+
+        Ok(())
+    }
+
+    /// `try_encrypt_extended` witness equations: `c0 = u·b + e1 + m` and
+    /// `c1 = u·a + e2`, per `.rules/witness.md`.
+    #[test]
+    fn extended_encrypt_witness_equations() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+        let pt = Plaintext::try_encode(
+            &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
+            Encoding::poly(),
+            &params,
+        )?;
+
+        let (ct, u, e1, e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+
+        let b = pk.c[0].c[0].clone();
+        let a = pk.c[0].c[1].clone();
+        let m = pt.to_poly();
+
+        let mut expected_c0 = &u * &b;
+        expected_c0 += &e1;
+        expected_c0 += &m;
+        let mut expected_c1 = &u * &a;
+        expected_c1 += &e2;
+
+        assert_eq!(ct.c[0].coefficients(), expected_c0.coefficients());
+        assert_eq!(ct.c[1].coefficients(), expected_c1.coefficients());
+
+        Ok(())
+    }
+
     #[test]
     fn test_serialize() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
@@ -395,7 +478,7 @@ mod tests {
             BfvParameters::default_arc(6, 8),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
-            let pk = LBFVPublicKey::new(&sk, &mut rng);
+            let pk = LBFVPublicKey::new(&sk, &mut rng).unwrap();
             let bytes = pk.to_bytes();
             assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
         }

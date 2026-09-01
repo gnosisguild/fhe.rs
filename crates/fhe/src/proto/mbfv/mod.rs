@@ -1,4 +1,4 @@
-//! Protobuf for the Threshold BFV encryption scheme.
+//! MBFV protobuf definitions and generated types.
 
 #[allow(clippy::all)]
 mod generated;
