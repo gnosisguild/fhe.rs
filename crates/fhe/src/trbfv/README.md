@@ -66,9 +66,16 @@ Let `mult_depth` be the number of multiplication levels.
     with **aggregate RLK error** `|S| &middot; B_e`, where `|S|` is the
     `accepted_participant_count` (the size of the *l*-BFV accepted set).
 
-- **Smudging bound:** `B&#x209b;&#x2098; = 2^(lambda) &middot; B&#x1d9c;` where
+- **Smudging bound:** `B&#x209b;&#x2098; = 2^(lambda + 1) &middot; d &middot; B&#x1d9c;` where
   `lambda` is the statistical security parameter (see
-  [`MIN_SECURE_LAMBDA`]).
+  [`MIN_SECURE_LAMBDA`]) and `d` is the polynomial ring degree. The extra
+  factor `2 &middot; d` is the whole-transcript policy (issue #108): a single
+  decryption reveals all `d` coefficients of the smudging noise at once, so a
+  union bound over the coefficients adds a factor `d`, and `2^(lambda + 1)`
+  keeps the constant-`2` convention of the correctness inequality. The older
+  `B&#x209b;&#x2098; = 2^lambda &middot; B&#x1d9c;` form only bounds the statistical distance for
+  a *single* coefficient and is not what [`smudging.rs`](smudging.rs)
+  implements.
 
 ### Sampler-specific `B_enc`
 
