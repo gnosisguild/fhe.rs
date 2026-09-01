@@ -276,10 +276,9 @@ impl ShareManager {
         // the workspace convention it stays fallible rather than indexed.
         for (party_idx, item) in sk_sss_collected.iter().enumerate() {
             for (row, item_row) in item.rows().into_iter().enumerate() {
-                let q_i =
-                    self.params.moduli().get(row).copied().ok_or_else(|| {
-                        Error::DefaultError("modulus index out of range".to_string())
-                    })?;
+                let q_i = self.params.moduli().get(row).copied().ok_or_else(|| {
+                    Error::malformed_shares(party_idx, "modulus index out of range".to_string())
+                })?;
                 for (col, &value) in item_row.iter().enumerate() {
                     if value >= q_i {
                         return Err(Error::malformed_shares(

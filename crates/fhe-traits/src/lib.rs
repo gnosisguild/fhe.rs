@@ -44,12 +44,6 @@ pub trait FheParametrized {
     type Parameters: FheParameters;
 }
 
-// /// Indicates that an object is parametrized.
-// pub trait FheCommonRandomPoly {
-//     /// The type of the FHE parameters.
-//     type CommonRandomPoly: FheCommonRandomPolys;
-// }
-
 /// Indicates that Self parameters can be switched.
 pub trait FheParametersSwitchable<S: FheParametrized>
 where
