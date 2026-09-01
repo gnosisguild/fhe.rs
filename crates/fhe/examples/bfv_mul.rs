@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_degree(degree)
             .set_plaintext_modulus(plaintext_modulus)
             .set_moduli(&moduli)
-            .set_variance(10)
+            .set_variance(10)?
             // Var(e_1) for n=20, λ=28 from the parameter tool.
             .set_error1_variance_str("4126466797617934249663747413333")?
             .build_arc()?

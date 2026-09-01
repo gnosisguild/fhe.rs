@@ -812,7 +812,16 @@ mod protobuf {
                             Poly::<NttShoup>::from_bytes(c1i, &ctx_ksk).map_err(Error::MathError)
                         })
                         .collect::<Result<_>>()?;
-                    if parsed != regenerated {
+                    // Wire-decoded inline c1 polys have variable-time
+                    // computations disabled, while the seed-regenerated ones
+                    // locally enable them; the consistency check compares
+                    // values, so the regenerated copy is timing-normalized
+                    // before the equality check.
+                    let mut regenerated_normalized = regenerated.clone();
+                    regenerated_normalized
+                        .iter_mut()
+                        .for_each(|p| p.disallow_variable_time_computations());
+                    if parsed != regenerated_normalized {
                         return Err(Error::DefaultError(
                             "Contradictory KSK protobuf: inline c1 polynomials \
                              do not match seed-derived c1"
@@ -1002,6 +1011,21 @@ mod tests {
         use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
         use fhe_traits::Serialize;
 
+        /// Clear variable-time state on the wire-decoded key-switching
+        /// components, matching what deserialization guarantees under the
+        /// caller-wins policy (#99): seed-regenerated c1 components keep the
+        /// local variable-time policy on both construction and deserialization.
+        fn disallow_ksk_variable_time(ksk: &mut KeySwitchingKey) {
+            ksk.c0
+                .iter_mut()
+                .for_each(|p| p.disallow_variable_time_computations());
+            if ksk.seed.is_none() {
+                ksk.c1
+                    .iter_mut()
+                    .for_each(|p| p.disallow_variable_time_computations());
+            }
+        }
+
         #[test]
         fn proto_conversion() -> Result<(), Box<dyn Error>> {
             let mut rng = rng();
@@ -1014,7 +1038,15 @@ mod tests {
                 let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
                 let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
                 let ksk_proto = KeySwitchingKeyProto::from(&ksk);
-                assert_eq!(ksk, KeySwitchingKey::try_convert_from(&ksk_proto, &params)?);
+                // Caller-wins policy (#99): the wire cannot carry variable-time
+                // state, so the round trip preserves values with the timing
+                // flags cleared.
+                let mut expected = ksk.clone();
+                disallow_ksk_variable_time(&mut expected);
+                assert_eq!(
+                    expected,
+                    KeySwitchingKey::try_convert_from(&ksk_proto, &params)?
+                );
             }
             Ok(())
         }
@@ -1055,6 +1087,37 @@ mod tests {
                 "Protobuf deserialization of honest KSK should succeed"
             );
 
+            Ok(())
+        }
+
+        /// A KSK proto with a seed plus the mathematically matching inline c1
+        /// polynomials is a redundant but valid encoding: the consistency
+        /// check must compare values, not local timing policy. Wire-decoded
+        /// inline c1 polys have variable-time computations disabled, while
+        /// seed-regenerated c1 polys locally enable them, so a full-flag
+        /// equality check would falsely reject the duplicate.
+        #[test]
+        fn proto_accepts_seed_with_matching_inline_c1() -> Result<(), Box<dyn Error>> {
+            let mut rng = rng();
+            let params = BfvParameters::default_arc(6, 8);
+            let sk = SecretKey::random(&params, &mut rng);
+            let ctx = params.context_at_level(0)?;
+            let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+
+            // Build a valid KSK with a known seed.
+            let honest_seed = [17u8; 32];
+            let ksk = KeySwitchingKey::new_with_seed(&sk, &from, honest_seed, 0, 0, &mut rng)?;
+
+            // Serialize → proto carries the seed, no inline c1. Then add the
+            // seed-matching inline c1 polynomials as a redundant duplicate.
+            let mut proto = KeySwitchingKeyProto::from(&ksk);
+            proto.c1 = ksk.c1.iter().map(|p| p.to_bytes()).collect();
+
+            // Deserialization must accept the redundant encoding and keep the
+            // seed-regenerated c1 values.
+            let decoded = KeySwitchingKey::try_convert_from(&proto, &params)?;
+            assert_eq!(decoded.c1, ksk.c1);
+            assert_eq!(decoded.seed, Some(honest_seed));
             Ok(())
         }
     }

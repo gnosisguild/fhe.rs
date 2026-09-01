@@ -40,6 +40,7 @@ fn mul_params() -> Arc<BfvParameters> {
         .set_plaintext_modulus(1153)
         .set_moduli_sizes(&[40; 4])
         .set_variance(1)
+        .unwrap()
         .build_arc()
         .unwrap()
 }

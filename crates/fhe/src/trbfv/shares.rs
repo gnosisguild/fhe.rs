@@ -13,9 +13,7 @@ use fhe_math::{
     rns::{RnsContext, ScalingFactor},
     rq::{Context, Ntt, Poly, PowerBasis, RepresentationTag, scaler::Scaler},
 };
-use itertools::Itertools;
 use ndarray::{Array2, ArrayView1};
-use num_bigint::BigUint;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
@@ -1426,20 +1424,24 @@ impl ShareManager {
                     self.params.degree(),
                 )
                 .map_err(Error::MathError)?;
-                let factor =
-                    ScalingFactor::new(&BigUint::from(self.params.plaintext()), rns.modulus())
-                        .map_err(Error::MathError)?;
+                let factor = ScalingFactor::new(self.params.plaintext_big(), rns.modulus())
+                    .map_err(Error::MathError)?;
                 Scaler::new(&ctx_i, &plaintext_ctx, factor).map_err(Error::MathError)
             })
             .collect();
         let scalers = scalers?;
 
         let params = ciphertext.params.clone();
-        let ptxt_u64 = params.plaintext.as_u64().ok_or_else(|| {
-            Error::DefaultError(
-                "threshold BFV decrypt_from_shares requires a u64 plaintext modulus".to_string(),
-            )
-        })?;
+        // The threshold-decryption contract is u64 arithmetic: the plaintext
+        // modulus must fit in u64 (checked representation-independently via
+        // `try_plaintext`, so Large-stored values through `u64::MAX` are not
+        // misclassified) and must construct the u64 `Modulus` used for the
+        // final reduction (`Modulus::new` rejects values >= 2^62). Values
+        // outside the contract return a typed error; the coefficient
+        // accumulation below additionally uses checked addition so a future
+        // bound relaxation cannot overflow silently.
+        let ptxt_u64 = params.try_plaintext()?;
+        let ptxt_modulus = Modulus::new(ptxt_u64).map_err(Error::MathError)?;
 
         let d = Zeroizing::new(
             result_poly
@@ -1450,15 +1452,20 @@ impl ShareManager {
             Vec::<u64>::try_from(d.as_ref())
                 .map_err(Error::from)?
                 .into_iter()
-                .map(|vi| vi + ptxt_u64)
-                .collect_vec(),
+                .map(|vi| {
+                    vi.checked_add(ptxt_u64).ok_or_else(|| {
+                        Error::DefaultError(
+                            "threshold BFV decrypt_from_shares coefficient addition overflowed"
+                                .to_string(),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
         );
         let mut w = Zeroizing::new(v[..params.degree()].to_vec());
         let q = Modulus::new(params.moduli()[0]).map_err(Error::MathError)?;
         q.reduce_vec(&mut w);
-        Modulus::new(ptxt_u64)
-            .map_err(Error::MathError)?
-            .reduce_vec(&mut w);
+        ptxt_modulus.reduce_vec(&mut w);
 
         let poly =
             Poly::<PowerBasis>::try_convert_from(w.as_slice(), ciphertext.c[0].ctx(), false)?
@@ -1490,7 +1497,7 @@ mod tests {
     use fhe_traits::{DeserializeWithContext, Serialize};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use ndarray::Array2;
-    use num_bigint::BigInt;
+    use num_bigint::{BigInt, BigUint};
     use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use shamir_rns::{BarrettField, ShamirScheme};
@@ -1832,7 +1839,7 @@ mod tests {
 
         // Setup: Generate keys and encrypt a plaintext
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
 
         let mut plaintext_data = vec![42u64, 100, 400];
         plaintext_data.resize(params.degree(), 0);
@@ -1948,7 +1955,7 @@ mod tests {
         let params = test_params();
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
         let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
         ciphertext.switch_down().unwrap();
@@ -1986,7 +1993,7 @@ mod tests {
         let params = test_params();
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
         let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
         ciphertext.switch_down().unwrap();
@@ -2051,7 +2058,7 @@ mod tests {
         }
 
         // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
         let mut plaintext_data = vec![123u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
@@ -2088,6 +2095,121 @@ mod tests {
             .expect("Decoding plaintext failed");
 
         assert_eq!(decoded, plaintext_data);
+    }
+
+    /// Run the n = 3, threshold = 1 threshold-decryption workflow with `params`
+    /// and return the result of `decrypt_from_shares`. `plaintext_value` is
+    /// encoded as the constant coefficient of a poly-encoded plaintext.
+    fn threshold_decrypt_with_params(
+        params: Arc<BfvParameters>,
+        plaintext_value: u64,
+    ) -> Result<Plaintext, Error> {
+        let mut rng = rng();
+        let n = 3;
+        let threshold = 1;
+
+        let mut managers: Vec<ShareManager> = (0..n)
+            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
+            .collect();
+
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let sk_poly = managers[0]
+            .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
+            .unwrap();
+        let sk_sss = managers[0]
+            .generate_secret_shares_from_poly(sk_poly, &mut rng)
+            .unwrap();
+
+        let participant_set = test_participant_set(n);
+        let use_session = SessionId::new([10; 32]);
+        let mut sk_poly_sums = Vec::with_capacity(n);
+        for (i, manager) in managers.iter().enumerate() {
+            let mut node_share_m = Array2::zeros((0, params.degree()));
+            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
+                node_share_m.push_row(sk_sss_m.row(i).unwrap()).unwrap();
+            }
+            sk_poly_sums.push(aggregate_receiver_key(
+                manager,
+                &participant_set,
+                SecretShareMatrix::new(node_share_m),
+            ));
+        }
+
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
+        let mut plaintext_data = vec![plaintext_value];
+        plaintext_data.resize(params.degree(), 0);
+        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
+        let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
+
+        let mut decryption_shares = Vec::new();
+        for i in 0..(threshold + 1) {
+            let share = managers[i]
+                .decryption_share(
+                    ct.clone(),
+                    (i + 1) as u32,
+                    sk_poly_sums[i].clone().into_ntt().unwrap(),
+                    use_session,
+                    aggregate_zero_noise(&managers[i], &participant_set, use_session),
+                )
+                .unwrap();
+            decryption_shares.push(share);
+        }
+
+        managers[0].decrypt_from_shares(decryption_shares, ct)
+    }
+
+    #[test]
+    fn decrypt_from_shares_rejects_plaintext_above_u64() {
+        // A plaintext modulus above u64::MAX is stored in the Large
+        // representation; the u64 threshold-decryption contract must surface
+        // the representation-independent typed error (`PlaintextModulusNotU64`)
+        // rather than a representation-dependent rejection.
+        let p = BigUint::parse_bytes(b"340282366920938463463374607431768211507", 10).unwrap();
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus_biguint(p)
+            .set_moduli_sizes(&[62, 62, 62, 62, 62])
+            .build_arc()
+            .unwrap();
+        let err = threshold_decrypt_with_params(params, 123).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::ParametersError(crate::ParametersError::PlaintextModulusNotU64 { .. })
+        ));
+    }
+
+    #[test]
+    fn decrypt_from_shares_rejects_large_representation_outside_operational_bound() {
+        // u64::MAX fits in u64 (so `try_plaintext` accepts it) but cannot
+        // construct the u64 `Modulus` used for the final reduction (values
+        // >= 2^62 are rejected): the operational bound must produce a typed
+        // error, never an overflow or panic in the coefficient accumulation.
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus_biguint(BigUint::from(u64::MAX))
+            .set_moduli(&[4611686018427387617, 4611686018427387329])
+            .build_arc()
+            .unwrap();
+        let err = threshold_decrypt_with_params(params, 123).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::MathError(fhe_math::Error::InvalidModulus(_))
+        ));
+    }
+
+    #[test]
+    fn decrypt_from_shares_succeeds_with_u64_contract_plaintext() {
+        // A plaintext modulus within the u64 operational bound decrypts
+        // correctly through the representation-independent contract path.
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(1153)
+            .set_moduli(&[4611686018427387617, 4611686018427387329])
+            .build_arc()
+            .unwrap();
+        let plaintext = threshold_decrypt_with_params(params, 123).unwrap();
+        let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext, Encoding::poly()).unwrap();
+        assert_eq!(decoded[0], 123);
     }
 
     #[test]
@@ -2130,7 +2252,7 @@ mod tests {
         }
 
         // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
         let mut plaintext_data = vec![321u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
@@ -2209,7 +2331,7 @@ mod tests {
         }
 
         // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
         let mut plaintext_data = vec![777u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
@@ -2289,7 +2411,7 @@ mod tests {
         }
 
         // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
         let mut plaintext_data = vec![555u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
@@ -2469,7 +2591,7 @@ mod tests {
         ));
 
         let secret_key = SecretKey::random(&params, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&[7_u64], Encoding::poly(), &params).unwrap();
         let ciphertext = Arc::new(public_key.try_encrypt(&plaintext, &mut rng).unwrap());
         let ctx = params.context_at_level(0).unwrap();
@@ -2580,7 +2702,7 @@ mod tests {
             values.resize(params.degree(), 0);
             values
         };
-        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ciphertext = Arc::new(public_key.try_encrypt(&plaintext, &mut rng).unwrap());
 
@@ -2784,7 +2906,7 @@ mod tests {
         let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
 
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
         let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
@@ -2833,7 +2955,7 @@ mod tests {
         let params = test_params();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&[1_u64], Encoding::poly(), &params).unwrap();
         let ciphertext = Arc::new(pk.try_encrypt(&plaintext, &mut rng).unwrap());
         let foreign_ctx =
@@ -3081,7 +3203,7 @@ mod tests {
         }
 
         // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
         let mut plaintext_data = vec![222u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();

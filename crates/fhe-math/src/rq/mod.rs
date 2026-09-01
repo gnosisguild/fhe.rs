@@ -25,7 +25,7 @@ use fhe_util::sample_vec_cbd;
 use itertools::{Itertools, izip};
 use ndarray::{Array2, ArrayView2, Axis, s};
 use num_bigint::{BigInt, BigUint, RandBigInt, ToBigInt};
-use num_traits::{Signed, ToPrimitive};
+use num_traits::{Signed, ToPrimitive, Zero};
 pub use ops::dot_product;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -505,7 +505,9 @@ impl<R: RepresentationTag> Poly<R> {
         Self::uniform_bigint(ctx, representation, &bigint_bound, rng)
     }
 
-    /// Conditional error sampling: uses CBD for small variance, uniform for large variance.
+    /// Conditional error sampling: uses CBD for integer variances `1..=16`
+    /// (support `[-2v, 2v]`), uniform sampling on the exact minimal
+    /// `[-B, B]` interval for larger variances, and rejects zero variance.
     pub fn conditional_error<T: RngCore + CryptoRng>(
         ctx: &Arc<Context>,
         representation: Representation,
@@ -519,14 +521,11 @@ impl<R: RepresentationTag> Poly<R> {
             ));
         }
 
-        let variance_u64 = variance.to_u64().unwrap_or(u64::MAX);
-
-        if variance_u64 <= 16 {
-            let variance_usize = variance.to_usize().unwrap_or(0);
-            Self::small(ctx, variance_usize, rng)
-        } else {
-            let bound = variance_to_uniform_bound(variance)?;
-            Self::uniform_bigint(ctx, representation, &bound, rng)
+        match conditional_error_distribution(variance)? {
+            ErrorDistribution::Cbd { variance } => Self::small(ctx, variance, rng),
+            ErrorDistribution::Uniform { bound } => {
+                Self::uniform_bigint(ctx, representation, &BigInt::from(bound), rng)
+            }
         }
     }
 
@@ -1043,6 +1042,80 @@ pub fn sample_uniform_coefficients_bigint<T: RngCore + CryptoRng>(
         .collect()
 }
 
+/// Canonical branch selection shared by [`Poly::conditional_error`] and
+/// [`error_support_bound`].
+///
+/// The CBD/uniform boundary is defined exactly once here so the sampler and
+/// its support bound can never disagree: integer variances `1..=16` select
+/// the CBD branch (support `[-2v, 2v]`), larger variances select the uniform
+/// branch on `[-B, B]` with `B` the smallest integer satisfying
+/// `B(B+1)/3 >= variance`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ErrorDistribution {
+    /// Centered binomial distribution with validated integer variance in
+    /// `1..=16`; maximum absolute coefficient `2 * variance`.
+    Cbd {
+        /// The validated CBD variance.
+        variance: usize,
+    },
+    /// Discrete uniform distribution on `[-bound, bound]` where `bound` is
+    /// returned by [`variance_to_uniform_bound`].
+    Uniform {
+        /// The exact uniform support bound.
+        bound: BigUint,
+    },
+}
+
+/// Resolve the canonical error distribution for a requested variance.
+///
+/// Zero is rejected explicitly: it is not a valid conditional-sampler input,
+/// and returning a zero support bound would silently claim noise-free
+/// sampling.
+fn conditional_error_distribution(variance: &BigUint) -> Result<ErrorDistribution> {
+    if variance.is_zero() {
+        return Err(Error::Default(
+            "The error variance must be a positive integer".to_string(),
+        ));
+    }
+    match variance.to_usize() {
+        Some(v) if (1..=16).contains(&v) => Ok(ErrorDistribution::Cbd { variance: v }),
+        _ => {
+            let bound = variance_to_uniform_bound(variance)?;
+            // Checked conversion: the mathematical result is non-negative,
+            // but the conversion stays fallible to avoid silent wrapping.
+            let bound = bound.to_biguint().ok_or_else(|| {
+                Error::Default("Failed to convert uniform bound to BigUint".to_string())
+            })?;
+            Ok(ErrorDistribution::Uniform { bound })
+        }
+    }
+}
+
+/// Maximum absolute coefficient that [`Poly::conditional_error`] can sample
+/// for the given error variance.
+///
+/// The result shares the canonical branch selection of the sampler:
+///
+/// - variance `0` is rejected;
+/// - integer variances `1..=16` select the CBD branch whose support is
+///   `[-2v, 2v]`, so the bound is exactly `2 * variance`;
+/// - larger variances (including values beyond `u64`) select the uniform
+///   branch on `[-B, B]` where `B` is the smallest integer satisfying
+///   `B(B+1)/3 >= variance`, i.e. the exact [`variance_to_uniform_bound`]
+///   result whose achieved discrete variance never undershoots the requested
+///   value.
+///
+/// # Errors
+///
+/// Returns an error when `variance` is zero or when an internal
+/// arbitrary-precision conversion fails.
+pub fn error_support_bound(variance: &BigUint) -> Result<BigUint> {
+    match conditional_error_distribution(variance)? {
+        ErrorDistribution::Cbd { variance } => Ok(BigUint::from(2usize * variance)),
+        ErrorDistribution::Uniform { bound } => Ok(bound),
+    }
+}
+
 /// Convert variance to bound for uniform distribution.
 ///
 /// The sampler draws from the discrete uniform distribution on the `2B + 1`
@@ -1071,7 +1144,7 @@ pub fn variance_to_uniform_bound(variance: &BigUint) -> Result<BigInt> {
 mod tests {
     use super::{
         Array2UnwindGuard, Context, Ntt, Poly, PowerBasis, Representation, UnwindGuard,
-        switcher::Switcher, variance_to_uniform_bound,
+        error_support_bound, switcher::Switcher, variance_to_uniform_bound,
     };
     use crate::{Error as CrateError, rq::SubstitutionExponent, zq::Modulus};
     use fhe_util::variance;
@@ -1516,6 +1589,183 @@ mod tests {
             v17_achieved >= v16 - 1.0,
             "variance jumped from {v16} at the CBD boundary down to {v17_achieved} just past it"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn error_support_bound_rejects_zero_variance() {
+        // Zero variance is invalid for the conditional sampler; the support
+        // bound helper must reject it instead of returning a misleading zero
+        // bound.
+        assert!(error_support_bound(&BigUint::zero()).is_err());
+    }
+
+    #[test]
+    fn error_support_bound_cbd_branch_is_twice_the_variance() {
+        // Integer variances 1..=16 select CBD(v) whose support is [-2v, 2v].
+        for variance in 1u32..=16 {
+            let bound = error_support_bound(&BigUint::from(variance)).unwrap();
+            assert_eq!(
+                bound,
+                BigUint::from(2 * variance),
+                "CBD support bound for variance {variance} must be exactly {}",
+                2 * variance
+            );
+        }
+        // Pinned boundary values: v=1 -> 2, v=15 -> 30, v=16 -> 32.
+        assert_eq!(
+            error_support_bound(&BigUint::from(1u32)).unwrap(),
+            BigUint::from(2u32)
+        );
+        assert_eq!(
+            error_support_bound(&BigUint::from(15u32)).unwrap(),
+            BigUint::from(30u32)
+        );
+        assert_eq!(
+            error_support_bound(&BigUint::from(16u32)).unwrap(),
+            BigUint::from(32u32)
+        );
+    }
+
+    #[test]
+    fn error_support_bound_uniform_is_minimal_and_never_undershoots() {
+        // Pinned CBD-boundary value: variance=17 is the first uniform
+        // variance, and the minimal B with B(B+1)/3 >= 17 is B = 7
+        // (6*7 = 42 < 51 <= 56 = 7*8).
+        let bound17 = error_support_bound(&BigUint::from(17u32)).unwrap();
+        assert_eq!(bound17, BigUint::from(7u32));
+
+        // Above the CBD boundary the bound must equal
+        // `variance_to_uniform_bound`: the smallest B with B(B+1)/3 >= v, so
+        // it never undershoots and its predecessor already undershoots.
+        let mut previous = bound17;
+        for variance in 18u64..=2000 {
+            let target = BigUint::from(3u32) * BigUint::from(variance);
+            let bound = error_support_bound(&BigUint::from(variance)).unwrap();
+            assert_eq!(
+                bound,
+                variance_to_uniform_bound(&BigUint::from(variance))
+                    .unwrap()
+                    .to_biguint()
+                    .unwrap(),
+                "variance={variance}: uniform branch must agree with variance_to_uniform_bound"
+            );
+            assert!(!bound.is_zero());
+            assert!(
+                &bound * (&bound + 1u32) >= target,
+                "variance={variance}: B={bound} does not reach the requested variance"
+            );
+            let prev = &bound - 1u32;
+            assert!(
+                &prev * &bound < target,
+                "variance={variance}: B={bound} is not minimal, B-1={prev} already suffices"
+            );
+            // Monotonicity across the uniform branch.
+            assert!(bound >= previous, "uniform bound decreased at v={variance}");
+            previous = bound;
+        }
+    }
+
+    #[test]
+    fn error_support_bound_handles_u64_limits_and_beyond() {
+        // Values near and beyond u64::MAX stay on the uniform branch and are
+        // computed without truncation.
+        let u64_max = BigUint::from(u64::MAX);
+        let u64_max_plus_one = &u64_max + 1u32;
+        let two_pow_128 = BigUint::from(2u32).pow(128);
+
+        for variance in [&u64_max, &u64_max_plus_one, &two_pow_128] {
+            let expected = variance_to_uniform_bound(variance)
+                .unwrap()
+                .to_biguint()
+                .unwrap();
+            assert_eq!(
+                error_support_bound(variance).unwrap(),
+                expected,
+                "variance={variance}: expected the exact minimal uniform bound"
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn error_support_bound_matches_sampler_branches(hi: u64, lo: u64) {
+            // Arbitrary variances spanning [0, 2^128) as two independent u64
+            // limbs: values through 16 use the CBD support rule, larger ones
+            // agree with `variance_to_uniform_bound`, and the uniform result
+            // never undershoots B(B+1)/3 >= v.
+            let variance = (BigUint::from(hi) << 64u32) | BigUint::from(lo);
+
+            if variance.is_zero() {
+                prop_assert!(error_support_bound(&variance).is_err());
+            } else if variance <= BigUint::from(16u32) {
+                // Value is within 1..=16 by construction.
+                let v = variance.to_usize().unwrap();
+                prop_assert_eq!(
+                    error_support_bound(&variance).unwrap(),
+                    BigUint::from(2 * v)
+                );
+            } else {
+                let bound = error_support_bound(&variance).unwrap();
+                prop_assert_eq!(
+                    bound.clone(),
+                    variance_to_uniform_bound(&variance)
+                        .unwrap()
+                        .to_biguint()
+                        .unwrap()
+                );
+                let target = variance * 3u32;
+                prop_assert!(&bound * (&bound + 1u32) >= target);
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_error_samples_respect_error_support_bound() -> Result<(), Box<dyn Error>> {
+        // Observed extrema only sanity-check the bound; the mathematical
+        // minimality/never-undershoot tests above are the actual support
+        // evidence.
+        let ctx = Arc::new(Context::new(&[4611686018326724609], 1 << 18)?);
+        let q = Modulus::new(4611686018326724609).unwrap();
+        let mut rng = rand::rng();
+
+        // CBD branch: samples stay within the 2*v CBD support.
+        for variance in 1..=16usize {
+            let p = Poly::<PowerBasis>::conditional_error(
+                &ctx,
+                Representation::PowerBasis,
+                &BigUint::from(variance),
+                &mut rng,
+            )?;
+            let coefficients = p.coefficients().to_slice().unwrap();
+            let centered = q.center_vec(coefficients);
+            let max_abs = centered.iter().map(|vi| vi.abs()).max().unwrap();
+            let bound = error_support_bound(&BigUint::from(variance)).unwrap();
+            let bound_i64 = i64::try_from(bound.clone()).map_err(Box::<dyn Error>::from)?;
+            assert!(
+                max_abs <= bound_i64,
+                "CBD sample |{max_abs}| exceeds support bound {bound}"
+            );
+        }
+
+        // Uniform branch: samples stay within the exact helper bound.
+        for variance in [17u32, 20u32] {
+            let p = Poly::<PowerBasis>::conditional_error(
+                &ctx,
+                Representation::PowerBasis,
+                &BigUint::from(variance),
+                &mut rng,
+            )?;
+            let coefficients = p.coefficients().to_slice().unwrap();
+            let centered = q.center_vec(coefficients);
+            let max_abs = centered.iter().map(|vi| vi.abs()).max().unwrap();
+            let bound = error_support_bound(&BigUint::from(variance)).unwrap();
+            let bound_i64 = i64::try_from(bound.clone()).map_err(Box::<dyn Error>::from)?;
+            assert!(
+                max_abs <= bound_i64,
+                "uniform sample |{max_abs}| exceeds support bound {bound}"
+            );
+        }
         Ok(())
     }
 

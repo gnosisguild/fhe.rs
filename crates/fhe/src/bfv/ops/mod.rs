@@ -427,7 +427,7 @@ mod tests {
             BfvParameters::default_arc(6, 16),
         ] {
             let zero = Ciphertext::zero(&params);
-            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+            let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
             for _ in 0..50 {
                 let a = q.random_vec(params.degree(), &mut rng);
                 let b = q.random_vec(params.degree(), &mut rng);
@@ -468,7 +468,7 @@ mod tests {
             BfvParameters::default_arc(1, 16),
             BfvParameters::default_arc(6, 16),
         ] {
-            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+            let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
             for _ in 0..50 {
                 let a = q.random_vec(params.degree(), &mut rng);
                 let b = q.random_vec(params.degree(), &mut rng);
@@ -521,7 +521,7 @@ mod tests {
             BfvParameters::default_arc(6, 16),
         ] {
             let zero = Ciphertext::zero(&params);
-            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+            let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
             for _ in 0..50 {
                 let a = q.random_vec(params.degree(), &mut rng);
                 let mut a_neg = a.clone();
@@ -569,7 +569,7 @@ mod tests {
             BfvParameters::default_arc(1, 16),
             BfvParameters::default_arc(6, 16),
         ] {
-            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+            let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
             for _ in 0..50 {
                 let a = q.random_vec(params.degree(), &mut rng);
                 let mut a_neg = a.clone();
@@ -655,7 +655,7 @@ mod tests {
             BfvParameters::default_arc(1, 16),
             BfvParameters::default_arc(6, 16),
         ] {
-            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+            let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
             for _ in 0..50 {
                 let a = q.random_vec(params.degree(), &mut rng);
                 let mut c = a.clone();
@@ -689,7 +689,7 @@ mod tests {
             BfvParameters::default_arc(1, 16),
             BfvParameters::default_arc(6, 16),
         ] {
-            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+            let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
             for _ in 0..50 {
                 let a = q.random_vec(params.degree(), &mut rng);
                 let b = q.random_vec(params.degree(), &mut rng);
@@ -743,7 +743,7 @@ mod tests {
             BfvParameters::default_arc(2, 16),
             BfvParameters::default_arc(8, 16),
         ] {
-            let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+            let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
             for _ in 0..1 {
                 // We will encode `values` in an Simd format, and check that the product is
                 // computed correctly.
@@ -779,7 +779,7 @@ mod tests {
     fn square() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(6, 16);
-        let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+        let q = fhe_math::zq::Modulus::new(params.try_plaintext()?).unwrap();
         for _ in 0..20 {
             // We will encode `values` in an Simd format, and check that the product is
             // computed correctly.

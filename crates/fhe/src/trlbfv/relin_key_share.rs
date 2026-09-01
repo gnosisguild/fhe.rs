@@ -360,6 +360,21 @@ mod protobuf {
         use rand::rng;
         use rand_chacha::ChaCha8Rng;
 
+        /// Clear variable-time state on the wire-decoded key-switching
+        /// components, matching what deserialization guarantees under the
+        /// caller-wins policy (#99): seed-regenerated c1 components keep the
+        /// local variable-time policy on both construction and deserialization.
+        fn disallow_ksk_variable_time(ksk: &mut KeySwitchingKey) {
+            ksk.c0
+                .iter_mut()
+                .for_each(|p| p.disallow_variable_time_computations());
+            if ksk.seed.is_none() {
+                ksk.c1
+                    .iter_mut()
+                    .for_each(|p| p.disallow_variable_time_computations());
+            }
+        }
+
         #[test]
         fn bound_rlk_share_roundtrip() -> Result<()> {
             let mut rng = rng();
@@ -381,8 +396,15 @@ mod protobuf {
             )?;
             let bytes = share.to_bytes();
             let restored = RelinKeyShare::from_bytes(&bytes, &params)?;
-            assert_eq!(restored.ksk_r_to_s, share.ksk_r_to_s);
-            assert_eq!(restored.ksk_s_to_r, share.ksk_s_to_r);
+            // Caller-wins policy (#99): the wire cannot carry variable-time
+            // state, so the round trip preserves values with the timing flags
+            // cleared.
+            let mut expected_r_to_s = share.ksk_r_to_s.clone();
+            disallow_ksk_variable_time(&mut expected_r_to_s);
+            assert_eq!(restored.ksk_r_to_s, expected_r_to_s);
+            let mut expected_s_to_r = share.ksk_s_to_r.clone();
+            disallow_ksk_variable_time(&mut expected_s_to_r);
+            assert_eq!(restored.ksk_s_to_r, expected_s_to_r);
             assert_eq!(restored.binding, Some(binding));
             Ok(())
         }
@@ -398,8 +420,15 @@ mod protobuf {
             let share = RelinKeyShare::contribution(&sk, d1_seed, a_seed, 0, 0, &mut rng)?;
             let bytes = share.to_bytes();
             let restored = RelinKeyShare::from_bytes(&bytes, &params)?;
-            assert_eq!(restored.ksk_r_to_s, share.ksk_r_to_s);
-            assert_eq!(restored.ksk_s_to_r, share.ksk_s_to_r);
+            // Caller-wins policy (#99): the wire cannot carry variable-time
+            // state, so the round trip preserves values with the timing flags
+            // cleared.
+            let mut expected_r_to_s = share.ksk_r_to_s.clone();
+            disallow_ksk_variable_time(&mut expected_r_to_s);
+            assert_eq!(restored.ksk_r_to_s, expected_r_to_s);
+            let mut expected_s_to_r = share.ksk_s_to_r.clone();
+            disallow_ksk_variable_time(&mut expected_s_to_r);
+            assert_eq!(restored.ksk_s_to_r, expected_s_to_r);
             assert_eq!(restored.binding, None);
             Ok(())
         }

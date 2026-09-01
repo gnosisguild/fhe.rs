@@ -331,7 +331,7 @@ mod tests {
 
                     // Use it to encrypt a random polynomial ct1
                     let pt1 = Plaintext::try_encode(
-                        &fhe_math::zq::Modulus::new(params.plaintext())
+                        &fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                             .unwrap()
                             .random_vec(params.degree(), &mut rng),
                         Encoding::poly_at_level(level),
@@ -342,7 +342,7 @@ mod tests {
 
                     // Key switch ct1 to a new keypair
                     let sk_out = SecretKey::random(&params, &mut rng);
-                    let pk_out = PublicKey::new(&sk_out, &mut rng);
+                    let pk_out = PublicKey::new(&sk_out, &mut rng).unwrap();
                     let ct2: Ciphertext = parties
                         .iter()
                         .enumerate()
@@ -381,7 +381,7 @@ mod tests {
             .aggregate()
             .unwrap();
         let pt = Plaintext::try_encode(
-            &fhe_math::zq::Modulus::new(params.plaintext())
+            &fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                 .unwrap()
                 .random_vec(params.degree(), &mut rng),
             Encoding::poly_at_level(0),
@@ -415,7 +415,7 @@ mod tests {
                 .unwrap();
             let mut rng = rng();
             let pt = Plaintext::try_encode(
-                &fhe_math::zq::Modulus::new(params.plaintext())
+                &fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                     .unwrap()
                     .random_vec(params.degree(), &mut rng),
                 Encoding::poly_at_level(0),
@@ -431,7 +431,7 @@ mod tests {
         };
         let mut rng = rng();
         let pt_b = Plaintext::try_encode(
-            &fhe_math::zq::Modulus::new(params.plaintext())
+            &fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                 .unwrap()
                 .random_vec(params.degree(), &mut rng),
             Encoding::poly_at_level(0),
@@ -440,7 +440,7 @@ mod tests {
         .unwrap();
         let ct_b = Arc::new(_pk.try_encrypt(&pt_b, &mut rng).unwrap());
         let sk_out = SecretKey::random(&params, &mut rng);
-        let pk_out = PublicKey::new(&sk_out, &mut rng);
+        let pk_out = PublicKey::new(&sk_out, &mut rng).unwrap();
         let set = two_set();
 
         let good = pks_share_for(
@@ -480,7 +480,7 @@ mod tests {
                 .unwrap();
             let mut rng = rng();
             let pt = Plaintext::try_encode(
-                &fhe_math::zq::Modulus::new(params.plaintext())
+                &fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                     .unwrap()
                     .random_vec(params.degree(), &mut rng),
                 Encoding::poly_at_level(0),
@@ -496,9 +496,9 @@ mod tests {
         };
         let mut rng = rng();
         let sk_out_a = SecretKey::random(&params, &mut rng);
-        let pk_out_a = PublicKey::new(&sk_out_a, &mut rng);
+        let pk_out_a = PublicKey::new(&sk_out_a, &mut rng).unwrap();
         let sk_out_b = SecretKey::random(&params, &mut rng);
-        let pk_out_b = PublicKey::new(&sk_out_b, &mut rng);
+        let pk_out_b = PublicKey::new(&sk_out_b, &mut rng).unwrap();
 
         let good = pks_share_for(
             &parties[0],
@@ -537,7 +537,7 @@ mod tests {
                 .unwrap();
             let mut rng = rng();
             let pt = Plaintext::try_encode(
-                &fhe_math::zq::Modulus::new(params.plaintext())
+                &fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                     .unwrap()
                     .random_vec(params.degree(), &mut rng),
                 Encoding::poly_at_level(0),
@@ -554,7 +554,7 @@ mod tests {
         let mut rng = rng();
         let other_params = BfvParameters::default_arc(1, 16);
         let sk_out = SecretKey::random(&params, &mut rng);
-        let pk_out = PublicKey::new(&sk_out, &mut rng);
+        let pk_out = PublicKey::new(&sk_out, &mut rng).unwrap();
 
         let good = pks_share_for(
             &parties[0],
@@ -594,7 +594,7 @@ mod tests {
         let set_a = participant_set(65);
         let set_b = participant_set(66);
         let sk_out = SecretKey::random(&params, &mut rng);
-        let pk_out = PublicKey::new(&sk_out, &mut rng);
+        let pk_out = PublicKey::new(&sk_out, &mut rng).unwrap();
 
         // Cross-session.
         let a1 = pks_share_for(
@@ -670,7 +670,7 @@ mod tests {
         let (params, parties, ct, _pk) = setup(86);
         let set = participant_set(86);
         let sk_out = SecretKey::random(&params, &mut rng);
-        let pk_out = PublicKey::new(&sk_out, &mut rng);
+        let pk_out = PublicKey::new(&sk_out, &mut rng).unwrap();
         let binding = ContributionBinding::new(set, 1).unwrap();
         let ctx0 = params.context_at_level(0).unwrap();
 
@@ -753,7 +753,7 @@ mod tests {
 
         // Target public key with only one component.
         let sk_one = SecretKey::random(&params, &mut rng);
-        let mut pk_one_component = PublicKey::new(&sk_one, &mut rng);
+        let mut pk_one_component = PublicKey::new(&sk_one, &mut rng).unwrap();
         pk_one_component.c.c.truncate(1);
         let err = PublicKeySwitchShare::new(
             &parties[0].sk_share,
@@ -774,7 +774,7 @@ mod tests {
         // Target public key with three components: components beyond the
         // second change the switch semantics and must not be dropped.
         let sk_three = SecretKey::random(&params, &mut rng);
-        let mut pk_three_components = PublicKey::new(&sk_three, &mut rng);
+        let mut pk_three_components = PublicKey::new(&sk_three, &mut rng).unwrap();
         pk_three_components
             .c
             .c
@@ -810,7 +810,7 @@ mod tests {
                 .aggregate()
                 .unwrap();
             let pt = Plaintext::try_encode(
-                &fhe_math::zq::Modulus::new(params.plaintext())
+                &fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                     .unwrap()
                     .random_vec(params.degree(), &mut rng),
                 Encoding::poly_at_level(0),
@@ -825,7 +825,7 @@ mod tests {
             )
         };
         let sk_out = SecretKey::random(&params, &mut rng);
-        let pk_out = PublicKey::new(&sk_out, &mut rng);
+        let pk_out = PublicKey::new(&sk_out, &mut rng).unwrap();
 
         let good = pks_share_for(
             &parties[0],
@@ -865,7 +865,7 @@ mod tests {
             .aggregate()
             .unwrap();
         let pt = Plaintext::try_encode(
-            &fhe_math::zq::Modulus::new(params.plaintext())
+            &fhe_math::zq::Modulus::new(params.try_plaintext().unwrap())
                 .unwrap()
                 .random_vec(params.degree(), &mut rng),
             Encoding::poly_at_level(0),
@@ -876,7 +876,7 @@ mod tests {
         assert_eq!(ct.level, 0);
 
         let sk_out = SecretKey::random(&params, &mut rng);
-        let mut deep_pk_out = PublicKey::new(&sk_out, &mut rng);
+        let mut deep_pk_out = PublicKey::new(&sk_out, &mut rng).unwrap();
         deep_pk_out.c.switch_down().unwrap();
         assert_eq!(deep_pk_out.c.level, 1);
 
@@ -904,7 +904,7 @@ mod tests {
         let ct_leveled = Arc::new(ct_leveled);
         let set = participant_set(68);
         let sk_out = SecretKey::random(&params, &mut rng);
-        let pk_out = PublicKey::new(&sk_out, &mut rng);
+        let pk_out = PublicKey::new(&sk_out, &mut rng).unwrap();
 
         let ct2: Ciphertext = parties
             .iter()

@@ -200,10 +200,10 @@ mod tests {
             BfvParameters::default_arc(8, 16),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
-            let v1 = fhe_math::zq::Modulus::new(params.plaintext())
+            let v1 = fhe_math::zq::Modulus::new(params.try_plaintext()?)
                 .unwrap()
                 .random_vec(params.degree(), &mut rng);
-            let v2 = fhe_math::zq::Modulus::new(params.plaintext())
+            let v2 = fhe_math::zq::Modulus::new(params.try_plaintext()?)
                 .unwrap()
                 .random_vec(params.degree(), &mut rng);
 
@@ -231,7 +231,23 @@ mod tests {
     #[cfg(feature = "protobuf")]
     mod protobuf {
         use super::*;
+        use crate::bfv::KeySwitchingKey;
         use fhe_traits::{DeserializeParametrized, Serialize};
+
+        /// Clear variable-time state on the wire-decoded key-switching
+        /// components, matching what deserialization guarantees under the
+        /// caller-wins policy (#99): seed-regenerated c1 components keep the
+        /// local variable-time policy on both construction and deserialization.
+        fn disallow_ksk_variable_time(ksk: &mut KeySwitchingKey) {
+            ksk.c0
+                .iter_mut()
+                .for_each(|p| p.disallow_variable_time_computations());
+            if ksk.seed.is_none() {
+                ksk.c1
+                    .iter_mut()
+                    .for_each(|p| p.disallow_variable_time_computations());
+            }
+        }
 
         #[test]
         fn serialize() -> Result<(), Box<dyn std::error::Error>> {
@@ -241,13 +257,18 @@ mod tests {
                 BfvParameters::default_arc(5, 16),
             ] {
                 let sk = SecretKey::random(&params, &mut rng);
-                let v = fhe_math::zq::Modulus::new(params.plaintext())
+                let v = fhe_math::zq::Modulus::new(params.try_plaintext()?)
                     .unwrap()
                     .random_vec(params.degree(), &mut rng);
                 let pt = Plaintext::try_encode(&v, Encoding::simd(), &params)?;
-                let ct: RGSWCiphertext = sk.try_encrypt(&pt, &mut rng)?;
+                let mut ct: RGSWCiphertext = sk.try_encrypt(&pt, &mut rng)?;
 
                 let bytes = ct.to_bytes();
+                // Caller-wins policy (#99): the wire cannot carry variable-time
+                // state, so the round trip preserves values with the timing
+                // flags cleared.
+                disallow_ksk_variable_time(&mut ct.ksk0);
+                disallow_ksk_variable_time(&mut ct.ksk1);
                 assert_eq!(RGSWCiphertext::from_bytes(&bytes, &params)?, ct);
             }
 
