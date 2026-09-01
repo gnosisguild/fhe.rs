@@ -20,11 +20,6 @@ pub enum Error {
     #[error("Math library error: {0}")]
     MathError(#[from] fhe_math::Error),
 
-    /// Legacy catch-all error (deprecated).
-    #[deprecated(note = "use the domain-specific error variants instead")]
-    #[error("{0}")]
-    DefaultError(String),
-
     /// Cryptographic objects were constructed with incompatible parameters.
     #[error("Parameter mismatch between {left:?} and {right:?}")]
     ParameterMismatch {
