@@ -185,7 +185,10 @@ impl ShamirSecretSharing {
     /// (e.g., duplicate share indices).
     pub fn recover(&self, shares: &[(usize, BigInt)]) -> Result<BigInt, Error> {
         if shares.len() != self.threshold + 1 {
-            return Err(Error::insufficient_shares(shares.len(), self.threshold + 1));
+            return Err(Error::share_count_mismatch(
+                shares.len(),
+                self.threshold + 1,
+            ));
         }
         let (xs, ys): (Vec<usize>, Vec<BigInt>) = shares.iter().cloned().unzip();
         let result = self.lagrange_interpolation(Zero::zero(), xs, ys)?;

@@ -16,9 +16,9 @@ impl Error {
         })
     }
 
-    /// Create an insufficient shares error.
+    /// Create a share count mismatch error.
     #[must_use]
-    pub fn insufficient_shares(got: usize, required: usize) -> Self {
+    pub fn share_count_mismatch(got: usize, required: usize) -> Self {
         Error::Threshold(ThresholdError::ShareCountMismatch {
             actual: got,
             expected: required,
@@ -101,7 +101,7 @@ mod tests {
             })
         ));
 
-        let error = Error::insufficient_shares(2, 3);
+        let error = Error::share_count_mismatch(2, 3);
         assert!(matches!(
             error,
             Error::Threshold(ThresholdError::ShareCountMismatch {
