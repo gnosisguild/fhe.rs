@@ -8,7 +8,7 @@ The crate contains helper routines such as primality testing, centered binomial 
 
 ```toml
 [dependencies]
-fhe-util = "0.1.1"
+fhe-util = "0.3.0"
 ```
 
 ## Testing
