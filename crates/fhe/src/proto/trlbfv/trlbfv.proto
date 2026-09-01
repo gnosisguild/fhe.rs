@@ -1,8 +1,0 @@
-syntax = "proto3";
-
-package fhers.trlbfv;
-
-// TR-LBFV reuses the l-BFV wire objects (LbfvPublicKey, LbfvRelinKeyShare,
-// LbfvBinding) combined with participant-binding metadata, so there are no
-// TRLBFV-specific messages yet. This file anchors the crate's protobuf
-// module for future TRLBFV-specific envelopes.

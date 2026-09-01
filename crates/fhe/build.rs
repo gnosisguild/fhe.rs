@@ -34,22 +34,6 @@ fn main() -> Result<()> {
     )?;
 
     compile_proto_file(
-        "src/proto/trlbfv/trlbfv.proto",
-        &["src/proto"],
-        &proto_dir.join("trlbfv").join("generated.rs"),
-        &temp_dir,
-        &[],
-    )?;
-
-    compile_proto_file(
-        "src/proto/trbfv/trbfv.proto",
-        &["src/proto"],
-        &proto_dir.join("trbfv").join("generated.rs"),
-        &temp_dir,
-        &[],
-    )?;
-
-    compile_proto_file(
         "src/proto/mbfv/mbfv.proto",
         &["src/proto"],
         &proto_dir.join("mbfv").join("generated.rs"),
@@ -60,8 +44,6 @@ fn main() -> Result<()> {
     for proto in [
         "src/proto/bfv/bfv.proto",
         "src/proto/lbfv/lbfv.proto",
-        "src/proto/trlbfv/trlbfv.proto",
-        "src/proto/trbfv/trbfv.proto",
         "src/proto/mbfv/mbfv.proto",
     ] {
         println!("cargo:rerun-if-changed={proto}");
