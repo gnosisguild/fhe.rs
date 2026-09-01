@@ -55,6 +55,17 @@ pub struct ShareManager {
     pub params: Arc<BfvParameters>,
 }
 
+/// An aggregated smudging-noise share that can be consumed only once.
+pub struct OneTimeNoiseShare {
+    poly: Poly<PowerBasis>,
+}
+
+impl OneTimeNoiseShare {
+    pub(crate) fn new(poly: Poly<PowerBasis>) -> Self {
+        Self { poly }
+    }
+}
+
 impl ShareManager {
     /// Create a new share manager.
     ///
@@ -230,9 +241,7 @@ impl ShareManager {
     /// they are never reduced or otherwise repaired.
     ///
     /// # Arguments
-    /// - `sk_sss_collected`: One share matrix per contributing party (at most `n`;
-    ///   fewer is allowed, e.g. when some parties aborted during dealing).
-    ///   Each Array2<u64> has one row per modulus and one column per coefficient.
+    /// - `sk_sss_collected`: One share matrix per contributing party.
     ///
     /// # Returns
     /// A polynomial representing the aggregated secret key material
@@ -244,7 +253,7 @@ impl ShareManager {
     /// malformed, never reduced).
     pub fn aggregate_collected_shares(
         &self,
-        sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
+        sk_sss_collected: &[Array2<u64>],
     ) -> Result<Poly<PowerBasis>, Error> {
         if sk_sss_collected.is_empty() {
             return Err(Error::share_count_mismatch(0, 1));
@@ -252,11 +261,43 @@ impl ShareManager {
         if sk_sss_collected.len() > self.n {
             return Err(Error::share_count_mismatch(sk_sss_collected.len(), self.n));
         }
+        let matrices: Vec<(&Array2<u64>, usize)> = sk_sss_collected
+            .iter()
+            .enumerate()
+            .map(|(party_id, matrix)| (matrix, party_id))
+            .collect();
+        self.aggregate_matrices(&matrices)
+    }
+
+    /// Consume and aggregate one-time noise contributions.
+    pub fn aggregate_noise_shares(
+        &self,
+        contributions: Vec<Array2<u64>>,
+    ) -> Result<OneTimeNoiseShare, Error> {
+        if contributions.is_empty() {
+            return Err(Error::share_count_mismatch(0, 1));
+        }
+        if contributions.len() > self.n {
+            return Err(Error::share_count_mismatch(contributions.len(), self.n));
+        }
+        let matrices: Vec<(&Array2<u64>, usize)> = contributions
+            .iter()
+            .enumerate()
+            .map(|(party_id, matrix)| (matrix, party_id))
+            .collect();
+        let poly = self.aggregate_matrices(&matrices)?;
+        Ok(OneTimeNoiseShare::new(poly))
+    }
+
+    fn aggregate_matrices(
+        &self,
+        matrices: &[(&Array2<u64>, usize)],
+    ) -> Result<Poly<PowerBasis>, Error> {
         let expected_shape = (self.params.moduli().len(), self.params.degree());
-        for (party_idx, item) in sk_sss_collected.iter().enumerate() {
+        for (item, party_id) in matrices {
             if item.dim() != expected_shape {
                 return Err(Error::malformed_shares(
-                    party_idx,
+                    *party_id,
                     format!(
                         "share matrix has shape {:?}, expected {expected_shape:?}",
                         item.dim()
@@ -274,7 +315,7 @@ impl ShareManager {
         // are rejected instead. Shape was validated above, so the fallible
         // `moduli().get(row)` lookup is expected to succeed, but in keeping with
         // the workspace convention it stays fallible rather than indexed.
-        for (party_idx, item) in sk_sss_collected.iter().enumerate() {
+        for (item, party_id) in matrices {
             for (row, item_row) in item.rows().into_iter().enumerate() {
                 let q_i =
                     self.params.moduli().get(row).copied().ok_or_else(|| {
@@ -283,7 +324,7 @@ impl ShareManager {
                 for (col, &value) in item_row.iter().enumerate() {
                     if value >= q_i {
                         return Err(Error::malformed_shares(
-                            party_idx,
+                            *party_id,
                             format!(
                                 "share coefficient at row {row} (modulus q_i = {q_i}), column \
                                  {col} is {value}; expected a canonical residue in [0, {q_i})"
@@ -306,7 +347,7 @@ impl ShareManager {
             let acc = acc_row
                 .as_slice_mut()
                 .ok_or(fhe_math::Error::NonContiguousCoefficients)?;
-            for item in sk_sss_collected {
+            for (item, _) in matrices {
                 let item_row = item.row(row);
                 let share = item_row
                     .as_slice()
@@ -339,7 +380,7 @@ impl ShareManager {
         &self,
         ciphertext: Arc<Ciphertext>,
         sk_i: Poly<Ntt>,
-        es_i: Poly<PowerBasis>,
+        es_i: OneTimeNoiseShare,
     ) -> Result<Poly<PowerBasis>, Error> {
         if ciphertext.params != self.params {
             return Err(Error::ParameterMismatch {
@@ -371,7 +412,7 @@ impl ShareManager {
         c1.disallow_variable_time_computations();
         let mut sk_i = sk_i;
         sk_i.disallow_variable_time_computations();
-        let mut es_i = es_i;
+        let mut es_i = es_i.poly;
         es_i.disallow_variable_time_computations();
         if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
             return Err(Error::ParameterMismatch {
@@ -713,6 +754,29 @@ mod tests {
     }
 
     #[test]
+    fn test_noise_share_aggregation_produces_consumable_one_time_input() {
+        let mut rng = rng();
+        let params = test_params();
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let shape = (params.moduli().len(), params.degree());
+        let noise = manager
+            .aggregate_noise_shares(vec![Array2::zeros(shape)])
+            .unwrap();
+
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let ciphertext = Arc::new(public_key.try_encrypt(&plaintext, &mut rng).unwrap());
+        let secret_poly = manager
+            .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
+            .unwrap();
+
+        manager
+            .decryption_share(ciphertext, (*secret_poly).clone().into_ntt(), noise)
+            .unwrap();
+    }
+
+    #[test]
     fn test_decryption_share_computation() {
         let mut rng = rng();
         let params = test_params();
@@ -742,7 +806,11 @@ mod tests {
 
         // Compute decryption share.
         let decryption_share = manager
-            .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
+            .decryption_share(
+                ct.clone(),
+                (*sk_poly).clone().into_ntt(),
+                OneTimeNoiseShare::new(es_poly),
+            )
             .unwrap();
         assert!(!decryption_share.allows_variable_time_computations());
 
@@ -780,7 +848,7 @@ mod tests {
         let result = manager.decryption_share(
             Arc::new(ciphertext),
             (*secret_poly).clone().into_ntt(),
-            Poly::<PowerBasis>::zero(context),
+            OneTimeNoiseShare::new(Poly::<PowerBasis>::zero(context)),
         );
 
         assert_eq!(
@@ -879,7 +947,11 @@ mod tests {
             let es_poly = Poly::<PowerBasis>::zero(ctx);
 
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt(),
+                    OneTimeNoiseShare::new(es_poly),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -963,7 +1035,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt(),
+                    OneTimeNoiseShare::new(es_poly),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1047,7 +1123,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt(),
+                    OneTimeNoiseShare::new(es_poly),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1127,7 +1207,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt(),
+                    OneTimeNoiseShare::new(es_poly),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1406,7 +1490,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt(),
+                    OneTimeNoiseShare::new(es_poly),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }

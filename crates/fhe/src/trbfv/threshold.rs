@@ -42,7 +42,7 @@ use crate::Error;
 ///    - Combine threshold shares to recover plaintext
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
-use crate::trbfv::shares::ShareManager;
+use crate::trbfv::shares::{OneTimeNoiseShare, ShareManager};
 use crate::trbfv::smudging::{
     Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
 };
@@ -121,6 +121,18 @@ impl TRBFV {
         share_manager.aggregate_collected_shares(sk_sss_collected)
     }
 
+    /// Consume collected smudging-noise shares into a one-time decryption input.
+    ///
+    /// The returned value is intentionally not cloneable and is consumed by
+    /// [`Self::decryption_share`], preventing accidental reuse after aggregation.
+    pub fn aggregate_noise_shares(
+        &self,
+        es_sss_collected: Vec<Array2<u64>>,
+    ) -> Result<OneTimeNoiseShare, Error> {
+        let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
+        share_manager.aggregate_noise_shares(es_sss_collected)
+    }
+
     /// Generate smudging error coefficients for noise.
     ///
     /// Creates noise that will be added to decryption shares.
@@ -132,9 +144,8 @@ impl TRBFV {
     ///
     /// # Limitations
     ///
-    /// The generated smudging noise is one-time pre-shared material that must
-    /// not be reused across decryptions. This API does not track or enforce
-    /// consumption.
+    /// The generated smudging noise must be aggregated and consumed exactly
+    /// once through [`Self::aggregate_noise_shares`] and [`Self::decryption_share`].
     ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed (e.g., votes to count, numbers to sum)
@@ -174,9 +185,8 @@ impl TRBFV {
     ///
     /// # Limitations
     ///
-    /// The generated smudging noise is **one-time pre-shared material**: it
-    /// must not be reused across decryptions. This API does not track or
-    /// enforce consumption.
+    /// The generated smudging noise is **one-time pre-shared material**. It
+    /// must be aggregated and consumed exactly once before decryption.
     ///
     /// # Arguments
     /// * `num_ciphertexts` - Number of ciphertexts being processed
@@ -236,7 +246,7 @@ impl TRBFV {
         &self,
         ciphertext: Arc<Ciphertext>,
         sk_i: Poly<Ntt>,
-        es_i: Poly<PowerBasis>,
+        es_i: OneTimeNoiseShare,
     ) -> Result<Poly<PowerBasis>, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
         share_manager.decryption_share(ciphertext, sk_i, es_i)
@@ -526,7 +536,11 @@ mod tests {
         let es_poly = Poly::<PowerBasis>::zero(ctx);
 
         let decryption_share = trbfv
-            .decryption_share(ct, (*sk_poly).clone().into_ntt(), es_poly)
+            .decryption_share(
+                ct,
+                (*sk_poly).clone().into_ntt(),
+                OneTimeNoiseShare::new(es_poly),
+            )
             .unwrap();
 
         assert_eq!(decryption_share.coefficients().ncols(), params.degree());
@@ -570,7 +584,11 @@ mod tests {
             let es_poly = Poly::<PowerBasis>::zero(ctx);
 
             let share = trbfv_instances[i]
-                .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    (*sk_poly).clone().into_ntt(),
+                    OneTimeNoiseShare::new(es_poly),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }

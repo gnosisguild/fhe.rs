@@ -14,7 +14,7 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{Lambda, ShareManager, TRBFV},
+    trbfv::{Lambda, OneTimeNoiseShare, ShareManager, TRBFV},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -166,7 +166,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sk_sss_collected: Vec<Array2<u64>>,
         es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
+        es_poly_sum: Option<OneTimeNoiseShare>,
         d_share_poly: Poly<PowerBasis>,
         // BFV keys for share encryption
         sk_bfv: SecretKey,
@@ -201,7 +201,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
                 let ctx = params_trbfv.context_at_level(0).unwrap();
                 let sk_poly_sum = Poly::<PowerBasis>::zero(ctx);
-                let es_poly_sum = Poly::<PowerBasis>::zero(ctx);
+                let es_poly_sum = None;
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
 
                 let esi_coeffs = trbfv
@@ -320,9 +320,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             party.sk_poly_sum = trbfv
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
-            party.es_poly_sum = trbfv
-                .aggregate_collected_shares(&party.es_sss_collected)
-                .unwrap();
+            party.es_poly_sum = Some(
+                trbfv
+                    .aggregate_noise_shares(std::mem::take(&mut party.es_sss_collected))
+                    .unwrap(),
+            );
         });
     });
 
@@ -360,7 +362,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .decryption_share(
                 tally.clone(),
                 party.sk_poly_sum.clone().into_ntt(),
-                party.es_poly_sum.clone(),
+                party.es_poly_sum.take().unwrap(),
             )
             .unwrap();
     });
