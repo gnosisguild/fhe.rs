@@ -10,7 +10,8 @@ use fhe::bfv::{
 use fhe::mbfv::{AggregateIter, PublicKeyShare};
 use fhe::trbfv::smudging::SmudgingNoiseGenerator;
 use fhe::trbfv::{
-    Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, TRBFV,
+    Lambda, OneTimeNoiseShare, ShareManager, SmudgingBoundCalculator,
+    SmudgingBoundCalculatorConfig, TRBFV,
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -95,7 +96,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
         sk_sss_collected: Vec<Array2<u64>>,
         es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
+        es_poly_sum: Option<OneTimeNoiseShare>,
         // Per-party BFV keys (DKG preset) for encrypted share transport.
         sk_dkg: SecretKey,
         pk_dkg: PublicKey,
@@ -148,7 +149,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                 sk_sss_collected: Vec::with_capacity(NUM_PARTIES),
                 es_sss_collected: Vec::with_capacity(NUM_PARTIES),
                 sk_poly_sum: Poly::<PowerBasis>::zero(ctx),
-                es_poly_sum: Poly::<PowerBasis>::zero(ctx),
+                es_poly_sum: None,
                 sk_dkg,
                 pk_dkg,
             }
@@ -218,9 +219,11 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
         party.sk_poly_sum = trbfv
             .aggregate_collected_shares(&party.sk_sss_collected)
             .unwrap();
-        party.es_poly_sum = trbfv
-            .aggregate_collected_shares(&party.es_sss_collected)
-            .unwrap();
+        party.es_poly_sum = Some(
+            trbfv
+                .aggregate_noise_shares(std::mem::take(&mut party.es_sss_collected))
+                .unwrap(),
+        );
     });
 
     let pk: PublicKey = parties
@@ -253,12 +256,12 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
     let d_share_polys: Vec<Poly<PowerBasis>> = reconstructing
         .iter()
         .map(|&party_id| {
-            let party = &parties[party_id - 1];
+            let party = &mut parties[party_id - 1];
             trbfv
                 .decryption_share(
                     tally.clone(),
                     party.sk_poly_sum.clone().into_ntt(),
-                    party.es_poly_sum.clone(),
+                    party.es_poly_sum.take().unwrap(),
                 )
                 .unwrap()
         })
