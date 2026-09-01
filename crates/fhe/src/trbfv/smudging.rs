@@ -22,24 +22,29 @@ use std::sync::Arc;
 
 /// Minimum statistical security parameter accepted for production use.
 ///
-/// This is a statistical-hiding policy threshold: noise with `B_sm = 2^lambda * B_C`
-/// is intended to statistically hide the decryption noise. A larger lambda
-/// gives a stronger guarantee, not a computational one. [`MIN_SECURE_LAMBDA`]
-/// is a policy choice, not derived from a cryptographic reduction.
+/// This is a statistical-hiding policy threshold: noise with
+/// `B_sm = 2^(lambda + 1) * d * B_C` (`d` = polynomial degree) is intended to
+/// statistically hide the decryption noise for a whole decryption transcript
+/// (all `d` coefficients revealed at once), not just a single coefficient.
+/// A larger lambda gives a stronger guarantee, not a computational one.
+/// [`MIN_SECURE_LAMBDA`] is a policy choice, not derived from a cryptographic
+/// reduction.
 pub const MIN_SECURE_LAMBDA: usize = 35;
 
-/// Maximum lambda value beyond which `2^lambda * B_C` is computationally
-/// infeasible to represent. Rejecting values above this ceiling prevents
-/// massive memory allocations from huge BigUint shifts.
+/// Maximum lambda value beyond which `2^(lambda + 1) * d * B_C` is
+/// computationally infeasible to represent. Rejecting values above this
+/// ceiling prevents massive memory allocations from huge BigUint shifts.
 const MAX_FEASIBLE_LAMBDA: usize = 256;
 
 /// Statistical security level for smudging noise generation.
 ///
-/// The smudging bound is always computed as `B_sm = 2^lambda * B_C`; this type
-/// only controls which values of lambda the library accepts. Production code
-/// must use [`Lambda::secure`], which rejects lambda below
-/// [`MIN_SECURE_LAMBDA`]. Test setups that deliberately trade security for
-/// speed must opt in explicitly via [`Lambda::insecure`].
+/// The smudging bound is always computed as `B_sm = 2^(lambda + 1) * d * B_C`
+/// (`d` = polynomial degree, accounting for all `d` coefficients a single
+/// decryption reveals at once — see issue #108); this type only controls
+/// which values of lambda the library accepts. Production code must use
+/// [`Lambda::secure`], which rejects lambda below [`MIN_SECURE_LAMBDA`]. Test
+/// setups that deliberately trade security for speed must opt in explicitly
+/// via [`Lambda::insecure`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lambda {
     /// Statistical security parameter validated to be >= [`MIN_SECURE_LAMBDA`].
@@ -284,7 +289,9 @@ impl SmudgingBoundCalculator {
 
     /// Calculate the optimal smudging bound using arbitrary precision arithmetic.
     ///
-    /// Implements the trBFV security formula: `B_sm = 2^lambda * B_C` subject to
+    /// Implements the trBFV security formula: `B_sm = 2^(lambda + 1) * d * B_C`
+    /// (`d` = polynomial degree, accounting for the union bound over all `d`
+    /// coefficients a single decryption reveals — see issue #108) subject to
     /// the strict correctness constraint `2 * (B_C + n * B_sm) < Delta` where
     /// `Delta = floor(Q / t)`.
     ///
@@ -412,11 +419,16 @@ impl SmudgingBoundCalculator {
             )));
         }
 
-        // --- Compute B_sm = 2^lambda * B_C ---
+        // --- Compute B_sm = 2^(lambda + 1) * d * B_C
+        //
+        // A single decryption reveals all `d` (= degree) coefficients of the
+        // smudging noise at once. `2^lambda * B_C` alone only bounds the
+        // statistical distance for a single coefficient; the union bound over
+        // the `d` coefficients requires the additional degree factor.
         // Use BigUint shift to avoid usize → u32 truncation.
         // `lambda` was already validated against MAX_FEASIBLE_LAMBDA above.
-        let two_pow_lambda = BigUint::from(1_u64) << lambda;
-        let b_sm = two_pow_lambda * &b_c;
+        let two_pow_lambda_plus_one = BigUint::from(1_u64) << (lambda + 1);
+        let b_sm = two_pow_lambda_plus_one * &d * &b_c;
 
         // --- Strict correctness: 2 * (B_C + n * B_sm) < Delta ---
         let lhs = BigUint::from(2_u64) * (&b_c + BigUint::from(self.config.n) * &b_sm);
@@ -723,6 +735,7 @@ mod tests {
     #[test]
     fn injected_bc0_is_used_directly_additive() {
         let params = test_params();
+        let d = BigUint::from(params.degree());
         let injected = BigUint::from(12345_u64);
         let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, Lambda::insecure(2)).unwrap();
         let bound = SmudgingBoundCalculator::new(config)
@@ -730,8 +743,8 @@ mod tests {
             .calculate_sm_bound()
             .unwrap();
 
-        // B_sm = 2^lambda * B_C = 4 * 12345 = 49380
-        assert_eq!(bound, BigUint::from(4_u64) * &injected);
+        // B_sm = 2^(lambda + 1) * d * B_C = 8 * 8192 * 12345
+        assert_eq!(bound, BigUint::from(8_u64) * &d * &injected);
     }
 
     // ── Lambda handling (no u32 truncation) ──────────────────────────────
@@ -772,7 +785,7 @@ mod tests {
 
     #[test]
     fn lambda_floor_is_exact_no_rounding() {
-        // lambda=35: B_sm = 2^35 * B_C exactly.
+        // lambda=35: B_sm = 2^36 * d * B_C exactly.
         let params = test_params();
         let config =
             SmudgingBoundCalculatorConfig::new(params, 3, 1, Lambda::secure(35).unwrap()).unwrap();
@@ -944,7 +957,14 @@ mod tests {
     /// and depth=2 produces a larger bound than depth=1.
     #[test]
     fn test_multiplicative_depth_increases_bound() {
-        let params = test_params();
+        // The degree factor in the updated bound requires a wider modulus
+        // chain for this synthetic depth-growth check.
+        let params = BfvParametersBuilder::new()
+            .set_degree(8192)
+            .set_plaintext_modulus(16384)
+            .set_moduli_sizes(&[62, 62, 62, 62, 62, 62])
+            .build_arc()
+            .unwrap();
         let lambda = Lambda::insecure(2);
 
         // n=3: verify depth=1 strictly exceeds depth=0.
@@ -1034,8 +1054,8 @@ mod tests {
     #[test]
     fn smudging_bound_increases_with_larger_n() {
         let params = test_params();
-        // n=3 has less correctness headroom than n=1, but B_sm itself
-        // (2^lambda * B_C) doesn't depend on n directly — but B_fresh
+        // n=3 has less correctness headroom than n=1, but the B_sm multiplier
+        // (2^(lambda + 1) * d) doesn't depend on n directly — but B_fresh
         // depends on n through public_key_error. So larger n → larger B_C
         // → larger B_sm for the same lambda.
         let n1_config =

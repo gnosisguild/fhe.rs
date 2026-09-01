@@ -24,13 +24,8 @@ fn bench_data_sizes(c: &mut Criterion) {
 
     // Threshold BFV parameters
     let degree = 8192;
-    let moduli_trbfv = vec![
-        0x00800000022a0001,
-        0x00800000021a0001,
-        0x0080000002120001,
-        0x0080000001f60001,
-    ];
-    let plaintext_modulus_trbfv: u64 = 1000;
+    let moduli_trbfv = vec![0x0400000000c00001, 0x0400000000a40001, 0x0400000000990001];
+    let plaintext_modulus_trbfv: u64 = 1_000_000;
 
     let params_trbfv = Arc::new(
         BfvParametersBuilder::new()
@@ -38,20 +33,15 @@ fn bench_data_sizes(c: &mut Criterion) {
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
             .set_variance(10)
-            .set_error1_variance_str(
-                "52309181128222339698631578526730685514457152477762943514050560000",
-            )
+            .set_error1_variance_str("17723039943798878305384094137071261013333")
             .unwrap()
             .build()
             .unwrap(),
     );
 
     // BFV parameters for share encryption
-    let moduli_bfv = vec![
-        0x0400000001460001, // 59 bits
-        0x0400000000ea0001, // 59 bits
-    ];
-    let plaintext_modulus_bfv: u64 = 144115188075855872; // 2^57
+    let moduli_bfv = vec![0x1000000000024001, 0x1000000000054001];
+    let plaintext_modulus_bfv: u64 = 288230376164294657;
 
     let params_bfv = Arc::new(
         BfvParametersBuilder::new()
@@ -349,13 +339,8 @@ fn bench_timing_operations(c: &mut Criterion) {
 
     // Setup parameters (same as data sizes)
     let degree = 8192;
-    let moduli_trbfv = vec![
-        0x00800000022a0001,
-        0x00800000021a0001,
-        0x0080000002120001,
-        0x0080000001f60001,
-    ];
-    let plaintext_modulus_trbfv: u64 = 1000;
+    let moduli_trbfv = vec![0x0400000000c00001, 0x0400000000a40001, 0x0400000000990001];
+    let plaintext_modulus_trbfv: u64 = 1_000_000;
 
     let params_trbfv = Arc::new(
         BfvParametersBuilder::new()
@@ -371,8 +356,8 @@ fn bench_timing_operations(c: &mut Criterion) {
             .unwrap(),
     );
 
-    let moduli_bfv = vec![0x0400000001460001, 0x0400000000ea0001];
-    let plaintext_modulus_bfv: u64 = 144115188075855873;
+    let moduli_bfv = vec![0x1000000000024001, 0x1000000000054001];
+    let plaintext_modulus_bfv: u64 = 288230376164294657;
 
     let params_bfv = Arc::new(
         BfvParametersBuilder::new()
