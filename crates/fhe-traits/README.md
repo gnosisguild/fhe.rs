@@ -2,7 +2,7 @@
 
 Traits defining the interface for fully homomorphic encryption types and operations.
 
-This crate provides common abstractions for parameters, plaintext and ciphertext representations, encoding, encryption, decryption and serialization used throughout the [`fhe.rs`](https://github.com/tlepoint/fhe.rs) crates.
+This crate provides common abstractions for parameters, plaintext and ciphertext representations, encoding, encryption, decryption and serialization used throughout the [`fhe.rs`](https://github.com/gnosisguild/fhe.rs) crates.
 
 ## Installation
 
