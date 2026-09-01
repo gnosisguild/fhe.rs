@@ -9,9 +9,8 @@
 
 use crate::bfv::traits::TryConvertFrom;
 use crate::bfv::{BfvParameters, Ciphertext, KeySwitchingKey, SecretKey};
-use crate::proto::bfv::{
-    KeySwitchingKey as KeySwitchingKeyProto, LbfvRelinearizationKey as LBFVRelinearizationKeyProto,
-};
+use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
+use crate::proto::lbfv::LbfvRelinearizationKey as LBFVRelinearizationKeyProto;
 use crate::{Error, Result, SerializationError};
 use fhe_math::rq::{
     Context, Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher,

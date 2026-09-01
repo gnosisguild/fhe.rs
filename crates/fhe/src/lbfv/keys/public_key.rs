@@ -13,7 +13,8 @@ use zeroize::Zeroizing;
 use crate::bfv::{
     BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
 };
-use crate::proto::bfv::{Ciphertext as CiphertextProto, LbfvPublicKey as LBFVPublicKeyProto};
+use crate::proto::bfv::Ciphertext as CiphertextProto;
+use crate::proto::lbfv::LbfvPublicKey as LBFVPublicKeyProto;
 use fhe_math::rq::{Ntt, NttShoup, Poly, Representation, switcher::Switcher};
 use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 

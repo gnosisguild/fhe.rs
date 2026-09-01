@@ -26,12 +26,6 @@ message RelinearizationKey {
   KeySwitchingKey ksk = 1;
 }
 
-message LBFVRelinearizationKey {
-  KeySwitchingKey ksk_r_to_s = 1;
-  KeySwitchingKey ksk_s_to_r = 2;
-  repeated bytes b_vec = 3;
-}
-
 message GaloisKey {
   KeySwitchingKey ksk = 1;
   uint32 exponent = 2;
@@ -57,19 +51,6 @@ message PublicKey {
   Ciphertext c = 1;
 }
 
-message LBFVPublicKey {
-  repeated Ciphertext c = 1;
-  uint32 l = 2;
-  bytes seed = 3;
-}
-
-message PublicKeyShare {
-  Poly p0 = 1;
-}
-
-message Poly {
-  Poly p0 = 1;
-}
 message SecretKey {
   repeated sint64 coeffs = 1;
 }
