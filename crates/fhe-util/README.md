@@ -1,4 +1,4 @@
-# fhe-util [![crate version](https://img.shields.io/crates/v/fhe-util.svg)](https://crates.io/crates/fhe-util) [![documentation](https://docs.rs/fhe-util/badge.svg)](https://docs.rs/fhe-util)
+# fhe-util [![fhe-util version](https://img.shields.io/badge/fhe--util-0.3.0-blue.svg)](https://github.com/gnosisguild/fhe.rs/tree/core/main/crates/fhe-util) [![documentation](https://docs.rs/fhe-util/badge.svg)](https://docs.rs/fhe-util)
 
 Utility functions for the [`fhe.rs`](https://github.com/gnosisguild/fhe.rs) ecosystem.
 
@@ -8,7 +8,7 @@ The crate contains helper routines such as primality testing, centered binomial 
 
 ```toml
 [dependencies]
-fhe-util = "0.3.0"
+fhe-util = { git = "https://github.com/gnosisguild/fhe.rs", branch = "core/main" }
 ```
 
 ## Testing

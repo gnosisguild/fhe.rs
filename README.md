@@ -1,6 +1,6 @@
 # fhe.rs: Fully Homomorphic Encryption in Rust
 
-[![continuous integration](https://github.com/gnosisguild/fhe.rs/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/gnosisguild/fhe.rs/actions/workflows/rust.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Code coverage](https://codecov.io/gh/gnosisguild/fhe.rs/branch/main/graph/badge.svg?token=LCBSDMB5NS)](https://codecov.io/gh/gnosisguild/fhe.rs)
+[![continuous integration](https://github.com/gnosisguild/fhe.rs/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/gnosisguild/fhe.rs/actions/workflows/rust.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 This repository contains the `fhe.rs` library, an experimental cryptographic library in Rust for Ring-LWE-based homomorphic encryption, developed by [Tancrède Lepoint](https://tancre.de) and [Gnosis Guild](https://github.com/gnosisguild).
 For more information about the library, see [fhe.rs](https://fhe.rs).
@@ -19,19 +19,21 @@ The library features:
 
 `fhe.rs` is implemented using the Rust programming language. The ecosystem is composed of four public crates (packages):
 
-* [![fhe crate version](https://img.shields.io/crates/v/fhe.svg)](https://crates.io/crates/fhe) [`fhe`](https://crates.io/crates/fhe): This crate contains the BFV, l-BFV, and threshold BFV implementations;
-* [![fhe-math crate version](https://img.shields.io/crates/v/fhe-math.svg)](https://crates.io/crates/fhe-math) [`fhe-math`](https://crates.io/crates/fhe-math): This crate contains the core mathematical operations for the `fhe` crate;
-* [![fhe-traits crate version](https://img.shields.io/crates/v/fhe-traits.svg)](https://crates.io/crates/fhe-traits) [`fhe-traits`](https://crates.io/crates/fhe-traits): This crate contains traits for homomorphic encryption schemes;
-* [![fhe-util crate version](https://img.shields.io/crates/v/fhe-util.svg)](https://crates.io/crates/fhe-util) [`fhe-util`](https://crates.io/crates/fhe-util): This crate contains utility functions for the `fhe` crate.
+* [![fhe version](https://img.shields.io/badge/fhe-0.3.0-blue.svg)](https://github.com/gnosisguild/fhe.rs/tree/core/main/crates/fhe) [`fhe`](https://github.com/gnosisguild/fhe.rs/tree/core/main/crates/fhe): This crate contains the BFV, l-BFV, and threshold BFV implementations;
+* [![fhe-math version](https://img.shields.io/badge/fhe--math-0.3.0-blue.svg)](https://github.com/gnosisguild/fhe.rs/tree/core/main/crates/fhe-math) [`fhe-math`](https://github.com/gnosisguild/fhe.rs/tree/core/main/crates/fhe-math): This crate contains the core mathematical operations for the `fhe` crate;
+* [![fhe-traits version](https://img.shields.io/badge/fhe--traits-0.3.0-blue.svg)](https://github.com/gnosisguild/fhe.rs/tree/core/main/crates/fhe-traits) [`fhe-traits`](https://github.com/gnosisguild/fhe.rs/tree/core/main/crates/fhe-traits): This crate contains traits for homomorphic encryption schemes;
+* [![fhe-util version](https://img.shields.io/badge/fhe--util-0.3.0-blue.svg)](https://github.com/gnosisguild/fhe.rs/tree/core/main/crates/fhe-util) [`fhe-util`](https://github.com/gnosisguild/fhe.rs/tree/core/main/crates/fhe-util): This crate contains utility functions for the `fhe` crate.
 
 ### Installation
 
 To install, add the following to your project's `Cargo.toml` file:
 
+The `0.3.0` crates are currently available from the `core/main` branch and will be published to crates.io in the release process.
+
 ```toml
 [dependencies]
-fhe = "0.3.0"
-fhe-traits = "0.3.0"
+fhe = { git = "https://github.com/gnosisguild/fhe.rs", branch = "core/main" }
+fhe-traits = { git = "https://github.com/gnosisguild/fhe.rs", branch = "core/main" }
 ```
 
 ## Minimum supported version / toolchain

@@ -1,4 +1,4 @@
-# fhe [![fhe crate version](https://img.shields.io/crates/v/fhe.svg)](https://crates.io/crates/fhe) [![documentation](https://docs.rs/fhe/badge.svg)](https://docs.rs/fhe)
+# fhe [![fhe version](https://img.shields.io/badge/fhe-0.3.0-blue.svg)](https://github.com/gnosisguild/fhe.rs/tree/core/main/crates/fhe) [![documentation](https://docs.rs/fhe/badge.svg)](https://docs.rs/fhe)
 
 **A pure-Rust implementation of fully homomorphic encryption schemes based on Ring-LWE.**
 
@@ -14,9 +14,11 @@ This library provides implementations of:
 
 Add the following to your `Cargo.toml`:
 
+The `0.3.0` crate is currently available from the `core/main` branch and will be published to crates.io in the release process.
+
 ```toml
 [dependencies]
-fhe = "0.3.0"
+fhe = { git = "https://github.com/gnosisguild/fhe.rs", branch = "core/main" }
 ```
 
 ## Cargo features
