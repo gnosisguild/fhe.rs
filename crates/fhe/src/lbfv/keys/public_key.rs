@@ -806,15 +806,15 @@ mod tests {
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62usize; 3])
-            .set_variance(10)
-            .set_error1_variance_usize(15)
+            .set_variance(10)?
+            .set_error1_variance_usize(15)?
             .build_arc()?;
 
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng)?;
 
         let pt = Plaintext::try_encode(
-            &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
+            &Modulus::new(params.try_plaintext()?)?.random_vec(params.degree(), &mut rng),
             Encoding::poly(),
             &params,
         )?;
@@ -842,7 +842,7 @@ mod tests {
         let pk = LBFVPublicKey::new(&sk, &mut rng)?;
 
         let pt = Plaintext::try_encode(
-            &Modulus::new(params.plaintext())?.random_vec(params.degree(), &mut rng),
+            &Modulus::new(params.try_plaintext()?)?.random_vec(params.degree(), &mut rng),
             Encoding::poly(),
             &params,
         )?;
