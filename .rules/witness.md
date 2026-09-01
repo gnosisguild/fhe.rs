@@ -13,7 +13,7 @@ This document specifies the witness material produced by the `_extended` API var
 
 1. Encryption source is `lbfv::LBFVPublicKey::try_encrypt_extended(pt, rng)` returning `Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)>` as `(ct,u,e1,e2)`.
 2. Encryption satisfies `c0 = u·b + e1 + m`, `c1 = u·a + e2`, with `m = Δ·msg` and `Δ = floor(Q/t)`.
-3. Encryption circuits prove both equations and `‖u‖∞`, `‖e1‖∞`, `‖e2‖∞ ≤ B_enc`; `sk` is not an encryption witness.
+3. Encryption circuits prove both equations and `‖u‖∞`, `‖e1‖∞`, `‖e2‖∞ ≤ B_enc`; `sk` is not an encryption witness. `e1` is sampled from `params.error1_variance` and `u`/`e2` from `params.variance` (`bfv::PublicKey` and `lbfv::LBFVPublicKey` both do this — see `.rules/cryptography.md` 2.6); when `error1_variance != variance`, `e1`'s bound differs from `u`/`e2`'s and circuits must use the bound matching each witness's actual sampler.
 4. Encryption witnesses are `Poly<Ntt>`, only `c[0]` is used, and callers erase them.
 5. Unbound RLK source is `trlbfv::RelinKeyShare::contribution_with_crp_extended(sk, crp_d1, crp_a, ct_level, key_level, rng)` → `Result<(RelinKeyShare, RlkWitness)>`.
 6. Bound RLK source is `trlbfv::RelinKeyShare::contribution_with_crp_and_binding_extended(sk, crp_d1, crp_a, binding, ct_level, key_level, rng)` → `Result<(RelinKeyShare, RlkWitness)>`.
@@ -37,7 +37,7 @@ The l-BFV construction uses one row per modulus and the signs match the implemen
 
 ## Evidence / tests
 
-The API signatures, equations, circuit statements, representation table (`Poly<NttShoup>`, `Poly<Ntt>`, `Poly<PowerBasis>`), and source documentation above are the contract evidence; test extended APIs against their published equations and range handling. Gap: no test currently asserts the encryption-witness equations `c0 = u·b + e1 + m` and `c1 = u·a + e2` for `try_encrypt_extended` (the RLK equations are tested in `crates/fhe/src/lbfv/keys/relinearization_key.rs`); add one when touching these APIs.
+The API signatures, equations, circuit statements, representation table (`Poly<NttShoup>`, `Poly<Ntt>`, `Poly<PowerBasis>`), and source documentation above are the contract evidence; test extended APIs against their published equations and range handling. The encryption-witness equations `c0 = u·b + e1 + m` and `c1 = u·a + e2` for `try_encrypt_extended` are covered by `extended_encrypt_witness_equations` in `crates/fhe/src/lbfv/keys/public_key.rs` (the RLK equations are tested in `crates/fhe/src/lbfv/keys/relinearization_key.rs`).
 
 ## Sync
 
