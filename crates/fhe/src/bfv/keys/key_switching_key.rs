@@ -101,9 +101,11 @@ impl KeySwitchingKey {
         rng: &mut R,
     ) -> Result<Self> {
         if ciphertext_level < ksk_level {
-            return Err(Error::DefaultError(format!(
-                "ciphertext_level ({ciphertext_level}) must be >= ksk_level ({ksk_level})"
-            )));
+            return Err(crate::EvaluationKeyError::InvalidLevelOrder {
+                ciphertext_level,
+                key_level: ksk_level,
+            }
+            .into());
         }
 
         let params = sk.params.clone();
@@ -121,7 +123,7 @@ impl KeySwitchingKey {
             let modulus = ctx_ksk
                 .moduli()
                 .first()
-                .ok_or_else(|| Error::DefaultError("Empty modulus list in ctx_ksk".to_string()))?;
+                .ok_or(fhe_math::Error::EmptyModuli)?;
             let log_modulus = modulus.next_power_of_two().ilog2() as usize;
             let log_base = log_modulus / 2;
             let c1 = Self::c1_from_seed(&ctx_ksk, seed, log_modulus.div_ceil(log_base));
@@ -168,9 +170,11 @@ impl KeySwitchingKey {
         rng: &mut R,
     ) -> Result<Self> {
         if ciphertext_level < ksk_level {
-            return Err(Error::DefaultError(format!(
-                "ciphertext_level ({ciphertext_level}) must be >= ksk_level ({ksk_level})"
-            )));
+            return Err(crate::EvaluationKeyError::InvalidLevelOrder {
+                ciphertext_level,
+                key_level: ksk_level,
+            }
+            .into());
         }
 
         let params = sk.params.clone();
@@ -178,17 +182,19 @@ impl KeySwitchingKey {
         let ctx_ciphertext = params.context_at_level(ciphertext_level)?.clone();
 
         if from.ctx() != &ctx_ksk {
-            return Err(Error::DefaultError(
-                "Incorrect context for polynomial from".to_string(),
-            ));
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::KeySwitchingKey,
+            });
         }
 
         // Validate every supplied c1 polynomial uses ctx_ksk
-        for (i, c1i) in c1.iter().enumerate() {
+        for c1i in &c1 {
             if c1i.ctx().as_ref() != ctx_ksk.as_ref() {
-                return Err(Error::DefaultError(format!(
-                    "c1[{i}] has wrong context: expected ksk-level context"
-                )));
+                return Err(Error::ParameterMismatch {
+                    left: crate::ParameterSource::Polynomial,
+                    right: crate::ParameterSource::KeySwitchingKey,
+                });
             }
         }
 
@@ -196,15 +202,16 @@ impl KeySwitchingKey {
             let modulus = ctx_ksk
                 .moduli()
                 .first()
-                .ok_or_else(|| Error::DefaultError("Empty modulus list in ctx_ksk".to_string()))?;
+                .ok_or(fhe_math::Error::EmptyModuli)?;
             let log_modulus = modulus.next_power_of_two().ilog2() as usize;
             let log_base = log_modulus / 2;
             let expected_len = log_modulus.div_ceil(log_base);
             if c1.len() != expected_len {
-                return Err(Error::DefaultError(format!(
-                    "Expected {expected_len} c1 polynomials for single-modulus context, got {}",
-                    c1.len()
-                )));
+                return Err(crate::EvaluationKeyError::InvalidDecompositionLength {
+                    actual: c1.len(),
+                    expected: expected_len,
+                }
+                .into());
             }
             let c0 = Self::generate_c0_decomposition(sk, from, &c1, rng, log_base)?;
             Ok(Self {
@@ -221,10 +228,11 @@ impl KeySwitchingKey {
         } else {
             let expected_len = ctx_ciphertext.moduli().len();
             if c1.len() != expected_len {
-                return Err(Error::DefaultError(format!(
-                    "Expected {expected_len} c1 polynomials, got {}",
-                    c1.len()
-                )));
+                return Err(crate::EvaluationKeyError::InvalidDecompositionLength {
+                    actual: c1.len(),
+                    expected: expected_len,
+                }
+                .into());
             }
             let c0 = Self::generate_c0(sk, from, &c1, rng)?;
             Ok(Self {
@@ -257,9 +265,11 @@ impl KeySwitchingKey {
         rng: &mut R,
     ) -> Result<(Self, Vec<Poly<NttShoup>>)> {
         if ciphertext_level < ksk_level {
-            return Err(Error::DefaultError(format!(
-                "ciphertext_level ({ciphertext_level}) must be >= ksk_level ({ksk_level})"
-            )));
+            return Err(crate::EvaluationKeyError::InvalidLevelOrder {
+                ciphertext_level,
+                key_level: ksk_level,
+            }
+            .into());
         }
 
         let params = sk.params.clone();
@@ -267,16 +277,18 @@ impl KeySwitchingKey {
         let ctx_ciphertext = params.context_at_level(ciphertext_level)?.clone();
 
         if from.ctx() != &ctx_ksk {
-            return Err(Error::DefaultError(
-                "Incorrect context for polynomial from".to_string(),
-            ));
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::KeySwitchingKey,
+            });
         }
 
-        for (i, c1i) in c1.iter().enumerate() {
+        for c1i in &c1 {
             if c1i.ctx().as_ref() != ctx_ksk.as_ref() {
-                return Err(Error::DefaultError(format!(
-                    "c1[{i}] has wrong context: expected ksk-level context"
-                )));
+                return Err(Error::ParameterMismatch {
+                    left: crate::ParameterSource::Polynomial,
+                    right: crate::ParameterSource::KeySwitchingKey,
+                });
             }
         }
 
@@ -284,15 +296,16 @@ impl KeySwitchingKey {
             let modulus = ctx_ksk
                 .moduli()
                 .first()
-                .ok_or_else(|| Error::DefaultError("Empty modulus list in ctx_ksk".to_string()))?;
+                .ok_or(fhe_math::Error::EmptyModuli)?;
             let log_modulus = modulus.next_power_of_two().ilog2() as usize;
             let log_base = log_modulus / 2;
             let expected_len = log_modulus.div_ceil(log_base);
             if c1.len() != expected_len {
-                return Err(Error::DefaultError(format!(
-                    "Expected {expected_len} c1 polynomials for single-modulus context, got {}",
-                    c1.len()
-                )));
+                return Err(crate::EvaluationKeyError::InvalidDecompositionLength {
+                    actual: c1.len(),
+                    expected: expected_len,
+                }
+                .into());
             }
             let (c0, errors) =
                 Self::generate_c0_decomposition_with_errors(sk, from, &c1, rng, log_base)?;
@@ -313,10 +326,11 @@ impl KeySwitchingKey {
         } else {
             let expected_len = ctx_ciphertext.moduli().len();
             if c1.len() != expected_len {
-                return Err(Error::DefaultError(format!(
-                    "Expected {expected_len} c1 polynomials, got {}",
-                    c1.len()
-                )));
+                return Err(crate::EvaluationKeyError::InvalidDecompositionLength {
+                    actual: c1.len(),
+                    expected: expected_len,
+                }
+                .into());
             }
             let (c0, errors) = Self::generate_c0_with_errors(sk, from, &c1, rng)?;
             Ok((
@@ -391,10 +405,12 @@ impl KeySwitchingKey {
             Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
         );
 
-        let moduli_slice =
-            sk.params.moduli.get(..c1.len()).ok_or_else(|| {
-                Error::DefaultError("c1 length exceeds modulus count".to_string())
-            })?;
+        let moduli_slice = sk.params.moduli.get(..c1.len()).ok_or(
+            crate::EvaluationKeyError::InvalidDecompositionLength {
+                actual: c1.len(),
+                expected: sk.params.moduli.len(),
+            },
+        )?;
         let rns = RnsContext::new(moduli_slice)?;
 
         let c0 = c1
@@ -411,9 +427,9 @@ impl KeySwitchingKey {
                 let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
                 b -= a_s_pb.as_ref();
 
-                let gi = rns.get_garner(i).ok_or_else(|| {
-                    Error::DefaultError(format!("Garner coefficient {i} not found"))
-                })?;
+                let gi = rns
+                    .get_garner(i)
+                    .ok_or(crate::EvaluationKeyError::MissingGarnerCoefficient { index: i })?;
                 let g_i_from = Zeroizing::new(gi * from);
 
                 b += &g_i_from;
@@ -486,16 +502,18 @@ impl KeySwitchingKey {
     ) -> Result<(Vec<Poly<NttShoup>>, Vec<Poly<NttShoup>>)> {
         let ctx0 = c1
             .first()
-            .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
+            .ok_or(crate::EvaluationKeyError::EmptyKeySwitchingComponents)?
             .ctx();
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
         );
 
-        let moduli_slice =
-            sk.params.moduli.get(..c1.len()).ok_or_else(|| {
-                Error::DefaultError("c1 length exceeds modulus count".to_string())
-            })?;
+        let moduli_slice = sk.params.moduli.get(..c1.len()).ok_or(
+            crate::EvaluationKeyError::InvalidDecompositionLength {
+                actual: c1.len(),
+                expected: sk.params.moduli.len(),
+            },
+        )?;
         let rns = RnsContext::new(moduli_slice)?;
 
         let pairs: Vec<(Poly<NttShoup>, Poly<NttShoup>)> = c1
@@ -519,9 +537,9 @@ impl KeySwitchingKey {
 
                 b -= a_s_pb.as_ref();
 
-                let gi = rns.get_garner(i).ok_or_else(|| {
-                    Error::DefaultError(format!("Garner coefficient {i} not found"))
-                })?;
+                let gi = rns
+                    .get_garner(i)
+                    .ok_or(crate::EvaluationKeyError::MissingGarnerCoefficient { index: i })?;
                 let g_i_from = Zeroizing::new(gi * from);
                 b += &g_i_from;
 
@@ -547,7 +565,7 @@ impl KeySwitchingKey {
     ) -> Result<(Vec<Poly<NttShoup>>, Vec<Poly<NttShoup>>)> {
         let ctx0 = c1
             .first()
-            .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
+            .ok_or(crate::EvaluationKeyError::EmptyKeySwitchingComponents)?
             .ctx();
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
@@ -609,11 +627,9 @@ impl KeySwitchingKey {
         {
             let mut c2_i =
                 Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
-                    c2_i_coefficients.as_slice().ok_or_else(|| {
-                        Error::DefaultError(
-                            "Non-contiguous coefficient array in key_switch".to_string(),
-                        )
-                    })?,
+                    c2_i_coefficients
+                        .as_slice()
+                        .ok_or(fhe_math::Error::NonContiguousCoefficients)?,
                     &self.ctx_ksk,
                     fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public()),
                 );
@@ -664,11 +680,9 @@ impl KeySwitchingKey {
         {
             let mut c2_i =
                 Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
-                    c2_i_coefficients.as_slice().ok_or_else(|| {
-                        Error::DefaultError(
-                            "Non-contiguous coefficient array in key_switch_assign".to_string(),
-                        )
-                    })?,
+                    c2_i_coefficients
+                        .as_slice()
+                        .ok_or(fhe_math::Error::NonContiguousCoefficients)?,
                     &self.ctx_ksk,
                     fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public()),
                 );
@@ -692,20 +706,14 @@ impl KeySwitchingKey {
             .ctx()
             .moduli()
             .first()
-            .ok_or_else(|| {
-                Error::DefaultError("Empty modulus list in key_switch_decomposition".to_string())
-            })?
+            .ok_or(fhe_math::Error::EmptyModuli)?
             .next_power_of_two()
             .ilog2() as usize;
 
         let mut coefficients = p
             .coefficients()
             .to_slice()
-            .ok_or_else(|| {
-                Error::DefaultError(
-                    "Non-contiguous coefficient array in key_switch_decomposition".to_string(),
-                )
-            })?
+            .ok_or(fhe_math::Error::NonContiguousCoefficients)?
             .to_vec();
         let mut c2i = vec![];
         let mask = (1u64 << self.log_base) - 1;
@@ -1108,7 +1116,13 @@ mod tests {
             .collect();
 
         let result = KeySwitchingKey::new_with_c1(&sk, &from, c1, 0, 0, &mut rng);
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(crate::Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::KeySwitchingKey,
+            })
+        ));
         Ok(())
     }
 
@@ -1134,7 +1148,15 @@ mod tests {
         // ciphertext_level(1) < ksk_level(2) → must be rejected by level ordering
         let result =
             KeySwitchingKey::new_with_c1(&sk, &from, c1, ciphertext_level, ksk_level, &mut rng);
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(crate::Error::EvaluationKey(
+                crate::EvaluationKeyError::InvalidLevelOrder {
+                    ciphertext_level: 1,
+                    key_level: 2,
+                }
+            ))
+        ));
         Ok(())
     }
 
