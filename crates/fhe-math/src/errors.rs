@@ -118,6 +118,10 @@ pub enum Error {
     /// Indicates that a modular inverse does not exist.
     #[error("Value {value} is not invertible modulo {modulus}.")]
     NonInvertible { value: u64, modulus: u64 },
+
+    /// Indicates that a decoded value is not a canonical representative of its modulus.
+    #[error("Value {value} is not canonical: expected a value in [0, {modulus}).")]
+    NonCanonicalValue { value: u64, modulus: u64 },
 }
 
 /// Errors arising while decoding or converting serialized polynomials.
