@@ -91,7 +91,6 @@ jobs:
           cargo run --release -p fhe --example rgsw
           cargo run --release -p fhe --example sealpir
           cargo run --release -p fhe --example trlbfv_mul
-          cargo run --release -p fhe --example util
           cargo run --release -p fhe --all-features --example trbfv_add
           cargo run --release -p fhe --all-features --example trbfv_add_bfv_share
           cargo run --release -p fhe --all-features --example trbfv_add_bfv_share_insecure
