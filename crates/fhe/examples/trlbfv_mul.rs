@@ -14,8 +14,7 @@
 // Decryption assembles the joint sk = Σ sk_i only to verify correctness.
 // In production this step would be replaced by threshold decryption.
 //
-//   Parameters: 3 parties, 1 multiplication, 4×61-bit primes, degree 16384, k=1000.
-//   Correctness: log₂(B_C after 1 mult) = 193.5 < log₂(Δ) = 234.0  ✓
+//   Parameters: 3 parties, 1 multiplication, 5×51-bit primes, degree 16384, k=1000.
 
 #![allow(clippy::indexing_slicing, missing_docs)]
 
@@ -27,6 +26,7 @@ use fhe::{
     aggregate::AggregateIter,
     bfv::{self, CommonRandomPolyVec, Encoding, Plaintext, SecretKey},
     lbfv::LBFVRelinearizationKey,
+    trbfv::presets,
     trlbfv::{
         AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
         aggregate_relinearization_key,
@@ -39,26 +39,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand::rng();
 
     // ── Parameters ────────────────────────────────────────────────────────────
-    // Four 61-bit NTT primes ≡ 1 mod 32768, sufficient noise budget for one
-    // multiplication + relinearization (log₂ B_C = 193.5 < log₂ Δ = 234.0).
-    let degree = 16384usize;
-    let plaintext_modulus = 1_000u64;
-    let moduli = [
-        0x1fffffffffe10001u64,
-        0x1fffffffffe00001,
-        0x1fffffffffdd0001,
-        0x1fffffffffd08001,
-    ];
-
-    let params: Arc<bfv::BfvParameters> = timeit!(
-        "Parameters",
-        bfv::BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus)
-            .set_moduli(&moduli)
-            .set_variance(10)
-            .build_arc()?
-    );
+    let params: Arc<bfv::BfvParameters> =
+        timeit!("Parameters", presets::secure_16384_lbfv_parameters()?);
+    let degree = params.degree();
+    let plaintext_modulus = params.plaintext();
     println!(
         "l = {} (gadget dimension = num moduli)",
         params.moduli().len()

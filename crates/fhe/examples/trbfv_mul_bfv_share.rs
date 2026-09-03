@@ -8,13 +8,12 @@
 //
 // Two BFV parameter sets:
 //
-//   First set  (computation) — n=5, z=3, k=1000, d=16384, 4×61-bit moduli, λ=40.
-//              Correctness: log₂(B_C after mult) = 187.5 < log₂(Δ) = 234.0  ✓
+//   First set  (computation) — n=20, z=3, k=1000, d=16384, 5×51-bit moduli, λ=31.
 //
-//   Second set (share encryption) — k = q[1] of first set ≈ 2^61, d=16384,
-//              2×62-bit moduli. Each Shamir share value lies in [0, q_i) ⊆ [0, k),
+//   Second set (share encryption) — k = q[1] of first set ≈ 2^50, d=16384,
+//              2×53-bit moduli. Each Shamir share value lies in [0, q_i) ⊆ [0, k),
 //              so it encodes directly as a BFV plaintext.
-//              BFV decrypt is correct because k ≈ 2^61 < q₀/2 ≈ 2^61.9999  ✓
+//              BFV decrypt is correct because k ≈ 2^50 < q₀/2 ≈ 2^52.0000  ✓
 //
 // Protocol:
 //  1. Each party generates: an l-BFV pk share, an l-BFV RLK share, Shamir shares of
@@ -37,7 +36,7 @@ use fhe::{
     aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::LBFVRelinearizationKey,
-    trbfv::{Lambda, ShareManager, TRBFV},
+    trbfv::{Lambda, ShareManager, TRBFV, presets},
     trlbfv::{
         AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
         aggregate_relinearization_key,
@@ -76,29 +75,12 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // ── First BFV parameter set (threshold computation) ──────────────────────
-    // n=5, z=3, k=1000, λ=40, σ²=10. Four 61-bit NTT primes, each ≡ 1 mod 32768. ✓
-    let degree = 16384usize;
-    let plaintext_modulus_trbfv: u64 = 1_000;
-    let moduli_trbfv = [
-        0x1fffffffffe10001u64, // q[1] = 2305843009211662337
-        0x1fffffffffe00001,    // q[2] = 2305843009210613761
-        0x1fffffffffdd0001,    // q[3] = 2305843009196982273
-        0x1fffffffffd08001,    // q[4] = 2305843009177763841
-    ];
-
     println!("Building trBFV parameters (first set)...");
     let params_trbfv: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (trBFV)",
-        bfv::BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus_trbfv)
-            .set_moduli(&moduli_trbfv)
-            .set_variance(10)
-            // Var(e_1) from the parameter tool: n=5, z=3, λ=40.
-            .set_error1_variance_str("4326914048779023023775413607683413333")?
-            .build_arc()?
+        presets::secure_16384_lbfv_parameters()?
     );
+    let degree = params_trbfv.degree();
     println!(
         "✓ trBFV parameters: [{}]",
         params_trbfv
@@ -110,21 +92,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // ── Second BFV parameter set (share encryption) ───────────────────────────
-    // Plaintext modulus = q[1] of the first set ≈ 2^61. All Shamir share values
-    // lie in [0, q_i) ⊆ [0, q[1]) = [0, k), so they fit as BFV plaintexts.
-    // Two 62-bit NTT primes (≡ 1 mod 32768). Correctness: k ≈ 2^61 < q₀/2 ≈ 2^61.0000003 ✓
-    let plaintext_modulus_share_enc: u64 = moduli_trbfv[0]; // = q[1]
-    let moduli_share_enc = [0x3fffffffffd78001u64, 0x3fffffffffe80001];
+    // The plaintext modulus equals the largest computation modulus, so every
+    // Shamir share fits as a BFV plaintext.
     println!("\nBuilding share-encryption parameters (second set)...");
     let params_share_enc: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share enc)",
-        bfv::BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus_share_enc)
-            .set_moduli(&moduli_share_enc)
-            .set_variance(10)
-            .build_arc()?
+        presets::secure_16384_share_parameters()?
     );
+    let plaintext_modulus_share_enc = params_share_enc.plaintext();
     println!(
         "✓ Share-enc parameters: [{}] (plaintext = 0x{:016x})",
         params_share_enc
@@ -142,10 +117,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    // Defaults: n=5 keeps the example fast; the params are correct for n up to 20.
-    let mut num_parties = 5usize;
-    let mut threshold = 2usize;
-    let mut lambda = 40usize;
+    let mut num_parties = presets::SECURE_16384_NUM_PARTIES;
+    let mut threshold = presets::SECURE_16384_THRESHOLD;
+    let mut lambda = presets::SECURE_16384_LAMBDA;
 
     for arg in &args {
         if arg.starts_with("--num_parties") {
@@ -183,12 +157,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
     }
 
-    // λ=40 is the design point of this parameter set (≥ fhe::trbfv::MIN_SECURE_LAMBDA=35).
+    // Use the secure-16384 design point supplied for the depth-3 preset.
     let security = Lambda::secure(lambda)?;
     let mut rng = rand::rng();
 
     println!("\n# Threshold BFV multiplication");
-    println!("  num_parties       = {num_parties}  (params: n=5, k=1000, z=3, λ=40)");
+    println!("  num_parties       = {num_parties}  (params: n=20, k=1000, z=3, λ=31)");
     println!("  threshold         = {threshold}");
     println!("  lambda            = {lambda}  (secure, >= fhe::trbfv::MIN_SECURE_LAMBDA)");
     println!(
@@ -243,12 +217,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .generate_secret_shares_from_poly(sk_poly, &mut rng)
                     .unwrap();
 
-                // Smudging noise shares (m=1 ciphertext, depth=3 multiplications,
+                // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications,
                 // accepted l-BFV participant count = num_parties).
                 let esi_coeffs = trbfv
                     .generate_smudging_error_with_participant_count(
-                        1,
                         3,
+                        presets::SECURE_16384_MULT_DEPTH,
                         num_parties,
                         security,
                         &mut rng,

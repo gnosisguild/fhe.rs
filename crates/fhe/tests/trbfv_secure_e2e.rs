@@ -5,9 +5,10 @@
 use std::sync::Arc;
 
 use fhe::bfv::{
-    self, BfvParameters, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey,
+    BfvParameters, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey,
 };
 use fhe::mbfv::{AggregateIter, PublicKeyShare};
+use fhe::trbfv::presets;
 use fhe::trbfv::smudging::SmudgingNoiseGenerator;
 use fhe::trbfv::{
     Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, TRBFV,
@@ -19,42 +20,26 @@ use num_bigint::BigInt;
 use rayon::prelude::*;
 
 // Secure preset (degree 8192), as used in production (enclave).
-const DEGREE: usize = 8192;
-const NUM_PARTIES: usize = 20;
-const THRESHOLD: usize = 9; // max for n = 20: (n - 1) / 2
-const LAMBDA: usize = 50;
+const DEGREE: usize = presets::SECURE_8192_DEGREE;
+const NUM_PARTIES: usize = presets::SECURE_8192_NUM_PARTIES;
+const THRESHOLD: usize = presets::SECURE_8192_THRESHOLD;
+const LAMBDA: usize = presets::SECURE_8192_LAMBDA;
 const NUM_SUMMED: usize = 50;
 
 // Threshold BFV parameters.
-const TRBFV_PLAINTEXT_MODULUS: u64 = 1_000_000;
-const TRBFV_MODULI: &[u64] = &[0x02000000015a0001, 0x0200000001460001, 0x0200000001210001];
-const TRBFV_ERROR1_VARIANCE: &str = "18148392902450051384713312396360971277653333";
+const TRBFV_PLAINTEXT_MODULUS: u64 = presets::SECURE_8192_TRBFV_PLAINTEXT_MODULUS;
+const TRBFV_MODULI: &[u64] = presets::SECURE_8192_TRBFV_MODULI;
 
 // DKG parameters: BFV instance for encrypted Shamir share transport. The
-// plaintext modulus equals the largest trBFV modulus (0x02000000015a0001).
-const DKG_PLAINTEXT_MODULUS: u64 = 144115188098531329;
-const DKG_MODULI: &[u64] = &[0x0800000000004001, 0x0800000000044001];
+// plaintext modulus equals the largest trBFV modulus (0x0400000000c00001).
+const DKG_PLAINTEXT_MODULUS: u64 = presets::SECURE_8192_SHARE_PLAINTEXT_MODULUS;
 
 fn trbfv_params() -> Arc<BfvParameters> {
-    bfv::BfvParametersBuilder::new()
-        .set_degree(DEGREE)
-        .set_plaintext_modulus(TRBFV_PLAINTEXT_MODULUS)
-        .set_moduli(TRBFV_MODULI)
-        .set_variance(10)
-        .set_error1_variance_str(TRBFV_ERROR1_VARIANCE)
-        .unwrap()
-        .build_arc()
-        .unwrap()
+    presets::secure_8192_trbfv_parameters().unwrap()
 }
 
 fn dkg_params() -> Arc<BfvParameters> {
-    bfv::BfvParametersBuilder::new()
-        .set_degree(DEGREE)
-        .set_plaintext_modulus(DKG_PLAINTEXT_MODULUS)
-        .set_moduli(DKG_MODULI)
-        .set_variance(10)
-        .build_arc()
-        .unwrap()
+    presets::secure_8192_share_parameters().unwrap()
 }
 
 enum NoiseMode {

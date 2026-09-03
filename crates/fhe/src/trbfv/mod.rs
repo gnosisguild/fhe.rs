@@ -5,6 +5,8 @@
 pub mod config;
 /// Error types for threshold operations
 pub mod errors;
+/// Parameter sets used by threshold examples and benchmarks
+pub mod presets;
 /// Shamir Secret Sharing implementation
 pub mod shamir;
 /// Share collection and management
