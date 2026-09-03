@@ -18,6 +18,8 @@
 
 #![allow(clippy::indexing_slicing, missing_docs)]
 
+#[path = "support/presets.rs"]
+mod presets;
 mod util;
 
 use std::{error::Error, sync::Arc};
@@ -26,7 +28,6 @@ use fhe::{
     aggregate::AggregateIter,
     bfv::{self, CommonRandomPolyVec, Encoding, Plaintext, SecretKey},
     lbfv::LBFVRelinearizationKey,
-    trbfv::presets,
     trlbfv::{
         AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
         aggregate_relinearization_key,
@@ -37,10 +38,10 @@ use util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand::rng();
+    let preset = presets::secure_16384()?;
 
     // ── Parameters ────────────────────────────────────────────────────────────
-    let params: Arc<bfv::BfvParameters> =
-        timeit!("Parameters", presets::secure_16384_lbfv_parameters()?);
+    let params: Arc<bfv::BfvParameters> = timeit!("Parameters", preset.parameters.clone());
     let degree = params.degree();
     let plaintext_modulus = params.plaintext();
     println!(

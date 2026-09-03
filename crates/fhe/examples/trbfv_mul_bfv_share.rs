@@ -27,6 +27,8 @@
 
 #![allow(clippy::indexing_slicing, missing_docs)]
 
+#[path = "support/presets.rs"]
+mod presets;
 mod util;
 
 use std::{env, error::Error, process::exit, sync::Arc};
@@ -36,7 +38,7 @@ use fhe::{
     aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::LBFVRelinearizationKey,
-    trbfv::{Lambda, ShareManager, TRBFV, presets},
+    trbfv::{Lambda, ShareManager, TRBFV},
     trlbfv::{
         AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
         aggregate_relinearization_key,
@@ -75,11 +77,10 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let preset = presets::secure_16384()?;
     println!("Building trBFV parameters (first set)...");
-    let params_trbfv: Arc<bfv::BfvParameters> = timeit!(
-        "Parameters generation (trBFV)",
-        presets::secure_16384_lbfv_parameters()?
-    );
+    let params_trbfv: Arc<bfv::BfvParameters> =
+        timeit!("Parameters generation (trBFV)", preset.parameters.clone());
     let degree = params_trbfv.degree();
     println!(
         "✓ trBFV parameters: [{}]",
@@ -97,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("\nBuilding share-encryption parameters (second set)...");
     let params_share_enc: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share enc)",
-        presets::secure_16384_share_parameters()?
+        preset.share_parameters.clone()
     );
     let plaintext_modulus_share_enc = params_share_enc.plaintext();
     println!(
@@ -117,9 +118,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_parties = presets::SECURE_16384_NUM_PARTIES;
-    let mut threshold = presets::SECURE_16384_THRESHOLD;
-    let mut lambda = presets::SECURE_16384_LAMBDA;
+    let mut num_parties = preset.num_parties;
+    let mut threshold = preset.threshold;
+    let mut lambda = preset.lambda;
 
     for arg in &args {
         if arg.starts_with("--num_parties") {
@@ -222,7 +223,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let esi_coeffs = trbfv
                     .generate_smudging_error_with_participant_count(
                         3,
-                        presets::SECURE_16384_MULT_DEPTH,
+                        preset.multiplicative_depth.unwrap(),
                         num_parties,
                         security,
                         &mut rng,

@@ -1,9 +1,11 @@
 //! Benchmarks for threshold BFV share operations.
 use criterion::{Criterion, criterion_group, criterion_main};
+#[path = "../examples/support/presets.rs"]
+mod presets;
 use fhe::bfv::CommonRandomPoly;
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::PublicKeyShare;
-use fhe::trbfv::{Lambda, ShareManager, TRBFV, presets};
+use fhe::trbfv::{Lambda, ShareManager, TRBFV};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
 
@@ -21,10 +23,11 @@ fn format_bytes(bytes: usize) -> String {
 
 fn bench_data_sizes(c: &mut Criterion) {
     let group = c.benchmark_group("BFV Encrypted Shares Data Sizes");
+    let preset = presets::secure_8192().unwrap();
 
     // Threshold BFV parameters
-    let params_trbfv = presets::secure_8192_trbfv_parameters().unwrap();
-    let params_bfv = presets::secure_8192_share_parameters().unwrap();
+    let params_trbfv = preset.parameters.clone();
+    let params_bfv = preset.share_parameters.clone();
     let degree = params_trbfv.degree();
     let moduli_trbfv = params_trbfv.moduli();
     let moduli_bfv = params_bfv.moduli();
@@ -75,12 +78,7 @@ fn bench_data_sizes(c: &mut Criterion) {
 
         // Generate smudging error shares
         let esi_coeffs = trbfv
-            .generate_smudging_error(
-                100,
-                0,
-                Lambda::secure(presets::SECURE_8192_LAMBDA).unwrap(),
-                &mut rng,
-            )
+            .generate_smudging_error(100, 0, Lambda::secure(preset.lambda).unwrap(), &mut rng)
             .unwrap();
         let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
         let esi_sss = share_manager
@@ -317,10 +315,11 @@ fn bench_data_sizes(c: &mut Criterion) {
 
 fn bench_timing_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("BFV Encrypted Shares Timing");
+    let preset = presets::secure_8192().unwrap();
 
     // Setup parameters (same as data sizes)
-    let params_trbfv = presets::secure_8192_trbfv_parameters().unwrap();
-    let params_bfv = presets::secure_8192_share_parameters().unwrap();
+    let params_trbfv = preset.parameters.clone();
+    let params_bfv = preset.share_parameters.clone();
     let degree = params_trbfv.degree();
 
     let num_parties = 3;

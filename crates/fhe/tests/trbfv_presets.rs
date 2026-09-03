@@ -1,25 +1,34 @@
-//! Regression tests for the parameter sets used by the examples and benches.
+//! Regression tests for the two parameter presets used by the examples.
 
-use fhe::trbfv::presets;
+#[path = "../examples/support/presets.rs"]
+mod presets;
+
 use fhe::trbfv::{Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
 use num_bigint::BigUint;
 
 #[test]
-fn secure_8192_matches_the_published_preset() {
-    let params = presets::secure_8192_trbfv_parameters().unwrap();
-    assert_eq!(params.degree(), 8192);
-    assert_eq!(params.plaintext(), 1_000_000);
-    assert_eq!(params.moduli(), presets::SECURE_8192_TRBFV_MODULI);
+fn secure_8192_preset_is_feasible_and_covers_share_moduli() {
+    let preset = presets::secure_8192().unwrap();
+    assert_eq!(preset.parameters.degree(), 8192);
+    assert_eq!(preset.parameters.plaintext(), 1_000_000);
     assert_eq!(
-        params.get_error1_variance().to_string(),
-        presets::SECURE_8192_ERROR1_VARIANCE
+        preset.parameters.moduli(),
+        &[0x0400000000c00001, 0x0400000000a40001, 0x0400000000990001]
     );
+    assert_eq!(
+        preset.parameters.get_error1_variance().to_string(),
+        "17723039943798878305460955570711717478400"
+    );
+    assert_eq!(preset.num_parties, 20);
+    assert_eq!(preset.threshold, 9);
+    assert_eq!(preset.lambda, 45);
+    assert_eq!(preset.multiplicative_depth, None);
 
     let config = SmudgingBoundCalculatorConfig::new(
-        params,
-        presets::SECURE_8192_NUM_PARTIES,
-        presets::SECURE_8192_MAX_CIPHERTEXTS,
-        Lambda::secure(presets::SECURE_8192_LAMBDA).unwrap(),
+        preset.parameters.clone(),
+        preset.num_parties,
+        preset.max_ciphertexts,
+        Lambda::secure(preset.lambda).unwrap(),
     )
     .unwrap();
     let bound = SmudgingBoundCalculator::new(config)
@@ -29,63 +38,59 @@ fn secure_8192_matches_the_published_preset() {
         bound,
         BigUint::parse_bytes(b"132922799578495921427264261134328266752000000", 10).unwrap()
     );
-}
 
-#[test]
-fn secure_8192_share_parameters_cover_computation_moduli() {
-    let params = presets::secure_8192_share_parameters().unwrap();
-    assert_eq!(params.degree(), presets::SECURE_8192_DEGREE);
-    assert_eq!(
-        params.plaintext(),
-        presets::SECURE_8192_SHARE_PLAINTEXT_MODULUS
-    );
     assert!(
-        presets::SECURE_8192_TRBFV_MODULI
+        preset
+            .parameters
+            .moduli()
             .iter()
-            .all(|&modulus| modulus <= params.plaintext())
+            .all(|&modulus| modulus <= preset.share_parameters.plaintext())
     );
 }
 
 #[test]
-fn secure_16384_matches_the_published_preset() {
-    let params = presets::secure_16384_lbfv_parameters().unwrap();
-    assert_eq!(params.degree(), presets::SECURE_16384_DEGREE);
+fn secure_16384_preset_is_feasible_and_covers_share_moduli() {
+    let preset = presets::secure_16384().unwrap();
+    assert_eq!(preset.parameters.degree(), 16384);
+    assert_eq!(preset.parameters.plaintext(), 1_000);
     assert_eq!(
-        params.plaintext(),
-        presets::SECURE_16384_LBFV_PLAINTEXT_MODULUS
+        preset.parameters.moduli(),
+        &[
+            0x00040000009f0001,
+            0x00040000008a0001,
+            0x0004000000800001,
+            0x00040000007e0001,
+            0x0004000000750001,
+        ]
     );
-    assert_eq!(params.moduli(), presets::SECURE_16384_LBFV_MODULI);
     assert_eq!(
-        params.get_error1_variance().to_string(),
-        presets::SECURE_16384_ERROR1_VARIANCE
+        preset.parameters.get_error1_variance().to_string(),
+        "264093875047547791978479834453333"
     );
+    assert_eq!(preset.num_parties, 20);
+    assert_eq!(preset.threshold, 9);
+    assert_eq!(preset.lambda, 31);
+    assert_eq!(preset.multiplicative_depth, Some(3));
 
     let config = SmudgingBoundCalculatorConfig::new_multiplicative(
-        params,
-        presets::SECURE_16384_NUM_PARTIES,
-        3,
-        presets::SECURE_16384_MULT_DEPTH,
-        Lambda::secure(presets::SECURE_16384_LAMBDA).unwrap(),
+        preset.parameters.clone(),
+        preset.num_parties,
+        preset.max_ciphertexts,
+        preset.multiplicative_depth.unwrap(),
+        Lambda::secure(preset.lambda).unwrap(),
     )
     .unwrap();
     let bound = SmudgingBoundCalculator::new(config)
-        .with_accepted_participant_count(presets::SECURE_16384_NUM_PARTIES)
+        .with_accepted_participant_count(preset.num_parties)
         .calculate_sm_bound()
         .unwrap();
     assert!(bound > BigUint::from(0_u64));
-}
 
-#[test]
-fn secure_16384_share_parameters_cover_computation_moduli() {
-    let params = presets::secure_16384_share_parameters().unwrap();
-    assert_eq!(params.degree(), presets::SECURE_16384_DEGREE);
-    assert_eq!(
-        params.plaintext(),
-        presets::SECURE_16384_SHARE_PLAINTEXT_MODULUS
-    );
     assert!(
-        presets::SECURE_16384_LBFV_MODULI
+        preset
+            .parameters
+            .moduli()
             .iter()
-            .all(|&modulus| modulus <= params.plaintext())
+            .all(|&modulus| modulus <= preset.share_parameters.plaintext())
     );
 }

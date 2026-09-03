@@ -6,6 +6,8 @@
 
 #![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 
+#[path = "support/presets.rs"]
+mod presets;
 mod util;
 
 use std::{env, error::Error, process::exit, sync::Arc};
@@ -14,7 +16,7 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{Lambda, ShareManager, TRBFV, presets},
+    trbfv::{Lambda, ShareManager, TRBFV},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -48,10 +50,11 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let preset = presets::secure_8192()?;
     println!("Building trBFV parameters...");
     let params_trbfv: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (threshold BFV)",
-        presets::secure_8192_trbfv_parameters()?
+        preset.parameters.clone()
     );
     let degree = params_trbfv.degree();
     println!("✓ trBFV parameters built successfully");
@@ -60,7 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("\nBuilding BFV parameters for share encryption...");
     let params_bfv: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share encryption BFV)",
-        presets::secure_8192_share_parameters()?
+        preset.share_parameters.clone()
     );
     let plaintext_modulus_bfv = params_bfv.plaintext();
     println!("✓ BFV parameters built successfully");
@@ -82,9 +85,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut num_summed = 50;
-    let mut num_parties = presets::SECURE_8192_NUM_PARTIES;
-    let mut threshold = presets::SECURE_8192_THRESHOLD;
-    let mut lambda = presets::SECURE_8192_LAMBDA;
+    let mut num_parties = preset.num_parties;
+    let mut threshold = preset.threshold;
+    let mut lambda = preset.lambda;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.

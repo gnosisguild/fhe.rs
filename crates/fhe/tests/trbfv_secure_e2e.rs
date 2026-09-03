@@ -2,13 +2,13 @@
 
 #![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 
+#[path = "../examples/support/presets.rs"]
+mod presets;
+
 use std::sync::Arc;
 
-use fhe::bfv::{
-    BfvParameters, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey,
-};
+use fhe::bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::{AggregateIter, PublicKeyShare};
-use fhe::trbfv::presets;
 use fhe::trbfv::smudging::SmudgingNoiseGenerator;
 use fhe::trbfv::{
     Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, TRBFV,
@@ -19,28 +19,7 @@ use ndarray::{Array, Array2, ArrayView};
 use num_bigint::BigInt;
 use rayon::prelude::*;
 
-// Secure preset (degree 8192), as used in production (enclave).
-const DEGREE: usize = presets::SECURE_8192_DEGREE;
-const NUM_PARTIES: usize = presets::SECURE_8192_NUM_PARTIES;
-const THRESHOLD: usize = presets::SECURE_8192_THRESHOLD;
-const LAMBDA: usize = presets::SECURE_8192_LAMBDA;
 const NUM_SUMMED: usize = 50;
-
-// Threshold BFV parameters.
-const TRBFV_PLAINTEXT_MODULUS: u64 = presets::SECURE_8192_TRBFV_PLAINTEXT_MODULUS;
-const TRBFV_MODULI: &[u64] = presets::SECURE_8192_TRBFV_MODULI;
-
-// DKG parameters: BFV instance for encrypted Shamir share transport. The
-// plaintext modulus equals the largest trBFV modulus (0x0400000000c00001).
-const DKG_PLAINTEXT_MODULUS: u64 = presets::SECURE_8192_SHARE_PLAINTEXT_MODULUS;
-
-fn trbfv_params() -> Arc<BfvParameters> {
-    presets::secure_8192_trbfv_parameters().unwrap()
-}
-
-fn dkg_params() -> Arc<BfvParameters> {
-    presets::secure_8192_share_parameters().unwrap()
-}
 
 enum NoiseMode {
     /// Each party samples its smudging contribution uniformly in [-B_sm, B_sm].
@@ -51,9 +30,14 @@ enum NoiseMode {
 }
 
 fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
-    let params_trbfv = trbfv_params();
-    let params_dkg = dkg_params();
-    let trbfv = TRBFV::new(NUM_PARTIES, THRESHOLD, params_trbfv.clone()).unwrap();
+    let preset = presets::secure_8192().unwrap();
+    let params_trbfv = preset.parameters.clone();
+    let params_dkg = preset.share_parameters.clone();
+    let degree = params_trbfv.degree();
+    let num_parties = preset.num_parties;
+    let threshold = preset.threshold;
+    let lambda = preset.lambda;
+    let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
 
     // Worst-case noise needs the bound itself.
     let smudging_bound = match noise_mode {
@@ -61,9 +45,9 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
         NoiseMode::WorstCase => {
             let config = SmudgingBoundCalculatorConfig::new(
                 params_trbfv.clone(),
-                NUM_PARTIES,
+                num_parties,
                 NUM_SUMMED,
-                Lambda::secure(LAMBDA).unwrap(),
+                Lambda::secure(lambda).unwrap(),
             )
             .unwrap();
             let bound = SmudgingBoundCalculator::new(config)
@@ -89,7 +73,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
     let mut rng = rand::rng();
     let crp = CommonRandomPoly::new(&params_trbfv, &mut rng).unwrap();
 
-    let mut parties: Vec<Party> = (0..NUM_PARTIES)
+    let mut parties: Vec<Party> = (0..num_parties)
         .into_par_iter()
         .map(|_| {
             let mut rng = rand::rng();
@@ -98,7 +82,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
             let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
             let mut share_manager =
-                ShareManager::new(NUM_PARTIES, THRESHOLD, params_trbfv.clone()).unwrap();
+                ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
             let sk_poly = share_manager
                 .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
                 .unwrap();
@@ -111,11 +95,11 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                     .generate_smudging_error(
                         NUM_SUMMED,
                         0,
-                        Lambda::secure(LAMBDA).unwrap(),
+                        Lambda::secure(lambda).unwrap(),
                         &mut rng,
                     )
                     .unwrap(),
-                Some(bound) => vec![bound.clone(); DEGREE],
+                Some(bound) => vec![bound.clone(); degree],
             };
             let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
             let esi_sss = share_manager
@@ -130,8 +114,8 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                 pk_share,
                 sk_sss,
                 esi_sss,
-                sk_sss_collected: Vec::with_capacity(NUM_PARTIES),
-                es_sss_collected: Vec::with_capacity(NUM_PARTIES),
+                sk_sss_collected: Vec::with_capacity(num_parties),
+                es_sss_collected: Vec::with_capacity(num_parties),
                 sk_poly_sum: Poly::<PowerBasis>::zero(ctx),
                 es_poly_sum: Poly::<PowerBasis>::zero(ctx),
                 sk_dkg,
@@ -182,7 +166,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                 let (encrypted_sk_shares, encrypted_esi_shares) = &sender_encrypted[receiver_idx];
 
                 let decrypt_rows = |cts: &[Ciphertext], sk: &SecretKey| -> Array2<u64> {
-                    let mut rows = Array::zeros((0, DEGREE));
+                    let mut rows = Array::zeros((0, degree));
                     for ct in cts {
                         let pt = sk.try_decrypt(ct).unwrap();
                         let decrypted: Vec<u64> =
@@ -232,8 +216,8 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
 
     // Threshold decryption with an arbitrary (non-prefix) subset of parties:
     // 1-based indices {2, 4, ..., 20}, i.e. threshold + 1 = 10 parties.
-    let reconstructing: Vec<usize> = (1..=NUM_PARTIES).filter(|i| i % 2 == 0).collect();
-    assert_eq!(reconstructing.len(), THRESHOLD + 1);
+    let reconstructing: Vec<usize> = (1..=num_parties).filter(|i| i % 2 == 0).collect();
+    assert_eq!(reconstructing.len(), threshold + 1);
 
     let d_share_polys: Vec<Poly<PowerBasis>> = reconstructing
         .iter()
@@ -273,9 +257,10 @@ fn trbfv_e2e_secure_8192_worst_case_smudging_noise() {
 /// i.e. every trBFV modulus. This pins the relation between the two presets.
 #[test]
 fn dkg_plaintext_modulus_covers_trbfv_moduli() {
-    let max_trbfv_modulus = *TRBFV_MODULI.iter().max().unwrap();
+    let preset = presets::secure_8192().unwrap();
+    let max_trbfv_modulus = *preset.parameters.moduli().iter().max().unwrap();
     assert!(
-        DKG_PLAINTEXT_MODULUS >= max_trbfv_modulus,
+        preset.share_parameters.plaintext() >= max_trbfv_modulus,
         "DKG plaintext modulus must be >= every trBFV modulus so shares fit in transport plaintexts"
     );
 }
@@ -287,12 +272,13 @@ fn dkg_plaintext_modulus_covers_trbfv_moduli() {
 fn trbfv_smudging_bound_is_feasible_for_secure_8192_preset() {
     use num_bigint::BigUint;
 
-    let params = trbfv_params();
+    let preset = presets::secure_8192().unwrap();
+    let params = preset.parameters.clone();
     let config = SmudgingBoundCalculatorConfig::new(
         params.clone(),
-        NUM_PARTIES,
+        preset.num_parties,
         NUM_SUMMED,
-        Lambda::secure(LAMBDA).unwrap(),
+        Lambda::secure(preset.lambda).unwrap(),
     )
     .unwrap();
     let bound = SmudgingBoundCalculator::new(config)
@@ -317,27 +303,28 @@ fn trbfv_smudging_bound_is_feasible_for_secure_8192_preset() {
 fn trbfv_smudging_bound_respects_strict_correctness() {
     use num_bigint::BigUint;
 
-    let params = trbfv_params();
+    let preset = presets::secure_8192().unwrap();
+    let params = preset.parameters.clone();
     let config = SmudgingBoundCalculatorConfig::new(
         params.clone(),
-        NUM_PARTIES,
+        preset.num_parties,
         NUM_SUMMED,
-        Lambda::secure(LAMBDA).unwrap(),
+        Lambda::secure(preset.lambda).unwrap(),
     )
     .unwrap();
     let bound = SmudgingBoundCalculator::new(config)
         .calculate_sm_bound()
         .unwrap();
 
-    // Reconstruct Delta = floor(Q / t) from the preset constants.
-    let q_full: BigUint = TRBFV_MODULI.iter().map(|&m| BigUint::from(m)).product();
-    let t = BigUint::from(TRBFV_PLAINTEXT_MODULUS);
+    // Reconstruct Delta = floor(Q / t) from the preset parameters.
+    let q_full: BigUint = params.moduli().iter().map(|&m| BigUint::from(m)).product();
+    let t = BigUint::from(params.plaintext());
     let delta = &q_full / &t;
 
     // For the inequality to have passed, we must have (2 * n * B_sm) < Delta.
     // (This is a weaker check than the full 2*(B_C + n*B_sm) < Delta,
     //  but it's a simple invariant that any feasible bound must satisfy.)
-    let two_n_bsm = BigUint::from(2_u64 * NUM_PARTIES as u64) * &bound;
+    let two_n_bsm = BigUint::from(2_u64 * preset.num_parties as u64) * &bound;
     assert!(
         two_n_bsm < delta,
         "2*n*B_sm = {two_n_bsm} must be < Delta = {delta}"
@@ -348,19 +335,20 @@ fn trbfv_smudging_bound_respects_strict_correctness() {
 /// set it to n must produce the same bound as the default.
 #[test]
 fn trbfv_smudging_default_accepted_count_matches_explicit_n() {
-    let params = trbfv_params();
+    let preset = presets::secure_8192().unwrap();
+    let params = preset.parameters.clone();
     let config = SmudgingBoundCalculatorConfig::new(
         params.clone(),
-        NUM_PARTIES,
+        preset.num_parties,
         NUM_SUMMED,
-        Lambda::secure(LAMBDA).unwrap(),
+        Lambda::secure(preset.lambda).unwrap(),
     )
     .unwrap();
     let bound_default = SmudgingBoundCalculator::new(config.clone())
         .calculate_sm_bound()
         .unwrap();
     let bound_explicit = SmudgingBoundCalculator::new(config)
-        .with_accepted_participant_count(NUM_PARTIES)
+        .with_accepted_participant_count(preset.num_parties)
         .calculate_sm_bound()
         .unwrap();
     assert_eq!(bound_default, bound_explicit);
