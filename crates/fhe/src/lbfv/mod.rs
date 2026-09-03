@@ -1,22 +1,26 @@
-/*!
- * Implementation of the l-BFV relinearization algorithm as described in
- * [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
- *
- * The l-BFV (linear BFV) relinearization algorithm provides several key
- * advantages over traditional relinearization approaches:
- *
- * 1. Linear Communication: The protocol achieves linear communication
- *    complexity, making it more efficient than quadratic alternatives.
- *
- * 2. Single Round: Unlike traditional approaches that require two rounds of
- *    communication, l-BFV completes relinearization in a single round,
- *    significantly reducing latency and network overhead.
- *
- * 3. Enhanced Robustness: The single-round nature of the protocol
- *    inherently provides robustness in the threshold setting.
- */
+//!
+//! Single-party l-BFV operational keys: [`LBFVPublicKey`] and
+//! [`LBFVRelinearizationKey`].
+//!
+//! The l-BFV (linear BFV) relinearization algorithm is described in [Robust
+//! Multiparty Computation from Threshold Encryption Based on
+//! RLWE](https://eprint.iacr.org/2024/1285.pdf). This module provides
+//! single-party l-BFV operational keys and their constructors.
+//!
+//! Threshold/multiparty shares, bindings, and aggregation live separately in
+//! [`crate::trlbfv`]. The keys produced here do not carry threshold participant
+//! set metadata.
+//!
+//! The shared polynomials `a` (CRS) and `d1` (URS) are supplied as
+//! [`CommonRandomPolyVec`](crate::bfv::CommonRandomPolyVec) values. The
+//! implementation's `l` equals the number of RNS moduli, which need not match
+//! the paper's gadget dimension because of the HPS optimisation
+//! (<https://eprint.iacr.org/2018/117>).
+//!
+//! The l-BFV relinearization argument relies on the circular-security
+//! assumption inherited from the cited multi-key construction. This caveat
+//! applies to all key material produced by this module and by [`crate::trlbfv`].
 
-pub mod keys;
+pub(crate) mod keys;
 
-pub use keys::LBFVPublicKey;
-pub use keys::LBFVRelinearizationKey;
+pub use keys::{LBFVPublicKey, LBFVRelinearizationKey};

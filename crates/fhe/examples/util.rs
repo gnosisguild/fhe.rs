@@ -96,15 +96,15 @@ pub fn number_elements_per_plaintext(
 #[must_use]
 pub fn encode_database(
     database: &[Vec<u8>],
-    par: Arc<bfv::BfvParameters>,
+    params: Arc<bfv::BfvParameters>,
     level: usize,
 ) -> (Vec<bfv::Plaintext>, (usize, usize)) {
     assert!(!database.is_empty());
 
     let elements_size = database[0].len();
-    let plaintext_nbits = par.plaintext().ilog2() as usize;
+    let plaintext_nbits = params.plaintext().ilog2() as usize;
     let number_elements_per_plaintext =
-        number_elements_per_plaintext(par.degree(), plaintext_nbits, elements_size);
+        number_elements_per_plaintext(params.degree(), plaintext_nbits, elements_size);
     let number_rows = database.len().div_ceil(number_elements_per_plaintext);
     println!("number_rows = {number_rows}");
     println!("number_elements_per_plaintext = {number_elements_per_plaintext}");
@@ -120,7 +120,7 @@ pub fn encode_database(
     let public_zero = bfv::Plaintext::try_encode_vt(
         &[] as &[u64],
         bfv::Encoding::poly_at_level(level),
-        &par,
+        &params,
         variable_time,
     )
     .unwrap();
@@ -136,7 +136,7 @@ pub fn encode_database(
         preprocessed_database[i] = bfv::Plaintext::try_encode_vt(
             pt_values.as_slice(),
             bfv::Encoding::poly_at_level(level),
-            &par,
+            &params,
             variable_time,
         )
         .unwrap();

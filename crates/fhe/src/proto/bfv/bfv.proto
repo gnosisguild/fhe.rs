@@ -22,6 +22,7 @@ message KeySwitchingKey {
   uint32 log_base = 6;
 }
 
+
 message RelinearizationKey {
   KeySwitchingKey ksk = 1;
 }
