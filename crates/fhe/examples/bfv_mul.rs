@@ -4,13 +4,15 @@
 // encrypt two values, multiply with relinearization, decrypt and check.
 //
 //   n (ciphernodes)  = 20       z (mult depth) = 3
-//   k (plaintext)    = 1000     λ (stat sec)   = 28
-//   d (ring dim)     = 16384    |q|            ≈ 2^244 (4 × 61-bit primes)
+//   k (plaintext)    = 1000     λ (stat sec)   = 31
+//   d (ring dim)     = 16384    |q|            ≈ 2^251 (5 × 51-bit primes)
 //
-// Correctness: log₂(B_C after 1 mult) = 193.5 < log₂(Δ) = 234.0  ✓
+// Correctness: the supplied depth-3 preset has log₂(B_C) ≈ 186.3 < log₂(Δ) ≈ 240.0.
 
 #![allow(clippy::indexing_slicing, missing_docs)]
 
+#[path = "support/presets.rs"]
+mod presets;
 mod util;
 
 use std::{error::Error, sync::Arc};
@@ -24,35 +26,16 @@ use util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand::rng();
+    let preset = presets::secure_16384()?;
 
     println!("=== BFV Homomorphic Multiplication ===");
-    println!("n=20 ciphernodes, k=1000, d=16384, 4×61-bit moduli, λ=28\n");
+    println!("n=20 ciphernodes, k=1000, d=16384, 5×51-bit moduli, λ=31\n");
 
-    let degree = 16384usize;
-    let plaintext_modulus = 1_000u64;
-
-    // Four 61-bit NTT primes, each ≡ 1 mod 32768 (= 2n, required for
-    // negacyclic NTT in Z[x]/(x^n+1) with n=16384).
-    let moduli = [
-        0x1fffffffffe10001u64,
-        0x1fffffffffe00001,
-        0x1fffffffffdd0001,
-        0x1fffffffffd08001,
-    ];
-
-    let params: Arc<bfv::BfvParameters> = timeit!(
-        "Parameter generation",
-        bfv::BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus)
-            .set_moduli(&moduli)
-            .set_variance(10)
-            // Var(e_1) for n=20, λ=28 from the parameter tool.
-            .set_error1_variance_str("4126466797617934249663747413333")?
-            .build_arc()?
-    );
+    let params: Arc<bfv::BfvParameters> =
+        timeit!("Parameter generation", preset.parameters.clone());
+    let plaintext_modulus = params.plaintext();
     println!(
-        "Moduli (4×61-bit): {:?}",
+        "Moduli (5×51-bit): {:?}",
         params
             .moduli()
             .iter()

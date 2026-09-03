@@ -28,10 +28,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ct2_rgsw: RGSWCiphertext = sk.try_encrypt(&pt2, &mut rng)?;
 
     let mut product = &ct1 * &ct2_rgsw;
-    let expected = &ct1 * &ct2;
+    let mut expected = &ct1 * &ct2;
 
     println!("Noise in product: {}", unsafe {
-        sk.measure_noise(&product)?
+        sk.measure_noise(&expected)?
     });
     println!("Size of product: {} bytes", product.to_bytes().len());
     println!("Noise in expected: {}", unsafe {
@@ -39,6 +39,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
 
     product.switch_to_level(product.max_switchable_level())?;
+    expected.switch_to_level(expected.max_switchable_level())?;
     println!("Noise in product: {}", unsafe {
         sk.measure_noise(&product)?
     });
