@@ -225,6 +225,9 @@ impl SmudgingNoiseGenerator {
     /// The coefficients are sampled uniformly from `[-B_sm, B_sm]`, as
     /// specified for the smudging noise in the trBFV paper.
     ///
+    /// Please note that one smudging error must be used only for one
+    /// decryption. Multiple usages can reveal key-share material.
+    ///
     /// # Returns
     /// A vector of uniformly sampled BigInt coefficients
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(

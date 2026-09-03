@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package fhers.ckks;
+
+message Ciphertext {
+  repeated bytes c = 1;
+  uint32 level = 2;
+  double scale = 3;
+}
+
+message PublicKey {
+  repeated bytes c = 1;
+}
+
+message SecretKey {
+  repeated sint64 coeffs = 1;
+}
+
+message Parameters {
+  uint32 degree = 1;
+  repeated uint64 moduli = 2;
+  uint32 variance = 3;
+  double scale = 4;
+  // Hybrid key switching (optional; absent/empty = disabled).
+  repeated uint64 special_moduli = 5;
+  uint32 dnum = 6;
+}

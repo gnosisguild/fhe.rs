@@ -5,10 +5,12 @@
 mod errors;
 
 pub mod bfv;
+pub mod ckks;
 pub mod lbfv;
 pub mod mbfv;
 pub mod proto;
 pub mod trbfv;
+pub mod trckks;
 pub use errors::{Error, ParametersError, Result, SerializationError, ThresholdError};
 
 // Test the source code included in the README.
