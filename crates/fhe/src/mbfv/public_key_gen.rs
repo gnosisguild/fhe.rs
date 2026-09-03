@@ -6,7 +6,6 @@ use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
 use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, Rng as RngCore};
 use zeroize::Zeroizing;
-//use serde::{Serialize, Deserialize};
 
 use crate::bfv::CommonRandomPoly;
 
@@ -113,20 +112,10 @@ impl PublicKeyShare {
             p0_share,
         })
     }
-    /// Convert this PublicKeyShare to an individual PublicKey without aggregation.
+    /// Convert this public-key share to an individual public key without aggregation.
     ///
-    /// This creates a PublicKey that can be used for individual encryption/decryption
-    /// with the corresponding SecretKey. The resulting PublicKey is NOT suitable for
-    /// threshold operations - use aggregation for that.
-    // pub fn to_public_key(&self) -> Result<PublicKey> {
-    //     Ok(PublicKey {
-    //         c: Ciphertext::new(
-    //             vec![self.p0_share.clone(), self.crp.poly.clone()],
-    //             &self.params,
-    //         )?,
-    //         params: self.params.clone(),
-    //     })
-    // }
+    /// The resulting key is not suitable for threshold operations; use aggregation
+    /// for that case.
     pub fn to_public_key(&self) -> Result<PublicKey> {
         let mut p0 = self.p0_share.clone();
         let mut p1 = self.crp.poly.clone();
@@ -172,38 +161,11 @@ impl Aggregate<PublicKeyShare> for PublicKey {
     }
 }
 
-// impl From<&PublicKeyShare> for PublicKeyShare {
-//     fn from(pks: &PublicKeyShare) -> Self {
-//         PublicKeyShareProto {
-//             c: Some(CiphertextProto::from(&p0_share.p0)),
-//         }
-//     }
-// }
-
 impl Serialize for PublicKeyShare {
     fn to_bytes(&self) -> Vec<u8> {
-        //PublicKeyShareProto::from(self).encode_to_vec()
-        // PublicKeyShare {
-        //     params: self.params,
-        //     crp: self.crp,
-        //     p0_share: self.p0_share,
-        // }
-        // .encode_to_vec()
         self.p0_share.to_bytes()
     }
 }
-
-// impl DeserializeWithCRP for PublicKeyShare {
-//     type Error = Error;
-
-//     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>, crp:
-// CommonRandomPoly) -> Result<Self> {         Ok(Self {
-//             params: params.clone(),
-//             crp: crp.clone(),
-//             p0_share,
-//         })
-//     }
-// }
 
 #[cfg(test)]
 mod tests {

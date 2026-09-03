@@ -364,9 +364,6 @@ pub struct BfvParametersBuilder {
     plaintext: BigUint,
     variance: usize,
     error1_variance: BigUint,
-    // CHANGE 1: Added flag to track if error1_variance was explicitly set
-    // This allows error1_variance to automatically follow variance unless
-    // the user explicitly sets a different value
     error1_variance_explicitly_set: bool,
     ciphertext_moduli: Vec<u64>,
     ciphertext_moduli_sizes: Vec<usize>,
@@ -389,10 +386,7 @@ impl BfvParametersBuilder {
             degree: Default::default(),
             plaintext: Default::default(),
             variance: 10,
-            error1_variance: BigUint::from(10u32), // Default to same as variance
-            // CHANGE 2: Initialize the flag to false
-            // Since error1_variance hasn't been explicitly set yet, it will
-            // track variance changes
+            error1_variance: BigUint::from(10u32),
             error1_variance_explicitly_set: false,
             ciphertext_moduli: Default::default(),
             ciphertext_moduli_sizes: Default::default(),
@@ -437,8 +431,6 @@ impl BfvParametersBuilder {
     /// Sets the error variance. Valid variances are between one and thirty-two.
     pub fn set_variance(&mut self, variance: usize) -> &mut Self {
         self.variance = variance;
-        // Only update error1_variance if it hasn't been explicitly set
-        // This maintains backward compatibility while allowing independent control
         if !self.error1_variance_explicitly_set {
             self.error1_variance = BigUint::from(variance as u32);
         }
@@ -446,9 +438,6 @@ impl BfvParametersBuilder {
     }
 
     /// Sets the error2 variance for threshold BFV using BigUint.
-    ///
-    /// CHANGE 4: Mark the flag as true when explicitly setting error1_variance
-    /// This prevents future set_variance() calls from overwriting this value
     pub fn set_error1_variance(&mut self, error1_variance: BigUint) -> &mut Self {
         self.error1_variance = error1_variance;
         self.error1_variance_explicitly_set = true;
@@ -457,8 +446,6 @@ impl BfvParametersBuilder {
 
     /// Sets the error2 variance for threshold BFV from a usize.
     /// Convenience method for smaller values.
-    ///
-    /// CHANGE 5: Also marks the flag as true
     pub fn set_error1_variance_usize(&mut self, error1_variance: usize) -> &mut Self {
         self.error1_variance = BigUint::from(error1_variance);
         self.error1_variance_explicitly_set = true;
@@ -467,8 +454,6 @@ impl BfvParametersBuilder {
 
     /// Sets the error2 variance for threshold BFV from a string representation.
     /// Useful for very large numbers that can't fit in standard integer types.
-    ///
-    /// CHANGE 6: Also marks the flag as true
     pub fn set_error1_variance_str(&mut self, error1_variance: &str) -> Result<&mut Self> {
         let big_uint = error1_variance.parse::<BigUint>().map_err(|_| {
             Error::ParametersError(ParametersError::InvalidError1Variance {

@@ -454,15 +454,21 @@ impl LBFVPublicKey {
 
         // Necessary checks
         if ciphertext_level > self.params.max_level() {
-            return Err(Error::DefaultError(
-                "Level is greater than the maximum level".to_string(),
-            ));
+            return Err(Error::InvalidLevel {
+                level: ciphertext_level,
+                min_level: 0,
+                max_level: self.params.max_level(),
+            });
         }
 
         // Note: this may seem redundant, but it's because in the future, we want to experiment with different key levels
         // for the public key.
         if key_level != 0 {
-            return Err(Error::DefaultError("Key level must be 0".to_string()));
+            return Err(Error::InvalidLevel {
+                level: key_level,
+                min_level: 0,
+                max_level: 0,
+            });
         }
 
         let key_ctx = self.params.context_at_level(key_level)?;
@@ -503,9 +509,10 @@ impl LBFVPublicKey {
             let poly = match rep {
                 Representation::NttShoup => poly.into_ntt_shoup(),
                 Representation::PowerBasis | Representation::Ntt => {
-                    return Err(Error::DefaultError(
-                        "l-BFV extract_b_polynomials requires NttShoup representation".to_string(),
-                    ));
+                    return Err(crate::EvaluationKeyError::UnsupportedRepresentation {
+                        found: format!("{rep:?}"),
+                    }
+                    .into());
                 }
             };
             b_polynomials.push(poly);
@@ -613,18 +620,17 @@ impl DeserializeParametrized for LBFVPublicKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: LBFVPublicKeyProto = Message::decode(bytes).map_err(|e| {
-            Error::SerializationError(SerializationError::ProtobufError {
-                message: e.to_string(),
+        let proto: LBFVPublicKeyProto = Message::decode(bytes).map_err(|_| {
+            Error::SerializationError(SerializationError::Decode {
+                object: crate::SerializedObject::PublicKey,
             })
         })?;
 
         if proto.c.is_empty() {
-            return Err(Error::SerializationError(
-                SerializationError::InvalidFormat {
-                    reason: "LBFV public key has no ciphertexts".to_string(),
-                },
-            ));
+            return Err(SerializationError::MissingField {
+                field: crate::SerializedField::PublicKeyCiphertext,
+            }
+            .into());
         }
 
         let proto_l = proto.l as usize;
@@ -669,11 +675,11 @@ impl DeserializeParametrized for LBFVPublicKey {
         for ct_proto in proto.c {
             let mut ct = Ciphertext::try_convert_from(&ct_proto, params)?;
             if ct.level != 0 {
-                return Err(Error::SerializationError(
-                    SerializationError::InvalidFormat {
-                        reason: "LBFV public key ciphertext must be at level 0".to_string(),
-                    },
-                ));
+                return Err(SerializationError::InvalidPublicKeyLevel {
+                    actual: ct.level,
+                    expected: 0,
+                }
+                .into());
             }
             // The polynomials of a public key should not allow for variable time
             // computation.
@@ -686,11 +692,11 @@ impl DeserializeParametrized for LBFVPublicKey {
         let seed = if !proto.seed.is_empty() {
             let mut seed_array = <ChaCha8Rng as SeedableRng>::Seed::default();
             if proto.seed.len() != seed_array.len() {
-                return Err(Error::SerializationError(
-                    SerializationError::InvalidFormat {
-                        reason: "Invalid LBFV public key seed length".to_string(),
-                    },
-                ));
+                return Err(SerializationError::InvalidPublicKeySeedLength {
+                    actual: proto.seed.len(),
+                    expected: seed_array.len(),
+                }
+                .into());
             }
             seed_array.copy_from_slice(&proto.seed);
             Some(seed_array)

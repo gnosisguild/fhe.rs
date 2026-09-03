@@ -17,7 +17,7 @@
  */
 
 use crate::bfv::{BfvParameters, Ciphertext, KeySwitchingKey, SecretKey};
-use crate::{Error, Result};
+use crate::{Error, Result, SerializationError};
 use fhe_math::rq::{
     Context, Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher,
     traits::TryConvertFrom as TryConvertFromPoly,
@@ -370,6 +370,19 @@ impl LBFVRelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
+        if ciphertext_level < key_level {
+            return Err(Error::InvalidLevel {
+                level: ciphertext_level,
+                min_level: key_level,
+                max_level: sk.params.max_level(),
+            });
+        }
+        if sk.params.context_at_level(key_level)?.moduli().len() == 1
+            || sk.params.context_at_level(ciphertext_level)?.moduli().len() == 1
+        {
+            return Err(crate::EvaluationKeyError::KeySwitchingNotSupported.into());
+        }
+
         let d1_seed = d1_seed.unwrap_or_else(|| {
             let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
             rng.fill(&mut seed);
@@ -529,7 +542,11 @@ impl LBFVRelinearizationKey {
                 Error::DefaultError("ciphertext_level exceeds max_level in l()".to_string())
             })?;
         if expected != self.b_vec.len() {
-            return Err(Error::DefaultError("'l' is not consistent.".to_string()));
+            return Err(crate::EvaluationKeyError::InvalidDecompositionLength {
+                actual: self.b_vec.len(),
+                expected,
+            }
+            .into());
         }
         Ok(self.b_vec.len())
     }
@@ -567,13 +584,18 @@ impl LBFVRelinearizationKey {
     #[allow(clippy::indexing_slicing)] // ct.c checked to have exactly 3 elements above; c[0..1] always valid BFV invariant
     pub fn relinearizes(&self, ct: &mut Ciphertext) -> Result<()> {
         if ct.c.len() != 3 {
-            Err(Error::DefaultError(
-                "Only supports relinearization of ciphertext with 3 parts".to_string(),
-            ))
+            Err(crate::CiphertextError::InvalidPolynomialCount {
+                operation: crate::CiphertextOperation::Relinearization,
+                actual: ct.c.len(),
+                expected: 3,
+            }
+            .into())
         } else if ct.level != self.ciphertext_level() {
-            Err(Error::DefaultError(
-                "Ciphertext has incorrect level".to_string(),
-            ))
+            Err(Error::InvalidLevel {
+                level: ct.level,
+                min_level: self.ciphertext_level(),
+                max_level: self.ciphertext_level(),
+            })
         } else {
             let ciphertext_ctx = self.ciphertext_ctx();
             let c2_hat = ct.c[2].clone().into_power_basis();
@@ -698,32 +720,33 @@ impl LBFVRelinearizationKey {
 
         // Validate equal context and representation
         if poly.ctx() != &ciphertext_ctx {
-            return Err(Error::DefaultError(
-                "The input polynomial does not have the correct context.".to_string(),
-            ));
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::RelinearizationKey,
+            });
         }
         if arr.len() != ciphertext_ctx.moduli().len() {
-            return Err(Error::DefaultError(
-                "The input array of polynomials does not have the correct length.".to_string(),
-            ));
+            return Err(crate::EvaluationKeyError::InvalidDecompositionLength {
+                actual: arr.len(),
+                expected: ciphertext_ctx.moduli().len(),
+            }
+            .into());
         }
         // Product-sum of decomposed polynomial and array of polynomials
         let mut out = Poly::<Ntt>::zero(&ksk_ctx);
         for (poly_i_coefficients, arr_i) in izip!(poly.coefficients().outer_iter(), arr.iter()) {
             if arr_i.ctx() != &ksk_ctx {
-                return Err(Error::DefaultError(
-                    "The input array of polynomials does not have the correct context.".to_string(),
-                ));
+                return Err(Error::ParameterMismatch {
+                    left: crate::ParameterSource::Polynomial,
+                    right: crate::ParameterSource::KeySwitchingKey,
+                });
             }
 
             let poly_i =
                 Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
-                    poly_i_coefficients.as_slice().ok_or_else(|| {
-                        Error::DefaultError(
-                            "Non-contiguous coefficient array in decompose_poly_and_product_sum"
-                                .to_string(),
-                        )
-                    })?,
+                    poly_i_coefficients
+                        .as_slice()
+                        .ok_or(fhe_math::Error::NonContiguousCoefficients)?,
                     &ksk_ctx,
                     fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public()),
                 );
@@ -760,20 +783,24 @@ impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
         value: &LBFVRelinearizationKeyProto,
         params: &Arc<BfvParameters>,
     ) -> Result<Self> {
-        let ksk_r_to_s = value
-            .ksk_r_to_s
-            .as_ref()
-            .ok_or_else(|| {
-                Error::DefaultError("Invalid serialization: missing ksk_r_to_s".to_string())
-            })
-            .and_then(|ksk| KeySwitchingKey::try_convert_from(ksk, params))?;
-        let ksk_s_to_r = value
-            .ksk_s_to_r
-            .as_ref()
-            .ok_or_else(|| {
-                Error::DefaultError("Invalid serialization: missing ksk_s_to_r".to_string())
-            })
-            .and_then(|ksk| KeySwitchingKey::try_convert_from(ksk, params))?;
+        let ksk_r_to_s = KeySwitchingKey::try_convert_from(
+            value
+                .ksk_r_to_s
+                .as_ref()
+                .ok_or(SerializationError::MissingField {
+                    field: crate::SerializedField::RelinearizationKeySwitchingKey,
+                })?,
+            params,
+        )?;
+        let ksk_s_to_r = KeySwitchingKey::try_convert_from(
+            value
+                .ksk_s_to_r
+                .as_ref()
+                .ok_or(SerializationError::MissingField {
+                    field: crate::SerializedField::RelinearizationKeySwitchingKey,
+                })?,
+            params,
+        )?;
 
         // Reject protos that carry a binding — callers should use trlbfv instead.
         if value.binding.is_some() {
@@ -871,9 +898,9 @@ impl DeserializeParametrized for LBFVRelinearizationKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
-        let rk = Message::decode(bytes).map_err(|e| {
-            Error::SerializationError(crate::SerializationError::ProtobufError {
-                message: e.to_string(),
+        let rk = Message::decode(bytes).map_err(|_| {
+            Error::SerializationError(crate::SerializationError::Decode {
+                object: crate::SerializedObject::RelinearizationKey,
             })
         })?;
         LBFVRelinearizationKey::try_convert_from(&rk, params)

@@ -9,5 +9,5 @@ This repository contains the `fhe.rs` library, a cryptographic library in Rust f
 - Add or update tests for the code you change, even if nobody asked.
 
 ## PR instructions
-- Title format: [agent] <Title>
+- Use Conventional Commits for commit messages and pull request titles, such as `refactor: simplify error handling`.
 - Always run `cargo test`, `cargo +nightly fmt --all` and `cargo clippy --all-targets -- -D warnings` before committing.

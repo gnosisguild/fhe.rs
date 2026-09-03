@@ -276,10 +276,9 @@ impl ShareManager {
         // the workspace convention it stays fallible rather than indexed.
         for (party_idx, item) in sk_sss_collected.iter().enumerate() {
             for (row, item_row) in item.rows().into_iter().enumerate() {
-                let q_i =
-                    self.params.moduli().get(row).copied().ok_or_else(|| {
-                        Error::DefaultError("modulus index out of range".to_string())
-                    })?;
+                let q_i = self.params.moduli().get(row).copied().ok_or_else(|| {
+                    Error::malformed_shares(party_idx, "modulus index out of range".to_string())
+                })?;
                 for (col, &value) in item_row.iter().enumerate() {
                     if value >= q_i {
                         return Err(Error::malformed_shares(
@@ -535,8 +534,8 @@ impl ShareManager {
             .collect();
         let scalers = scalers?;
 
-        let params = ciphertext.params.clone();
-        let ptxt_u64 = params.plaintext.as_u64().ok_or_else(|| {
+        let par = ciphertext.params.clone();
+        let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
             Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
                 reason: "threshold BFV decrypt_from_shares requires a u64 plaintext modulus"
                     .to_string(),
@@ -555,8 +554,8 @@ impl ShareManager {
                 .map(|vi| vi + ptxt_u64)
                 .collect_vec(),
         );
-        let mut w = v[..params.degree()].to_vec();
-        let q = Modulus::new(params.moduli()[0]).map_err(Error::MathError)?;
+        let mut w = v[..par.degree()].to_vec();
+        let q = Modulus::new(par.moduli()[0]).map_err(Error::MathError)?;
         q.reduce_vec(&mut w);
         Modulus::new(ptxt_u64)
             .map_err(Error::MathError)?
@@ -566,7 +565,7 @@ impl ShareManager {
             Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt();
 
         let pt = Plaintext {
-            params: params.clone(),
+            params: par.clone(),
             encoding: None,
             poly_ntt: poly,
         };

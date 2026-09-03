@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - main
+      - core/main
 
 jobs:
   check:
@@ -51,7 +52,7 @@ jobs:
           toolchain: stable
           override: true
       - uses: actions/checkout@v6
-       - uses: actions-rs/cargo@v1
-         with:
-           command: test
-           args: --release --workspace ${{ matrix.features == 'all' && '--all-features' || '' }}
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --release --workspace ${{ matrix.features == 'all' && '--all-features' || '' }}

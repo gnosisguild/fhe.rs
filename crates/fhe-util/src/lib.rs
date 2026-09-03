@@ -569,16 +569,7 @@ mod tests {
 
     #[test]
     fn inv_kats() {
-        // KATs for inversion generated in Sage using the following code.
-        /*
-        sage: for p in range(2, 1000, 7):
-        ....:     for a in range(1, 30, 3):
-        ....:         if gcd(a, p) == 1:
-        ....:             i = ZZ(a)^(-1) % p
-        ....:             print("assert_eq!(inverse({}, {}), Some({}));".format(a, p, i))
-        ....:         else:
-        ....:             print("assert!(inverse({}, {}).is_none());".format(a, p))
-         */
+        // These known-answer cases were generated independently in Sage.
         assert_eq!(inverse(1, 2), Some(1));
         assert!(inverse(4, 2).is_none());
         assert_eq!(inverse(7, 2), Some(1));

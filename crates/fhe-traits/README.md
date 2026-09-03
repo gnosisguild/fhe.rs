@@ -1,14 +1,14 @@
-# fhe-traits [![crate version](https://img.shields.io/crates/v/fhe-traits.svg)](https://crates.io/crates/fhe-traits) [![documentation](https://docs.rs/fhe-traits/badge.svg)](https://docs.rs/fhe-traits)
+# fhe-traits [![fhe-traits version](https://img.shields.io/badge/fhe--traits-0.3.0-blue.svg)](https://github.com/gnosisguild/fhe.rs/tree/core/main/crates/fhe-traits) [![documentation](https://docs.rs/fhe-traits/badge.svg)](https://docs.rs/fhe-traits)
 
 Traits defining the interface for fully homomorphic encryption types and operations.
 
-This crate provides common abstractions for parameters, plaintext and ciphertext representations, encoding, encryption, decryption and serialization used throughout the [`fhe.rs`](https://github.com/tlepoint/fhe.rs) crates.
+This crate provides common abstractions for parameters, plaintext and ciphertext representations, encoding, encryption, decryption and serialization used throughout the [`fhe.rs`](https://github.com/gnosisguild/fhe.rs) crates.
 
 ## Installation
 
 ```toml
 [dependencies]
-fhe-traits = "0.1.1"
+fhe-traits = { git = "https://github.com/gnosisguild/fhe.rs", branch = "core/main" }
 ```
 
 ## Testing
