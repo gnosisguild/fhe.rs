@@ -80,16 +80,13 @@ fn parse_proto(
     }
 
     let mut index = 0;
-    let power_basis_coefficients: Vec<u64> = ctx
-        .q
-        .iter()
-        .flat_map(|qi| {
-            let size = qi.serialization_length(degree);
-            let v = qi.deserialize_vec(&value.coefficients[index..index + size]);
-            index += size;
-            v
-        })
-        .collect();
+    let mut power_basis_coefficients: Vec<u64> = Vec::with_capacity(degree * ctx.q.len());
+    for qi in ctx.q.iter() {
+        let size = qi.serialization_length(degree);
+        power_basis_coefficients
+            .extend(qi.deserialize_vec(&value.coefficients[index..index + size])?);
+        index += size;
+    }
 
     Ok((
         representation_from_proto,
@@ -148,6 +145,14 @@ impl TryConvertFrom<&Rq> for Poly<NttShoup> {
 impl TryConvertFrom<Vec<u64>> for Poly<PowerBasis> {
     fn try_convert_from(mut v: Vec<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         if v.len() == ctx.q.len() * ctx.degree {
+            for (row, qi) in v.chunks(ctx.degree).zip(ctx.q.iter()) {
+                if let Some(&value) = row.iter().find(|&&x| x >= **qi) {
+                    return Err(Error::NonCanonicalValue {
+                        value,
+                        modulus: **qi,
+                    });
+                }
+            }
             let coefficients = Array2::from_shape_vec((ctx.q.len(), ctx.degree), v).unwrap();
             Ok(Self {
                 ctx: ctx.clone(),
@@ -648,6 +653,29 @@ mod tests {
                 Poly::<Ntt>::try_convert_from(vec![0; 16], &ctx, false)?,
                 Poly::<Ntt>::zero(&ctx)
             );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn try_convert_from_vec_rejects_noncanonical_full_length_values() -> Result<(), Box<dyn Error>>
+    {
+        let degree = 16;
+        for modulus in MODULI {
+            let ctx = Arc::new(Context::new(&[*modulus], degree)?);
+            for noncanonical in [*modulus, *modulus + 1, u64::MAX] {
+                let mut v = vec![0u64; degree];
+                v[0] = noncanonical;
+                let err = Poly::<PowerBasis>::try_convert_from(v, &ctx, false).unwrap_err();
+                assert_eq!(
+                    err,
+                    CrateError::NonCanonicalValue {
+                        value: noncanonical,
+                        modulus: *modulus,
+                    }
+                );
+            }
         }
 
         Ok(())

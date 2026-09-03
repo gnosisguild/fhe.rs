@@ -29,7 +29,7 @@ use std::sync::Arc;
 /// A larger lambda gives a stronger guarantee, not a computational one.
 /// [`MIN_SECURE_LAMBDA`] is a policy choice, not derived from a cryptographic
 /// reduction.
-pub const MIN_SECURE_LAMBDA: usize = 35;
+pub const MIN_SECURE_LAMBDA: usize = 31;
 
 /// Maximum lambda value beyond which `2^(lambda + 1) * d * B_C` is
 /// computationally infeasible to represent. Rejecting values above this

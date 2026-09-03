@@ -465,15 +465,13 @@ impl FheDecoder<Plaintext> for Vec<i64> {
                 .map(|value| -> Result<i64> {
                     if value >= &threshold {
                         let value_int = BigInt::from_biguint(Sign::Plus, value.clone());
-                        (value_int - &modulus_int).to_i64().ok_or_else(|| {
-                            Error::DefaultError(
-                                "Centered plaintext value too large for i64".to_string(),
-                            )
-                        })
+                        (value_int - &modulus_int)
+                            .to_i64()
+                            .ok_or(crate::PlaintextError::ValueTooLargeForI64.into())
                     } else {
-                        value.to_i64().ok_or_else(|| {
-                            Error::DefaultError("Plaintext value too large for i64".to_string())
-                        })
+                        value
+                            .to_i64()
+                            .ok_or(crate::PlaintextError::ValueTooLargeForI64.into())
                     }
                 })
                 .collect::<Result<Vec<_>>>()?)
@@ -604,7 +602,12 @@ mod tests {
         // must return an error, not panic.
         let huge_vals = vec![&p_val / 2u32];
         let plaintext = Plaintext::try_encode(&huge_vals, Encoding::poly(), &params)?;
-        assert!(Vec::<i64>::try_decode(&plaintext, Encoding::poly()).is_err());
+        assert!(matches!(
+            Vec::<i64>::try_decode(&plaintext, Encoding::poly()),
+            Err(crate::Error::Plaintext(
+                crate::PlaintextError::ValueTooLargeForI64
+            ))
+        ));
 
         Ok(())
     }

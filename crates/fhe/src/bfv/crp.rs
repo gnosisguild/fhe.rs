@@ -182,19 +182,20 @@ impl CommonRandomPolyVec {
     ) -> Result<Self> {
         let expected_l = params.moduli().len();
         if polys.len() != expected_l {
-            return Err(crate::Error::DefaultError(format!(
-                "CommonRandomPolyVec expected {} polynomials (one per modulus), got {}",
-                expected_l,
-                polys.len()
-            )));
+            return Err(crate::MultipartyError::InvalidCommonRandomPolynomialCount {
+                actual: polys.len(),
+                expected: expected_l,
+            }
+            .into());
         }
 
         let ctx0 = params.context_at_level(0)?;
-        for (i, p) in polys.iter().enumerate() {
+        for p in &polys {
             if p.ctx() != ctx0 {
-                return Err(crate::Error::DefaultError(format!(
-                    "CommonRandomPolyVec polynomial {i} has an incorrect context"
-                )));
+                return Err(crate::Error::ParameterMismatch {
+                    left: crate::ParameterSource::Polynomial,
+                    right: crate::ParameterSource::Parameters,
+                });
             }
         }
 
@@ -206,9 +207,10 @@ impl CommonRandomPolyVec {
                 seed_rng.fill(&mut seed_i);
                 let expected = Poly::<Ntt>::random_from_seed(ctx0, seed_i);
                 if expected != *poly {
-                    return Err(crate::Error::DefaultError(format!(
-                        "CommonRandomPolyVec seed does not match the concrete polynomial at index {i}"
-                    )));
+                    return Err(crate::MultipartyError::CommonRandomPolynomialSeedMismatch {
+                        index: i,
+                    }
+                    .into());
                 }
             }
         }
@@ -336,13 +338,23 @@ mod proto_tests {
         let params = BfvParameters::default_arc(6, 8);
 
         let too_few: Vec<Poly<Ntt>> = vec![];
-        assert!(CommonRandomPolyVec::from_polys(&params, too_few, None).is_err());
+        assert!(matches!(
+            CommonRandomPolyVec::from_polys(&params, too_few, None),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::InvalidCommonRandomPolynomialCount { .. }
+            ))
+        ));
 
         let ctx0 = params.context_at_level(0).unwrap();
         let too_many: Vec<Poly<Ntt>> = (0..params.moduli().len() + 1)
             .map(|_| Poly::<Ntt>::random(ctx0, &mut rng))
             .collect();
-        assert!(CommonRandomPolyVec::from_polys(&params, too_many, None).is_err());
+        assert!(matches!(
+            CommonRandomPolyVec::from_polys(&params, too_many, None),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::InvalidCommonRandomPolynomialCount { .. }
+            ))
+        ));
     }
 
     #[test]
@@ -360,7 +372,12 @@ mod proto_tests {
         // A different seed must be rejected.
         let mut other_seed = seed;
         other_seed[0] ^= 0xff;
-        assert!(CommonRandomPolyVec::from_polys(&params, polys, Some(other_seed)).is_err());
+        assert!(matches!(
+            CommonRandomPolyVec::from_polys(&params, polys, Some(other_seed)),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::CommonRandomPolynomialSeedMismatch { index: 0 }
+            ))
+        ));
 
         // The correct seed must be accepted.
         let valid_from_polys =

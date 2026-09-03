@@ -44,12 +44,6 @@ pub trait FheParametrized {
     type Parameters: FheParameters;
 }
 
-// /// Indicates that an object is parametrized.
-// pub trait FheCommonRandomPoly {
-//     /// The type of the FHE parameters.
-//     type CommonRandomPoly: FheCommonRandomPolys;
-// }
-
 /// Indicates that Self parameters can be switched.
 pub trait FheParametersSwitchable<S: FheParametrized>
 where
@@ -87,7 +81,7 @@ where
     fn try_encode(
         value: V,
         encoding: Self::Encoding,
-        par: &Arc<Self::Parameters>,
+        params: &Arc<Self::Parameters>,
     ) -> Result<Self, Self::Error>;
 }
 
@@ -106,7 +100,7 @@ where
     fn try_encode_vt(
         value: V,
         encoding: Self::Encoding,
-        par: &Arc<Self::Parameters>,
+        params: &Arc<Self::Parameters>,
         variable_time: VariableTime,
     ) -> Result<Self, Self::Error>;
 }
@@ -175,7 +169,7 @@ where
     type Error;
 
     /// Attempt to deserialize from a vector of bytes
-    fn from_bytes(bytes: &[u8], par: &Arc<Self::Parameters>) -> Result<Self, Self::Error>;
+    fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self, Self::Error>;
 }
 
 /// Deserialization setting an explicit context.
@@ -220,7 +214,7 @@ where
     /// Attempt to deserialize from a vector of bytes
     fn from_bytes(
         bytes: &[u8],
-        par: &Arc<Self::Parameters>,
+        params: &Arc<Self::Parameters>,
         crp: Self::CommonRandomPoly,
     ) -> Result<Self, Self::Error>;
 }

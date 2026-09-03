@@ -243,6 +243,9 @@ pub enum PlaintextError {
 
     #[error("Plaintext value does not fit in u64")]
     ValueTooLargeForU64,
+
+    #[error("Plaintext value does not fit in i64")]
+    ValueTooLargeForI64,
 }
 
 /// Plaintext encoding failures.
@@ -282,6 +285,17 @@ pub enum EvaluationKeyError {
 
     #[error("Key-switching key contains no components")]
     EmptyKeySwitchingComponents,
+
+    #[error(
+        "Ciphertext level {ciphertext_level} must be greater than or equal to key level {key_level}"
+    )]
+    InvalidLevelOrder {
+        ciphertext_level: usize,
+        key_level: usize,
+    },
+
+    #[error("Garner coefficient {index} is not available")]
+    MissingGarnerCoefficient { index: usize },
 
     #[error("Invalid rotation step {step}: must be in range [{min}, {max}]")]
     InvalidRotationStep { step: usize, min: usize, max: usize },
@@ -338,6 +352,9 @@ pub enum MultipartyError {
 
     #[error("Expected {expected} common random polynomials, got {actual}")]
     InvalidCommonRandomPolynomialCount { actual: usize, expected: usize },
+
+    #[error("Common random polynomial seed does not match polynomial at index {index}")]
+    CommonRandomPolynomialSeedMismatch { index: usize },
 
     #[error("Round-two relinearization share is missing its round-one aggregation")]
     MissingRelinearizationRoundOneShare,
@@ -403,6 +420,14 @@ pub enum SerializationError {
     /// An I/O operation failed.
     #[error("Serialization I/O error: {kind:?}")]
     Io { kind: std::io::ErrorKind },
+
+    /// Indicates invalid serialized data format
+    #[error("Invalid serialized format: {reason}")]
+    InvalidFormat { reason: String },
+
+    /// Indicates protobuf encoding/decoding error
+    #[error("Protobuf error: {message}")]
+    ProtobufError { message: String },
 }
 
 impl From<std::io::Error> for SerializationError {
