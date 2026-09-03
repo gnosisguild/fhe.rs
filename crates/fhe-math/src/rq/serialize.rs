@@ -34,6 +34,7 @@ mod tests {
     use rand::rng;
 
     use crate::rq::{Context, Ntt, NttShoup, Poly, PowerBasis, traits::TryConvertFrom};
+    use crate::zq::Modulus;
     use crate::{
         Error, PolynomialSerializationError,
         proto::rq::{Representation as RepresentationProto, Rq},
@@ -121,6 +122,43 @@ mod tests {
                 expected: _
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_noncanonical_coefficient_rejected() -> Result<(), Box<dyn StdError>> {
+        // A malicious/malformed payload can pack any value representable in
+        // `nbits = ceil(log2(p))` bits, including values in `[p, 2^nbits)`.
+        // Such noncanonical representatives must be rejected, not silently
+        // accepted as if they were already reduced mod p.
+        let degree = 16;
+        let qi = Q[0];
+        let modulus = Modulus::new(qi)?;
+        let ctx = Arc::new(Context::new(&[qi], degree)?);
+        let p_nbits = modulus.serialization_length(degree) * 8 / degree;
+
+        for noncanonical in [qi, qi + 1, (1u64 << p_nbits) - 1] {
+            let mut values = vec![0u64; degree];
+            values[0] = noncanonical;
+            let coefficients = modulus.serialize_vec(&values);
+
+            let proto = Rq {
+                representation: RepresentationProto::Powerbasis as i32,
+                degree: degree as u32,
+                coefficients,
+                allow_variable_time: false,
+            };
+
+            let bytes = proto.encode_to_vec();
+            let err = Poly::<PowerBasis>::from_bytes(&bytes, &ctx).unwrap_err();
+            assert_eq!(
+                err,
+                Error::NonCanonicalValue {
+                    value: noncanonical,
+                    modulus: qi,
+                }
+            );
+        }
         Ok(())
     }
 

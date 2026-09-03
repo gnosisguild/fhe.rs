@@ -814,10 +814,20 @@ impl Modulus {
     }
 
     /// Deserialize a vector of bytes into a vector of elements mod p.
-    #[must_use]
-    pub fn deserialize_vec(&self, b: &[u8]) -> Vec<u64> {
+    ///
+    /// Returns an error if any decoded value is not a canonical representative
+    /// in `[0, p)`; the packed `nbits` encoding can otherwise represent values
+    /// up to `2^nbits - 1`, which may exceed `p`.
+    pub fn deserialize_vec(&self, b: &[u8]) -> Result<Vec<u64>> {
         let p_nbits = 64 - (self.p - 1).leading_zeros() as usize;
-        transcode_from_bytes(b, p_nbits)
+        let v = transcode_from_bytes(b, p_nbits);
+        if let Some(&value) = v.iter().find(|&&x| x >= self.p) {
+            return Err(Error::NonCanonicalValue {
+                value,
+                modulus: self.p,
+            });
+        }
+        Ok(v)
     }
 }
 
@@ -1115,7 +1125,7 @@ mod tests {
         fn serialize(p in valid_moduli(), mut a in prop_vec(any::<u64>(), 8)) {
             p.reduce_vec(&mut a);
             let b = p.serialize_vec(&a);
-            let c = p.deserialize_vec(&b);
+            let c = p.deserialize_vec(&b).unwrap();
             prop_assert_eq!(a, c);
         }
 
@@ -1218,6 +1228,29 @@ mod tests {
                     assert_eq!(q.mul(a, b.unwrap()), 1)
                 }
             }
+        }
+    }
+
+    #[test]
+    fn deserialize_vec_rejects_noncanonical_values() {
+        // p = 1153 has nbits = 11, so the packed encoding can represent values
+        // up to 2^11 - 1 = 2047, well above p.
+        let p = Modulus::new(1153).unwrap();
+        let p_nbits = 64 - (*p - 1).leading_zeros() as usize;
+        assert_eq!(p_nbits, 11);
+
+        for noncanonical in [*p, *p + 1, (1u64 << p_nbits) - 1] {
+            let mut values = vec![0u64; 8];
+            values[0] = noncanonical;
+            let bytes = super::transcode_to_bytes(&values, p_nbits);
+            let err = p.deserialize_vec(&bytes).unwrap_err();
+            assert_eq!(
+                err,
+                super::Error::NonCanonicalValue {
+                    value: noncanonical,
+                    modulus: *p,
+                }
+            );
         }
     }
 }
