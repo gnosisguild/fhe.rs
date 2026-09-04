@@ -105,6 +105,10 @@ required-features = ["experimental-mbfv"]
 name = "trbfv_secure_e2e"
 required-features = ["experimental-mbfv"]
 
+[[test]]
+name = "trbfv_contract"
+required-features = ["experimental-mbfv"]
+
 [[example]]
 name = "trbfv_mul_bfv_share_binding"
 required-features = ["experimental-mbfv"]

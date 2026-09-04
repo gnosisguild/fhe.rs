@@ -12,6 +12,42 @@ already happened out of band.
 
 This module enables distributed decryption between `n` parties without necessarily involving all of them: any `threshold + 1` of the `n` parties can decrypt a ciphertext, while any coalition of at most `threshold` parties learns nothing. The threshold must be exactly `(n-1)/2` (integer division), the maximal corruption tolerance under an honest majority — see `config.rs` for the derivation.
 
+## Implementation Contract
+
+This crate exposes the cryptographic component used by a threshold FHE
+application. It does not expose the complete multiparty protocol described in
+the paper. The following table is the boundary for callers and integrators:
+
+| Paper or application component | Responsibility |
+| ------------------------------ | -------------- |
+| BFV and l-BFV operations (Sections 4 and 6) | Implemented by `fhe.rs`. |
+| Shamir sharing, share aggregation, smudging bounds, and threshold decryption | Implemented by `fhe.rs`. |
+| DKG, PVSS, FLSS, and GURS | Must be supplied externally. |
+| Authenticated transport, broadcast, retries, and identifiable aborts | Must be supplied externally. |
+| Committee membership, accepted-party policy, and application lifecycle | Must be supplied externally. |
+| ZK proofs and application wire formats | Must be supplied externally. |
+
+The public `TRBFV` flow is:
+
+1. Create a `TRBFV` instance with BFV parameters.
+2. Generate and distribute Shamir shares for each party's secret contribution.
+3. Aggregate the received contributions for the same externally agreed party
+   set.
+4. Compute one decryption share per decrypting party.
+5. Reconstruct with exactly `threshold + 1` distinct 1-based party IDs.
+
+The examples in `crates/fhe/examples/` simulate the external setup and share
+transport locally. They demonstrate the supported component flow, but they do
+not implement DKG, authenticated broadcast, PVSS, ZK validation, or the paper's
+robustness protocol.
+
+Paper-conforming deployments use odd `n` with `n = 2t + 1`. The current API
+also accepts even `n` for compatibility; those deployments are an
+implementation-specific extension and must not be presented as covered by the
+paper's theorem. The API likewise does not bind a contribution matrix to a
+party identity or session, so callers must enforce a common participant set and
+identity/session binding at their protocol boundary.
+
 ## Architecture
 
 The module follows a modular design with clear separation of concerns:

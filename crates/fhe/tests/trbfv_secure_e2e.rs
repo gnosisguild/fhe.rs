@@ -18,6 +18,9 @@ use ndarray::{Array, Array2, ArrayView};
 use num_bigint::BigInt;
 use rayon::prelude::*;
 
+#[path = "support/standard_8192.rs"]
+mod standard_8192;
+
 // Secure preset (degree 8192), as used in production (enclave).
 const DEGREE: usize = 8192;
 const NUM_PARTIES: usize = 20;
@@ -28,7 +31,6 @@ const NUM_SUMMED: usize = 50;
 // Threshold BFV parameters.
 const TRBFV_PLAINTEXT_MODULUS: u64 = 1_000_000;
 const TRBFV_MODULI: &[u64] = &[0x02000000015a0001, 0x0200000001460001, 0x0200000001210001];
-const TRBFV_ERROR1_VARIANCE: &str = "18148392902450051384713312396360971277653333";
 
 // DKG parameters: BFV instance for encrypted Shamir share transport. The
 // plaintext modulus equals the largest trBFV modulus (0x02000000015a0001).
@@ -36,15 +38,7 @@ const DKG_PLAINTEXT_MODULUS: u64 = 144115188098531329;
 const DKG_MODULI: &[u64] = &[0x0800000000004001, 0x0800000000044001];
 
 fn trbfv_params() -> Arc<BfvParameters> {
-    bfv::BfvParametersBuilder::new()
-        .set_degree(DEGREE)
-        .set_plaintext_modulus(TRBFV_PLAINTEXT_MODULUS)
-        .set_moduli(TRBFV_MODULI)
-        .set_variance(10)
-        .set_error1_variance_str(TRBFV_ERROR1_VARIANCE)
-        .unwrap()
-        .build_arc()
-        .unwrap()
+    standard_8192::parameters()
 }
 
 fn dkg_params() -> Arc<BfvParameters> {

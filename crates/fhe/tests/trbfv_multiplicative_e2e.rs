@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use fhe::aggregate::AggregateIter;
-use fhe::bfv::{BfvParameters, BfvParametersBuilder, Ciphertext, Encoding, Plaintext, SecretKey};
+use fhe::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
 use fhe::trbfv::{Lambda, ShareManager, TRBFV};
 use fhe::trlbfv::{
     AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
@@ -25,6 +25,9 @@ use num_bigint::BigInt;
 use rand::{Rng, SeedableRng, rng};
 use rand_chacha::ChaCha8Rng;
 
+#[path = "support/toy.rs"]
+mod toy_parameters;
+
 /// Small parameters for fast depth-1 multiplicative e2e testing.
 ///
 /// The relinearization error bound contains the largest modulus `b_g` as a
@@ -33,13 +36,7 @@ use rand_chacha::ChaCha8Rng;
 /// them to provide Q budget, keeping `b_g` small enough for the
 /// multiplicative recurrence to produce a feasible smudging bound.
 fn mul_params() -> Arc<BfvParameters> {
-    BfvParametersBuilder::new()
-        .set_degree(64)
-        .set_plaintext_modulus(1153)
-        .set_moduli_sizes(&[40; 4])
-        .set_variance(1)
-        .build_arc()
-        .unwrap()
+    toy_parameters::parameters()
 }
 
 /// Paper-conforming trBFV config: n = 2t + 1 = 3, threshold t = 1.
