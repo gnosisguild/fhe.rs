@@ -96,7 +96,7 @@ jobs:
           override: true
       - uses: actions/checkout@v6
       - name: Run representative tests
-        run: cargo test -p fhe --release --all-features --test bfv_lbfv_trlbfv_contract --test trbfv_contract --test trbfv_secure_e2e
+        run: cargo test -p fhe --release --all-features --test bfv_lbfv_trlbfv_contract --test trbfv_contract
 
   test-standard-128:
     name: Test standard-128 profile

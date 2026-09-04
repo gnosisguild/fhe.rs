@@ -27,7 +27,7 @@ pub struct Preset {
 }
 
 /// Build the Secure-8192 threshold BFV preset.
-pub fn secure_8192() -> Result<Preset> {
+pub fn secure8192() -> Result<Preset> {
     let parameters = BfvParametersBuilder::new()
         .set_degree(8192)
         .set_plaintext_modulus(1_000_000)
