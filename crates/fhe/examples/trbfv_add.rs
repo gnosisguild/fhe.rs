@@ -7,13 +7,15 @@
 
 #![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 
+#[path = "support/presets.rs"]
+mod presets;
 mod util;
 
 use std::{env, error::Error, process::exit, sync::Arc};
 
 use console::style;
 use fhe::{
-    bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
+    bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
     trbfv::{Lambda, ShareManager, TRBFV},
 };
@@ -49,21 +51,9 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // BFV parameters
-    let degree = 8192;
-    let plaintext_modulus: u64 = 1_000_000;
-    let moduli = vec![0x0400000000c00001, 0x0400000000a40001, 0x0400000000990001];
-
-    let params = timeit!(
-        "Parameters generation",
-        bfv::BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus)
-            .set_moduli(&moduli)
-            .set_variance(10)
-            .set_error1_variance_str("17723039943798878305384094137071261013333")?
-            .build_arc()?
-    );
+    let preset = presets::secure_8192()?;
+    let params = timeit!("Parameters generation", preset.parameters.clone());
+    let degree = params.degree();
 
     // This executable is a command line tool which enables to specify
     // trBFV summations with party and threshold sizes.
@@ -75,9 +65,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut num_summed = 50;
-    let mut num_parties = 7;
-    let mut threshold = 3;
-    let mut lambda = 45;
+    let mut num_parties = preset.num_parties;
+    let mut threshold = preset.threshold;
+    let mut lambda = preset.lambda;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.

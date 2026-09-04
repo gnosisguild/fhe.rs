@@ -1,12 +1,13 @@
 //! Benchmarks for threshold BFV share operations.
 use criterion::{Criterion, criterion_group, criterion_main};
+#[path = "../examples/support/presets.rs"]
+mod presets;
 use fhe::bfv::CommonRandomPoly;
-use fhe::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
+use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::PublicKeyShare;
 use fhe::trbfv::{Lambda, ShareManager, TRBFV};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
-use std::sync::Arc;
 
 fn format_bytes(bytes: usize) -> String {
     if bytes >= 1024 * 1024 * 1024 {
@@ -22,37 +23,14 @@ fn format_bytes(bytes: usize) -> String {
 
 fn bench_data_sizes(c: &mut Criterion) {
     let group = c.benchmark_group("BFV Encrypted Shares Data Sizes");
+    let preset = presets::secure_8192().unwrap();
 
     // Threshold BFV parameters
-    let degree = 8192;
-    let moduli_trbfv = vec![0x0400000000c00001, 0x0400000000a40001, 0x0400000000990001];
-    let plaintext_modulus_trbfv: u64 = 1_000_000;
-
-    let params_trbfv = Arc::new(
-        BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus_trbfv)
-            .set_moduli(&moduli_trbfv)
-            .set_variance(10)
-            .set_error1_variance_str("17723039943798878305384094137071261013333")
-            .unwrap()
-            .build()
-            .unwrap(),
-    );
-
-    // BFV parameters for share encryption
-    let moduli_bfv = vec![0x1000000000024001, 0x1000000000054001];
-    let plaintext_modulus_bfv: u64 = 288230376164294657;
-
-    let params_bfv = Arc::new(
-        BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus_bfv)
-            .set_moduli(&moduli_bfv)
-            .set_variance(10)
-            .build()
-            .unwrap(),
-    );
+    let params_trbfv = preset.parameters.clone();
+    let params_bfv = preset.share_parameters.clone();
+    let degree = params_trbfv.degree();
+    let moduli_trbfv = params_trbfv.moduli();
+    let moduli_bfv = params_bfv.moduli();
 
     let num_parties = 3;
     let threshold = 1;
@@ -62,9 +40,9 @@ fn bench_data_sizes(c: &mut Criterion) {
         "Parameters: {} parties, threshold {}, degree {}",
         num_parties, threshold, degree
     );
-    println!("trBFV moduli: {} moduli of ~56 bits", moduli_trbfv.len());
+    println!("trBFV moduli: {} moduli of ~59 bits", moduli_trbfv.len());
     println!(
-        "BFV encryption moduli: {} moduli of ~59 bits",
+        "BFV encryption moduli: {} moduli of ~61 bits",
         moduli_bfv.len()
     );
 
@@ -100,7 +78,7 @@ fn bench_data_sizes(c: &mut Criterion) {
 
         // Generate smudging error shares
         let esi_coeffs = trbfv
-            .generate_smudging_error(100, 0, Lambda::secure(80).unwrap(), &mut rng)
+            .generate_smudging_error(100, 0, Lambda::secure(preset.lambda).unwrap(), &mut rng)
             .unwrap();
         let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
         let esi_sss = share_manager
@@ -337,38 +315,12 @@ fn bench_data_sizes(c: &mut Criterion) {
 
 fn bench_timing_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("BFV Encrypted Shares Timing");
+    let preset = presets::secure_8192().unwrap();
 
     // Setup parameters (same as data sizes)
-    let degree = 8192;
-    let moduli_trbfv = vec![0x0400000000c00001, 0x0400000000a40001, 0x0400000000990001];
-    let plaintext_modulus_trbfv: u64 = 1_000_000;
-
-    let params_trbfv = Arc::new(
-        BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus_trbfv)
-            .set_moduli(&moduli_trbfv)
-            .set_variance(10)
-            .set_error1_variance_str(
-                "52309181128222339698631578526730685514457152477762943514050560000",
-            )
-            .unwrap()
-            .build()
-            .unwrap(),
-    );
-
-    let moduli_bfv = vec![0x1000000000024001, 0x1000000000054001];
-    let plaintext_modulus_bfv: u64 = 288230376164294657;
-
-    let params_bfv = Arc::new(
-        BfvParametersBuilder::new()
-            .set_degree(degree)
-            .set_plaintext_modulus(plaintext_modulus_bfv)
-            .set_moduli(&moduli_bfv)
-            .set_variance(10)
-            .build()
-            .unwrap(),
-    );
+    let params_trbfv = preset.parameters.clone();
+    let params_bfv = preset.share_parameters.clone();
+    let degree = params_trbfv.degree();
 
     let num_parties = 3;
     let threshold = 1; // must be exactly (n - 1) / 2

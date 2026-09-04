@@ -15,8 +15,16 @@ pub fn bfv_benchmark(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(1));
 
-    for params in BfvParameters::default_parameters_128(20).unwrap() {
-        for size in [10, 128, 1000] {
+    // Keep CI and local smoke runs from allocating the full largest benchmark
+    // matrix while retaining the complete suite for normal benchmark runs.
+    let smoke = std::env::var_os("FHE_BENCH_SMOKE").is_some();
+    let sizes: &[usize] = if smoke { &[10] } else { &[10, 128, 1000] };
+
+    for params in BfvParameters::default_parameters_128(20)
+        .unwrap()
+        .take(if smoke { 1 } else { usize::MAX })
+    {
+        for &size in sizes {
             let sk = SecretKey::random(&params, &mut rng);
             let pt1 = Plaintext::try_encode(&(1..16u64).collect_vec(), Encoding::poly(), &params)
                 .unwrap();
@@ -24,16 +32,23 @@ pub fn bfv_benchmark(c: &mut Criterion) {
 
             let ct_vec = (0..size)
                 .map(|i| {
-                    let pt =
-                        Plaintext::try_encode(&(i..16u64).collect_vec(), Encoding::poly(), &params)
-                            .unwrap();
+                    let pt = Plaintext::try_encode(
+                        &((i as u64)..16u64).collect_vec(),
+                        Encoding::poly(),
+                        &params,
+                    )
+                    .unwrap();
                     sk.try_encrypt(&pt, &mut rng).unwrap()
                 })
                 .collect_vec();
             let pt_vec = (0..size)
                 .map(|i| {
-                    Plaintext::try_encode(&(i..39u64).collect_vec(), Encoding::poly(), &params)
-                        .unwrap()
+                    Plaintext::try_encode(
+                        &((i as u64)..39u64).collect_vec(),
+                        Encoding::poly(),
+                        &params,
+                    )
+                    .unwrap()
                 })
                 .collect_vec();
 

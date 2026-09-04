@@ -152,3 +152,38 @@ jobs:
           override: true
       - name: Run secure multiplication stress test
         run: cargo test -p fhe --release --test trbfv_multiplicative_e2e
+  examples-and-benches:
+    name: Examples and benchmarks smoke test
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions/checkout@v6
+      - uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --workspace --all-targets --all-features
+      - uses: actions-rs/cargo@v1
+        with:
+          command: bench
+          args: -p fhe --benches --all-features --no-run
+      - name: Run examples
+        run: |
+          cargo run --release -p fhe --example bfv_basic
+          cargo run --release -p fhe --example bfv_mul
+          cargo run --release -p fhe --example bfv_ops
+          cargo run --release -p fhe --example bfv_test_simple
+          cargo run --release -p fhe --example mulpir
+          cargo run --release -p fhe --example pir
+          cargo run --release -p fhe --example rgsw
+          cargo run --release -p fhe --example sealpir
+          cargo run --release -p fhe --example trlbfv_mul
+          cargo run --release -p fhe --all-features --example trbfv_add
+          cargo run --release -p fhe --all-features --example trbfv_add_bfv_share
+          cargo run --release -p fhe --all-features --example trbfv_add_bfv_share_insecure
+          cargo run --release -p fhe --all-features --example trbfv_mul_bfv_share
+          cargo run --release -p fhe --all-features --example trbfv_mul_bfv_share_binding
+          cargo run --release -p fhe --all-features --example voting
