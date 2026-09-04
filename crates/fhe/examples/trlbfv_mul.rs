@@ -39,15 +39,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand::rng();
 
     // ── Parameters ────────────────────────────────────────────────────────────
-    // Four 61-bit NTT primes ≡ 1 mod 32768, sufficient noise budget for one
-    // multiplication + relinearization (log₂ B_C = 193.5 < log₂ Δ = 234.0).
+    // Five 51-bit NTT primes, sufficient noise budget for the configured
+    // multiplication and relinearization depth.
     let degree = 16384usize;
     let plaintext_modulus = 1_000u64;
     let moduli = [
-        0x1fffffffffe10001u64,
-        0x1fffffffffe00001,
-        0x1fffffffffdd0001,
-        0x1fffffffffd08001,
+        0x00040000009f0001u64,
+        0x00040000008a0001,
+        0x0004000000800001,
+        0x00040000007e0001,
+        0x0004000000750001,
     ];
 
     let params: Arc<bfv::BfvParameters> = timeit!(

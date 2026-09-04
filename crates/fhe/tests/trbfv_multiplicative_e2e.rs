@@ -22,48 +22,37 @@ use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2};
 use num_bigint::BigInt;
-use rand::{Rng, SeedableRng, rng};
-use rand_chacha::ChaCha8Rng;
 
-#[path = "support/toy.rs"]
-mod toy_parameters;
+#[path = "support/secure_16384.rs"]
+mod secure_16384;
+#[path = "support/testkit.rs"]
+mod testkit;
 
-/// Small parameters for fast depth-1 multiplicative e2e testing.
-///
-/// The relinearization error bound contains the largest modulus `b_g` as a
-/// factor, which makes large moduli infeasible for depth > 0.  We use modest
-/// 40-bit moduli (still large enough for NTT with degree 64) and a few of
-/// them to provide Q budget, keeping `b_g` small enough for the
-/// multiplicative recurrence to produce a feasible smudging bound.
+/// Secure degree-16384 parameters for depth-1 multiplicative e2e testing.
 fn mul_params() -> Arc<BfvParameters> {
-    toy_parameters::parameters()
+    secure_16384::parameters()
 }
 
 /// Paper-conforming trBFV config: n = 2t + 1 = 3, threshold t = 1.
 const N: usize = 3;
 const THRESHOLD: usize = 1; // (n - 1) / 2
 const MULT_DEPTH: u32 = 1;
-const LAMBDA_VALUE: usize = 35; // MIN_SECURE_LAMBDA
+const LAMBDA_VALUE: usize = 31; // MIN_SECURE_LAMBDA
 
 /// Distributed l-BFV PK + RLK contributions, Shamir-shared key/noise, depth-1
 /// multiplication, threshold decryption.
 #[test]
 fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
     let params = mul_params();
+    let share_params = secure_16384::share_encryption_parameters();
+    assert_eq!(share_params.degree(), params.degree());
+    assert_eq!(share_params.moduli().len(), 2);
     let trbfv = TRBFV::new(N, THRESHOLD, params.clone()).expect("n=3, t=1 must validate");
 
     // ── Common CRS / URS seeds ╌───────────────────────────────────────
-    let mut rng = rng();
-    let crs_seed = {
-        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        rng.fill(&mut seed);
-        seed
-    };
-    let urs_seed = {
-        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        rng.fill(&mut seed);
-        seed
-    };
+    let mut rng = testkit::rng(81);
+    let crs_seed = testkit::seed(82);
+    let urs_seed = testkit::seed(83);
 
     // ── Participant set (1‑based IDs) ╌─────────────────────────────────
     let participant_set = ParticipantSet::new([42u8; 32], (1..=N as u32).collect())

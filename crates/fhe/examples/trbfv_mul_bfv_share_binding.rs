@@ -67,14 +67,15 @@ fn print_notice_and_exit(error: Option<String>) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     // ── First BFV parameter set (threshold computation) ──────────────────────
-    // n=5, z=3, k=1000, λ=40, σ²=10. Four 61-bit NTT primes, each ≡ 1 mod 32768. ✓
+    // n=20, z=3, k=1000, λ=31, σ²=10. Five 51-bit NTT primes. ✓
     let degree = 16384usize;
     let plaintext_modulus_trbfv: u64 = 1_000;
     let moduli_trbfv = [
-        0x1fffffffffe10001u64, // q[1] = 2305843009211662337
-        0x1fffffffffe00001,    // q[2] = 2305843009210613761
-        0x1fffffffffdd0001,    // q[3] = 2305843009196982273
-        0x1fffffffffd08001,    // q[4] = 2305843009177763841
+        0x00040000009f0001u64,
+        0x00040000008a0001,
+        0x0004000000800001,
+        0x00040000007e0001,
+        0x0004000000750001,
     ];
 
     println!("Building trBFV parameters (first set)...");
@@ -85,8 +86,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_plaintext_modulus(plaintext_modulus_trbfv)
             .set_moduli(&moduli_trbfv)
             .set_variance(10)
-            // Var(e_1) from the parameter tool: n=5, z=3, λ=40.
-            .set_error1_variance_str("4326914048779023023775413607683413333")?
+            // Var(e_1) from the parameter tool: n=20, z=3, λ=31.
+            .set_error1_variance_str("264093875047547791978479834453333")?
             .build_arc()?
     );
     println!(
@@ -100,11 +101,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // ── Second BFV parameter set (share encryption) ───────────────────────────
-    // Plaintext modulus = q[1] of the first set ≈ 2^61. All Shamir share values
-    // lie in [0, q_i) ⊆ [0, q[1]) = [0, k), so they fit as BFV plaintexts.
-    // Two 62-bit NTT primes (≡ 1 mod 32768). Correctness: k ≈ 2^61 < q₀/2 ≈ 2^61.0000003 ✓
-    let plaintext_modulus_share_enc: u64 = moduli_trbfv[0]; // = q[1]
-    let moduli_share_enc = [0x3fffffffffd78001u64, 0x3fffffffffe80001];
+    // All Shamir share values fit in this 51-bit BFV plaintext space.
+    // Two 53-bit NTT primes. ✓
+    let plaintext_modulus_share_enc: u64 = 1_125_899_917_262_849;
+    let moduli_share_enc = [0x0010000000060001u64, 0x00100000000f0001];
     println!("\nBuilding share-encryption parameters (second set)...");
     let params_share_enc: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share enc)",

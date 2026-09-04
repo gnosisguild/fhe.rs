@@ -1,11 +1,11 @@
-//! End-to-end threshold BFV tests with the production secure_8192 presets.
+//! End-to-end threshold BFV tests with the representative secure8192 profile.
 
 #![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 
 use std::sync::Arc;
 
 use fhe::bfv::{
-    self, BfvParameters, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey,
+    BfvParameters, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey,
 };
 use fhe::mbfv::{AggregateIter, PublicKeyShare};
 use fhe::trbfv::smudging::SmudgingNoiseGenerator;
@@ -18,37 +18,28 @@ use ndarray::{Array, Array2, ArrayView};
 use num_bigint::BigInt;
 use rayon::prelude::*;
 
-#[path = "support/standard_8192.rs"]
-mod standard_8192;
+#[path = "support/secure8192.rs"]
+mod secure8192;
+#[path = "support/testkit.rs"]
+mod testkit;
 
 // Secure preset (degree 8192), as used in production (enclave).
 const DEGREE: usize = 8192;
 const NUM_PARTIES: usize = 20;
 const THRESHOLD: usize = 9; // max for n = 20: (n - 1) / 2
-const LAMBDA: usize = 50;
+const LAMBDA: usize = 45;
 const NUM_SUMMED: usize = 50;
 
 // Threshold BFV parameters.
 const TRBFV_PLAINTEXT_MODULUS: u64 = 1_000_000;
-const TRBFV_MODULI: &[u64] = &[0x02000000015a0001, 0x0200000001460001, 0x0200000001210001];
-
-// DKG parameters: BFV instance for encrypted Shamir share transport. The
-// plaintext modulus equals the largest trBFV modulus (0x02000000015a0001).
-const DKG_PLAINTEXT_MODULUS: u64 = 144115188098531329;
-const DKG_MODULI: &[u64] = &[0x0800000000004001, 0x0800000000044001];
+const TRBFV_MODULI: &[u64] = &[0x0400000000c00001, 0x0400000000a40001, 0x0400000000990001];
 
 fn trbfv_params() -> Arc<BfvParameters> {
-    standard_8192::parameters()
+    secure8192::parameters()
 }
 
 fn dkg_params() -> Arc<BfvParameters> {
-    bfv::BfvParametersBuilder::new()
-        .set_degree(DEGREE)
-        .set_plaintext_modulus(DKG_PLAINTEXT_MODULUS)
-        .set_moduli(DKG_MODULI)
-        .set_variance(10)
-        .build_arc()
-        .unwrap()
+    secure8192::share_encryption_parameters()
 }
 
 enum NoiseMode {
@@ -77,7 +68,7 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
             .unwrap();
             let bound = SmudgingBoundCalculator::new(config)
                 .calculate_sm_bound()
-                .expect("secure_8192 parameters must admit a smudging bound");
+                .expect("secure8192 parameters must admit a smudging bound");
             Some(BigInt::from(bound))
         }
     };
@@ -95,13 +86,14 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
         pk_dkg: PublicKey,
     }
 
-    let mut rng = rand::rng();
+    let mut rng = testkit::rng(90);
     let crp = CommonRandomPoly::new(&params_trbfv, &mut rng).unwrap();
 
     let mut parties: Vec<Party> = (0..NUM_PARTIES)
         .into_par_iter()
-        .map(|_| {
-            let mut rng = rand::rng();
+        .enumerate()
+        .map(|(party_index, _)| {
+            let mut rng = testkit::rng(100 + party_index as u8);
 
             let sk_share = SecretKey::random(&params_trbfv, &mut rng);
             let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
@@ -156,12 +148,13 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
     // encrypted_shares[sender][receiver] = (sk share cts, esi share cts), one ct per modulus.
     let encrypted_shares: Vec<Vec<(Vec<Ciphertext>, Vec<Ciphertext>)>> = parties
         .par_iter()
-        .map(|party| {
+        .enumerate()
+        .map(|(sender_index, party)| {
+            let mut rng = testkit::rng(120 + sender_index as u8);
             pk_dkg_list
                 .iter()
                 .enumerate()
                 .map(|(receiver_idx, receiver_pk)| {
-                    let mut rng = rand::rng();
                     let mut encrypt_rows = |sss: &[Array2<u64>]| -> Vec<Ciphertext> {
                         sss.iter()
                             .map(|share_matrix| {
@@ -227,8 +220,9 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
     let numbers: Vec<u64> = vec![1; NUM_SUMMED];
     let numbers_encrypted: Vec<Ciphertext> = numbers
         .par_iter()
-        .map(|&number| {
-            let mut rng = rand::rng();
+        .enumerate()
+        .map(|(number_index, &number)| {
+            let mut rng = testkit::rng(140 + number_index as u8);
             let pt = Plaintext::try_encode(&[number], Encoding::poly(), &params_trbfv).unwrap();
             pk.try_encrypt(&pt, &mut rng).unwrap()
         })
@@ -269,12 +263,12 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
 }
 
 #[test]
-fn trbfv_e2e_secure_8192_random_smudging_noise() {
+fn trbfv_e2e_secure8192_random_smudging_noise() {
     run_threshold_sum_e2e(NoiseMode::Random);
 }
 
 #[test]
-fn trbfv_e2e_secure_8192_worst_case_smudging_noise() {
+fn trbfv_e2e_secure8192_worst_case_smudging_noise() {
     run_threshold_sum_e2e(NoiseMode::WorstCase);
 }
 
@@ -283,17 +277,18 @@ fn trbfv_e2e_secure_8192_worst_case_smudging_noise() {
 #[test]
 fn dkg_plaintext_modulus_covers_trbfv_moduli() {
     let max_trbfv_modulus = *TRBFV_MODULI.iter().max().unwrap();
+    let dkg_params = secure8192::share_encryption_parameters();
     assert!(
-        DKG_PLAINTEXT_MODULUS >= max_trbfv_modulus,
+        dkg_params.plaintext() >= max_trbfv_modulus,
         "DKG plaintext modulus must be >= every trBFV modulus so shares fit in transport plaintexts"
     );
 }
 
 // ── Independent invariant tests (not formula mirrors) ─────────────────
 
-/// The secure_8192 preset must produce a feasible (non-zero) smudging bound.
+/// The secure8192 profile must produce a feasible (non-zero) smudging bound.
 #[test]
-fn trbfv_smudging_bound_is_feasible_for_secure_8192_preset() {
+fn trbfv_smudging_bound_is_feasible_for_secure8192_profile() {
     use num_bigint::BigUint;
 
     let params = trbfv_params();

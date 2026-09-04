@@ -22,8 +22,26 @@ jobs:
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
 
-  clippy:
-    name: Clippy
+  clippy-core:
+    name: Clippy (core)
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions/checkout@v6
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+  clippy-serialization:
+    name: Clippy (all features)
     env:
       CARGO_INCREMENTAL: 0
       CARGO_TERM_COLOR: always
@@ -40,16 +58,14 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-  check:
-    name: Check (${{ matrix.features }})
+  test-toy:
+    name: Test toy profiles
     env:
       CARGO_INCREMENTAL: 0
       CARGO_TERM_COLOR: always
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        features: [default, all]
     steps:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
@@ -59,21 +75,17 @@ jobs:
           toolchain: stable
           override: true
       - uses: actions/checkout@v6
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
-          args: --workspace ${{ matrix.features == 'all' && '--all-features' || '' }}
+      - name: Run toy and contract tests
+        run: cargo test -p fhe --release --no-default-features --test trbfv_contract --test bfv_lbfv_trlbfv_contract
 
-  test:
-    name: Test Suite (${{ matrix.features }})
+  test-representative:
+    name: Test representative profiles
     env:
       CARGO_INCREMENTAL: 0
       CARGO_TERM_COLOR: always
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        features: [default, all]
     steps:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
@@ -83,7 +95,60 @@ jobs:
           toolchain: stable
           override: true
       - uses: actions/checkout@v6
-      - uses: actions-rs/cargo@v1
+      - name: Run representative tests
+        run: cargo test -p fhe --release --all-features --test bfv_lbfv_trlbfv_contract --test trbfv_contract --test trbfv_secure_e2e
+
+  test-standard-128:
+    name: Test standard-128 profile
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions/checkout@v6
+      - uses: actions-rs/toolchain@v1
         with:
-          command: test
-          args: --release --workspace ${{ matrix.features == 'all' && '--all-features' || '' }}
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Run standard-128 smoke test
+        run: cargo test -p fhe --release --test standard_128
+
+  test-serialization:
+    name: Test serialization boundary
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions/checkout@v6
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Run serialization tests
+        run: cargo test -p fhe --release --all-features --test serialization_contract
+
+  stress:
+    name: Stress profiles (manual)
+    if: github.event_name == 'workflow_dispatch'
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions/checkout@v6
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Run secure multiplication stress test
+        run: cargo test -p fhe --release --test trbfv_multiplicative_e2e

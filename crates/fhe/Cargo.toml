@@ -107,7 +107,15 @@ required-features = ["experimental-mbfv"]
 
 [[test]]
 name = "trbfv_contract"
-required-features = ["experimental-mbfv"]
+
+[[test]]
+name = "bfv_lbfv_trlbfv_contract"
+
+[[test]]
+name = "serialization_contract"
+
+[[test]]
+name = "standard_128"
 
 [[example]]
 name = "trbfv_mul_bfv_share_binding"

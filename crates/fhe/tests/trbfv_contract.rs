@@ -2,10 +2,12 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-#[path = "support/standard_8192.rs"]
-mod standard_8192;
-#[path = "support/toy.rs"]
-mod toy;
+#[path = "support/insecure.rs"]
+mod insecure;
+#[path = "support/secure8192.rs"]
+mod secure8192;
+#[path = "support/secure_16384.rs"]
+mod secure_16384;
 
 use std::sync::Arc;
 
@@ -25,11 +27,11 @@ struct TrbfvProfile {
     multiplicative_depth: Option<u32>,
 }
 
-fn profiles() -> [TrbfvProfile; 2] {
+fn profiles() -> [TrbfvProfile; 3] {
     [
         TrbfvProfile {
-            name: "toy",
-            parameters: toy::parameters(),
+            name: "insecure",
+            parameters: insecure::parameters(),
             num_parties: 3,
             threshold: 1,
             lambda: 35,
@@ -37,13 +39,22 @@ fn profiles() -> [TrbfvProfile; 2] {
             multiplicative_depth: Some(1),
         },
         TrbfvProfile {
-            name: "standard-8192",
-            parameters: standard_8192::parameters(),
+            name: "secure8192",
+            parameters: secure8192::parameters(),
             num_parties: 20,
             threshold: 9,
-            lambda: 50,
-            max_ciphertexts: 50,
+            lambda: 45,
+            max_ciphertexts: 1_000_000,
             multiplicative_depth: None,
+        },
+        TrbfvProfile {
+            name: "secure_16384",
+            parameters: secure_16384::parameters(),
+            num_parties: 20,
+            threshold: 9,
+            lambda: 31,
+            max_ciphertexts: 3,
+            multiplicative_depth: Some(3),
         },
     ]
 }
@@ -71,6 +82,18 @@ fn named_profiles_match_threshold_contract() {
         .unwrap();
         assert_eq!(trbfv.n, profile.num_parties);
         assert_eq!(trbfv.threshold, profile.threshold);
+
+        let share_parameters = match profile.name {
+            "secure8192" => secure8192::share_encryption_parameters(),
+            "secure_16384" => secure_16384::share_encryption_parameters(),
+            _ => continue,
+        };
+        assert_eq!(
+            share_parameters.degree(),
+            profile.parameters.degree(),
+            "profile {} share transport must use the same ring degree",
+            profile.name
+        );
     }
 }
 

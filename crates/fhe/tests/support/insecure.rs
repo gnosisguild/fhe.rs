@@ -1,9 +1,12 @@
-//! Small TRBFV parameters for fast integration tests.
+//! Intentionally insecure parameters for fast integration and negative tests.
 
 use std::sync::Arc;
 
 use fhe::bfv::{BfvParameters, BfvParametersBuilder};
 
+/// Build a small profile for breadth and failure-path coverage.
+///
+/// This profile must never be used as evidence for a security claim.
 pub fn parameters() -> Arc<BfvParameters> {
     BfvParametersBuilder::new()
         .set_degree(64)
@@ -11,5 +14,5 @@ pub fn parameters() -> Arc<BfvParameters> {
         .set_moduli_sizes(&[40; 4])
         .set_variance(1)
         .build_arc()
-        .expect("toy TRBFV parameters must be valid")
+        .expect("insecure test parameters must be valid")
 }

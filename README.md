@@ -54,6 +54,9 @@ cargo +nightly fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-The toy parameter profiles used by tests are intentionally insecure and provide
-fast correctness coverage only. The larger profiles exercise production-like
-parameter ranges but do not constitute a cryptographic security proof.
+The test parameter profiles are named `insecure`, `secure8192`, and
+`secure_16384`. The `insecure` profile provides fast breadth and negative
+coverage only; the larger profiles exercise production-like parameter ranges
+but do not constitute a cryptographic security proof. Serialization is an
+unconditional part of the current crate API, so CI tests both default/no-default
+core builds and the all-features serialization boundary.

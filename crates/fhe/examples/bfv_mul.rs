@@ -26,18 +26,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand::rng();
 
     println!("=== BFV Homomorphic Multiplication ===");
-    println!("n=20 ciphernodes, k=1000, d=16384, 4×61-bit moduli, λ=28\n");
+    println!("n=20 ciphernodes, k=1000, d=16384, 5×51-bit moduli, λ=31\n");
 
     let degree = 16384usize;
     let plaintext_modulus = 1_000u64;
 
-    // Four 61-bit NTT primes, each ≡ 1 mod 32768 (= 2n, required for
+    // Five 51-bit NTT primes, each ≡ 1 mod 32768 (= 2n, required for
     // negacyclic NTT in Z[x]/(x^n+1) with n=16384).
     let moduli = [
-        0x1fffffffffe10001u64,
-        0x1fffffffffe00001,
-        0x1fffffffffdd0001,
-        0x1fffffffffd08001,
+        0x00040000009f0001u64,
+        0x00040000008a0001,
+        0x0004000000800001,
+        0x00040000007e0001,
+        0x0004000000750001,
     ];
 
     let params: Arc<bfv::BfvParameters> = timeit!(
@@ -47,8 +48,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_plaintext_modulus(plaintext_modulus)
             .set_moduli(&moduli)
             .set_variance(10)
-            // Var(e_1) for n=20, λ=28 from the parameter tool.
-            .set_error1_variance_str("4126466797617934249663747413333")?
+            // Var(e_1) for n=20, λ=31 from the parameter tool.
+            .set_error1_variance_str("264093875047547791978479834453333")?
             .build_arc()?
     );
     println!(
