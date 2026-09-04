@@ -7,8 +7,8 @@ use fhe::trbfv::{Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig}
 use num_bigint::BigUint;
 
 #[test]
-fn secure_8192_preset_is_feasible_and_covers_share_moduli() {
-    let preset = presets::secure_8192().unwrap();
+fn secure8192_preset_is_feasible_and_covers_share_moduli() {
+    let preset = presets::secure8192().unwrap();
     assert_eq!(preset.parameters.degree(), 8192);
     assert_eq!(preset.parameters.plaintext(), 1_000_000);
     assert_eq!(
