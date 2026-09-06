@@ -87,11 +87,20 @@ impl CkksEncoder {
 
         let mut coeffs = vec![0i64; n];
         let scale_factor = delta * 2.0 / (n as f64);
+        // Only non-zero slots contribute (adding `0.0 * cos` is exactly a
+        // no-op), so sparse vectors — one-hot masks, short inputs — cost
+        // `O(N · nnz)` instead of `O(N²)`.
+        let nonzero: Vec<(usize, f64)> = z
+            .iter()
+            .enumerate()
+            .filter(|(_, zj)| **zj != 0.0)
+            .map(|(j, zj)| (self.root_exponents[j], *zj))
+            .collect();
         for (k, coeff) in coeffs.iter_mut().enumerate() {
             let mut acc = 0.0f64;
-            for (j, zj) in z.iter().enumerate() {
+            for &(e_j, zj) in &nonzero {
                 // conj(zeta_j)^k = exp(-i*pi*e_j*k/N); Re(z_j * that) = z_j*cos.
-                let angle = -PI * ((self.root_exponents[j] * k) as f64) / (n as f64);
+                let angle = -PI * ((e_j * k) as f64) / (n as f64);
                 acc += zj * angle.cos();
             }
             let rounded = (scale_factor * acc).round();
@@ -114,12 +123,50 @@ impl CkksEncoder {
         })
     }
 
+    /// Encode the constant vector `[c; N/2]` (every slot equal to `c`) at
+    /// `level` and `scale` in `O(N)`: the canonical embedding of a
+    /// constant slot vector is the constant polynomial `round(scale·c)`,
+    /// exactly (the `O(N²)` transform only adds float rounding noise of a
+    /// few units in the tail). Use it for slot-replicated inputs and the
+    /// plaintext constants of iterated polynomial maps.
+    pub fn encode_constant(&self, c: f64, level: usize, scale: f64) -> Result<CkksPlaintext> {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(Error::InvalidPlaintext {
+                reason: format!("invalid encoding scale {scale}"),
+            });
+        }
+        let rounded = (scale * c).round();
+        if !rounded.is_finite() || rounded.abs() >= (i64::MAX as f64) {
+            return Err(Error::InvalidPlaintext {
+                reason: "encoded coefficient overflows i64".to_string(),
+            });
+        }
+        let mut coeffs = vec![0i64; self.par.degree()];
+        coeffs[0] = rounded as i64;
+        let ctx = self.par.context_at_level(level)?;
+        let poly = Poly::<PowerBasis>::try_convert_from(coeffs.as_slice(), ctx, false)?.into_ntt();
+        Ok(CkksPlaintext {
+            par: self.par.clone(),
+            poly,
+            scale,
+            level,
+        })
+    }
+
     /// Decode a plaintext back into `N/2` real values.
     ///
     /// Evaluates the plaintext polynomial at the roots `zeta_j` and divides
     /// by the plaintext's scale.
     pub fn decode(&self, pt: &CkksPlaintext) -> Result<Vec<f64>> {
+        self.decode_slots(pt, self.par.slots())
+    }
+
+    /// Decode only the first `count` slots (`O(N · count)` instead of the
+    /// full `O(N²)` transform) — what an opening that packed its outputs
+    /// into a few slots needs.
+    pub fn decode_slots(&self, pt: &CkksPlaintext, count: usize) -> Result<Vec<f64>> {
         let n = self.par.degree();
+        let count = count.min(self.par.slots());
         let ctx = self.par.context_at_level(pt.level)?;
         let q = ctx.modulus();
 
@@ -137,8 +184,8 @@ impl CkksEncoder {
             })
             .collect();
 
-        let mut values = Vec::with_capacity(self.par.slots());
-        for e_j in &self.root_exponents {
+        let mut values = Vec::with_capacity(count);
+        for e_j in self.root_exponents.iter().take(count) {
             let mut re = 0.0f64;
             for (k, ck) in coeffs.iter().enumerate().take(n) {
                 let angle = PI * ((e_j * k) as f64) / (n as f64);
@@ -148,6 +195,80 @@ impl CkksEncoder {
         }
         Ok(values)
     }
+
+    /// Encode real values directly as the plaintext polynomial's
+    /// COEFFICIENTS: coefficient `k` = `round(scale · values[k])`, no
+    /// canonical-embedding transform. `values.len() ≤ N`; missing
+    /// coefficients are 0.
+    ///
+    /// Coefficient encoding is what makes a rotation-free inner product
+    /// possible in a CKKS instance that has no Galois keys: for
+    /// `X(t) = Σ_j x_j t^j` and `W(t) = Σ_j w_j t^{N-j}` the product's
+    /// coefficient of `t^N ≡ −1` is `−Σ_j w_j x_j`, i.e. the constant
+    /// coefficient of `X·W` is `−⟨w, x⟩` (with `w_0` placed at `t^0`, the
+    /// constant term picks up `+w_0 x_0` and `−Σ_{j≥1} w_j x_j`; see the
+    /// unit test for the exact bookkeeping). Multiplication of two
+    /// coefficient-encoded plaintexts is polynomial (convolution)
+    /// multiplication, not slot-wise — the caller owns that algebra.
+    pub fn encode_coefficients(
+        &self,
+        values: &[f64],
+        level: usize,
+        scale: f64,
+    ) -> Result<CkksPlaintext> {
+        let n = self.par.degree();
+        if values.len() > n {
+            return Err(Error::InvalidPlaintext {
+                reason: format!("{} coefficients exceed degree {n}", values.len()),
+            });
+        }
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(Error::InvalidPlaintext {
+                reason: format!("invalid encoding scale {scale}"),
+            });
+        }
+        let mut coeffs = vec![0i64; n];
+        for (k, v) in values.iter().enumerate() {
+            let rounded = (scale * v).round();
+            if !rounded.is_finite() || rounded.abs() >= (i64::MAX as f64) {
+                return Err(Error::InvalidPlaintext {
+                    reason: "encoded coefficient overflows i64".to_string(),
+                });
+            }
+            coeffs[k] = rounded as i64;
+        }
+        let ctx = self.par.context_at_level(level)?;
+        let poly = Poly::<PowerBasis>::try_convert_from(coeffs.as_slice(), ctx, false)?.into_ntt();
+        Ok(CkksPlaintext {
+            par: self.par.clone(),
+            poly,
+            scale,
+            level,
+        })
+    }
+
+    /// Decode the first `count` plaintext COEFFICIENTS (centered mod `Q_ℓ`,
+    /// divided by the scale). Inverse of [`Self::encode_coefficients`].
+    pub fn decode_coefficients(&self, pt: &CkksPlaintext, count: usize) -> Result<Vec<f64>> {
+        let n = self.par.degree();
+        let count = count.min(n);
+        let ctx = self.par.context_at_level(pt.level)?;
+        let q = ctx.modulus();
+        let half_q = q / 2u32;
+        let coeffs = Vec::<BigUint>::from(&pt.poly.clone().into_power_basis());
+        Ok(coeffs
+            .iter()
+            .take(count)
+            .map(|c| {
+                let centered = if c > &half_q {
+                    BigInt::from(c.clone()) - BigInt::from(q.clone())
+                } else {
+                    BigInt::from(c.clone())
+                };
+                centered.to_f64().unwrap_or(0.0) / pt.scale
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -155,6 +276,69 @@ mod tests {
     use super::CkksEncoder;
     use crate::ckks::CkksParametersBuilder;
     use std::error::Error;
+
+    /// Coefficient encoding round-trips and, under polynomial
+    /// multiplication mod `t^N + 1`, realises a rotation-free inner product:
+    /// with `X(t) = m + Σ_{j<k} x_j t^{j+1}` and `W(t) = Σ_{j<k} w_j t^{N-j-1}`,
+    /// the constant coefficient of `X·W` is `−⟨w, x⟩` (every `x_j t^{j+1}`
+    /// meets `w_j t^{N-j-1}` at `t^N ≡ −1`), and `m` only reaches the
+    /// constant term through `W`'s (absent) `t^0` coefficient, so the mask
+    /// must be re-added by the caller — exactly what a per-user masked
+    /// opening needs. Verified through a real encrypt → ct×pt → decrypt.
+    #[test]
+    fn coefficient_encoding_inner_product() -> Result<(), Box<dyn Error>> {
+        use crate::ckks::{CkksPublicKey, CkksSecretKey};
+        let params = CkksParametersBuilder::new()
+            .set_degree(64)
+            .set_moduli_sizes(&[50, 40, 40])
+            .set_scale(2f64.powi(30))
+            .build_arc()?;
+        let encoder = CkksEncoder::new(&params);
+        let n = params.degree();
+        let scale = params.scale();
+
+        let x = [0.25, 0.5, 0.125, 1.0, 0.75, 0.0, 0.375, 0.625];
+        let w = [0.1, -0.2, 0.3, 0.05, -0.15, 0.4, 0.0, -0.3];
+        let m = 3.5;
+        let expected = -x.iter().zip(w).map(|(a, b)| a * b).sum::<f64>();
+
+        let mut xc = vec![0.0; n];
+        xc[0] = m;
+        for (j, v) in x.iter().enumerate() {
+            xc[j + 1] = *v;
+        }
+        let mut wc = vec![0.0; n];
+        for (j, v) in w.iter().enumerate() {
+            wc[n - j - 1] = *v;
+        }
+
+        // Round-trip.
+        let pt_x = encoder.encode_coefficients(&xc, 0, scale)?;
+        let back = encoder.decode_coefficients(&pt_x, 9)?;
+        for (a, b) in xc[..9].iter().zip(&back) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+        assert!(
+            encoder
+                .encode_coefficients(&vec![0.0; n + 1], 0, scale)
+                .is_err()
+        );
+
+        // Homomorphic inner product: ct(X) × pt(W), constant coefficient.
+        let mut rng = rand::rng();
+        let sk = CkksSecretKey::random(&params, &mut rng);
+        let pk = CkksPublicKey::new(&sk, &mut rng)?;
+        let ct = pk.try_encrypt(&pt_x, &mut rng)?;
+        let pt_w = encoder.encode_coefficients(&wc, 0, scale)?;
+        let prod = ct.try_mul_plaintext(&pt_w)?;
+        let dec = sk.try_decrypt(&prod)?;
+        let got = encoder.decode_coefficients(&dec, 1)?[0];
+        assert!(
+            (got - expected).abs() < 1e-4,
+            "inner product {got} vs {expected}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn encode_decode_roundtrip() -> Result<(), Box<dyn Error>> {
@@ -206,6 +390,42 @@ mod tests {
         let pt = encoder.encode(&values, 1)?;
         let decoded = encoder.decode(&pt)?;
         assert!((decoded[0] - std::f64::consts::PI).abs() < 1e-6);
+        Ok(())
+    }
+
+    /// `encode_constant` matches the full transform of a replicated vector
+    /// (up to the transform's float tail) and `decode_slots` is a prefix of
+    /// `decode`.
+    #[test]
+    fn constant_fast_path_and_slot_prefix_decode() -> Result<(), Box<dyn Error>> {
+        let params = CkksParametersBuilder::new()
+            .set_degree(64)
+            .set_moduli_sizes(&[50, 40])
+            .set_scale(2f64.powi(30))
+            .build_arc()?;
+        let encoder = CkksEncoder::new(&params);
+        let c = -0.5f64;
+        let fast = encoder.encode_constant(c, 1, 2f64.powi(20))?;
+        let slow = encoder.encode_with_scale(&vec![c; params.slots()], 1, 2f64.powi(20))?;
+        assert_eq!(fast.level, slow.level);
+        assert!((fast.scale - slow.scale).abs() < f64::EPSILON);
+        for (a, b) in encoder
+            .decode(&fast)?
+            .iter()
+            .zip(encoder.decode(&slow)?.iter())
+        {
+            assert!((a - c).abs() < 1e-5, "fast {a}");
+            assert!((a - b).abs() < 1e-5, "fast {a} vs slow {b}");
+        }
+        let pt = encoder.encode(&[1.5, -2.25, 3.125, 0.0, 42.0], 0)?;
+        let full = encoder.decode(&pt)?;
+        let prefix = encoder.decode_slots(&pt, 3)?;
+        assert_eq!(prefix.len(), 3);
+        for (a, b) in prefix.iter().zip(full.iter()) {
+            assert!((a - b).abs() < 1e-9);
+        }
+        assert_eq!(encoder.decode_slots(&pt, 1000)?.len(), params.slots());
+        assert!(encoder.encode_constant(1.0, 0, 0.0).is_err());
         Ok(())
     }
 }

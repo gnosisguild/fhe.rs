@@ -41,6 +41,7 @@ mod ops;
 mod parameters;
 mod plaintext;
 mod relin_key;
+pub mod secure_presets;
 pub(crate) mod wire;
 
 pub use ciphertext::CkksCiphertext;

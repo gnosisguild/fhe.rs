@@ -504,3 +504,265 @@ Operational: the interfold ceremony machine can drop the per-level loop —
 one `(round, chunk)` stream per party; `CkksHybridRelinKeyShare::to_bytes`
 is 72 MiB at L20 / 346 MiB at the ladder (still > the 25 MiB DHT document
 cap, so chunking stays).
+
+## 6. Secure parameter sets and app feasibility (2026-09-03)
+
+Code: `crates/fhe/src/ckks/secure_presets.rs` (the sets, budget check,
+tests), `crates/fhe/src/trckks/app_feasibility.rs` (the flooding matrix,
+tests), `crates/fhe/examples/trckks_secure_feasibility.rs` (prints §6.1
+and §6.2 from the library), `crates/fhe/examples/trckks_dkg_bench.rs`
+(`--preset s1-stats|s1-cmp5|s1-cmp6|s2-cmp12 --app stats|poly4|cmp<K>`),
+`crates/fhe/scripts/trckks_bench_row.py` (JSON → §6.3 table row).
+
+**Security budget.** *Homomorphic Encryption Security Standard* (Albrecht
+et al., Nov 2018, <https://homomorphicencryption.org/standard/>), Table 1,
+uniform ternary secret, classical 128-bit: max `log₂(Q·P)` = **218 at
+N=8192, 438 at N=16384, 881 at N=32768**; the N=65536 row, **1772**, is the
+estimator extrapolation used by Lattigo and OpenFHE default tables. The
+bound applies to the full key-switching modulus: **the hybrid special
+primes `P` COUNT toward it** (the relin key is an RLWE encryption under
+`Q·P`; see §5.3). `secure_presets::security_budget` sums every ciphertext
+AND special prime; the constructors refuse any shape over the table. The
+`lattice-estimator` is not pip/uv-installable without Sage
+(`uv pip install lattice-estimator` → "not found in the package registry"),
+so the table is the source; no independent estimator cross-check was run.
+
+### 6.1 The sets
+
+Generated primes have exactly the requested bit size and are `≡ 1 (mod
+2N)` (asserted); `Δ = 2^40`; hybrid key switching ON with 60-bit special
+primes, default digit size `α = k` (`dnum = ⌈L/k⌉`).
+
+| set | N | limbs (bits) | log₂Q | k | log₂P | log₂(Q·P) | budget | headroom | depth | dnum | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **S1_stats** | 32768 | 60 + 17×40 | 740 | 2 | 120 | **860** | 881 | 21 | 17 | 9 | MAXIMUM 40-bit depth under the budget: an 18th limb gives 900 > 881 |
+| **S1_cmp5** | 32768 | 60 + 16×40 | 700 | 2 | 120 | **820** | 881 | 61 | 16 | 9 | exact 5-iteration sign ladder (`1 + 3·5` rescale limbs) |
+| S1_cmp6 | 32768 | 60 + 19×40 | 820 | 2 | 120 | **940** | 881 | — | — | — | **DOES NOT FIT** (940 > 881): `s1_cmp6()` always errors; 5 iterations is the largest ladder at N=32768 (`S1_MAX_SIGN_ITERATIONS`). With `k=1` (60 bits) it is still 880 — *exactly* at the bound only if the base drops to 45 bits; not offered. |
+| **S2_cmp12** | 65536 | 60 + 37×40 | 1540 | 3 | 180 | **1720** | 1772 | 52 | 37 | 13 | the 12-iteration ladder of interfold `sign_extraction_params` at secure N (60-bit base instead of 45); 13 iterations (1840) do not fit |
+
+Cross-check of the §5.3 trap encoded as a test: `secure32768-L20` (805)
+with `k=2` → 925 > 881, `headroom_bits() == 0`, `fits() == false`.
+
+### 6.2 App feasibility: do the flooding walls close?
+
+Every cell below is `CkksSmudgingBoundCalculator` at **λ = 50**
+(`trbfv::MIN_SECURE_LAMBDA`, the BFV secure floor) with the demo apps'
+input bounds — survey/auction inputs normalized to `[0, 1]` (`B = 1`),
+statistics `output_scale = 10^4` as the mask operand, precision target
+0.01 (stats, poly4) / 0.05 (comparisons: `|slot| ∈ [0.95, 1.05]`), opening
+level = circuit depth, `n ∈ {3, 5, 10, 20}`. `sm_bits = λ + log₂B_C` is
+what `calculate_sm_bits()` WOULD return; "walls close?" is the
+calculator's verdict; the last three columns are what would change it
+(the opening scale `Δ_eff` the precision wall needs, the `Q_l` the wrap
+wall would then need vs what the set has, and the largest λ at which both
+walls close at the set's own `Δ_eff`). Regenerate with
+`cargo run --release --example trckks_secure_feasibility`; pinned by
+`app_feasibility::tests::secure_floor_matrix_hits_the_precision_wall_everywhere`.
+
+| set | app | depth/level | n | λ | log₂B_C | sm_bits | walls close? | flooding error at Δ_eff (target) | Δ_eff needed (bits) | Q_l needed / have (bits) | max closing λ |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| S1_stats | stats (100 users) | 1 | 3 | 50 | 56 | 106 | ❌ precision | 1.3e20 (0.01) | 114 | 135 / 700 | none |
+| S1_stats | stats | 1 | 5 | 50 | 56 | 106 | ❌ precision | 2.2e20 (0.01) | 115 | 136 / 700 | none |
+| S1_stats | stats | 1 | 10 | 50 | 56 | 106 | ❌ precision | 4.4e20 (0.01) | 116 | 137 / 700 | none |
+| S1_stats | stats | 1 | 20 | 50 | 56 | 106 | ❌ precision | 8.8e20 (0.01) | 117 | 138 / 700 | none |
+| S1_stats | poly4 | 4 | 3 | 50 | 81 | 131 | ❌ precision | 4.6e27 (0.01) | 139 | 140 / 580 | none |
+| S1_stats | poly4 | 4 | 5 | 50 | 81 | 131 | ❌ precision | 7.7e27 (0.01) | 140 | 141 / 580 | none |
+| S1_stats | poly4 | 4 | 10 | 50 | 81 | 131 | ❌ precision | 1.5e28 (0.01) | 141 | 142 / 580 | none |
+| S1_stats | poly4 | 4 | 20 | 50 | 81 | 131 | ❌ precision | 3.1e28 (0.01) | 142 | 143 / 580 | none |
+| S1_stats | cmp5 | 16 | 3 | 50 | 261 | 311 | ❌ wrap-around | 7.1e81 (0.05) | 317 | 318 / 100 | none |
+| S1_stats | cmp5 | 16 | 5 | 50 | 261 | 311 | ❌ wrap-around | 1.2e82 (0.05) | 317 | 319 / 100 | none |
+| S1_stats | cmp5 | 16 | 10 | 50 | 261 | 311 | ❌ wrap-around | 2.4e82 (0.05) | 318 | 320 / 100 | none |
+| S1_stats | cmp5 | 16 | 20 | 50 | 261 | 311 | ❌ wrap-around | 4.7e82 (0.05) | 319 | 321 / 100 | none |
+| S1_cmp5 | stats | 1 | 3 / 5 / 10 / 20 | 50 | 56 | 106 | ❌ precision | 1.3e20 … 8.8e20 (0.01) | 114–117 | 135–138 / 660 | none |
+| S1_cmp5 | poly4 | 4 | 3 / 5 / 10 / 20 | 50 | 81 | 131 | ❌ precision | 4.6e27 … 3.1e28 (0.01) | 139–142 | 140–143 / 540 | none |
+| S1_cmp5 | cmp5 | 16 | 3 / 5 / 10 / 20 | 50 | 261 | 311 | ❌ wrap-around | 7.1e81 … 4.7e82 (0.05) | 317–319 | 318–321 / 60 | none |
+| S2_cmp12 | stats | 1 | 3 / 5 / 10 / 20 | 50 | 58 | 108 | ❌ precision | 5.3e20 … 3.5e21 (0.01) | 116–119 | 137–140 / 1500 | none |
+| S2_cmp12 | poly4 | 4 | 3 / 5 / 10 / 20 | 50 | 86 | 136 | ❌ precision | 1.5e29 … 9.9e29 (0.01) | 144–147 | 145–148 / 1380 | none |
+| S2_cmp12 | cmp5 | 16 | 3 / 5 / 10 / 20 | 50 | 278 | 328 | ❌ precision | 9.3e86 … 6.2e87 (0.05) | 334–336 | 335–338 / 900 | none |
+| S2_cmp12 | cmp6 | 19 | 3 / 5 / 10 / 20 | 50 | 326 | 376 | ❌ precision | 2.6e101 … 1.7e102 (0.05) | 382–384 | 383–386 / 780 | none |
+| S2_cmp12 | cmp12 | 37 | 3 / 5 / 10 / 20 | 50 | 614 | 664 | ❌ wrap-around | 1.3e188 … 8.7e188 (0.05) | 670–672 | 671–674 / 60 | none |
+
+**Reading it.** NO (set, app, n) cell closes at the secure floor, and the
+committee size is irrelevant (it adds `log₂n ≤ 4.3` bits to a gap of
+60–600 bits). The cause is the calculator's noise model, not the
+parameter sets: it takes the **worst-case sup-norm** fresh noise
+`B_fresh = (2N+1)·2σ² ≈ 2^20.3` at N=32768 and multiplies it by **N per
+multiplicative level** (`b_c = operand·N·b_c + (N+1)/2`, the rescale only
+cancels `Δ`), so `log₂B_C ≈ 20 + 15.3·depth` (+16.3 at N=65536; the
+`cmp_rows_grow_fifteen_bits_per_level` test pins this). The precision wall
+needs `n·2^λ·B_C ≤ precision·Δ_eff` with `Δ_eff ≈ 2^40`, i.e.
+`2^(50+56+2) ≤ 2^33` already for depth-1 statistics. Consequences:
+
+- **What changes it, per wall.** *Precision wall (stats, poly4, shallow
+  comparisons):* an opening scale `Δ_eff ≥ 2^114` (stats) / `2^139`
+  (poly4) — above the encoder's `2^63` coefficient cap and far beyond
+  what a 60-bit base modulus can hold, so "raise Δ" is not available; a
+  smaller precision target does not help either (the flooding error is
+  1e20 against a 0.01 target). *Wrap-around wall (cmp5 on S1, cmp12 on
+  S2):* the worst-case `B_C` alone (261 / 614 bits) exceeds the 60–100-bit
+  opening modulus; the ciphertext still decrypts correctly in practice
+  (§6.3 measured 1.7e-5 error on the demo ladder, 4.4e-5 rel on S1) because
+  the real noise is ~`√N`-scaled Gaussian, not the sup-norm product.
+- **What ACTUALLY closes them:** (i) an average-case (canonical-embedding,
+  variance-tracking) `B_C` in `CkksSmudgingBoundCalculator` — the
+  standard CKKS practice (Bossuat et al., Lattigo) gives `log₂B_C ≈
+  20 + ~8·depth` at these N; with that, `sm_bits ≈ 50 + 28 = 78` for
+  stats and the precision wall needs `Δ_eff ≥ 2^(78 + 2 + 7) = 2^87` —
+  still over `Δ = 2^40`, so (ii) is also needed: **open at a larger
+  effective scale** by NOT rescaling the last product (`Δ_eff = Δ²/1 =
+  2^80` at level `d−1`, cf. the ParamSet-3 demo trick of decrypting at
+  the doubled scale) or by using a 60-bit `Δ` on 60-bit limbs (`Q·P`
+  budget: 60 + 12×60 + 120 = 900 > 881 — only 11 levels at N=32768, or
+  S2 with 26 levels); and/or (iii) a smaller λ via a Rényi-divergence
+  flooding argument (`≈ λ/2` for the same statistical guarantee,
+  Li–Micciancio–Schultz–Sorrell 2022 / "Noah's Ark" 2023), which
+  `Lambda::secure` currently refuses below 50. None of these are
+  parameter-set changes; they are calculator and opening-protocol
+  changes and are the open item of this section.
+- Until then, every threshold opening at these sets runs with a
+  **caller-chosen** `smudging_bits` (the bench uses 20, the demos 20): the
+  decryption is correct (§6.3) but NOT certified against the IND-CPA-D
+  channel by the derived bound.
+
+### 6.3 Measured cost of the real app chain (DKG → hybrid ceremony → encrypt → evaluate → threshold decrypt)
+
+One `--app` run does, on real threshold keys: DKG (§1) → ONE hybrid
+ceremony → encrypt `--users` slot-replicated user vectors under the joint
+pk (`encode_constant` = the client's packed ciphertext) → evaluate the
+app with the interfold policy math mirrored (`statistics_packed_policy`:
+level-0 relinearized squares, one-hot masks at `Δ·2^8`/`2^8`, ONE packed
+opening; `poly4`: four `x² → relin → rescale` squarings, `x^16`;
+`cmp<K>`: `sign_extraction_policy` — one-hot-packed pairwise differences
+of all `C(users,2)` pairs, then `K` iterations of `f(y) = (1.5 − 0.5y²)·y`
+with two hybrid-relinearized products each at levels `1+3i`, `3+3i`) →
+`t+1` decryption shares → Lagrange combine → `max abs error` vs the
+plaintext evaluation. Single process, single-threaded except the rayon
+Shamir/Lagrange inner loops (§1). Smudging bits are the CLI value (20):
+§6.2 shows no derived bound closes, so `sm_bits used / required` is
+reported per row.
+
+Columns: DKG CPU/party; dealt bytes out/party; ceremony CPU/party;
+ceremony up / down bytes/party; joint hybrid key bytes; per-user (fresh)
+ciphertext bytes; eval wall; decryption-share bytes; combine wall; max abs
+error (relative in parentheses; sign count for comparisons); smudging
+bits used / required by the λ=50 floor + walls verdict; runs.
+
+| set | app | n | users | DKG /party | dealt out /party | ceremony /party | up / down /party | key | user ct | eval | dec share | combine | max abs err | sm_bits used/req | runs |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1-stats | stats | 3 | 4 | 1.09 s | 18.00 MiB | 299.3 ms | 120.94 MiB / 241.88 MiB | 60.47 MiB | 5.78 MiB | 471.6 ms | 2.73 MiB | 329.6 ms | 5.3e-01 on a 2e4 slot (rel 4.4e-05) | 20 / 101 ❌ | 1 |
+| s1-stats | stats | 5 | 4 | | | | | | | | | | | | |
+| s1-stats | stats | 10 | 4 | | | | | | | | | | | | |
+| s1-stats | poly4 | 3 | 1 | | | | | | | | | | | | |
+| s1-stats | poly4 | 5 | 1 | | | | | | | | | | | | |
+| s1-stats | poly4 | 10 | 1 | | | | | | | | | | | | |
+| s1-stats | cmp5 | 3 | 4 | | | | | | | | | | | | |
+| s1-stats | cmp5 | 5 | 4 | | | | | | | | | | | | |
+| s1-stats | cmp5 | 10 | 4 | | | | | | | | | | | | |
+| s1-stats | stats | 20 | 4 | | | | | | | | | | | | |
+| s2-cmp12 | stats | 3 | 4 | | | | | | | | | | | | |
+| s2-cmp12 | poly4 | 3 | 1 | | | | | | | | | | | | |
+| s2-cmp12 | cmp6 | 3 | 4 | | | | | | | | | | | | |
+| s2-cmp12 | cmp12 | 3 | 4 | | | | | | | | | | | | |
+| s2-cmp12 | cmp12 | 5 | 4 | | | | | | | | | | | | |
+| s2-cmp12 | cmp12 | 10 | 4 | | | | | | | | | | | | |
+
+(`s1-cmp5` is S1_stats minus one limb; its rows are the S1_stats `cmp5`
+rows within a few %, so the S1 ladder shape is benchmarked on `s1-stats`.
+`s1-cmp6` cannot be run: it does not build.)
+
+The one measured row (validation of the pipeline, 13.2 s wall for the
+whole run incl. the §2/§5 checks; `/tmp/trckks-bench/secure-s1-stats-stats-n3.{json,log}`)
+in detail: DKG 1.09 s (deal sk 472 ms + deal e_sm 605 ms + pk share
+12 ms), hybrid ceremony 299 ms CPU (R1 gen 130 ms, R1 serialize 207 ms,
+R1 agg 15 ms, R2 gen 136 ms, R2 agg 14 ms) for a 60.5 MiB key (k=2,
+dnum=9, 18+2 limbs), fresh ciphertext 5.78 MiB, encrypt 21 ms/user,
+eval 472 ms of which 415 ms are the four level-0 hybrid relinearizations
+(~104 ms each at 18 limbs; the §5.2 `mult.relin_ms` at 2 limbs is 5 ms),
+decryption share 8.8 ms / 2.73 MiB at level 1, combine 330 ms, result
+`[Σv, Σv²]·10^4 = [20000, 12000]` exact to 0.53 (rel 4.4e-5 — the
+per-slot smudging noise `3·2^20/2^48` plus relin noise). The depth-4
+hybrid chain check on the same keys: rel err 3.4e-7.
+
+**Commands to fill the table** (from the repo root; cheapest first;
+`BENCH_MACHINE` is written into the JSON; expected wall time per command
+is order-of-magnitude, from the one measured row and §2/§5 scaling:
+S1 rows ∝ n for DKG + combine, N=65536 ≈ 2.2× per party):
+
+```
+cargo build --release --example trckks_dkg_bench
+export BENCH_MACHINE="$(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.ncpu) cores"
+B=./target/release/examples/trckks_dkg_bench; O=/tmp/trckks-bench
+# S1 (N=32768): ~15 s / ~30 s / ~1 min per command at n=3 / 5 / 10 (3 runs: ×3)
+$B --preset s1-stats --parties 3    --runs 3 --app stats --users 4 --json $O/secure-s1-stats-stats-n3.json   # ~40 s  (1 run measured above)
+$B --preset s1-stats --parties 3    --runs 3 --app poly4           --json $O/secure-s1-stats-poly4-n3.json   # ~40 s
+$B --preset s1-stats --parties 3    --runs 3 --app cmp5  --users 4 --json $O/secure-s1-stats-cmp5-n3.json    # ~1 min
+$B --preset s1-stats --parties 5    --runs 3 --app stats --users 4 --json $O/secure-s1-stats-stats-n5.json   # ~1.5 min
+$B --preset s1-stats --parties 5    --runs 3 --app poly4           --json $O/secure-s1-stats-poly4-n5.json   # ~1.5 min
+$B --preset s1-stats --parties 5    --runs 3 --app cmp5  --users 4 --json $O/secure-s1-stats-cmp5-n5.json    # ~2 min
+$B --preset s1-stats --parties 10   --runs 3 --app stats --users 4 --json $O/secure-s1-stats-stats-n10.json  # ~3 min
+$B --preset s1-stats --parties 10   --runs 3 --app poly4           --json $O/secure-s1-stats-poly4-n10.json  # ~3 min
+$B --preset s1-stats --parties 10   --runs 3 --app cmp5  --users 4 --json $O/secure-s1-stats-cmp5-n10.json   # ~4 min
+# S2 (N=65536, 38+3 limbs): ~2–4 min per run at n=3 (the 346 MiB key + 24 relins), ~5 min at n=5, ~10 min at n=10
+$B --preset s2-cmp12 --parties 3    --runs 1 --app stats --users 4 --json $O/secure-s2-cmp12-stats-n3.json   # ~3 min
+$B --preset s2-cmp12 --parties 3    --runs 1 --app poly4           --json $O/secure-s2-cmp12-poly4-n3.json   # ~3 min
+$B --preset s2-cmp12 --parties 3    --runs 1 --app cmp6  --users 4 --json $O/secure-s2-cmp12-cmp6-n3.json    # ~4 min
+$B --preset s2-cmp12 --parties 3    --runs 1 --app cmp12 --users 4 --json $O/secure-s2-cmp12-cmp12-n3.json   # ~5 min
+$B --preset s2-cmp12 --parties 5    --runs 1 --app cmp12 --users 4 --json $O/secure-s2-cmp12-cmp12-n5.json   # ~7 min
+$B --preset s2-cmp12 --parties 10   --runs 1 --app cmp12 --users 4 --json $O/secure-s2-cmp12-cmp12-n10.json  # ~15 min
+# n=20, S1 stats only (DKG dealing ∝ n·(n−1) bytes, ~360 MiB out per party): ~10 min
+$B --preset s1-stats --parties 20   --runs 1 --app stats --users 4 --json $O/secure-s1-stats-stats-n20.json  # ~10 min
+# render any JSON as a table row (one line per committee size in the file):
+python3 crates/fhe/scripts/trckks_bench_row.py $O/secure-s1-stats-stats-n3.json
+```
+
+Run each in the background with `nohup … > $O/<name>.log 2>&1 &` and
+poll the `.log`; the JSON is written at the end of the command. To run a
+different user count (`--users 8` → 28 pairs for `cmp<K>`) or a different
+ladder depth (`--app cmp3`), the same command shape applies; `--users` >
+`N/2` pairs is rejected.
+
+### 6.4 What apps can we build, at what committee size
+
+Cost-wise (this section + §5.3) and correctness-wise (measured error),
+per set — with the flooding caveat of §6.2 applying to ALL of them until
+the calculator's noise model / opening scale is fixed:
+
+- **S1_stats (N=32768, 17 levels, 860 bits) — many-user shallow
+  aggregates and depth-4 scoring: BUILDABLE at n ≤ 10 today, n = 20
+  ⚠ extrapolated.** Per party: DKG ≈ 1.1 s·(n/3) (Shamir dealing,
+  ∝ n), 18 MiB·(n−1)/2 dealt out, ONE hybrid ceremony ≈ 0.3 s CPU +
+  121 MiB up / 121·(n−1) MiB down (242 MiB at n=3, 1.06 GiB at n=10,
+  2.3 GiB at n=20 ⚠), a 60 MiB key to store, then per E3: 5.8 MiB per
+  user ciphertext, sub-second evaluation for statistics over any number
+  of users that fits `N/2 = 16384` slots per packed input (the eval is
+  4 relins + adds; 100 users ≈ 10 s), one 2.7 MiB decryption share per
+  party and a 0.3–1.4 s combine (∝ (t+1)²). Precision 4e-5 relative on
+  the statistics slots, 3e-7 on a depth-4 chain — far inside the 2-decimal
+  on-chain fixed point. Committee-size guidance: n = 5 (t = 2) is the
+  sweet spot (≈ 0.5 GiB ceremony download, ≈ 2 s DKG); n = 10 costs
+  ≈ 1 GiB download and ≈ 4 s DKG per party; n = 20 is DKG-transport bound
+  (≈ 340 MiB dealt out per party, ≈ 6.8 GiB committee-wide).
+- **S1_cmp5 / S1_stats for comparisons (5-iteration sign extraction):
+  BUILDABLE, but only for gaps ≥ ~13 % of the bound** (`1.5^-5 ≈ 0.13`;
+  §"Sign extraction" needs 12 iterations for 2 % gaps). A 6-iteration
+  ladder does NOT fit N=32768 at 128-bit. Same committee guidance as
+  S1_stats; eval ≈ 10 relins ≈ 1 s.
+- **S2_cmp12 (N=65536, 37 levels, 1720 bits) — 12-iteration comparisons
+  (2 % gaps) and anything ≤ 37 levels: BUILDABLE at n ≤ 5, n = 10
+  feasible but ceremony-download bound (§5.3: 693 MiB up, 6.1 GiB down
+  per party ⚠), n = 20 ≈ 13 GiB down ⚠.** Per E3: 23–24 MiB per user
+  ciphertext, ≈ 24 relins at 20–100 ms ≈ 2–3 s eval, 0.7 MiB decryption
+  share (the output is at level 37, 2 limbs), combine ≈ 0.05–0.15 s.
+  Fill the §6.3 rows to replace the ⚠ marks.
+- **Not buildable at 128-bit with 40-bit limbs:** a 6-iteration ladder
+  on N=32768 (940 > 881 bits) — use 5 iterations, a better-conditioned
+  sign polynomial (§4.3 lever 3), or N=65536.
+
+**Client side.** Per-user ciphertext: **5.78 MiB at S1 (18 limbs ×
+32768 × 2 polys, bit-packed), 23.8 MiB at S2** (§2.3 `ct.fresh_bytes`,
+38 limbs × 65536) — the on-chain `publishInput` payload before any
+compression; encryption 21 ms (S1) in native Rust. **NOTE: Greco proving
+(ct0/ct1 legs) at N=32768/65536 is UNMEASURED** — the measured legs are
+the N=512 ps2/ps3 shapes (≈ 1.5 s / 13 s per leg in-browser); the per-limb
+circuit rows scale with `N × limbs` (18× to 38× the ps2 rows) and are a
+separate workstream.

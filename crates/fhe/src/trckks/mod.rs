@@ -54,6 +54,7 @@
 //! zero-knowledge proofs: it is verified by determinism (every party derives
 //! the identical joint key from the same public shares).
 
+pub mod app_feasibility;
 mod hybrid_gen;
 mod keygen;
 mod relin_gen;

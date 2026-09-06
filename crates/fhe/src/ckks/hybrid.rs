@@ -6,8 +6,10 @@
 //! key-switching noise divided by the special modulus `P`.
 //!
 //! References: Han–Ki, *Better Bootstrapping for Approximate Homomorphic
-//! Encryption* (CT-RSA 2020, <https://eprint.iacr.org/2019/688>), §3
-//! ("hybrid key switching"); the RNS variant follows Lattigo's
+//! Encryption* (CT-RSA 2020, <https://eprint.iacr.org/2019/688>), which
+//! combines RNS decomposition with the "temporary modulus" (special-prime)
+//! technique of Gentry–Halevi–Smart to cut the number of temporary moduli in
+//! key switching; the RNS variant follows Lattigo's
 //! `rlwe.Evaluator.GadgetProduct` / `KeySwitch` (`ring.BasisExtender`).
 //!
 //! # Gadget

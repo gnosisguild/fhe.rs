@@ -5,11 +5,18 @@
 //! CKKS decryption returns `m + e` — the message WITH its noise. Li &
 //! Micciancio (Eurocrypt 2021) showed this leaks the secret key: given a
 //! ciphertext and its decryption, `e` is recoverable, and RLWE noise is
-//! key material. In the threshold setting every decryption-share opening has
-//! the same shape, so each share must carry flooding noise large enough to
-//! statistically hide the ciphertext noise (Li–Micciancio–Schultz–Sorrell,
-//! Crypto 2022; "Noah's Ark", eprint 2023/815; OpenFHE implements the same
-//! rule).
+//! key material — i.e. the relevant notion is IND-CPA-D, not IND-CPA. In the
+//! threshold setting every decryption-share opening has the same shape, so
+//! each share must carry flooding noise large enough to statistically hide
+//! the ciphertext noise. The bound below is the standard smudging lemma
+//! (Asharov–Jain–López-Alt–Tromer–Vaikuntanathan–Wichs, Eurocrypt 2012, via
+//! AJW'11 Lemma 2.1) — a statistical-distance argument, the same route taken
+//! by "Noah's Ark" (eprint 2023/815) and implemented by OpenFHE.
+//! Li–Micciancio–Schultz–Sorrell (Crypto 2022) is the *alternative* tight
+//! DP/Gaussian-mechanism analysis, which we do NOT use; note it also proves
+//! that flooding tailored to an observed ciphertext's error (rather than a
+//! static, circuit-derived worst case) is vulnerable to IND-CPA-D attacks —
+//! relevant if this calculator is ever relaxed to an average-case `B_C`.
 //!
 //! # The bound
 //!
@@ -149,14 +156,47 @@ impl CkksSmudgingBoundCalculator {
         // rescale rounding (d+1)/2. Conservative: assume the dropped
         // modulus only cancels delta (scale-matched moduli), leaving the
         // operand bound as multiplier.
+        //
+        // PLUS the relinearization key-switch noise, which the earlier
+        // version of this bound OMITTED. Every ct×ct level relinearizes;
+        // the key switch adds noise BEFORE the level's rescale, so it is
+        // then divided by the dropped modulus like everything else.
+        //
+        // Key-switch noise before rescale (`ckks/hybrid.rs` module docs):
+        //   RNS-decomposition key : ≈ L_ℓ · q_max · N · B_key
+        //   hybrid key            : ≈ dnum · N · B_key · (D/P), D/P ≤ 1 by
+        //                           construction (a digit never exceeds P)
+        // where `B_key` is the relin KEY's error. The multiparty ceremony
+        // key sums n parties' errors and round 2 multiplies by s_i (‖s‖≤1
+        // ternary, but ‖·‖₁ ≤ N), so we charge B_key = 2·n·N·B_e —
+        // conservative. Which key an E3 uses is a property of its params:
+        // special primes present ⇒ hybrid, else RNS. We divide by q_min
+        // (≤ the dropped modulus ⇒ a LARGER quotient ⇒ conservative).
+        // At secure N this is what separates the two key types: the RNS
+        // term is ~2^14 above the fresh noise at N=32768 (the measured
+        // "garbage" of per-level keys), the hybrid term is ~2 bits.
         let moduli = self.config.params.moduli();
+        let n_parties = BigUint::from(self.config.n_parties.max(1));
+        let q_max = BigUint::from(moduli.iter().copied().max().unwrap_or(1));
+        let q_min = BigUint::from(moduli.iter().copied().min().unwrap_or(1).max(1));
+        let b_key = BigUint::from(2u32) * &n_parties * &d * &b_e;
+        let hybrid = !self.config.params.special_moduli().is_empty();
+        let dnum = BigUint::from(self.config.params.dnum().max(1));
         for level in 0..self.config.circuit.depth {
             let operand = self.config.circuit.mult_operand_bound.abs().ceil() as u64;
             let operand = BigUint::from(operand.max(1));
             let rescale_round = (&d + BigUint::from(1u32)) / BigUint::from(2u32);
             // Sanity: the dropped modulus must exist.
             debug_assert!(level + 1 < moduli.len(), "depth exceeds moduli chain");
-            b_c = operand * &d * b_c + rescale_round;
+            // Limbs remaining at this level (RNS key size L_ℓ).
+            let l_level = BigUint::from(moduli.len().saturating_sub(level).max(1));
+            let relin_pre_rescale = if hybrid {
+                &dnum * &d * &b_key
+            } else {
+                &l_level * &q_max * &d * &b_key
+            };
+            let relin = relin_pre_rescale / &q_min + BigUint::from(1u32);
+            b_c = operand * &d * b_c + rescale_round + relin;
         }
         b_c
     }
@@ -215,6 +255,21 @@ impl CkksSmudgingBoundCalculator {
         }
         if !(self.config.precision_loss.is_finite() && self.config.precision_loss > 0.0) {
             return Err(Error::DefaultError("invalid precision target".to_string()));
+        }
+        // `mult_operand_bound` feeds `circuit_noise_bound` through an
+        // `f64 -> u64` cast: NaN casts to 0 (then `.max(1)`), so an invalid
+        // operand bound would silently SHRINK B_C — and with it the flooding
+        // requirement — instead of failing. That is the wrong direction to
+        // fail in for a security bound. Reject it explicitly.
+        if self.config.circuit.depth > 0
+            && !(self.config.circuit.mult_operand_bound.is_finite()
+                && self.config.circuit.mult_operand_bound >= 1.0)
+        {
+            return Err(Error::DefaultError(format!(
+                "invalid mult_operand_bound {} (must be finite and >= 1 for a circuit of \
+                 depth {})",
+                self.config.circuit.mult_operand_bound, self.config.circuit.depth
+            )));
         }
         // A ciphertext that went through `depth` rescales is at level >=
         // depth. Allowing level < depth would evaluate the wrap wall against
@@ -386,5 +441,62 @@ mod tests {
         });
         assert!(mul_calc.circuit_noise_bound() > add_calc.circuit_noise_bound());
         Ok(())
+    }
+
+    /// The relin key-switch term is CHARGED (regression: the original bound
+    /// omitted it). A one-level circuit with a trivial operand (bound 1) and
+    /// one addition must still exceed `N · B_fresh + rescale_round` — the
+    /// value the level would have WITHOUT any key-switch noise.
+    #[test]
+    fn relin_noise_is_charged_per_level() -> std::result::Result<(), Box<dyn StdError>> {
+        let params = big_params();
+        let d = BigUint::from(params.degree());
+        let b_e = BigUint::from(2 * params.variance() as u64);
+        let b_fresh = (BigUint::from(2u32) * &d + BigUint::from(1u32)) * &b_e;
+        let no_relin = &d * &b_fresh + (&d + BigUint::from(1u32)) / BigUint::from(2u32);
+        let calc = CkksSmudgingBoundCalculator::new(CkksSmudgingConfig {
+            params: params.clone(),
+            n_parties: 3,
+            circuit: CkksCircuitShape::one_level(1, 1.0),
+            level: 1,
+            input_bound: 1.0,
+            precision_loss: 1e-6,
+            lambda: Lambda::insecure(20),
+        });
+        let with_relin = calc.circuit_noise_bound();
+        assert!(
+            with_relin > no_relin,
+            "relin term missing: {with_relin} <= {no_relin}"
+        );
+        // ...and it scales with the committee size (B_key carries n).
+        let calc5 = CkksSmudgingBoundCalculator::new(CkksSmudgingConfig {
+            params,
+            n_parties: 5,
+            circuit: CkksCircuitShape::one_level(1, 1.0),
+            level: 1,
+            input_bound: 1.0,
+            precision_loss: 1e-6,
+            lambda: Lambda::insecure(20),
+        });
+        assert!(calc5.circuit_noise_bound() > with_relin);
+        Ok(())
+    }
+
+    /// A NaN operand bound must be REJECTED, not silently cast to 0 and
+    /// shrink the security bound.
+    #[test]
+    fn nan_operand_bound_is_rejected() {
+        let params = big_params();
+        let calc = CkksSmudgingBoundCalculator::new(CkksSmudgingConfig {
+            params,
+            n_parties: 3,
+            circuit: CkksCircuitShape::one_level(1, f64::NAN),
+            level: 1,
+            input_bound: 1.0,
+            precision_loss: 1e-6,
+            lambda: Lambda::insecure(20),
+        });
+        let err = calc.calculate_sm_bound().unwrap_err();
+        assert!(err.to_string().contains("mult_operand_bound"), "got: {err}");
     }
 }

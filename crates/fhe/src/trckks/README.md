@@ -10,9 +10,9 @@ run CKKS with the same DKG transport, share shapes, and decryption flow.
 |---|---|---|
 | Joint key | additive `s = Σ s_i`; pk from a CRP: party publishes `pk0_i = -a·s_i + e_i` | Mouchet–Troncoso-Pastoriza–Bossuat–Hubaux, [eprint 2020/304](https://eprint.iacr.org/2020/304), Protocol 1 (`EncKeyGen`) |
 | Relinearization key | two-round CRP ceremony, one instance per multiplication level | same paper, Protocol 2 (`RelinKeyGen`); ported from `fhe::mbfv::RelinKeyGenerator` |
-| Hybrid relinearization key | the SAME two-round ceremony over `Q·P` with the digit gadget: ONE instance serves every level | Han–Ki, [eprint 2019/688](https://eprint.iacr.org/2019/688) §3 (hybrid key switching); Lattigo `RKGProtocol`; see [`ckks/hybrid.rs`](../ckks/hybrid.rs) |
+| Hybrid relinearization key | the SAME two-round ceremony over `Q·P` with the digit gadget: ONE instance serves every level | Han–Ki, [eprint 2019/688](https://eprint.iacr.org/2019/688) (RNS decomposition + the Gentry–Halevi–Smart "temporary modulus" technique); Lattigo `RKGProtocol`; see [`ckks/hybrid.rs`](../ckks/hybrid.rs) |
 | Shamir layer | each party Shamir-shares `s_i` and its smudging polynomial coefficient-wise mod every RNS prime; `t+1` of `n` reconstruct | Urban–Rambaud, [eprint 2024/1285](https://eprint.iacr.org/2024/1285); same code as `trbfv::ShamirSecretSharing` |
-| Threshold decryption | `d_j = c0 + c1·[s]_j + [e_sm]_j`; Lagrange-combine `t+1` shares → `Δ·m + e + e_sm` | Li–Micciancio flooding: [eprint 2020/1533](https://eprint.iacr.org/2020/1533); bound derivation in [`smudging.rs`](smudging.rs) |
+| Threshold decryption | `d_j = c0 + c1·[s]_j + [e_sm]_j`; Lagrange-combine `t+1` shares → `Δ·m + e + e_sm` | flooding bound = standard smudging lemma (AJLTVW, Eurocrypt 2012); the IND-CPA-D attack it defends against is Li–Micciancio, [eprint 2020/1533](https://eprint.iacr.org/2020/1533); derivation in [`smudging.rs`](smudging.rs) |
 
 ## API map
 
@@ -79,6 +79,16 @@ Evaluate: `ct = a.try_mul(&b); hybrid_rlk.relinearizes(&mut ct); ct.rescale()` �
     .calculate_sm_bits()` — security floor `B_sm ≥ 2^λ·B_C` checked against the two
 CKKS correctness walls (no wrap mod `Q_l`; `n·B_sm ≤ precision_loss·effective_scale`).
 Reuses `trbfv::Lambda`.
+
+`B_C` (`circuit_noise_bound`) is worst-case sup-norm and charges, per multiplicative level:
+the operand product, the rescale rounding, AND the relinearization key-switch noise — which
+an earlier version omitted. The key-switch term is chosen from the params: special primes
+present ⇒ hybrid (`dnum·N·B_key`, `D/P ≤ 1`), else RNS key (`L_ℓ·q_max·N·B_key`), with
+`B_key = 2·n·N·B_e` for the n-party ceremony key, divided by `q_min` (≤ the dropped modulus,
+so conservative). This is the term that makes per-level RNS keys ~2^14 above fresh noise at
+N=32768 (the measured "garbage" of pre-hybrid runs) while hybrid adds ~2 bits. A non-finite
+`mult_operand_bound` is REJECTED (a NaN would cast to 0 and silently shrink the bound).
+Every `sm_bits` quoted anywhere must come from this calculator — never a constant.
 
 ## Typical flow
 

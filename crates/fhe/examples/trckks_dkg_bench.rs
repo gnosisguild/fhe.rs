@@ -34,12 +34,26 @@
 //! - `secure32768-L20`: N=32768, 45 + 19x40 (20 limbs, 805 bits), delta=2^40
 //! - `secure65536-ladder` (alias `secure65536-L40`): N=65536, 45 + 37x40
 //!   (38 limbs, 1525 bits), delta=2^40
+//! - the 128-bit-secure sets of `fhe::ckks::secure_presets` (special
+//!   primes INCLUDED in the budget, hybrid key switching forced):
+//!   `s1-stats` (N=32768, 60 + 17x40, k=2, 860 bits), `s1-cmp5`
+//!   (N=32768, 60 + 16x40, k=2, 820 bits), `s2-cmp12` (N=65536,
+//!   60 + 37x40, k=3, 1720 bits). `s1-cmp6` is rejected (940 > 881).
+//!
+//! `--app stats|poly4|cmp<K>` additionally runs the ACTUAL application
+//! chain on the threshold keys after the ceremony — `--users` packed
+//! user ciphertexts → evaluate (the interfold policy math, mirrored
+//! here) → `t+1` decryption shares → combine → max abs error vs the
+//! plaintext evaluation — and reports it under `app.*` (see
+//! `BENCHMARKS_TRCKKS.md` §6 for the per-app circuits).
 //!
 //! Security of the secure presets: the HE Standard (Albrecht et al., 2018,
 //! <https://homomorphicencryption.org/standard/>) Table 1, ternary secret,
 //! classical 128-bit, allows log2(Q) <= 881 at N=32768; the same estimator
 //! extended to N=65536 (as used by Lattigo/OpenFHE default tables) allows
-//! log2(Q) <= 1772. 805 < 881 and 1525 < 1772.
+//! log2(Q) <= 1772. 805 < 881 and 1525 < 1772 — for the ciphertext
+//! modulus alone; the bound applies to `Q·P` once hybrid special primes
+//! are added (`secure_presets::security_budget` accounts for both).
 //!
 //! Every timing is `std::time::Instant` wall time of ONE party's work
 //! (median across parties within a run), reported as min/median over
@@ -51,14 +65,18 @@
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::too_many_lines,
-    clippy::cast_precision_loss
+    clippy::cast_precision_loss,
+    clippy::too_many_arguments
 )]
 
 use clap::Parser;
+use fhe::ckks::secure_presets::{SecureSet, security_budget};
 use fhe::ckks::{
     CkksCiphertext, CkksEncoder, CkksHybridRelinKey, CkksParameters, CkksParametersBuilder,
-    CkksRelinearizationKey, CkksSecretKey,
+    CkksPublicKey, CkksRelinearizationKey, CkksSecretKey,
 };
+use fhe::trbfv::{Lambda, MIN_SECURE_LAMBDA};
+use fhe::trckks::app_feasibility::{AppClass, feasibility};
 use fhe::trckks::{
     CkksCrp, CkksHybridRelinKeyGenerator, CkksHybridRelinKeyShare, CkksPublicKeyShare,
     CkksRelinKeyGenerator, CkksRelinKeyShare, R1Aggregated, R2, TRCKKS,
@@ -110,6 +128,17 @@ struct Args {
     /// report both relative errors (costs four extra RNS level ceremonies).
     #[arg(long, default_value_t = false)]
     chain_compare: bool,
+    /// Application chain to run on the threshold keys after the ceremony:
+    /// `stats` (packed mean/variance over `--users` users), `poly4`
+    /// (depth-4 polynomial score), `cmp<K>` (`K`-iteration sign
+    /// extraction over all pairs of `--users` bidders). Forces hybrid
+    /// key switching.
+    #[arg(long)]
+    app: Option<String>,
+    /// Number of packed user ciphertexts for `--app` (users for `stats`,
+    /// bidders for `cmp<K>`; `poly4` always scores one vector).
+    #[arg(long, default_value_t = 4)]
+    users: usize,
 }
 
 struct Preset {
@@ -118,6 +147,8 @@ struct Preset {
     moduli_sizes: Vec<usize>,
     scale_bits: i32,
     security_note: &'static str,
+    /// Pre-built parameters (secure sets carry their special primes).
+    params: Option<Arc<CkksParameters>>,
 }
 
 fn ladder_sizes(iterations: usize) -> Vec<usize> {
@@ -129,6 +160,44 @@ fn ladder_sizes(iterations: usize) -> Vec<usize> {
 }
 
 fn preset(name: &str) -> Result<Preset, Box<dyn Error>> {
+    if let Some(set) = SecureSet::from_name(name) {
+        let params = set.build()?;
+        let b = security_budget(&params)?;
+        return Ok(Preset {
+            name: set.name(),
+            degree: params.degree(),
+            moduli_sizes: params.moduli_sizes().to_vec(),
+            scale_bits: params.scale().log2().round() as i32,
+            security_note: match set {
+                SecureSet::S1Stats => {
+                    "128-bit classical (HE Standard 2018 Table 1, ternary): log2(Q*P) = 860 <= 881 \
+                     at N=32768 (special primes counted)"
+                }
+                SecureSet::S1Cmp5 => {
+                    "128-bit classical (HE Standard 2018 Table 1, ternary): log2(Q*P) = 820 <= 881 \
+                     at N=32768 (special primes counted)"
+                }
+                SecureSet::S1Cmp6 => "REJECTED: 940 > 881",
+                SecureSet::S2Cmp12 => {
+                    "128-bit classical (estimator extrapolation): log2(Q*P) = 1720 <= 1772 at \
+                     N=65536 (special primes counted)"
+                }
+            },
+            params: Some(params.clone()),
+        })
+        .and_then(|p| {
+            if b.fits() {
+                Ok(p)
+            } else {
+                Err(format!(
+                    "{name}: {} bits > budget {}",
+                    b.log_qp_bits(),
+                    b.budget_bits
+                )
+                .into())
+            }
+        });
+    }
     Ok(match name {
         "demo512-2limb" => Preset {
             name: "demo512-2limb",
@@ -136,6 +205,7 @@ fn preset(name: &str) -> Result<Preset, Box<dyn Error>> {
             moduli_sizes: vec![45, 45],
             scale_bits: 40,
             security_note: "INSECURE demo shape (N=512)",
+            params: None,
         },
         "demo512-ladder" => Preset {
             name: "demo512-ladder",
@@ -143,6 +213,7 @@ fn preset(name: &str) -> Result<Preset, Box<dyn Error>> {
             moduli_sizes: ladder_sizes(12),
             scale_bits: 40,
             security_note: "INSECURE demo shape (N=512); 12-iteration sign-extraction ladder",
+            params: None,
         },
         "stats512-3limb" => Preset {
             name: "stats512-3limb",
@@ -150,6 +221,20 @@ fn preset(name: &str) -> Result<Preset, Box<dyn Error>> {
             moduli_sizes: vec![36, 36, 36],
             scale_bits: 40,
             security_note: "INSECURE demo shape (N=512); salary-survey statistics shape",
+            params: None,
+        },
+        "smoke8192-L8" => Preset {
+            name: "smoke8192-L8",
+            degree: 8192,
+            moduli_sizes: {
+                let mut s = vec![60usize];
+                s.extend(std::iter::repeat_n(40usize, 7));
+                s
+            },
+            scale_bits: 40,
+            security_note: "INSECURE smoke shape (N=8192, 340 bits > 218): the secure-set limb \
+                            shape at a size that runs in seconds",
+            params: None,
         },
         "secure32768-L20" => Preset {
             name: "secure32768-L20",
@@ -162,6 +247,7 @@ fn preset(name: &str) -> Result<Preset, Box<dyn Error>> {
             scale_bits: 40,
             security_note: "128-bit classical (HE Standard 2018 Table 1: log Q <= 881 at N=32768; \
                             here 805)",
+            params: None,
         },
         "secure65536-ladder" | "secure65536-L40" => Preset {
             name: "secure65536-ladder",
@@ -170,6 +256,7 @@ fn preset(name: &str) -> Result<Preset, Box<dyn Error>> {
             scale_bits: 40,
             security_note: "128-bit classical (HE Standard estimator extended to N=65536: log Q <= \
                             1772; here 1525)",
+            params: None,
         },
         other => return Err(format!("unknown preset {other}").into()),
     })
@@ -423,6 +510,256 @@ fn collect_rows(dealt: &[Vec<Array2<u64>>], j: usize) -> Vec<Array2<u64>> {
         .collect()
 }
 
+/// Deterministic per-user inputs in `[0, 1]` (the cap-normalized survey
+/// values / auction bids): spread so that every pairwise gap is ≥ 1/(m+1).
+fn user_values(m: usize) -> Vec<f64> {
+    (0..m).map(|i| (i + 1) as f64 / (m + 1) as f64).collect()
+}
+
+/// Plaintext mirror of the cubic sign map `f(y) = (1.5 − 0.5·y²)·y`.
+fn sign_map(mut y: f64, iterations: usize) -> f64 {
+    for _ in 0..iterations {
+        y = (1.5 - 0.5 * y * y) * y;
+    }
+    y
+}
+
+/// Homomorphic multiply + hybrid relinearize + rescale; accumulates the
+/// relinearization time.
+fn mul_relin_rescale(
+    a: &CkksCiphertext,
+    b: &CkksCiphertext,
+    rlk: &CkksHybridRelinKey,
+    relin_ms: &mut f64,
+) -> Result<CkksCiphertext, Box<dyn Error>> {
+    let mut p = a.try_mul(b)?;
+    let t = Instant::now();
+    rlk.relinearizes(&mut p)?;
+    *relin_ms += ms(t);
+    p.rescale()?;
+    Ok(p)
+}
+
+/// The application chain on the threshold keys: encrypt `users` packed
+/// ciphertexts under the joint `pk`, evaluate the app (interfold policy
+/// math mirrored), threshold-decrypt with `t+1` shares, compare with the
+/// plaintext evaluation. Fills `app.*`.
+fn app_chain(
+    params: &Arc<CkksParameters>,
+    trckks: &TRCKKS,
+    encoder: &CkksEncoder,
+    pk: &CkksPublicKey,
+    rlk: &CkksHybridRelinKey,
+    sk_shares_j: &[fhe_math::rq::Poly<fhe_math::rq::PowerBasis>],
+    es_shares_j: &[fhe_math::rq::Poly<fhe_math::rq::PowerBasis>],
+    app: AppClass,
+    users: usize,
+    smudging_bits: usize,
+    out: &mut Run,
+    rng: &mut impl rand::CryptoRng,
+) -> Result<(), Box<dyn Error>> {
+    let n = trckks.n;
+    let threshold = trckks.threshold;
+    let delta = params.scale();
+    let slots = params.slots();
+    let deep = app.depth();
+    if deep > params.max_level() {
+        return Err(format!(
+            "{} needs {deep} levels; the set has {}",
+            app.name(),
+            params.max_level()
+        )
+        .into());
+    }
+
+    // ── Client side: one packed (slot-replicated) ciphertext per user ──
+    let values = match app {
+        AppClass::Poly4 => vec![0.9f64],
+        AppClass::Stats { .. } | AppClass::Cmp { .. } => user_values(users),
+    };
+    let t = Instant::now();
+    let cts: Vec<CkksCiphertext> = values
+        .iter()
+        .map(|&v| {
+            let pt = encoder.encode_constant(v, 0, delta)?;
+            pk.try_encrypt(&pt, rng)
+        })
+        .collect::<fhe::Result<Vec<_>>>()?;
+    out.insert(
+        "app.encrypt_ms_per_user".into(),
+        ms(t) / values.len() as f64,
+    );
+    out.insert("app.users".into(), values.len() as f64);
+    out.insert("app.user_ct_bytes".into(), cts[0].to_bytes().len() as f64);
+
+    // ── Evaluate ───────────────────────────────────────────────────────
+    let t_eval = Instant::now();
+    let mut relin_ms = 0f64;
+    let (result, expected): (CkksCiphertext, Vec<f64>) = match app {
+        AppClass::Stats { .. } => {
+            // statistics_packed_policy: slot 0 = S·Σv, slot 1 = S·Σv²,
+            // squares relinearized at level 0, masks at scale delta·s / s.
+            let s_out = fhe::trckks::app_feasibility::STATS_OUTPUT_SCALE;
+            let s = 2f64.powi(8);
+            let mut ct_sum = cts[0].clone();
+            for ct in &cts[1..] {
+                ct_sum = ct_sum.try_add(ct)?;
+            }
+            let mask_sum = encoder.encode_with_scale(&[s_out], 0, delta * s)?;
+            let mut m_sum = ct_sum.try_mul_plaintext(&mask_sum)?;
+            m_sum.rescale()?;
+            let mut ct_sumsq: Option<CkksCiphertext> = None;
+            for ct in &cts {
+                let mut sq = ct.try_mul(ct)?;
+                let t = Instant::now();
+                rlk.relinearizes(&mut sq)?;
+                relin_ms += ms(t);
+                ct_sumsq = Some(match ct_sumsq {
+                    None => sq,
+                    Some(acc) => acc.try_add(&sq)?,
+                });
+            }
+            let mask_sumsq = encoder.encode_with_scale(&[0.0, s_out], 0, s)?;
+            let mut m_sumsq = ct_sumsq
+                .expect("non-empty")
+                .try_mul_plaintext(&mask_sumsq)?;
+            m_sumsq.rescale()?;
+            let out_ct = m_sum.try_add(&m_sumsq)?;
+            let sum: f64 = values.iter().sum();
+            let sumsq: f64 = values.iter().map(|v| v * v).sum();
+            (out_ct, vec![s_out * sum, s_out * sumsq])
+        }
+        AppClass::Poly4 => {
+            // Depth-4 score: x -> x^16 by four squarings (each one
+            // mul + relin + rescale), the shape of `chain_rel_error`.
+            let mut y = cts[0].clone();
+            for _ in 0..4 {
+                y = mul_relin_rescale(&y, &y, rlk, &mut relin_ms)?;
+            }
+            (y, vec![values[0].powi(16)])
+        }
+        AppClass::Cmp { iterations } => {
+            // sign_extraction_policy: pack all pairwise differences with
+            // one-hot(1/B) masks (B = 1), then iterate the cubic map.
+            let pairs: Vec<(usize, usize)> = (0..values.len())
+                .flat_map(|a| (a + 1..values.len()).map(move |b| (a, b)))
+                .collect();
+            if pairs.len() > slots {
+                return Err(format!("{} pairs exceed {slots} slots", pairs.len()).into());
+            }
+            let mut acc: Option<CkksCiphertext> = None;
+            for (p, &(a, b)) in pairs.iter().enumerate() {
+                let diff = cts[a].try_sub(&cts[b])?;
+                let mut mask = vec![0.0f64; p + 1];
+                mask[p] = 1.0;
+                let masked =
+                    diff.try_mul_plaintext(&encoder.encode_with_scale(&mask, 0, delta)?)?;
+                acc = Some(match acc {
+                    None => masked,
+                    Some(prev) => prev.try_add(&masked)?,
+                });
+            }
+            let mut y = acc.expect("at least one pair");
+            y.rescale()?;
+            for _ in 0..iterations {
+                let w = mul_relin_rescale(&y, &y, rlk, &mut relin_ms)?;
+                // Scale management: rescale divides by the ACTUAL dropped
+                // prime (≈2^40, never exactly), and `w = y²` squares the
+                // drift, so after k iterations the scale is off by a
+                // factor ~(1+ε)^(2^k) — enough to overflow the i64 encoder
+                // at 12 iterations on a 38-limb chain. Encode the −0.5
+                // constant at `q_top·Δ / w.scale` so `u` rescales to
+                // exactly Δ, the same re-centering interfold's policy does.
+                let q_top = *params.context_at_level(w.level)?.moduli().last().unwrap() as f64;
+                let c_scale = q_top * delta / w.scale;
+                let mut u =
+                    w.try_mul_plaintext(&encoder.encode_constant(-0.5, w.level, c_scale)?)?;
+                u.rescale()?;
+                u.scale = delta;
+                let t = u.try_add_plaintext(&encoder.encode_constant(1.5, u.level, u.scale)?)?;
+                let mut y_at_t = y.clone();
+                y_at_t.mod_switch_to_level(t.level)?;
+                y = mul_relin_rescale(&t, &y_at_t, rlk, &mut relin_ms)?;
+            }
+            let expected = pairs
+                .iter()
+                .map(|&(a, b)| sign_map(values[a] - values[b], iterations))
+                .collect();
+            (y, expected)
+        }
+    };
+    out.insert("app.eval_ms".into(), ms(t_eval));
+    out.insert("app.eval_relin_ms".into(), relin_ms);
+    out.insert("app.output_level".into(), result.level as f64);
+    out.insert("app.output_ct_bytes".into(), result.to_bytes().len() as f64);
+    out.insert("app.output_scale_bits".into(), result.scale.log2());
+
+    // ── Threshold decryption of the output ─────────────────────────────
+    let parties: Vec<usize> = (1..=threshold + 1).collect();
+    let mut t_ds = Vec::new();
+    let mut d_shares = Vec::new();
+    let mut ds_bytes = 0usize;
+    for &j in &parties {
+        let sk_j = trckks.project_share_to_level(&sk_shares_j[j - 1], result.level)?;
+        let es_j = trckks.project_share_to_level(&es_shares_j[j - 1], result.level)?;
+        let t = Instant::now();
+        let d = trckks.decryption_share(&result, sk_j.into_ntt(), es_j)?;
+        t_ds.push(ms(t));
+        ds_bytes = d.to_bytes().len();
+        d_shares.push(d);
+    }
+    let t = Instant::now();
+    let pt = trckks.decrypt(d_shares, parties, &result)?;
+    let t_combine = ms(t);
+    let decoded = encoder.decode_slots(&pt, expected.len())?;
+    let err = expected
+        .iter()
+        .zip(decoded.iter())
+        .map(|(e, d)| (e - d).abs())
+        .fold(0f64, f64::max);
+    let rel = expected
+        .iter()
+        .zip(decoded.iter())
+        .map(|(e, d)| (e - d).abs() / e.abs().max(1e-12))
+        .fold(0f64, f64::max);
+    out.insert("app.decrypt_share_ms".into(), median(&mut t_ds));
+    out.insert("app.decrypt_combine_ms".into(), t_combine);
+    out.insert("app.decrypt_share_bytes".into(), ds_bytes as f64);
+    out.insert("app.max_abs_error".into(), err);
+    out.insert("app.max_rel_error".into(), rel);
+    out.insert(
+        "app.expected_max_abs".into(),
+        expected.iter().fold(0f64, |m, e| m.max(e.abs())),
+    );
+    if let AppClass::Cmp { .. } = app {
+        let correct = expected
+            .iter()
+            .zip(decoded.iter())
+            .filter(|(e, d)| e.signum() == d.signum())
+            .count();
+        out.insert("app.signs_correct".into(), correct as f64);
+        out.insert("app.signs_total".into(), expected.len() as f64);
+    }
+    out.insert("app.sm_bits_used".into(), smudging_bits as f64);
+
+    // Flooding verdict at the secure floor for this exact (app, n).
+    match feasibility(params, app, n, Lambda::secure(MIN_SECURE_LAMBDA)?) {
+        Ok(row) => {
+            out.insert("app.sm_bits_required".into(), row.sm_bits as f64);
+            out.insert(
+                "app.walls_close".into(),
+                if row.closes() { 1.0 } else { 0.0 },
+            );
+            out.insert(
+                "app.required_opening_scale_bits".into(),
+                row.required_opening_scale_bits as f64,
+            );
+        }
+        Err(e) => eprintln!("feasibility: {e}"),
+    }
+    Ok(())
+}
+
 /// Deepest level at which ONE product of small values still fits: the
 /// product carries scale `delta^2`, so `Q_l` must exceed `2*scale_bits`
 /// plus headroom for the values and noise. With 36-bit limbs and
@@ -474,6 +811,8 @@ fn one_run(
     smudging_bits: usize,
     keyswitch: KeySwitch,
     chain_compare: bool,
+    app: Option<AppClass>,
+    users: usize,
 ) -> Result<Run, Box<dyn Error>> {
     let mut rng = rand::rng();
     let mut out = Run::new();
@@ -754,6 +1093,29 @@ fn one_run(
         out.insert("mult.chain_rel_error_rns".into(), e);
     }
 
+    // ── The application chain on the threshold keys ────────────────────
+    if let Some(app) = app {
+        let Some(Relin::Hybrid(hk)) = &deepest_rlk else {
+            return Err("--app requires --keyswitch hybrid (one key for every level)".into());
+        };
+        let t = Instant::now();
+        app_chain(
+            params,
+            &trckks,
+            &encoder,
+            &pk,
+            hk,
+            &sk_shares_j,
+            &es_shares_j,
+            app,
+            users,
+            smudging_bits,
+            &mut out,
+            &mut rng,
+        )?;
+        out.insert("app.total_ms".into(), ms(t));
+    }
+
     Ok(out)
 }
 
@@ -776,31 +1138,99 @@ fn json_escape(s: &str) -> String {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let preset = preset(&args.preset)?;
-    let keyswitch = match args.keyswitch.as_str() {
+    let app = match &args.app {
+        None => None,
+        Some(name) => Some(
+            AppClass::from_name(name, args.users)
+                .ok_or_else(|| format!("unknown --app {name} (stats|poly4|cmp<K>)"))?,
+        ),
+    };
+    let mut keyswitch = match args.keyswitch.as_str() {
         "rns" => KeySwitch::Rns,
         "hybrid" => KeySwitch::Hybrid,
         other => return Err(format!("unknown --keyswitch {other} (rns|hybrid)").into()),
     };
-    let mut builder = CkksParametersBuilder::new()
-        .set_degree(preset.degree)
-        .set_moduli_sizes(&preset.moduli_sizes)
-        .set_scale(2f64.powi(preset.scale_bits));
-    if keyswitch == KeySwitch::Hybrid {
-        builder = builder.set_special_moduli_sizes(&vec![60usize; args.special_primes]);
-        if let Some(d) = args.dnum {
-            builder = builder.set_dnum(d);
+    if app.is_some() || preset.params.is_some() {
+        if keyswitch == KeySwitch::Rns {
+            eprintln!("note: --app / secure sets force --keyswitch hybrid");
         }
+        keyswitch = KeySwitch::Hybrid;
     }
-    let params = builder.build_arc()?;
+    let params = match &preset.params {
+        Some(p) => p.clone(),
+        None => {
+            let mut builder = CkksParametersBuilder::new()
+                .set_degree(preset.degree)
+                .set_moduli_sizes(&preset.moduli_sizes)
+                .set_scale(2f64.powi(preset.scale_bits));
+            if keyswitch == KeySwitch::Hybrid {
+                builder = builder.set_special_moduli_sizes(&vec![60usize; args.special_primes]);
+                if let Some(d) = args.dnum {
+                    builder = builder.set_dnum(d);
+                }
+            }
+            builder.build_arc()?
+        }
+    };
     let num_limbs = params.moduli().len();
     let log_q: usize = params.moduli_sizes().iter().sum();
+    let log_p: usize = params
+        .special_moduli()
+        .iter()
+        .map(|&m| 64 - m.leading_zeros() as usize)
+        .sum();
     let levels = resolve_levels(&args.relin_levels, preset.name, &params);
 
     println!(
-        "== preset {} : N={}, L={} limbs, log2(Q)={}, delta=2^{} ==",
-        preset.name, preset.degree, num_limbs, log_q, preset.scale_bits
+        "== preset {} : N={}, L={} limbs, log2(Q)={}, log2(P)={}, log2(QP)={}, delta=2^{} ==",
+        preset.name,
+        preset.degree,
+        num_limbs,
+        log_q,
+        log_p,
+        log_q + log_p,
+        preset.scale_bits
     );
     println!("   security: {}", preset.security_note);
+    // The preset's note describes Q ALONE. Hybrid key switching appends the
+    // special primes P, and RLWE must be assessed at Q·P (the relin key is
+    // an encryption under modulus Q·P). Re-check the actual built parameters
+    // against the HE-Standard table and OVERRIDE the note when they do not
+    // fit, so a benchmark row can never carry a "128-bit" label its own
+    // parameters contradict (e.g. `secure32768-L20` + 2×60-bit specials =
+    // 925 > 881 bits).
+    match security_budget(&params) {
+        Ok(b) if b.fits() => println!(
+            "   security (Q·P re-check): log2(Q·P)={} <= {} at N={}: fits the 128-bit table \
+             (headroom {} bits)",
+            b.log_qp_bits(),
+            b.budget_bits,
+            b.degree,
+            b.headroom_bits()
+        ),
+        Ok(b) => println!(
+            "   ⚠ security (Q·P re-check): log2(Q·P)={} > {} at N={} — these parameters DO NOT \
+             fit the 128-bit table once the {} special prime(s) are counted. The note above \
+             applies to Q alone; treat every row below as NOT 128-bit secure.",
+            b.log_qp_bits(),
+            b.budget_bits,
+            b.degree,
+            params.special_moduli().len()
+        ),
+        Err(e) => println!(
+            "   security (Q·P re-check): N={} is not in the HE-Standard table ({e}); no \
+             128-bit claim is made for these rows",
+            params.degree()
+        ),
+    }
+    if let Some(app) = app {
+        println!(
+            "   app: {} (depth {}, {} users)",
+            app.name(),
+            app.depth(),
+            args.users
+        );
+    }
     match keyswitch {
         KeySwitch::Rns => println!(
             "   keyswitch: rns   relin levels: {levels:?}   runs: {}",
@@ -829,6 +1259,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 args.smudging_bits,
                 keyswitch,
                 args.chain_compare,
+                app,
+                args.users,
             )?);
             println!("   run {} done in {:.1}s", r + 1, t.elapsed().as_secs_f64());
         }
@@ -854,8 +1286,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut obj = String::new();
         obj.push_str("  {\n");
         obj.push_str(&format!(
-            "    \"preset\": \"{}\", \"degree\": {}, \"limbs\": {}, \"log_q\": {}, \"scale_bits\": {},\n",
-            preset.name, preset.degree, num_limbs, log_q, preset.scale_bits
+            "    \"preset\": \"{}\", \"degree\": {}, \"limbs\": {}, \"log_q\": {}, \"log_p\": {}, \"scale_bits\": {},\n",
+            preset.name, preset.degree, num_limbs, log_q, log_p, preset.scale_bits
+        ));
+        obj.push_str(&format!(
+            "    \"app\": \"{}\", \"users\": {},\n",
+            app.map_or(String::new(), |a| a.name()),
+            args.users
         ));
         obj.push_str(&format!(
             "    \"security\": \"{}\",\n    \"moduli_sizes\": {:?},\n",

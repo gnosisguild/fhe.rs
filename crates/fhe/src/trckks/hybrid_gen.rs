@@ -3,7 +3,7 @@
 //! The two-round CRP protocol `RelinKeyGen` of Mouchet et al.
 //! (<https://eprint.iacr.org/2020/304>, Protocol 2) — the same protocol as
 //! [`crate::trckks::CkksRelinKeyGenerator`] — instantiated with the hybrid
-//! gadget of [`crate::ckks::hybrid`] (Han–Ki 2020 §3; Lattigo `RKGProtocol`
+//! gadget of [`crate::ckks::hybrid`] (Han–Ki 2019/688; Lattigo `RKGProtocol`
 //! over `Q·P`). All key material lives over `Q·P` (as `(Q, P)` pairs,
 //! [`CkksQpPoly`]) and there are `dnum` digits instead of `L_ℓ`, so ONE
 //! ceremony yields a key for EVERY level. With `a_j` the `dnum` CRPs over
