@@ -3,9 +3,9 @@ use std::sync::Arc;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::Result;
 use crate::bfv::{BfvParameters, CommonRandomPolyVec, SecretKey};
 use crate::lbfv::LBFVPublicKey;
+use crate::{Error, Result};
 use fhe_math::rq::{Ntt, Poly};
 
 use super::ContributionBinding;
@@ -22,6 +22,46 @@ pub struct PublicKeyShare {
 }
 
 impl PublicKeyShare {
+    /// Return cloned public-key `b` components (`c[0]`) in gadget-row order.
+    ///
+    /// Each returned polynomial is independent of the share and uses the
+    /// level-0 context validated by the underlying l-BFV public key.
+    pub fn b_components(&self) -> Result<Vec<Poly<Ntt>>> {
+        self.key.validate_structure()?;
+        self.key
+            .c
+            .iter()
+            .enumerate()
+            .map(|(index, ciphertext)| {
+                ciphertext.c.first().cloned().ok_or_else(|| {
+                    Error::DefaultError(format!(
+                        "LBFV public-key ciphertext {index} is missing b component"
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    /// Return cloned concrete CRS `a` components (`c[1]`) in gadget-row order.
+    ///
+    /// Each returned polynomial is independent of the share and uses the
+    /// level-0 context validated by the underlying l-BFV public key.
+    pub fn a_components(&self) -> Result<Vec<Poly<Ntt>>> {
+        self.key.validate_structure()?;
+        self.key
+            .c
+            .iter()
+            .enumerate()
+            .map(|(index, ciphertext)| {
+                ciphertext.c.get(1).cloned().ok_or_else(|| {
+                    Error::DefaultError(format!(
+                        "LBFV public-key ciphertext {index} is missing a component"
+                    ))
+                })
+            })
+            .collect()
+    }
+
     /// Create a bound public-key contribution from a secret-key contribution
     /// and a shared CRS seed.
     pub fn new_with_seed_and_binding<R: RngCore + CryptoRng>(
@@ -238,6 +278,28 @@ mod tests {
         // The inner key should carry the CRP's seed (if any) or be seedless.
         assert_eq!(share.key.seed, crp.seed());
         assert_eq!(share.binding, None);
+        Ok(())
+    }
+
+    #[test]
+    fn components_from_crp_match_rows_and_level_zero_context() -> Result<()> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let crp = CommonRandomPolyVec::new(&params, &mut rng)?;
+        let share = PublicKeyShare::contribute_with_crp(&sk, &crp, &mut rng)?;
+
+        let a_components = share.a_components()?;
+        let b_components = share.b_components()?;
+        assert_eq!(a_components, crp.to_polys());
+        assert_eq!(a_components.len(), params.moduli().len());
+        assert_eq!(b_components.len(), params.moduli().len());
+
+        let ctx0 = params.context_at_level(0)?;
+        for polynomial in a_components.iter().chain(b_components.iter()) {
+            assert_eq!(polynomial.ctx(), ctx0);
+        }
+
         Ok(())
     }
 
