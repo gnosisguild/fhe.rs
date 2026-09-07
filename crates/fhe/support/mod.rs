@@ -133,6 +133,8 @@ pub fn secure8192() -> Result<Preset> {
         .set_variance(10)
         .set_error1_variance_str("17723039943798878305460955570711717478400")?
         .build_arc()?;
+    // Share transport uses standard BFV; the large threshold-BFV e1 variance
+    // belongs only to the computation parameters above.
     let share_parameters = BfvParametersBuilder::new()
         .set_degree(8192)
         .set_plaintext_modulus(288_230_376_164_294_657)
@@ -168,6 +170,8 @@ pub fn secure16384() -> Result<Preset> {
         .set_variance(10)
         .set_error1_variance_str("264093875047547791978479834453333")?
         .build_arc()?;
+    // Share transport uses standard BFV; the large threshold-BFV e1 variance
+    // belongs only to the computation parameters above.
     let share_parameters = BfvParametersBuilder::new()
         .set_degree(16384)
         .set_plaintext_modulus(1_125_899_917_262_849)
