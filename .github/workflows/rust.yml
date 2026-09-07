@@ -151,8 +151,8 @@ jobs:
           profile: minimal
           toolchain: stable
           override: true
-      - name: Run secure multiplication stress test
-        run: cargo test -p fhe --release --test trbfv_e2e
+      - name: Run threshold BFV and l-BFV stress tests
+        run: cargo test -p fhe --release --test trbfv_e2e --test trlbfv_e2e
   examples-and-benches:
     name: Examples and benchmarks smoke test
     env:

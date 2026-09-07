@@ -70,5 +70,5 @@ the test name is not an independent security claim.
 Repository-only profiles and deterministic RNG helpers live in
 `crates/fhe/support/mod.rs`, shared by the test, example, and benchmark targets
 without becoming part of the public `fhe` API. Fast profile and API checks are
-kept separate from the full distributed multiplication workflow in
-`crates/fhe/tests/trbfv_e2e.rs`.
+kept separate from the full threshold BFV and distributed l-BFV workflows in
+`crates/fhe/tests/trbfv_e2e.rs` and `crates/fhe/tests/trlbfv_e2e.rs`.
