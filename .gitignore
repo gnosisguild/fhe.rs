@@ -15,3 +15,6 @@ proptest-regressions/
 .vscode
 # tmuxp project config
 .tmuxp.yaml
+
+# agent working files
+.hermes/
