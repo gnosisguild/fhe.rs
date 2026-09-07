@@ -46,6 +46,41 @@ impl FheParametrized for RelinKeyShare {
 }
 
 impl RelinKeyShare {
+    /// Return the secret-dependent `d0` components in gadget-row order.
+    ///
+    /// Each [`Poly<NttShoup>`] contains all RNS limbs for one row. The slice is
+    /// borrowed read-only from this share; the component fields remain private,
+    /// so callers cannot mutate the key or bypass the validation performed by
+    /// the share constructors and deserializer.
+    #[must_use]
+    pub fn d0_components(&self) -> &[Poly<NttShoup>] {
+        &self.ksk_r_to_s.c0
+    }
+
+    /// Return the secret-dependent `d2` components in gadget-row order.
+    ///
+    /// Each [`Poly<NttShoup>`] contains all RNS limbs for one row. These rows
+    /// use the positive-`a` convention `d2 = r*a + e2 + g*sk`. The slice is
+    /// borrowed read-only from this share; the component fields remain private,
+    /// so callers cannot mutate the key or bypass the validation performed by
+    /// the share constructors and deserializer.
+    #[must_use]
+    pub fn d2_components(&self) -> &[Poly<NttShoup>] {
+        &self.ksk_s_to_r.c0
+    }
+
+    /// Return the ciphertext level used by this relinearization-key share.
+    #[must_use]
+    pub const fn ciphertext_level(&self) -> usize {
+        self.ksk_r_to_s.ciphertext_level
+    }
+
+    /// Return the key level used by this relinearization-key share.
+    #[must_use]
+    pub const fn key_level(&self) -> usize {
+        self.ksk_r_to_s.ksk_level
+    }
+
     /// Generate an unbound relinearization-key contribution from shared seeds.
     pub fn contribution<R: RngCore + CryptoRng>(
         sk: &SecretKey,
@@ -534,6 +569,34 @@ mod tests {
         let joint_sk = SecretKey::new(joint_coeffs, &params);
         let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
         assert_eq!(decoded.first(), Some(&25));
+        Ok(())
+    }
+
+    #[test]
+    fn proof_components_roundtrip_preserves_rows_and_levels() -> Result<()> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let crp_d1 = CommonRandomPolyVec::new(&params, &mut rng)?;
+        let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
+
+        let (share, witness) =
+            RelinKeyShare::contribution_with_crp_extended(&sk, &crp_d1, &crp_a, 0, 0, &mut rng)?;
+
+        assert_eq!(share.d0_components().len(), crp_d1.len());
+        assert_eq!(share.d2_components().len(), crp_a.len());
+        assert_eq!(witness.errors_d0.len(), crp_d1.len());
+        assert_eq!(witness.errors_d2.len(), crp_a.len());
+        assert_eq!(share.ciphertext_level(), 0);
+        assert_eq!(share.key_level(), 0);
+        assert_eq!(share.d0_components()[0].ctx().moduli(), params.moduli());
+        assert_eq!(share.d2_components()[0].ctx().moduli(), params.moduli());
+
+        let restored = RelinKeyShare::from_bytes(&share.to_bytes(), &params)?;
+        assert_eq!(restored.d0_components(), share.d0_components());
+        assert_eq!(restored.d2_components(), share.d2_components());
+        assert_eq!(restored.ciphertext_level(), share.ciphertext_level());
+        assert_eq!(restored.key_level(), share.key_level());
         Ok(())
     }
 }
