@@ -1,14 +1,14 @@
-//! Regression tests for the two parameter presets used by the examples.
+//! Regression tests for the shared parameter profiles.
 
-#[path = "../examples/support/presets.rs"]
-mod presets;
+#[path = "../support/mod.rs"]
+mod support;
 
 use fhe::trbfv::{Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
 use num_bigint::BigUint;
 
 #[test]
-fn secure8192_preset_is_feasible_and_covers_share_moduli() {
-    let preset = presets::secure8192().unwrap();
+fn secure8192_profile_is_feasible_and_covers_share_moduli() {
+    let preset = support::secure8192().unwrap();
     assert_eq!(preset.parameters.degree(), 8192);
     assert_eq!(preset.parameters.plaintext(), 1_000_000);
     assert_eq!(
@@ -44,13 +44,13 @@ fn secure8192_preset_is_feasible_and_covers_share_moduli() {
             .parameters
             .moduli()
             .iter()
-            .all(|&modulus| modulus <= preset.share_parameters.plaintext())
+            .all(|&modulus| { modulus <= preset.share_parameters.as_ref().unwrap().plaintext() })
     );
 }
 
 #[test]
-fn secure_16384_preset_is_feasible_and_covers_share_moduli() {
-    let preset = presets::secure_16384().unwrap();
+fn secure16384_profile_is_feasible_and_covers_share_moduli() {
+    let preset = support::secure16384().unwrap();
     assert_eq!(preset.parameters.degree(), 16384);
     assert_eq!(preset.parameters.plaintext(), 1_000);
     assert_eq!(
@@ -91,6 +91,6 @@ fn secure_16384_preset_is_feasible_and_covers_share_moduli() {
             .parameters
             .moduli()
             .iter()
-            .all(|&modulus| modulus <= preset.share_parameters.plaintext())
+            .all(|&modulus| { modulus <= preset.share_parameters.as_ref().unwrap().plaintext() })
     );
 }

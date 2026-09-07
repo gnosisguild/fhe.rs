@@ -1,7 +1,7 @@
 //! Benchmarks for threshold BFV share operations.
 use criterion::{Criterion, criterion_group, criterion_main};
-#[path = "../examples/support/presets.rs"]
-mod presets;
+#[path = "../support/mod.rs"]
+mod support;
 use fhe::bfv::CommonRandomPoly;
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::PublicKeyShare;
@@ -23,11 +23,11 @@ fn format_bytes(bytes: usize) -> String {
 
 fn bench_data_sizes(c: &mut Criterion) {
     let group = c.benchmark_group("BFV Encrypted Shares Data Sizes");
-    let preset = presets::secure8192().unwrap();
+    let preset = support::secure8192().unwrap();
 
     // Threshold BFV parameters
     let params_trbfv = preset.parameters.clone();
-    let params_bfv = preset.share_parameters.clone();
+    let params_bfv = preset.encrypted_share_parameters().unwrap();
     let degree = params_trbfv.degree();
     let moduli_trbfv = params_trbfv.moduli();
     let moduli_bfv = params_bfv.moduli();
@@ -315,11 +315,11 @@ fn bench_data_sizes(c: &mut Criterion) {
 
 fn bench_timing_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("BFV Encrypted Shares Timing");
-    let preset = presets::secure8192().unwrap();
+    let preset = support::secure8192().unwrap();
 
     // Setup parameters (same as data sizes)
     let params_trbfv = preset.parameters.clone();
-    let params_bfv = preset.share_parameters.clone();
+    let params_bfv = preset.encrypted_share_parameters().unwrap();
     let degree = params_trbfv.degree();
 
     let num_parties = 3;

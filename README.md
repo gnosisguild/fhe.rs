@@ -55,8 +55,12 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 The test parameter profiles are named `insecure`, `secure8192`, and
-`secure_16384`. The `insecure` profile provides fast breadth and negative
+`secure16384`. The `insecure` profile provides fast breadth and negative
 coverage only; the larger profiles exercise production-like parameter ranges
 but do not constitute a cryptographic security proof. Serialization is an
 unconditional part of the current crate API, so CI tests both default/no-default
 core builds and the all-features serialization boundary.
+
+The `bfv_default_128` smoke test selects a profile from the library's
+`default_parameters_128` table. It verifies BFV functionality for that profile;
+the test name is not an independent security claim.

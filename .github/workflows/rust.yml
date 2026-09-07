@@ -75,8 +75,8 @@ jobs:
           toolchain: stable
           override: true
       - uses: actions/checkout@v6
-      - name: Run toy and contract tests
-        run: cargo test -p fhe --release --no-default-features --test trbfv_contract --test bfv_lbfv_trlbfv_contract
+      - name: Run toy and profile tests
+        run: cargo test -p fhe --release --no-default-features --test trbfv_profiles --test bfv_lbfv_trlbfv
 
   test-representative:
     name: Test representative profiles
@@ -96,10 +96,10 @@ jobs:
           override: true
       - uses: actions/checkout@v6
       - name: Run representative tests
-        run: cargo test -p fhe --release --all-features --test bfv_lbfv_trlbfv_contract --test trbfv_contract
+        run: cargo test -p fhe --release --all-features --test bfv_lbfv_trlbfv --test trbfv_profiles
 
-  test-standard-128:
-    name: Test standard-128 profile
+  test-bfv-default-128:
+    name: Test BFV default-128 profile
     env:
       CARGO_INCREMENTAL: 0
       CARGO_TERM_COLOR: always
@@ -113,8 +113,8 @@ jobs:
           profile: minimal
           toolchain: stable
           override: true
-      - name: Run standard-128 smoke test
-        run: cargo test -p fhe --release --test standard_128
+      - name: Run BFV default-128 smoke test
+        run: cargo test -p fhe --release --test bfv_default_128
 
   test-serialization:
     name: Test serialization boundary
@@ -132,7 +132,7 @@ jobs:
           toolchain: stable
           override: true
       - name: Run serialization tests
-        run: cargo test -p fhe --release --all-features --test serialization_contract
+        run: cargo test -p fhe --release --all-features --test serialization
 
   stress:
     name: Stress profiles (manual)
@@ -151,7 +151,7 @@ jobs:
           toolchain: stable
           override: true
       - name: Run secure multiplication stress test
-        run: cargo test -p fhe --release --test trbfv_multiplicative_e2e
+        run: cargo test -p fhe --release --test trbfv_e2e
   examples-and-benches:
     name: Examples and benchmarks smoke test
     env:

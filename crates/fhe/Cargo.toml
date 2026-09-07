@@ -102,16 +102,16 @@ name = "trbfv_add_bfv_share_insecure"
 required-features = ["experimental-mbfv"]
 
 [[test]]
-name = "trbfv_contract"
+name = "trbfv_profiles"
 
 [[test]]
-name = "bfv_lbfv_trlbfv_contract"
+name = "bfv_lbfv_trlbfv"
 
 [[test]]
-name = "serialization_contract"
+name = "serialization"
 
 [[test]]
-name = "standard_128"
+name = "bfv_default_128"
 [[example]]
 name = "trbfv_mul_bfv_share_binding"
 required-features = ["experimental-mbfv"]

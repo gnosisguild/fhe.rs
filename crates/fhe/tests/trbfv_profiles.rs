@@ -1,66 +1,24 @@
-//! Public TRBFV contract tests across named parameter profiles.
+//! TRBFV profile and input-validation tests.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-#[path = "support/insecure.rs"]
-mod insecure;
-#[path = "support/secure8192.rs"]
-mod secure8192;
-#[path = "support/secure_16384.rs"]
-mod secure_16384;
-
-use std::sync::Arc;
+#[path = "../support/mod.rs"]
+mod support;
 
 use fhe::bfv::Ciphertext;
 use fhe::trbfv::{Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, TRBFV};
 use fhe::{Error, ThresholdError};
 use fhe_math::rq::{Poly, PowerBasis};
 use num_traits::Zero;
-#[derive(Clone)]
-struct TrbfvProfile {
-    name: &'static str,
-    parameters: Arc<fhe::bfv::BfvParameters>,
-    num_parties: usize,
-    threshold: usize,
-    lambda: usize,
-    max_ciphertexts: usize,
-    multiplicative_depth: Option<u32>,
-}
+use std::sync::Arc;
+use support::Preset;
 
-fn profiles() -> [TrbfvProfile; 3] {
-    [
-        TrbfvProfile {
-            name: "insecure",
-            parameters: insecure::parameters(),
-            num_parties: 3,
-            threshold: 1,
-            lambda: 35,
-            max_ciphertexts: 1,
-            multiplicative_depth: Some(1),
-        },
-        TrbfvProfile {
-            name: "secure8192",
-            parameters: secure8192::parameters(),
-            num_parties: 20,
-            threshold: 9,
-            lambda: 45,
-            max_ciphertexts: 1_000_000,
-            multiplicative_depth: None,
-        },
-        TrbfvProfile {
-            name: "secure_16384",
-            parameters: secure_16384::parameters(),
-            num_parties: 20,
-            threshold: 9,
-            lambda: 31,
-            max_ciphertexts: 3,
-            multiplicative_depth: Some(3),
-        },
-    ]
+fn profiles() -> [Preset; 3] {
+    support::profiles().unwrap()
 }
 
 #[test]
-fn named_profiles_match_threshold_contract() {
+fn profiles_match_threshold_configuration() {
     for profile in profiles() {
         assert_eq!(
             profile.threshold,
@@ -83,17 +41,14 @@ fn named_profiles_match_threshold_contract() {
         assert_eq!(trbfv.n, profile.num_parties);
         assert_eq!(trbfv.threshold, profile.threshold);
 
-        let share_parameters = match profile.name {
-            "secure8192" => secure8192::share_encryption_parameters(),
-            "secure_16384" => secure_16384::share_encryption_parameters(),
-            _ => continue,
-        };
-        assert_eq!(
-            share_parameters.degree(),
-            profile.parameters.degree(),
-            "profile {} share transport must use the same ring degree",
-            profile.name
-        );
+        if let Some(share_parameters) = profile.share_parameters {
+            assert_eq!(
+                share_parameters.degree(),
+                profile.parameters.degree(),
+                "profile {} share transport must use the same ring degree",
+                profile.name
+            );
+        }
     }
 }
 

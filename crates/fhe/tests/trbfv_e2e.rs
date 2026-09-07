@@ -1,4 +1,4 @@
-//! End-to-end threshold BFV multiplicative-depth test.
+//! End-to-end threshold BFV multiplication test.
 //!
 //! Verifies that a depth-1 homomorphic multiplication under distributed
 //! l-BFV public/relin keys, Shamir secret sharing, accepted-participant
@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use fhe::aggregate::AggregateIter;
-use fhe::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey};
+use fhe::bfv::{Ciphertext, Encoding, Plaintext, SecretKey};
 use fhe::trbfv::{Lambda, ShareManager, TRBFV};
 use fhe::trlbfv::{
     AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
@@ -23,15 +23,8 @@ use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2};
 use num_bigint::BigInt;
 
-#[path = "support/secure_16384.rs"]
-mod secure_16384;
-#[path = "support/testkit.rs"]
-mod testkit;
-
-/// Secure degree-16384 parameters for depth-1 multiplicative e2e testing.
-fn mul_params() -> Arc<BfvParameters> {
-    secure_16384::parameters()
-}
+#[path = "../support/mod.rs"]
+mod support;
 
 /// Paper-conforming trBFV config: n = 2t + 1 = 3, threshold t = 1.
 const N: usize = 3;
@@ -43,16 +36,17 @@ const LAMBDA_VALUE: usize = 31; // MIN_SECURE_LAMBDA
 /// multiplication, threshold decryption.
 #[test]
 fn depth1_mul_distributed_lbfv_trbfv_decrypt() {
-    let params = mul_params();
-    let share_params = secure_16384::share_encryption_parameters();
+    let preset = support::secure16384().expect("secure16384 profile must be valid");
+    let params = preset.parameters;
+    let share_params = preset.share_parameters.unwrap();
     assert_eq!(share_params.degree(), params.degree());
     assert_eq!(share_params.moduli().len(), 2);
     let trbfv = TRBFV::new(N, THRESHOLD, params.clone()).expect("n=3, t=1 must validate");
 
     // ── Common CRS / URS seeds ╌───────────────────────────────────────
-    let mut rng = testkit::rng(81);
-    let crs_seed = testkit::seed(82);
-    let urs_seed = testkit::seed(83);
+    let mut rng = support::rng(81);
+    let crs_seed = support::seed(82);
+    let urs_seed = support::seed(83);
 
     // ── Participant set (1‑based IDs) ╌─────────────────────────────────
     let participant_set = ParticipantSet::new([42u8; 32], (1..=N as u32).collect())
