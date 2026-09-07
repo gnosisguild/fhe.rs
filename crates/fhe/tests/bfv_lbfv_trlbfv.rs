@@ -124,7 +124,10 @@ fn bfv_addition_and_simd_round_trip_use_deterministic_profile() {
 
 #[test]
 fn lbfv_multiplication_and_relinearization_round_trip() {
-    let profile = profiles().into_iter().next().unwrap();
+    let profile = profiles()
+        .into_iter()
+        .find(|profile| profile.preset.name == "secure16384")
+        .unwrap();
     let mut rng = support::rng(profile.seed);
     let sk = SecretKey::random(&profile.preset.parameters, &mut rng);
     let crp_a =

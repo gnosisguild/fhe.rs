@@ -12,7 +12,7 @@ already happened out of band.
 
 This module enables distributed decryption between `n` parties without necessarily involving all of them: any `threshold + 1` of the `n` parties can decrypt a ciphertext, while any coalition of at most `threshold` parties learns nothing. The threshold must be exactly `(n-1)/2` (integer division), the maximal corruption tolerance under an honest majority — see `config.rs` for the derivation.
 
-## Implementation Contract
+## Implementation Boundary
 
 This crate exposes the cryptographic component used by a threshold FHE
 application. It does not expose the complete multiparty protocol described in

@@ -6,7 +6,9 @@
 mod support;
 
 use fhe::bfv::Ciphertext;
-use fhe::trbfv::{Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, TRBFV};
+use fhe::trbfv::{
+    Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, TRBFV,
+};
 use fhe::{Error, ThresholdError};
 use fhe_math::rq::{Poly, PowerBasis};
 use num_traits::Zero;
@@ -55,7 +57,11 @@ fn profiles_match_threshold_configuration() {
 #[test]
 fn named_profiles_have_feasible_smudging_bounds() {
     for profile in profiles() {
-        let lambda = Lambda::secure(profile.lambda).unwrap();
+        let lambda = if profile.lambda < MIN_SECURE_LAMBDA {
+            Lambda::insecure(profile.lambda)
+        } else {
+            Lambda::secure(profile.lambda).unwrap()
+        };
         let config = match profile.multiplicative_depth {
             Some(depth) => SmudgingBoundCalculatorConfig::new_multiplicative(
                 profile.parameters.clone(),
@@ -105,12 +111,16 @@ fn reconstruction_rejects_invalid_public_inputs() {
         too_few,
         Error::Threshold(ThresholdError::ShareCountMismatch {
             actual: 1,
-            expected: 2
-        })
+            expected
+        }) if expected == profile.threshold + 1
     ));
 
     let duplicate = trbfv
-        .decrypt(vec![share(), share()], vec![1, 1], ciphertext.clone())
+        .decrypt(
+            vec![share(), share(), share()],
+            vec![1, 1, 2],
+            ciphertext.clone(),
+        )
         .unwrap_err();
     assert!(matches!(
         duplicate,
@@ -118,10 +128,11 @@ fn reconstruction_rejects_invalid_public_inputs() {
     ));
 
     let zero_id = trbfv
-        .decrypt(vec![share(), share()], vec![0, 2], ciphertext)
+        .decrypt(vec![share(), share(), share()], vec![0, 2, 3], ciphertext)
         .unwrap_err();
     assert!(matches!(
         zero_id,
-        Error::Threshold(ThresholdError::InvalidPartyId { party_id: 0, n: 3 })
+        Error::Threshold(ThresholdError::InvalidPartyId { party_id: 0, n })
+            if n == profile.num_parties
     ));
 }

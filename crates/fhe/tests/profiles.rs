@@ -7,6 +7,27 @@ use fhe::trbfv::{Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig}
 use num_bigint::BigUint;
 
 #[test]
+fn insecure_profile_matches_supplied_512_parameters() {
+    let preset = support::insecure().unwrap();
+    assert_eq!(preset.parameters.degree(), 512);
+    assert_eq!(preset.parameters.plaintext(), 100);
+    assert_eq!(preset.parameters.moduli(), &[0xffffee001, 0xffffc4001]);
+    assert_eq!(preset.parameters.variance(), 10);
+    assert_eq!(preset.parameters.get_error1_variance().to_string(), "3");
+    assert_eq!(preset.num_parties, 5);
+    assert_eq!(preset.threshold, 2);
+    assert_eq!(preset.lambda, 2);
+    assert_eq!(preset.multiplicative_depth, Some(0));
+
+    let dkg_parameters = preset.share_parameters.as_ref().unwrap();
+    assert_eq!(dkg_parameters.degree(), 512);
+    assert_eq!(dkg_parameters.plaintext(), 0xffffee001);
+    assert_eq!(dkg_parameters.moduli(), &[0x7fffffffe0001]);
+    assert_eq!(dkg_parameters.variance(), 3);
+    assert_eq!(dkg_parameters.get_error1_variance().to_string(), "10");
+}
+
+#[test]
 fn secure8192_profile_is_feasible_and_covers_share_moduli() {
     let preset = support::secure8192().unwrap();
     assert_eq!(preset.parameters.degree(), 8192);
