@@ -19,6 +19,7 @@ jobs:
           profile: minimal
           toolchain: nightly
           override: true
+          components: rustfmt
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
 
