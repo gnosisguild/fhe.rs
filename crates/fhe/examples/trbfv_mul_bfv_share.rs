@@ -27,8 +27,8 @@
 
 #![allow(clippy::indexing_slicing, missing_docs)]
 
-#[path = "support/presets.rs"]
-mod presets;
+#[path = "../support/mod.rs"]
+mod support;
 mod util;
 
 use std::{env, error::Error, process::exit, sync::Arc};
@@ -77,7 +77,7 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let preset = presets::secure_16384()?;
+    let preset = support::secure16384()?;
     println!("Building trBFV parameters (first set)...");
     let params_trbfv: Arc<bfv::BfvParameters> =
         timeit!("Parameters generation (trBFV)", preset.parameters.clone());
@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("\nBuilding share-encryption parameters (second set)...");
     let params_share_enc: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share enc)",
-        preset.share_parameters.clone()
+        preset.encrypted_share_parameters()?
     );
     let plaintext_modulus_share_enc = params_share_enc.plaintext();
     println!(

@@ -832,6 +832,7 @@ impl Serialize for BfvParameters {
             moduli: self.moduli.to_vec(),
             variance: self.variance as u32,
             plaintext_modulus,
+            error1_variance: Some(self.error1_variance.to_bytes_le()),
         }
         .encode_to_vec()
     }
@@ -857,12 +858,16 @@ impl Deserialize for BfvParameters {
             }
         };
 
-        BfvParametersBuilder::new()
+        let mut builder = BfvParametersBuilder::new();
+        builder
             .set_degree(params.degree as usize)
             .set_plaintext_modulus_biguint(plaintext_modulus)
             .set_moduli(&params.moduli)
-            .set_variance(params.variance as usize)
-            .build()
+            .set_variance(params.variance as usize);
+        if let Some(error1_variance) = params.error1_variance {
+            builder.set_error1_variance(BigUint::from_bytes_le(&error1_variance));
+        }
+        builder.build()
     }
     type Error = Error;
 }
@@ -973,6 +978,7 @@ mod tests {
             .set_plaintext_modulus(2)
             .set_moduli_sizes(&[62, 62, 62, 61, 60, 11])
             .set_variance(4)
+            .set_error1_variance_usize(7)
             .build()?;
         let bytes = params.to_bytes();
         let proto = Parameters::decode(bytes.as_slice())?;
@@ -980,6 +986,7 @@ mod tests {
             proto.plaintext_modulus,
             Some(PlaintextModulusProto::Plaintext(2))
         ));
+        assert_eq!(proto.error1_variance, Some(vec![7]));
         assert_eq!(BfvParameters::try_deserialize(&bytes)?, params);
 
         let p = BigUint::parse_bytes(b"340282366920938463463374607431768211507", 10).unwrap();
@@ -1013,6 +1020,7 @@ mod tests {
             moduli: vec![4611686018427387617, 4611686018427387329],
             variance: 4,
             plaintext_modulus: None,
+            error1_variance: None,
         };
         let bytes = proto.encode_to_vec();
         let err = BfvParameters::try_deserialize(&bytes).unwrap_err();
@@ -1083,6 +1091,7 @@ mod tests {
             moduli: vec![97],
             variance: 33,
             plaintext_modulus: Some(PlaintextModulusProto::Plaintext(2)),
+            error1_variance: None,
         };
         let err = BfvParameters::try_deserialize(&proto.encode_to_vec()).unwrap_err();
         assert!(matches!(

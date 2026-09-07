@@ -11,8 +11,8 @@
 
 #![allow(clippy::indexing_slicing, missing_docs)]
 
-#[path = "support/presets.rs"]
-mod presets;
+#[path = "../support/mod.rs"]
+mod support;
 mod util;
 
 use std::{error::Error, sync::Arc};
@@ -26,7 +26,7 @@ use util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand::rng();
-    let preset = presets::secure_16384()?;
+    let preset = support::secure16384()?;
 
     println!("=== BFV Homomorphic Multiplication ===");
     println!("n=20 ciphernodes, k=1000, d=16384, 5×51-bit moduli, λ=31\n");

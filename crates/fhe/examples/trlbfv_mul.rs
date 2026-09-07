@@ -18,8 +18,8 @@
 
 #![allow(clippy::indexing_slicing, missing_docs)]
 
-#[path = "support/presets.rs"]
-mod presets;
+#[path = "../support/mod.rs"]
+mod support;
 mod util;
 
 use std::{error::Error, sync::Arc};
@@ -38,7 +38,7 @@ use util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand::rng();
-    let preset = presets::secure_16384()?;
+    let preset = support::secure16384()?;
 
     // ── Parameters ────────────────────────────────────────────────────────────
     let params: Arc<bfv::BfvParameters> = timeit!("Parameters", preset.parameters.clone());

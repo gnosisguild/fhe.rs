@@ -46,6 +46,7 @@ message Parameters {
     bytes plaintext_big = 5;
   }
   uint32 variance = 4;
+  optional bytes error1_variance = 6;
 }
 
 message PublicKey {

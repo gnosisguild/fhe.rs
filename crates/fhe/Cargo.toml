@@ -101,6 +101,17 @@ required-features = ["experimental-mbfv"]
 name = "trbfv_add_bfv_share_insecure"
 required-features = ["experimental-mbfv"]
 
+[[test]]
+name = "trbfv_profiles"
+
+[[test]]
+name = "bfv_lbfv_trlbfv"
+
+[[test]]
+name = "serialization"
+
+[[test]]
+name = "bfv_default_128"
 [[example]]
 name = "trbfv_mul_bfv_share_binding"
 required-features = ["experimental-mbfv"]

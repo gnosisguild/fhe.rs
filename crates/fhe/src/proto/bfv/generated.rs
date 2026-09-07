@@ -60,6 +60,8 @@ pub struct Parameters {
     pub moduli: ::prost::alloc::vec::Vec<u64>,
     #[prost(uint32, tag = "4")]
     pub variance: u32,
+    #[prost(bytes = "vec", optional, tag = "6")]
+    pub error1_variance: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
     #[prost(oneof = "parameters::PlaintextModulus", tags = "3, 5")]
     pub plaintext_modulus: ::core::option::Option<parameters::PlaintextModulus>,
 }

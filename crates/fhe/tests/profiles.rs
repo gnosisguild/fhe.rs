@@ -1,14 +1,35 @@
-//! Regression tests for the two parameter presets used by the examples.
+//! Regression tests for the shared parameter profiles.
 
-#[path = "../examples/support/presets.rs"]
-mod presets;
+#[path = "../support/mod.rs"]
+mod support;
 
 use fhe::trbfv::{Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
 use num_bigint::BigUint;
 
 #[test]
-fn secure_8192_preset_is_feasible_and_covers_share_moduli() {
-    let preset = presets::secure_8192().unwrap();
+fn insecure_profile_matches_supplied_512_parameters() {
+    let preset = support::insecure().unwrap();
+    assert_eq!(preset.parameters.degree(), 512);
+    assert_eq!(preset.parameters.plaintext(), 100);
+    assert_eq!(preset.parameters.moduli(), &[0xffffee001, 0xffffc4001]);
+    assert_eq!(preset.parameters.variance(), 10);
+    assert_eq!(preset.parameters.get_error1_variance().to_string(), "3");
+    assert_eq!(preset.num_parties, 5);
+    assert_eq!(preset.threshold, 2);
+    assert_eq!(preset.lambda, 2);
+    assert_eq!(preset.multiplicative_depth, Some(0));
+
+    let dkg_parameters = preset.share_parameters.as_ref().unwrap();
+    assert_eq!(dkg_parameters.degree(), 512);
+    assert_eq!(dkg_parameters.plaintext(), 0xffffee001);
+    assert_eq!(dkg_parameters.moduli(), &[0x7fffffffe0001]);
+    assert_eq!(dkg_parameters.variance(), 3);
+    assert_eq!(dkg_parameters.get_error1_variance().to_string(), "10");
+}
+
+#[test]
+fn secure8192_profile_is_feasible_and_covers_share_moduli() {
+    let preset = support::secure8192().unwrap();
     assert_eq!(preset.parameters.degree(), 8192);
     assert_eq!(preset.parameters.plaintext(), 1_000_000);
     assert_eq!(
@@ -44,13 +65,13 @@ fn secure_8192_preset_is_feasible_and_covers_share_moduli() {
             .parameters
             .moduli()
             .iter()
-            .all(|&modulus| modulus <= preset.share_parameters.plaintext())
+            .all(|&modulus| { modulus <= preset.share_parameters.as_ref().unwrap().plaintext() })
     );
 }
 
 #[test]
-fn secure_16384_preset_is_feasible_and_covers_share_moduli() {
-    let preset = presets::secure_16384().unwrap();
+fn secure16384_profile_is_feasible_and_covers_share_moduli() {
+    let preset = support::secure16384().unwrap();
     assert_eq!(preset.parameters.degree(), 16384);
     assert_eq!(preset.parameters.plaintext(), 1_000);
     assert_eq!(
@@ -91,6 +112,6 @@ fn secure_16384_preset_is_feasible_and_covers_share_moduli() {
             .parameters
             .moduli()
             .iter()
-            .all(|&modulus| modulus <= preset.share_parameters.plaintext())
+            .all(|&modulus| { modulus <= preset.share_parameters.as_ref().unwrap().plaintext() })
     );
 }

@@ -1,6 +1,6 @@
 # fhe.rs: Fully Homomorphic Encryption in Rust
 
-[![continuous integration](https://github.com/tlepoint/fhe.rs/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/tlepoint/fhe.rs/actions/workflows/rust.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Code coverage](https://codecov.io/gh/tlepoint/fhe.rs/branch/main/graph/badge.svg?token=LCBSDMB5NS)](https://codecov.io/gh/tlepoint/fhe.rs)
+[![continuous integration](https://github.com/tlepoint/fhe.rs/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/tlepoint/fhe.rs/actions/workflows/rust.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 This repository contains the `fhe.rs` library, an experimental cryptographic library in Rust for Ring-LWE-based homomorphic encryption, developed by [Tancrède Lepoint](https://tancre.de).
 For more information about the library, see [fhe.rs](https://fhe.rs).
@@ -41,3 +41,34 @@ Rust **1.91.1** or newer (Rust 2024 edition).
 The implementations contained in the `fhe.rs` ecosystem have never been independently audited for security.
 
 Use at your own risk.
+
+## Verification
+
+The repository's normal verification commands are:
+
+```bash
+cargo test --workspace
+cargo check --workspace --all-targets --all-features
+cargo test --release --workspace --all-features
+cargo +nightly fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+The test parameter profiles are named `insecure`, `secure8192`, and
+`secure16384`. The `insecure` profile provides fast breadth and negative
+coverage only: it uses the supplied degree-512 threshold parameters, degree-512
+DKG/share-transport parameters, lambda 2, and no multiplicative depth. The
+larger profiles exercise production-like parameter ranges but do not constitute
+a cryptographic security proof. Serialization is an unconditional part of the
+current crate API, so CI tests both default/no-default core builds and the
+all-features serialization boundary.
+
+The `bfv_default_128` smoke test selects a profile from the library's
+`default_parameters_128` table. It verifies BFV functionality for that profile;
+the test name is not an independent security claim.
+
+Repository-only profiles and deterministic RNG helpers live in
+`crates/fhe/support/mod.rs`, shared by the test, example, and benchmark targets
+without becoming part of the public `fhe` API. Fast profile and API checks are
+kept separate from the full threshold BFV and distributed l-BFV workflows in
+`crates/fhe/tests/trbfv_e2e.rs` and `crates/fhe/tests/trlbfv_e2e.rs`.

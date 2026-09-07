@@ -9,40 +9,64 @@ on:
       - core/main
 
 jobs:
-  check:
-    name: Check (${{ matrix.features }})
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        features: [default, all]
     steps:
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions/checkout@v6
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: nightly
           override: true
-      - uses: actions/checkout@v6
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
-          args: --workspace ${{ matrix.features == 'all' && '--all-features' || '' }}
+          components: rustfmt
+      - name: Check formatting
+        run: cargo +nightly fmt --all -- --check
 
-  test:
-    name: Test Suite (${{ matrix.features }})
+  clippy-core:
+    name: Clippy (core)
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions/checkout@v6
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+  clippy-serialization:
+    name: Clippy (all features)
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions/checkout@v6
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test-toy:
+    name: Test toy profiles
     env:
       CARGO_INCREMENTAL: 0
       CARGO_TERM_COLOR: always
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        features: [default, all]
     steps:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
@@ -52,10 +76,64 @@ jobs:
           toolchain: stable
           override: true
       - uses: actions/checkout@v6
-      - uses: actions-rs/cargo@v1
+      - name: Run toy and profile tests
+        run: cargo test -p fhe --release --no-default-features --test trbfv_profiles --test bfv_lbfv_trlbfv
+
+  test-representative:
+    name: Test representative profiles
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions-rs/toolchain@v1
         with:
-          command: test
-          args: --release --workspace ${{ matrix.features == 'all' && '--all-features' || '' }}
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions/checkout@v6
+      - name: Run representative tests
+        run: cargo test -p fhe --release --all-features --test bfv_lbfv_trlbfv --test trbfv_profiles
+
+  test-bfv-default-128:
+    name: Test BFV default-128 profile
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions/checkout@v6
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Run BFV default-128 smoke test
+        run: cargo test -p fhe --release --test bfv_default_128
+
+  test-serialization:
+    name: Test serialization boundary
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: actions/checkout@v6
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Run serialization tests
+        run: cargo test -p fhe --release --all-features --test serialization
 
   examples-and-benches:
     name: Examples and benchmarks smoke test
@@ -66,11 +144,6 @@ jobs:
     steps:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
       - uses: actions/checkout@v6
       - uses: actions-rs/cargo@v1
         with:

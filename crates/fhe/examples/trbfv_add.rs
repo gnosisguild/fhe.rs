@@ -7,8 +7,8 @@
 
 #![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 
-#[path = "support/presets.rs"]
-mod presets;
+#[path = "../support/mod.rs"]
+mod support;
 mod util;
 
 use std::{env, error::Error, process::exit, sync::Arc};
@@ -51,7 +51,7 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let preset = presets::secure_8192()?;
+    let preset = support::secure8192()?;
     let params = timeit!("Parameters generation", preset.parameters.clone());
     let degree = params.degree();
 
