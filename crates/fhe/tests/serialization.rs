@@ -42,6 +42,26 @@ fn representative_objects_round_trip_through_protobuf() {
 }
 
 #[test]
+fn secure_profiles_preserve_error1_variance_through_protobuf() {
+    for profile in support::profiles().unwrap().into_iter().skip(1) {
+        let expected_error1_variance = profile.parameters.get_error1_variance().clone();
+        let decoded = BfvParameters::try_deserialize(&profile.parameters.to_bytes()).unwrap();
+
+        assert_eq!(
+            decoded, *profile.parameters,
+            "profile {} must preserve all serialized parameters",
+            profile.name
+        );
+        assert_eq!(
+            decoded.get_error1_variance(),
+            &expected_error1_variance,
+            "profile {} must preserve its custom error1 variance",
+            profile.name
+        );
+    }
+}
+
+#[test]
 fn lbfv_keys_round_trip_and_reject_malformed_or_mismatched_inputs() {
     let params = support::insecure().unwrap().parameters;
     let other_params = BfvParametersBuilder::new()
