@@ -168,5 +168,5 @@ jobs:
           cargo run --release -p fhe --all-features --example trbfv_add_bfv_share
           cargo run --release -p fhe --all-features --example trbfv_add_bfv_share_insecure
           cargo run --release -p fhe --all-features --example trbfv_mul_bfv_share
-          cargo run --release -p fhe --all-features --example trbfv_mul_bfv_share_binding
+          cargo run --release -p fhe --all-features --example trbfv_mul_bfv_share_mbfv_pk
           cargo run --release -p fhe --all-features --example voting

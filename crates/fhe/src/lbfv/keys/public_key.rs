@@ -17,10 +17,9 @@
  * # Single-party operational key
  *
  * This module provides a strictly single-party operational public key.
- * There is no distributed aggregation, participant bindings, or
- * threshold construction.  All threshold/multiparty utilities live in
- * [`crate::trlbfv`]; use [`crate::trlbfv::PublicKeyShare`] and
- * [`crate::trlbfv::AggregatedPublicKey`] for distributed-key workflows.
+ * There is no distributed aggregation or threshold construction. All
+ * threshold/multiparty utilities live in [`crate::trlbfv`]; use
+ * [`crate::trlbfv::PublicKeyShare`] for distributed-key workflows.
  */
 
 use crate::{Error, Result};
@@ -605,7 +604,6 @@ impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
             c: pk.c.iter().map(CiphertextProto::from).collect(),
             l: pk.l as u32,
             seed: pk.seed.map_or_else(Vec::new, |s| s.to_vec()),
-            binding: None,
         }
     }
 }
@@ -655,18 +653,6 @@ impl DeserializeParametrized for LBFVPublicKey {
                         "LBFV public-key l={proto_l} does not match the ciphertext count={}",
                         proto.c.len()
                     ),
-                },
-            ));
-        }
-
-        // Reject protos that carry a binding — callers should use
-        // trlbfv::PublicKeyShare or trlbfv::AggregatedPublicKey instead.
-        if proto.binding.is_some() {
-            return Err(Error::SerializationError(
-                SerializationError::InvalidFormat {
-                    reason: "LBFVPublicKey carries a binding field; use \
-                             trlbfv::PublicKeyShare or trlbfv::AggregatedPublicKey instead"
-                        .to_string(),
                 },
             ));
         }
@@ -940,28 +926,6 @@ mod tests {
         let seedless_bytes = seedless_proto.encode_to_vec();
         let seedless_pk = LBFVPublicKey::from_bytes(&seedless_bytes, &params)?;
         assert!(seedless_pk.seed.is_none(), "Seedless PK must carry no seed");
-
-        Ok(())
-    }
-
-    /// A serialized PK carrying a binding must be rejected — single-party
-    /// LBFVPublicKey does not carry bindings.
-    #[test]
-    fn test_binding_rejected() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let sk = SecretKey::random(&params, &mut rng);
-        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
-
-        let mut proto: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
-        // Inject a binding field (any non-empty binding should be rejected).
-        proto.binding = Some(Default::default());
-
-        let bytes = proto.encode_to_vec();
-        assert!(
-            LBFVPublicKey::from_bytes(&bytes, &params).is_err(),
-            "PK deserialization must reject a binding field"
-        );
 
         Ok(())
     }

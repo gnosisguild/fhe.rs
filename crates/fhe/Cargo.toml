@@ -112,5 +112,5 @@ name = "serialization"
 [[test]]
 name = "bfv_default_128"
 [[example]]
-name = "trbfv_mul_bfv_share_binding"
+name = "trbfv_mul_bfv_share_mbfv_pk"
 required-features = ["experimental-mbfv"]

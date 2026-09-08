@@ -8,7 +8,7 @@ mod support;
 use fhe::aggregate::AggregateIter;
 use fhe::bfv::{CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::lbfv::{LBFVPublicKey, LBFVRelinearizationKey};
-use fhe::trlbfv::{AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare};
+use fhe::trlbfv::PublicKeyShare;
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 
 use support::Preset;
@@ -157,10 +157,9 @@ fn lbfv_multiplication_and_relinearization_round_trip() {
 }
 
 #[test]
-fn trlbfv_bound_aggregation_requires_an_exact_participant_set() {
+fn trlbfv_public_key_aggregation_is_order_independent() {
     let profile = profiles().into_iter().next().unwrap();
     let mut rng = support::rng(profile.seed);
-    let participant_set = ParticipantSet::new(support::seed(51), vec![3, 1, 2]).unwrap();
     let crp =
         CommonRandomPolyVec::from_seed(&profile.preset.parameters, support::seed(52)).unwrap();
     let secret_keys: Vec<_> = (0..3)
@@ -168,17 +167,11 @@ fn trlbfv_bound_aggregation_requires_an_exact_participant_set() {
         .collect();
     let shares: Vec<PublicKeyShare> = secret_keys
         .iter()
-        .enumerate()
-        .map(|(index, secret_key)| {
-            let binding =
-                ContributionBinding::new(participant_set.clone(), (index + 1) as u32).unwrap();
-            PublicKeyShare::contribute_with_crp_and_binding(secret_key, &crp, binding, &mut rng)
-                .unwrap()
-        })
+        .map(|secret_key| PublicKeyShare::contribute_with_crp(secret_key, &crp, &mut rng).unwrap())
         .collect();
-    let aggregated: AggregatedPublicKey = shares.clone().into_iter().aggregate().unwrap();
-    let reordered: AggregatedPublicKey = shares.clone().into_iter().rev().aggregate().unwrap();
-    assert_eq!(reordered.participant_set(), aggregated.participant_set());
+    let aggregated: LBFVPublicKey = shares.clone().into_iter().aggregate().unwrap();
+    let reordered: LBFVPublicKey = shares.clone().into_iter().rev().aggregate().unwrap();
+    assert_eq!(reordered, aggregated);
 
     let joint_coeffs: Vec<i64> = (0..profile.preset.parameters.degree())
         .map(|index| secret_keys.iter().map(|key| key.coeffs[index]).sum())
@@ -186,38 +179,22 @@ fn trlbfv_bound_aggregation_requires_an_exact_participant_set() {
     let joint_sk = SecretKey::new(joint_coeffs, &profile.preset.parameters);
     let plaintext =
         Plaintext::try_encode(&[7_u64], Encoding::poly(), &profile.preset.parameters).unwrap();
-    let ciphertext = aggregated
-        .operational()
-        .try_encrypt(&plaintext, &mut rng)
-        .unwrap();
+    let ciphertext = aggregated.try_encrypt(&plaintext, &mut rng).unwrap();
     assert_eq!(joint_sk.try_decrypt(&ciphertext).unwrap(), plaintext);
 
-    let bad_set = ParticipantSet::new(support::seed(53), vec![1, 2, 3]).unwrap();
-    let bad_binding = ContributionBinding::new(bad_set, 3).unwrap();
-    let bad_share = PublicKeyShare::contribute_with_crp_and_binding(
-        &secret_keys[2],
-        &crp,
-        bad_binding,
-        &mut rng,
-    )
-    .unwrap();
-    let inconsistent = vec![shares[0].clone(), shares[1].clone(), bad_share]
-        .into_iter()
-        .aggregate::<AggregatedPublicKey>();
-    assert!(
-        inconsistent.is_err(),
-        "insecure seed={} accepted mismatched participant sets",
-        profile.seed
-    );
-
-    let incomplete = shares
+    let subset = shares
         .into_iter()
         .take(2)
-        .aggregate::<AggregatedPublicKey>();
-    assert!(
-        incomplete.is_err(),
-        "insecure seed={} accepted an incomplete participant set",
-        profile.seed
+        .aggregate::<LBFVPublicKey>()
+        .unwrap();
+    let subset_coeffs: Vec<i64> = (0..profile.preset.parameters.degree())
+        .map(|index| secret_keys[..2].iter().map(|key| key.coeffs[index]).sum())
+        .collect();
+    let subset_sk = SecretKey::new(subset_coeffs, &profile.preset.parameters);
+    let subset_ciphertext = subset.try_encrypt(&plaintext, &mut rng).unwrap();
+    assert_eq!(
+        subset_sk.try_decrypt(&subset_ciphertext).unwrap(),
+        plaintext
     );
 }
 

@@ -283,7 +283,7 @@ impl LBFVRelinearizationKey {
     ///
     /// Validates that the two KSKs are structurally consistent and that
     /// `b_vec` has the correct length. The resulting key is operational
-    /// (single-party, no participant bindings).
+    /// (single-party construction).
     pub(crate) fn from_components(
         ksk_r_to_s: KeySwitchingKey,
         ksk_s_to_r: KeySwitchingKey,
@@ -773,7 +773,6 @@ impl From<&LBFVRelinearizationKey> for LBFVRelinearizationKeyProto {
             ksk_r_to_s: Some(KeySwitchingKeyProto::from(&value.ksk_r_to_s)),
             ksk_s_to_r: Some(KeySwitchingKeyProto::from(&value.ksk_s_to_r)),
             b_vec: value.b_vec.iter().map(|p| p.to_bytes()).collect(),
-            binding: None,
         }
     }
 }
@@ -801,15 +800,6 @@ impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
                 })?,
             params,
         )?;
-
-        // Reject protos that carry a binding — callers should use trlbfv instead.
-        if value.binding.is_some() {
-            return Err(Error::SerializationError(
-                crate::SerializationError::InvalidFormat {
-                    reason: "LBFV RLK carries a binding field; use trlbfv instead".to_string(),
-                },
-            ));
-        }
 
         // --- Cross-KSK structural validation ---
         if ksk_s_to_r.params != ksk_r_to_s.params {

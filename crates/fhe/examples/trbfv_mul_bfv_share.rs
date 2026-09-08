@@ -37,12 +37,9 @@ use console::style;
 use fhe::{
     aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
-    lbfv::LBFVRelinearizationKey,
+    lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     trbfv::{Lambda, ShareManager, TRBFV},
-    trlbfv::{
-        AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
-        aggregate_relinearization_key,
-    },
+    trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -176,11 +173,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crp_a = CommonRandomPolyVec::new(&params_trbfv, &mut rng)?;
     let crp_d1 = CommonRandomPolyVec::new(&params_trbfv, &mut rng)?;
 
-    // Canonical participant set — one common session ID covering all parties.
-    let lbfv_session_id: [u8; 32] = rand::random();
-    let lbfv_participant_set =
-        ParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
-
     struct Party {
         sk_sss: Vec<Array2<u64>>,           // sk_sss[m]: shape (num_parties, degree)
         esi_sss: Vec<Array2<u64>>,          // smudging error Shamir shares, same shape
@@ -203,7 +195,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
         (0..num_parties)
             .into_par_iter()
-            .map(|i| {
+            .map(|_| {
                 let mut rng = rand::rng();
 
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
@@ -235,25 +227,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
 
                 // l-BFV PK contribution (shared crp_a, same a_j across all parties).
-                let lbfv_binding =
-                    ContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32).unwrap();
-                let pk_lbfv_share = PublicKeyShare::contribute_with_crp_and_binding(
-                    &sk_share,
-                    &crp_a,
-                    lbfv_binding.clone(),
-                    &mut rng,
-                )
-                .unwrap();
+                let pk_lbfv_share =
+                    PublicKeyShare::contribute_with_crp(&sk_share, &crp_a, &mut rng).unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
-                let rlk_share = RelinKeyShare::contribution_with_crp_and_binding(
-                    &sk_share,
-                    &crp_d1,
-                    &crp_a,
-                    lbfv_binding,
-                    0,
-                    0,
-                    &mut rng,
+                let rlk_share = RelinKeyShare::contribution_with_crp(
+                    &sk_share, &crp_d1, &crp_a, 0, 0, &mut rng,
                 )
                 .unwrap();
 
@@ -281,17 +260,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // ── Distributed pk + RLK aggregation ─────────────────────────────────────
     // pk_lbfv is used for both RLK (b_vec) and encryption (c[0]).
-    let aggregated_pk: AggregatedPublicKey;
+    let aggregated_pk: LBFVPublicKey;
     let rlk: LBFVRelinearizationKey = timeit!("Distributed pk + RLK aggregation", {
         let pk_lbfv_shares: Vec<PublicKeyShare> =
             parties.iter().map(|p| p.pk_lbfv_share.clone()).collect();
-        aggregated_pk = pk_lbfv_shares
-            .into_iter()
-            .aggregate::<AggregatedPublicKey>()?;
+        aggregated_pk = pk_lbfv_shares.into_iter().aggregate::<LBFVPublicKey>()?;
         let rlk_shares: Vec<RelinKeyShare> = parties.iter().map(|p| p.rlk_share.clone()).collect();
         aggregate_relinearization_key(&rlk_shares, &aggregated_pk)?
     });
-    let pk_lbfv = aggregated_pk.operational();
+    let pk_lbfv = &aggregated_pk;
     println!("✓ pk_lbfv and RLK aggregated (l = {})", rlk.l()?);
 
     // ── Share encryption and transmission ─────────────────────────────────────

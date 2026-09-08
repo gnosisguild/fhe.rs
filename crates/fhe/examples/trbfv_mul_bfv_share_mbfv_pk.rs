@@ -3,6 +3,7 @@
 // Two BFV parameter sets:
 //
 //   First set  (computation) — n=20, z=3, k=1000, d=16384, 5×51-bit moduli, λ=31.
+//   This example uses 3 parties by default; the profile supports up to 20.
 //
 //   Second set (share encryption) — k = q[1] of first set ≈ 2^50, d=16384,
 //              2×53-bit moduli. Each Shamir share value lies in [0, q_i) ⊆ [0, k),
@@ -29,13 +30,10 @@ use std::{env, error::Error, process::exit, sync::Arc};
 use console::style;
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
-    lbfv::LBFVRelinearizationKey,
+    lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
     trbfv::{Lambda, ShareManager, TRBFV},
-    trlbfv::{
-        AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
-        aggregate_relinearization_key,
-    },
+    trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -53,7 +51,7 @@ fn print_notice_and_exit(error: Option<String>) {
         style("  overview:").magenta().bold()
     );
     println!(
-        "{} trbfv_mul_bfv_share [-h] [--num_parties=N] [--threshold=T] [--lambda=L]",
+        "{} trbfv_mul_bfv_share_mbfv_pk [-h] [--num_parties=N] [--threshold=T] [--lambda=L]",
         style("     usage:").magenta().bold()
     );
     println!(
@@ -108,8 +106,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_parties = preset.num_parties;
-    let mut threshold = preset.threshold;
+    let mut num_parties = 3;
+    let mut threshold = 1;
     let mut lambda = preset.lambda;
 
     fn parse_opt(arg: &str, prefix: &str) -> Option<usize> {
@@ -143,7 +141,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand::rng();
 
     println!("\n# Threshold BFV multiplication");
-    println!("  num_parties = {num_parties}  (params: n=20, k=1000, z=3, λ=31)");
+    println!("  num_parties = {num_parties}  (profile supports up to 20)");
     println!("  threshold   = {threshold}");
     println!("  lambda      = {lambda}");
 
@@ -154,11 +152,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut d1_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
     rng.fill(&mut pk_seed);
     rng.fill(&mut d1_seed);
-
-    // Canonical participant set — one common session ID covering all parties.
-    let lbfv_session_id: [u8; 32] = rng.random();
-    let lbfv_participant_set =
-        ParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
 
     struct Party {
         pk_share: MBFVPublicKeyShare,
@@ -181,17 +174,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let num_moduli = params_trbfv.moduli().len();
 
     println!("\n💻 Available CPU cores: {}", rayon::current_num_threads());
-    let participant_set_ref = &lbfv_participant_set;
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
         (0..num_parties)
             .into_par_iter()
-            .map(|party_idx| {
+            .map(|_| {
                 let mut rng = rand::rng();
-                let participant_id = (party_idx + 1) as u32;
-
-                // Unique contribution binding for this party.
-                let binding =
-                    ContributionBinding::new(participant_set_ref.clone(), participant_id).unwrap();
 
                 // trBFV keys and Shamir shares.
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
@@ -222,18 +209,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
 
                 // l-BFV PK contribution (CRS seed = pk_seed, shared by all parties).
-                let pk_lbfv_share = PublicKeyShare::new_with_seed_and_binding(
-                    &sk_share,
-                    pk_seed,
-                    binding.clone(),
-                    &mut rng,
-                )
-                .unwrap();
+                let pk_lbfv_share =
+                    PublicKeyShare::new_with_seed(&sk_share, pk_seed, &mut rng).unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
-                let rlk_share = RelinKeyShare::contribution_with_binding(
+                let rlk_share = RelinKeyShare::contribution(
                     &sk_share, d1_seed, pk_seed, // a_seed must match pk_lbfv_share's CRS seed
-                    binding, 0, 0, &mut rng,
+                    0, 0, &mut rng,
                 )
                 .unwrap();
 
@@ -264,9 +246,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rlk: LBFVRelinearizationKey = timeit!("Distributed RLK aggregation", {
         let pk_lbfv_shares: Vec<PublicKeyShare> =
             parties.iter().map(|p| p.pk_lbfv_share.clone()).collect();
-        let aggregated_pk = pk_lbfv_shares
-            .into_iter()
-            .aggregate::<AggregatedPublicKey>()?;
+        let aggregated_pk = pk_lbfv_shares.into_iter().aggregate::<LBFVPublicKey>()?;
         let rlk_shares: Vec<RelinKeyShare> = parties.iter().map(|p| p.rlk_share.clone()).collect();
         aggregate_relinearization_key(&rlk_shares, &aggregated_pk)?
     });
