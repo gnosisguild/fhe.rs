@@ -8,7 +8,7 @@ mod support;
 use fhe::aggregate::AggregateIter;
 use fhe::bfv::{CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::lbfv::{LBFVPublicKey, LBFVRelinearizationKey};
-use fhe::trlbfv::PublicKeyShare;
+use fhe::trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 
 use support::Preset;
@@ -196,6 +196,53 @@ fn trlbfv_public_key_aggregation_is_order_independent() {
         subset_sk.try_decrypt(&subset_ciphertext).unwrap(),
         plaintext
     );
+}
+
+#[test]
+fn trlbfv_aggregation_rejects_inconsistent_reference_strings() {
+    let profile = profiles().into_iter().next().unwrap();
+    let mut rng = support::rng(profile.seed);
+    let secret_keys = [
+        SecretKey::random(&profile.preset.parameters, &mut rng),
+        SecretKey::random(&profile.preset.parameters, &mut rng),
+    ];
+    let crs_seed = support::seed(53);
+    let other_crs_seed = support::seed(54);
+    let urs_seed = support::seed(55);
+    let other_urs_seed = support::seed(56);
+
+    let inconsistent_pk_shares = [
+        PublicKeyShare::new_with_seed(&secret_keys[0], crs_seed, &mut rng).unwrap(),
+        PublicKeyShare::new_with_seed(&secret_keys[1], other_crs_seed, &mut rng).unwrap(),
+    ];
+    assert!(
+        inconsistent_pk_shares
+            .into_iter()
+            .aggregate::<LBFVPublicKey>()
+            .is_err()
+    );
+
+    let public_key = secret_keys
+        .iter()
+        .map(|secret_key| PublicKeyShare::new_with_seed(secret_key, crs_seed, &mut rng).unwrap())
+        .aggregate::<LBFVPublicKey>()
+        .unwrap();
+
+    let inconsistent_urs_shares = [
+        RelinKeyShare::contribution(&secret_keys[0], urs_seed, crs_seed, 0, 0, &mut rng).unwrap(),
+        RelinKeyShare::contribution(&secret_keys[1], other_urs_seed, crs_seed, 0, 0, &mut rng)
+            .unwrap(),
+    ];
+    assert!(aggregate_relinearization_key(&inconsistent_urs_shares, &public_key).is_err());
+
+    let mismatched_crs_shares = secret_keys
+        .iter()
+        .map(|secret_key| {
+            RelinKeyShare::contribution(secret_key, urs_seed, other_crs_seed, 0, 0, &mut rng)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(aggregate_relinearization_key(&mismatched_crs_shares, &public_key).is_err());
 }
 
 #[test]
