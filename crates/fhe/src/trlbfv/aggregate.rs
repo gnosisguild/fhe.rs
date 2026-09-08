@@ -1,9 +1,7 @@
 //! Aggregation of threshold l-BFV key shares.
 //!
-//! Public-key aggregation validates the participant bindings and shared CRS,
-//! then produces an [`AggregatedPublicKey`]. Relinearization-key aggregation
-//! is performed by [`aggregate_relinearization_key`], which combines
-//! [`RelinKeyShare`] values against the aggregated public key.
+//! Public-key and relinearization-key aggregation validate their shared
+//! reference strings and combine additive contributions into operational keys.
 
 use crate::aggregate::Aggregate;
 use crate::bfv::KeySwitchingKey;
@@ -11,57 +9,15 @@ use crate::lbfv::{LBFVPublicKey, LBFVRelinearizationKey};
 use crate::{Error, Result};
 use fhe_math::rq::{Ntt, NttShoup, Poly, Representation};
 
-use super::binding::{ContributionBinding, ParticipantSet};
 use super::public_key_share::PublicKeyShare;
 use super::relin_key_share::RelinKeyShare;
-use crate::SerializationError;
-use crate::bfv::BfvParameters;
-use crate::proto::lbfv::{LbfvBinding, LbfvPublicKey as LbfvPublicKeyProto};
-use fhe_traits::FheParametrized;
-use fhe_traits::{DeserializeParametrized as DeserParam, Serialize};
-use prost::Message;
-use std::sync::Arc;
-
-/// An aggregated threshold l-BFV public key.
-///
-/// Wraps the operational single-party public key together with the participant
-/// set that produced it.  The operational key can be extracted via
-/// [`operational`](AggregatedPublicKey::operational) or
-/// [`into_operational`](AggregatedPublicKey::into_operational).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AggregatedPublicKey {
-    pub(crate) key: LBFVPublicKey,
-    pub(crate) participant_set: ParticipantSet,
-}
-
-impl AggregatedPublicKey {
-    /// Borrow the operational single-party public key.
-    #[must_use]
-    pub fn operational(&self) -> &LBFVPublicKey {
-        &self.key
-    }
-
-    /// Consume this aggregated key and return the operational single-party
-    /// public key.
-    #[must_use]
-    pub fn into_operational(self) -> LBFVPublicKey {
-        self.key
-    }
-
-    /// The participant set that produced this aggregated key.
-    #[must_use]
-    pub fn participant_set(&self) -> &ParticipantSet {
-        &self.participant_set
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Public-key aggregation helpers
 // ---------------------------------------------------------------------------
 
 /// Core public-key aggregation: CRS polynomial validation, b-polynomial
-/// summation, seed preservation, and key construction. Shared by both
-/// [`Aggregate<PublicKeyShare>`] impls.
+/// summation, seed preservation, and key construction.
 fn aggregate_pk_shares_core(shares: &[PublicKeyShare]) -> Result<LBFVPublicKey> {
     let (first, rest) = shares.split_first().ok_or_else(|| {
         Error::DefaultError("Cannot aggregate zero public-key shares".to_string())
@@ -136,14 +92,7 @@ fn aggregate_pk_shares_core(shares: &[PublicKeyShare]) -> Result<LBFVPublicKey> 
 }
 
 impl Aggregate<PublicKeyShare> for LBFVPublicKey {
-    /// Aggregate public-key shares without participant bindings.
-    ///
-    /// This is the unbound path: only CRS polynomial consistency and
-    /// parameter equality are validated. Participant set enforcement is
-    /// skipped entirely — bindings (if present) are ignored.
-    ///
-    /// For bound aggregation with participant-set validation, aggregate
-    /// into [`AggregatedPublicKey`] instead.
+    /// Aggregate public-key shares after validating their parameters and CRS.
     fn from_shares<T>(iter: T) -> Result<Self>
     where
         T: IntoIterator<Item = PublicKeyShare>,
@@ -170,53 +119,8 @@ impl Aggregate<PublicKeyShare> for LBFVPublicKey {
     }
 }
 
-impl Aggregate<PublicKeyShare> for AggregatedPublicKey {
-    fn from_shares<T>(iter: T) -> Result<Self>
-    where
-        T: IntoIterator<Item = PublicKeyShare>,
-    {
-        let shares: Vec<PublicKeyShare> = iter.into_iter().collect();
-        let (first, rest) = shares.split_first().ok_or_else(|| {
-            Error::DefaultError("Cannot aggregate zero public-key shares".to_string())
-        })?;
-
-        // Require binding metadata on every share.
-        let first_binding = first.binding.as_ref().ok_or_else(|| {
-            Error::DefaultError("Public-key share is missing participant binding".to_string())
-        })?;
-
-        first.key.validate_structure()?;
-        let participant_set = first_binding.participant_set().clone();
-
-        // Validate parameter equality and binding consistency across all shares.
-        let mut bindings: Vec<&ContributionBinding> = vec![first_binding];
-        for share in rest {
-            share.key.validate_structure()?;
-            let binding = share.binding.as_ref().ok_or_else(|| {
-                Error::DefaultError("Public-key share is missing participant binding".to_string())
-            })?;
-            if share.key.params != first.key.params {
-                return Err(Error::DefaultError(
-                    "Public-key shares have mismatched parameters".to_string(),
-                ));
-            }
-            bindings.push(binding);
-        }
-
-        // Validate exact participant-set coverage.
-        participant_set.validate_contributions(bindings)?;
-
-        let aggregated_key = aggregate_pk_shares_core(&shares)?;
-
-        Ok(AggregatedPublicKey {
-            key: aggregated_key,
-            participant_set,
-        })
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Relinearization-key aggregation
+// Relinearization-key aggregation helpers
 // ---------------------------------------------------------------------------
 
 /// Sum the `c0` components of a set of key-switching keys, coordinate-wise over
@@ -270,17 +174,22 @@ fn sum_ksk_c0<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// Core relinearization-key aggregation logic (shared by bound + unbound paths)
+// Relinearization-key aggregation
 // ---------------------------------------------------------------------------
 
-/// Core aggregation implementation. When `participant_set` is
-/// [`Some`], binding metadata is required on every share and
-/// participant-set coverage is validated. When [`None`], bindings
-/// are ignored and participant-set enforcement is skipped.
-fn aggregate_relinearization_key_impl(
+/// Aggregate threshold l-BFV relinearization-key contributions into an
+/// operational [`LBFVRelinearizationKey`].
+///
+/// The caller is responsible for selecting and authenticating contributions
+/// and for preventing duplicate inclusion. This function validates arithmetic
+/// structure, shared URS/CRS values, and consistency with `public_key`.
+///
+/// The aggregate error grows with the number of summed contributions. Callers
+/// must ensure that `shares.len()` is supported by their parameter set's noise
+/// budget.
+pub fn aggregate_relinearization_key(
     shares: &[RelinKeyShare],
     public_key: &LBFVPublicKey,
-    participant_set: Option<&ParticipantSet>,
 ) -> Result<LBFVRelinearizationKey> {
     let (first, rest) = shares.split_first().ok_or_else(|| {
         Error::DefaultError("Cannot aggregate zero relinearization key shares".to_string())
@@ -288,21 +197,6 @@ fn aggregate_relinearization_key_impl(
 
     // Validate public key structure.
     public_key.validate_structure()?;
-
-    // Participant-set enforcement (bound path only).
-    if let Some(ps) = participant_set {
-        let first_binding = first.binding.as_ref().ok_or_else(|| {
-            Error::DefaultError("RelinKeyShare is missing participant binding".to_string())
-        })?;
-        let mut bindings: Vec<&ContributionBinding> = vec![first_binding];
-        for share in rest {
-            let binding = share.binding.as_ref().ok_or_else(|| {
-                Error::DefaultError("RelinKeyShare is missing participant binding".to_string())
-            })?;
-            bindings.push(binding);
-        }
-        ps.validate_contributions(bindings)?;
-    }
 
     // Structural validation of every share's KSKs.
     for (i, share) in shares.iter().enumerate() {
@@ -426,13 +320,13 @@ fn aggregate_relinearization_key_impl(
             .iter()
             .all(|s| s.ksk_s_to_r.seed == first.ksk_s_to_r.seed);
 
-    // CRS binding: the a polynomials in ksk_s_to_r.c1 must match the
+    // CRS consistency: the a polynomials in ksk_s_to_r.c1 must match the
     // public key's a_j ciphertext polynomials.
     let pk_ctx0 = public_key.params.context_at_level(0)?;
     let ksk_ctx = &first.ksk_s_to_r.ctx_ksk;
     if ksk_ctx != pk_ctx0 {
         return Err(Error::DefaultError(
-            "Cannot verify CRS binding: RLK key context differs from public key level-0 context"
+            "Cannot verify CRS consistency: RLK key context differs from public key level-0 context"
                 .to_string(),
         ));
     }
@@ -441,12 +335,12 @@ fn aggregate_relinearization_key_impl(
         .checked_sub(first.ksk_r_to_s.ciphertext_level)
         .ok_or_else(|| {
             Error::DefaultError(
-                "CRS binding failed: ciphertext_level exceeds public-key l".to_string(),
+                "CRS consistency failed: ciphertext_level exceeds public-key l".to_string(),
             )
         })?;
     if first.ksk_s_to_r.c1.len() != new_l {
         return Err(Error::DefaultError(
-            "CRS binding failed: RLK's a polynomial count does not match expected l - ciphertext_level"
+            "CRS consistency failed: RLK's a polynomial count does not match expected l - ciphertext_level"
                 .to_string(),
         ));
     }
@@ -462,7 +356,7 @@ fn aggregate_relinearization_key_impl(
             })?;
         if a_ksk != *pk_a_j {
             return Err(Error::DefaultError(
-                "CRS binding failed: RLK's a_j does not match public key's a_j".to_string(),
+                "CRS consistency failed: RLK's a_j does not match public key's a_j".to_string(),
             ));
         }
     }
@@ -486,39 +380,6 @@ fn aggregate_relinearization_key_impl(
     LBFVRelinearizationKey::from_components(ksk_r_to_s, ksk_s_to_r, b_vec)
 }
 
-/// Aggregate threshold l-BFV relinearization-key contributions into an
-/// operational [`LBFVRelinearizationKey`] — **bound** path.
-///
-/// Requires participant bindings on every share and validates that the
-/// share set exactly covers the participant set stored in
-/// [`AggregatedPublicKey`].
-///
-/// For the unbound path (binding-less aggregation when ZK proofs handle
-/// authentication), use
-/// [`aggregate_relinearization_key_unbound`].
-pub fn aggregate_relinearization_key(
-    shares: &[RelinKeyShare],
-    public_key: &AggregatedPublicKey,
-) -> Result<LBFVRelinearizationKey> {
-    aggregate_relinearization_key_impl(shares, &public_key.key, Some(&public_key.participant_set))
-}
-
-/// Aggregate threshold l-BFV relinearization-key contributions into an
-/// operational [`LBFVRelinearizationKey`] — **unbound** path.
-///
-/// This is the unbound path: KSK consistency, CRS polynomial equality,
-/// and public-key CRS binding are validated, but participant-set
-/// enforcement is skipped. Share bindings (if present) are ignored.
-///
-/// For bound aggregation with participant-set validation, use
-/// [`aggregate_relinearization_key`] with an [`AggregatedPublicKey`].
-pub fn aggregate_relinearization_key_unbound(
-    shares: &[RelinKeyShare],
-    public_key: &LBFVPublicKey,
-) -> Result<LBFVRelinearizationKey> {
-    aggregate_relinearization_key_impl(shares, public_key, None)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::indexing_slicing, clippy::unwrap_used)]
@@ -527,11 +388,11 @@ mod tests {
     use crate::aggregate::AggregateIter;
     use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-    use rand::{RngCore, SeedableRng, rng};
+    use rand::{RngCore, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     #[test]
-    fn unbound_aggregation_works_without_bindings() -> Result<()> {
+    fn distributed_aggregation_works() -> Result<()> {
         let mut rng = rand::rng();
         let params = BfvParameters::default_arc(6, 8);
 
@@ -550,26 +411,19 @@ mod tests {
             s
         };
 
-        // Unbound PK shares — no bindings.
         let pk_shares: Vec<PublicKeyShare> = sks
             .iter()
-            .map(|sk| {
-                Ok(PublicKeyShare {
-                    key: LBFVPublicKey::new_with_seed(sk, a_seed, &mut rng)?,
-                    binding: None,
-                })
-            })
+            .map(|sk| PublicKeyShare::new_with_seed(sk, a_seed, &mut rng))
             .collect::<Result<Vec<_>>>()?;
 
         let pk: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
 
-        // Unbound RLK shares — no bindings.
         let rlk_shares: Vec<RelinKeyShare> = sks
             .iter()
             .map(|sk| RelinKeyShare::contribution(sk, d1_seed, a_seed, 0, 0, &mut rng))
             .collect::<Result<Vec<_>>>()?;
 
-        let rlk = aggregate_relinearization_key_unbound(&rlk_shares, &pk)?;
+        let rlk = aggregate_relinearization_key(&rlk_shares, &pk)?;
 
         // Verify multiplication + relinearization works.
         let joint_coeffs: Vec<i64> = (0..params.degree())
@@ -585,206 +439,6 @@ mod tests {
             Some(&9)
         );
 
-        Ok(())
-    }
-
-    #[test]
-    fn threshold_aggregation_keeps_binding_outside_lbfv_key() -> Result<()> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let participant_set = ParticipantSet::new([11u8; 32], vec![1, 2])?;
-
-        let secret_keys = [
-            SecretKey::random(&params, &mut rng),
-            SecretKey::random(&params, &mut rng),
-        ];
-
-        let a_seed = {
-            let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-            rng.fill_bytes(&mut seed);
-            seed
-        };
-        let d1_seed = {
-            let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-            rng.fill_bytes(&mut seed);
-            seed
-        };
-
-        let public_key_shares: Vec<PublicKeyShare> = secret_keys
-            .iter()
-            .enumerate()
-            .map(|(index, sk)| {
-                let b = ContributionBinding::new(participant_set.clone(), (index + 1) as u32)?;
-                PublicKeyShare::new_with_seed_and_binding(sk, a_seed, b, &mut rng)
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let aggregated_pk: AggregatedPublicKey = public_key_shares.into_iter().aggregate()?;
-        assert_eq!(aggregated_pk.participant_set(), &participant_set);
-
-        let relin_key_shares: Vec<RelinKeyShare> = secret_keys
-            .iter()
-            .enumerate()
-            .map(|(index, sk)| {
-                let b = ContributionBinding::new(participant_set.clone(), (index + 1) as u32)?;
-                RelinKeyShare::contribution_with_binding(sk, d1_seed, a_seed, b, 0, 0, &mut rng)
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let relin_key = aggregate_relinearization_key(&relin_key_shares, &aggregated_pk)?;
-
-        let plaintext = Plaintext::try_encode(&[3u64], Encoding::poly(), &params)?;
-        let ct = aggregated_pk
-            .operational()
-            .try_encrypt(&plaintext, &mut rng)?;
-        let mut square = &ct * &ct;
-        relin_key.relinearizes(&mut square)?;
-
-        let joint_coeffs: Vec<i64> = (0..params.degree())
-            .map(|d| secret_keys.iter().map(|sk| sk.coeffs[d]).sum())
-            .collect();
-        let joint_sk = SecretKey::new(joint_coeffs, &params);
-        let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
-        assert_eq!(decoded.first(), Some(&9));
-        Ok(())
-    }
-}
-
-impl Serialize for AggregatedPublicKey {
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut proto: LbfvPublicKeyProto = LbfvPublicKeyProto::from(&self.key);
-        proto.binding = Some(LbfvBinding {
-            session_id: self.participant_set.session_id().to_vec(),
-            participant_ids: self.participant_set.participant_ids().to_vec(),
-            participant_id: 0,
-            aggregate: true,
-        });
-        proto.encode_to_vec()
-    }
-}
-
-impl DeserParam for AggregatedPublicKey {
-    type Error = crate::Error;
-
-    fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> crate::Result<Self> {
-        let proto: LbfvPublicKeyProto = Message::decode(bytes).map_err(|e| {
-            crate::Error::SerializationError(SerializationError::ProtobufError {
-                message: e.to_string(),
-            })
-        })?;
-
-        let binding = proto.binding.as_ref().ok_or_else(|| {
-            crate::Error::SerializationError(SerializationError::InvalidFormat {
-                reason: "AggregatedPublicKey missing binding; expected aggregate=true".to_string(),
-            })
-        })?;
-
-        if !binding.aggregate {
-            return Err(crate::Error::SerializationError(
-                SerializationError::InvalidFormat {
-                    reason: format!(
-                        "AggregatedPublicKey binding has aggregate={}; expected true",
-                        binding.aggregate
-                    ),
-                },
-            ));
-        }
-
-        let session_id: [u8; 32] = binding.session_id.as_slice().try_into().map_err(|_| {
-            crate::Error::SerializationError(SerializationError::InvalidFormat {
-                reason: "Invalid session_id length in AggregatedPublicKey binding".to_string(),
-            })
-        })?;
-        let participant_set = ParticipantSet::new(session_id, binding.participant_ids.clone())?;
-
-        // Build the inner key from the proto, clearing the binding first.
-        let mut key_proto = proto.clone();
-        key_proto.binding = None;
-        let key_bytes = key_proto.encode_to_vec();
-        let key = LBFVPublicKey::from_bytes(&key_bytes, params)?;
-
-        Ok(AggregatedPublicKey {
-            key,
-            participant_set,
-        })
-    }
-}
-
-impl FheParametrized for AggregatedPublicKey {
-    type Parameters = BfvParameters;
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod proto_tests {
-    use super::*;
-
-    use crate::aggregate::AggregateIter;
-    use crate::bfv::{BfvParameters, SecretKey};
-    use crate::trlbfv::{ContributionBinding, ParticipantSet, PublicKeyShare};
-    use fhe_traits::{DeserializeParametrized, Serialize};
-    use rand::SeedableRng;
-    use rand::rng;
-    use rand_chacha::ChaCha8Rng;
-
-    #[test]
-    fn aggregated_public_key_roundtrip() -> crate::Result<()> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let participant_set = ParticipantSet::new([1u8; 32], vec![1, 2])?;
-
-        let sk1 = SecretKey::random(&params, &mut rng);
-        let sk2 = SecretKey::random(&params, &mut rng);
-
-        let seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-
-        let shares: Vec<PublicKeyShare> = [(&sk1, 1u32), (&sk2, 2u32)]
-            .iter()
-            .map(|(sk, id)| {
-                let binding = ContributionBinding::new(participant_set.clone(), *id)?;
-                PublicKeyShare::new_with_seed_and_binding(sk, seed, binding, &mut rng)
-            })
-            .collect::<crate::Result<Vec<_>>>()?;
-
-        let aggregated: AggregatedPublicKey = shares.into_iter().aggregate()?;
-        let bytes = aggregated.to_bytes();
-        let restored = AggregatedPublicKey::from_bytes(&bytes, &params)?;
-        assert_eq!(restored.key, aggregated.key);
-        assert_eq!(restored.participant_set, aggregated.participant_set);
-        Ok(())
-    }
-
-    #[test]
-    fn aggregated_pk_rejects_missing_binding() -> crate::Result<()> {
-        let params = BfvParameters::default_arc(6, 8);
-
-        // Serialize a plain LBFVPublicKey (no binding) and try to deser as AggregatedPublicKey.
-        let mut rng = rng();
-        let sk = SecretKey::random(&params, &mut rng);
-        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
-        let bytes = pk.to_bytes();
-        assert!(
-            AggregatedPublicKey::from_bytes(&bytes, &params).is_err(),
-            "Must reject a proto without a binding"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn aggregated_pk_rejects_contribution_binding() -> crate::Result<()> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
-        let sk = SecretKey::random(&params, &mut rng);
-        let seed = <ChaCha8Rng as SeedableRng>::Seed::default();
-        let participant_set = ParticipantSet::new([1u8; 32], vec![1, 2])?;
-        let binding = ContributionBinding::new(participant_set, 1)?;
-
-        let share = PublicKeyShare::new_with_seed_and_binding(&sk, seed, binding, &mut rng)?;
-        let bytes = share.to_bytes();
-        assert!(
-            AggregatedPublicKey::from_bytes(&bytes, &params).is_err(),
-            "Must reject a contribution binding (aggregate=false) when deserializing AggregatedPublicKey"
-        );
         Ok(())
     }
 }

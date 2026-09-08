@@ -7,9 +7,9 @@
 //! RLWE](https://eprint.iacr.org/2024/1285.pdf). This module provides
 //! single-party l-BFV operational keys and their constructors.
 //!
-//! Threshold/multiparty shares, bindings, and aggregation live separately in
-//! [`crate::trlbfv`]. The keys produced here do not carry threshold participant
-//! set metadata.
+//! Threshold/multiparty shares and aggregation live separately in
+//! [`crate::trlbfv`]. Contribution selection, authentication, and replay
+//! prevention remain protocol responsibilities.
 //!
 //! The shared polynomials `a` (CRS) and `d1` (URS) are supplied as
 //! [`CommonRandomPolyVec`](crate::bfv::CommonRandomPolyVec) values. The

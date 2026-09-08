@@ -27,11 +27,8 @@ use std::{error::Error, sync::Arc};
 use fhe::{
     aggregate::AggregateIter,
     bfv::{self, CommonRandomPolyVec, Encoding, Plaintext, SecretKey},
-    lbfv::LBFVRelinearizationKey,
-    trlbfv::{
-        AggregatedPublicKey, ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare,
-        aggregate_relinearization_key,
-    },
+    lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
+    trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use util::timeit::timeit;
@@ -58,10 +55,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
     let crp_d1 = CommonRandomPolyVec::new(&params, &mut rng)?;
 
-    let lbfv_session_id: [u8; 32] = rand::random();
-    let lbfv_participant_set =
-        ParticipantSet::new(lbfv_session_id, (1..=num_parties as u32).collect())?;
-
     println!("\n# Phase 1 — per-party key generation");
 
     // Each party samples its secret-key contribution sk_i.
@@ -75,27 +68,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     // All parties use the same crp_a so every a_j is identical across parties.
     let pk_shares: Vec<PublicKeyShare> = sk_shares
         .iter()
-        .enumerate()
-        .map(|(i, sk_i)| {
-            let binding = ContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32)?;
-            PublicKeyShare::contribute_with_crp_and_binding(sk_i, &crp_a, binding, &mut rng)
-        })
+        .map(|sk_i| PublicKeyShare::contribute_with_crp(sk_i, &crp_a, &mut rng))
         .collect::<Result<Vec<_>, _>>()?;
 
     // Each party computes its RLK contribution (d₀_i, d₂_i):
     //   d₀_i[j] = −sk_i · d₁_j + e₀_{i,j} + g_j · r_i   (ksk_r_to_s, uses crp_d1)
     //   d₂_i[j] =  r_i · a_j  + e₂_{i,j} + g_j · sk_i   (ksk_s_to_r, uses crp_a)
     // r_i is an ephemeral key sampled locally and discarded after this call.
-    // crp_a must equal the crp used for pk_shares (CRS binding check).
+    // crp_a must equal the CRP used for pk_shares.
     let rlk_shares: Vec<RelinKeyShare> = sk_shares
         .iter()
-        .enumerate()
-        .map(|(i, sk_i)| {
-            let binding = ContributionBinding::new(lbfv_participant_set.clone(), (i + 1) as u32)?;
-            RelinKeyShare::contribution_with_crp_and_binding(
-                sk_i, &crp_d1, &crp_a, binding, 0, 0, &mut rng,
-            )
-        })
+        .map(|sk_i| RelinKeyShare::contribution_with_crp(sk_i, &crp_d1, &crp_a, 0, 0, &mut rng))
         .collect::<Result<Vec<_>, _>>()?;
 
     println!("  {} parties generated (pk_share, rlk_share)", num_parties);
@@ -109,14 +92,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     //   c[j] for j>0    — b_j used for b_vec in the RLK
     let aggregated_pk = timeit!(
         "pk aggregation",
-        pk_shares.into_iter().aggregate::<AggregatedPublicKey>()?
+        pk_shares.into_iter().aggregate::<LBFVPublicKey>()?
     );
-    let pk = aggregated_pk.operational();
+    let pk = &aggregated_pk;
 
     // Aggregate RLK:
     //   d₀[j] = Σ_i d₀_i[j] = −sk · d₁_j + e₀_j + r · g_j
     //   d₂[j] = Σ_i d₂_i[j] =  r · a_j  + e₂_j + sk · g_j
-    // aggregated_pk supplies b_vec and enforces that a_seed matches (CRS binding).
+    // aggregated_pk supplies b_vec and enforces CRS consistency.
     // Neither sk nor r is ever assembled in one place.
     let rlk: LBFVRelinearizationKey = timeit!(
         "rlk aggregation",

@@ -10,7 +10,7 @@ use fhe::bfv::{
     Encoding, Plaintext, PublicKey, SecretKey,
 };
 use fhe::lbfv::{LBFVPublicKey, LBFVRelinearizationKey};
-use fhe::trlbfv::{ContributionBinding, ParticipantSet, PublicKeyShare, RelinKeyShare};
+use fhe::trlbfv::{PublicKeyShare, RelinKeyShare};
 use fhe_traits::{Deserialize, DeserializeParametrized, FheEncoder, FheEncrypter, Serialize};
 
 #[test]
@@ -86,15 +86,9 @@ fn lbfv_keys_round_trip_and_reject_malformed_or_mismatched_inputs() {
         rlk
     );
 
-    let participant_set = ParticipantSet::new(support::seed(67), vec![1]).unwrap();
-    let binding = ContributionBinding::new(participant_set, 1).unwrap();
-    let public_key_share =
-        PublicKeyShare::contribute_with_crp_and_binding(&sk, &crp_a, binding.clone(), &mut rng)
-            .unwrap();
-    let relin_key_share = RelinKeyShare::contribution_with_crp_and_binding(
-        &sk, &crp_d1, &crp_a, binding, 0, 0, &mut rng,
-    )
-    .unwrap();
+    let public_key_share = PublicKeyShare::contribute_with_crp(&sk, &crp_a, &mut rng).unwrap();
+    let relin_key_share =
+        RelinKeyShare::contribution_with_crp(&sk, &crp_d1, &crp_a, 0, 0, &mut rng).unwrap();
     assert_eq!(
         PublicKeyShare::from_bytes(&public_key_share.to_bytes(), &params).unwrap(),
         public_key_share
