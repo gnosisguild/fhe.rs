@@ -24,7 +24,6 @@ fhe-math = { version = "=0.3.0", path = "../fhe-math" }
 fhe-traits = { version = "=0.3.0", path = "../fhe-traits" }
 fhe-util = { version = "=0.3.0", path = "../fhe-util" }
 
-bincode.workspace = true
 serde.workspace = true
 doc-comment.workspace = true
 itertools.workspace = true
