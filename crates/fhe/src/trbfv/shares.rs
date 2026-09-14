@@ -41,14 +41,25 @@ use zeroize::Zeroizing;
 /// 3. ShareManager aggregates collected shares to reconstruct partial secrets
 /// 4. During decryption, ShareManager computes decryption shares from ciphertext
 /// 5. Finally, threshold number of decryption shares are combined to decrypt
+///
+/// The party count and threshold are immutable after construction so callers
+/// cannot bypass the validated honest-majority configuration.
+///
+/// ```compile_fail
+/// # use fhe::trbfv::ShareManager;
+/// fn reconfigure(manager: &mut ShareManager) {
+///     manager.n = 7;
+///     manager.threshold = 3;
+/// }
+/// ```
 #[derive(Debug)]
 pub struct ShareManager {
     /// Number of parties in the threshold scheme (must be `>= 3`)
-    pub n: usize,
+    n: usize,
     /// Degree `T` of the Shamir sharing polynomial, i.e. the maximum number of
     /// corrupted parties the deployment tolerates (must equal `(n - 1) / 2`).
     /// Reconstruction requires `T + 1` shares.
-    pub threshold: usize,
+    threshold: usize,
     /// BFV parameters (degree, moduli, etc.)
     pub params: Arc<BfvParameters>,
 }
@@ -87,6 +98,18 @@ impl ShareManager {
             threshold,
             params,
         })
+    }
+
+    /// Returns the number of parties in the threshold scheme.
+    #[must_use]
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// Returns the degree of the Shamir sharing polynomial.
+    #[must_use]
+    pub fn threshold(&self) -> usize {
+        self.threshold
     }
 
     /// Utility to create a Zeroizing<Poly> from coefficients.
@@ -470,8 +493,8 @@ mod tests {
     fn test_share_manager_creation() {
         let params = test_params();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
-        assert_eq!(manager.n, 5);
-        assert_eq!(manager.threshold, 2);
+        assert_eq!(manager.n(), 5);
+        assert_eq!(manager.threshold(), 2);
         assert_eq!(manager.params, params);
     }
 
@@ -534,8 +557,8 @@ mod tests {
         for (n, threshold) in [(3usize, 1usize), (4, 1), (5, 2), (10, 4), (20, 9), (21, 10)] {
             let manager = ShareManager::new(n, threshold, params.clone())
                 .expect("a valid threshold config must be accepted");
-            assert_eq!(manager.n, n);
-            assert_eq!(manager.threshold, threshold);
+            assert_eq!(manager.n(), n);
+            assert_eq!(manager.threshold(), threshold);
         }
     }
 
