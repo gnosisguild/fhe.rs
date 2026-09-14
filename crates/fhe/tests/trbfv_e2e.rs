@@ -44,8 +44,9 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
 
     let smudging_noises: Vec<Vec<BigInt>> = (0..N)
         .map(|_| {
+            // The evaluated ciphertext below is the sum of two fresh encryptions.
             trbfv
-                .generate_smudging_error(1, 0, Lambda::secure(LAMBDA_VALUE).unwrap(), &mut rng)
+                .generate_smudging_error(2, 0, Lambda::secure(LAMBDA_VALUE).unwrap(), &mut rng)
                 .expect("smudging noise generation")
         })
         .collect();

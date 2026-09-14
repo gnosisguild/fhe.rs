@@ -69,6 +69,10 @@ name = "trbfv_bfv_share"
 harness = false
 required-features = ["experimental-mbfv"]
 
+[[bench]]
+name = "trbfv_shamir"
+harness = false
+
 [[example]]
 name = "bfv_basic"
 

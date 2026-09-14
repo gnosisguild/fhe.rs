@@ -170,6 +170,15 @@ pub enum ThresholdError {
         expected: usize,
     },
 
+    /// A Shamir polynomial degree cannot be represented by the party set.
+    #[error("invalid Shamir threshold {threshold}: must be smaller than party count {party_count}")]
+    InvalidShamirThreshold {
+        /// Degree of the Shamir sharing polynomial
+        threshold: usize,
+        /// Number of parties receiving shares
+        party_count: usize,
+    },
+
     /// A wrong number of shares or contributions was provided.
     #[error("wrong share count: expected {expected}, got {actual}")]
     ShareCountMismatch {
@@ -191,6 +200,10 @@ pub enum ThresholdError {
     /// Lagrange reconstruction hit a non-invertible denominator.
     #[error("non-invertible Lagrange denominator (duplicate or invalid share indices)")]
     NonInvertibleShares,
+
+    /// Batch inversion requires at least one field element.
+    #[error("cannot batch-invert an empty field-element slice")]
+    EmptyBatchInversion,
 
     /// The statistical security parameter is below the secure minimum.
     #[error(
