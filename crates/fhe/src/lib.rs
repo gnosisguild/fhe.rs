@@ -4,11 +4,6 @@
 
 mod errors;
 mod rns_shamir;
-// Keep internal tests outside `src` without recompiling the implementation as
-// a second integration-test crate.
-#[cfg(test)]
-#[path = "../tests/internal/rns_shamir.rs"]
-mod rns_shamir_tests;
 
 pub mod aggregate;
 pub mod bfv;

@@ -201,6 +201,10 @@ pub enum ThresholdError {
     #[error("non-invertible Lagrange denominator (duplicate or invalid share indices)")]
     NonInvertibleShares,
 
+    /// Batch inversion requires at least one field element.
+    #[error("cannot batch-invert an empty field-element slice")]
+    EmptyBatchInversion,
+
     /// The statistical security parameter is below the secure minimum.
     #[error(
         "lambda {lambda} is below the secure minimum {min}; for testing, opt in explicitly \
