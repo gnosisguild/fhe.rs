@@ -552,7 +552,7 @@ impl Drop for SampleMatrix {
 /// Freshly sampled smudging noise with private wipe-on-drop storage.
 ///
 /// The underlying polynomial is private and the owner is consumed by the
-/// smudging dealing operation ([`ShareManager::generate_secret_shares_from_smudging_noise`]).
+/// smudging dealing operation ([`ShareManager::deal_smudging_noise`]).
 /// There is intentionally no `Clone`, `Copy`, coefficient accessor, or
 /// generic serialization: duplicating one-time noise across decryptions
 /// breaks the statistical hiding argument.
@@ -588,7 +588,7 @@ impl fmt::Debug for GeneratedSmudgingNoise {
 /// One dealer's smudging-noise share for one recipient.
 ///
 /// Created by dealing a [`GeneratedSmudgingNoise`] owner through
-/// [`ShareManager::generate_secret_shares_from_smudging_noise`]; there is one
+/// [`ShareManager::deal_smudging_noise`]; there is one
 /// share per committee member, each with logical layout
 /// `[modulus][coefficient]`. Collected shares aggregate into an
 /// [`AggregatedSmudgingShare`].

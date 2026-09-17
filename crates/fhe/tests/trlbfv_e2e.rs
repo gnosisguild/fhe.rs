@@ -198,12 +198,12 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
             // Each decrypting party aggregates its own noise inbox and
             // consumes the resulting aggregate in exactly one call.
             let inbox = std::mem::take(&mut es_inboxes[party_id - 1]);
-            let noise = ShareManager::new(N, THRESHOLD, params.clone())
+            let es_i = ShareManager::new(N, THRESHOLD, params.clone())
                 .expect("share manager")
                 .aggregate_smudging_shares(inbox)
                 .expect("aggregate smudging shares");
             trbfv
-                .decryption_share(tally.clone(), party.sk_poly_sum.clone().into_ntt(), noise)
+                .decryption_share(tally.clone(), party.sk_poly_sum.clone().into_ntt(), es_i)
                 .expect("decryption share")
         })
         .collect();

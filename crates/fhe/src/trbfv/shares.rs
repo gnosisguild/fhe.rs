@@ -402,7 +402,7 @@ impl ShareManager {
         &self,
         ciphertext: Arc<Ciphertext>,
         sk_i: Poly<Ntt>,
-        noise: AggregatedSmudgingShare,
+        es_i: AggregatedSmudgingShare,
     ) -> Result<Poly<PowerBasis>, Error> {
         if ciphertext.params != self.params {
             return Err(Error::ParameterMismatch {
@@ -436,7 +436,7 @@ impl ShareManager {
         sk_i.disallow_variable_time_computations();
         // The aggregate stays wrapped until the end of this call, so
         // validation failures below still consume (and wipe) the noise.
-        let mut es_i = noise.into_poly();
+        let mut es_i = es_i.into_poly();
         es_i.disallow_variable_time_computations();
         if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
             return Err(Error::ParameterMismatch {
@@ -999,11 +999,11 @@ mod tests {
         for i in 0..(threshold + 1) {
             let ctx = params.context_at_level(0).unwrap();
             //Setting smuding noise to be zero in this test
-            let noise =
+            let es_i =
                 AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
 
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), noise)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_i)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1085,10 +1085,10 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let noise =
+            let es_i =
                 AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), noise)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_i)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1170,10 +1170,10 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let noise =
+            let es_i =
                 AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), noise)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_i)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1251,10 +1251,10 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let noise =
+            let es_i =
                 AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), noise)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_i)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1561,10 +1561,10 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let noise =
+            let es_i =
                 AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), noise)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_i)
                 .unwrap();
             decryption_shares.push(share);
         }

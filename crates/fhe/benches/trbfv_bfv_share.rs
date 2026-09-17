@@ -79,7 +79,7 @@ fn bench_data_sizes(c: &mut Criterion) {
         let esi_noise = trbfv
             .generate_smudging_error(100, 0, Lambda::secure(preset.lambda).unwrap(), &mut rng)
             .unwrap();
-        let esi_deal = share_manager
+        let esi_sss = share_manager
             .deal_smudging_noise(esi_noise, &mut rng)
             .unwrap();
 
@@ -88,7 +88,7 @@ fn bench_data_sizes(c: &mut Criterion) {
         let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
 
         all_sk_shares.push(sk_sss.clone());
-        parties.push((sk_share, pk_share, sk_bfv, pk_bfv, sk_sss, esi_deal));
+        parties.push((sk_share, pk_share, sk_bfv, pk_bfv, sk_sss, esi_sss));
     }
 
     // Calculate Shamir share sizes

@@ -229,7 +229,7 @@ impl TRBFV {
     /// * `sk_i` - This party's *aggregated share of the joint secret key*, i.e. the
     ///   output of [`TRBFV::aggregate_collected_shares`] over the key share matrices
     ///   received from all parties — not a party's own secret key
-    /// * `noise` - This party's [`AggregatedSmudgingShare`], aggregated from the
+    /// * `es_i` - This party's [`AggregatedSmudgingShare`], aggregated from the
     ///   dealt noise shares. Unshared noise would be blown up by the Lagrange
     ///   coefficients during reconstruction and break correctness
     ///
@@ -240,10 +240,10 @@ impl TRBFV {
         &self,
         ciphertext: Arc<Ciphertext>,
         sk_i: Poly<Ntt>,
-        noise: AggregatedSmudgingShare,
+        es_i: AggregatedSmudgingShare,
     ) -> Result<Poly<PowerBasis>, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
-        share_manager.decryption_share(ciphertext, sk_i, noise)
+        share_manager.decryption_share(ciphertext, sk_i, es_i)
     }
 
     /// Decrypt ciphertext from collected decryption shares.
@@ -534,12 +534,12 @@ mod tests {
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();
         let ctx = params.context_at_level(0).unwrap();
-        let noise =
+        let es_i =
             AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
 
         // The level-1 ciphertext is rejected, and the moved-in aggregate is
         // consumed (dropped and wiped) by the failed call.
-        let result = trbfv.decryption_share(Arc::new(ct), (*sk_poly).clone().into_ntt(), noise);
+        let result = trbfv.decryption_share(Arc::new(ct), (*sk_poly).clone().into_ntt(), es_i);
         assert_eq!(
             result,
             Err(Error::InvalidLevel {
@@ -572,11 +572,11 @@ mod tests {
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();
         let ctx = params.context_at_level(0).unwrap();
-        let noise =
+        let es_i =
             AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
 
         let decryption_share = trbfv
-            .decryption_share(ct, (*sk_poly).clone().into_ntt(), noise)
+            .decryption_share(ct, (*sk_poly).clone().into_ntt(), es_i)
             .unwrap();
 
         assert_eq!(decryption_share.coefficients().ncols(), params.degree());
@@ -617,11 +617,11 @@ mod tests {
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
                 .unwrap();
             let ctx = params.context_at_level(0).unwrap();
-            let noise =
+            let es_i =
                 AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
 
             let share = trbfv_instances[i]
-                .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), noise)
+                .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_i)
                 .unwrap();
             decryption_shares.push(share);
         }

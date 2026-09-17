@@ -101,7 +101,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
             // Each decrypting party aggregates its own inbox and consumes the
             // resulting aggregate in exactly one decryption-share call.
             let inbox = std::mem::take(&mut inboxes[index]);
-            let noise = managers[index]
+            let es_i = managers[index]
                 .aggregate_smudging_shares(inbox)
                 .expect("aggregate smudging shares");
             decryption_shares.push(
@@ -109,7 +109,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
                     .decryption_share(
                         ciphertext.clone(),
                         sk_poly_sums[index].clone().into_ntt(),
-                        noise,
+                        es_i,
                     )
                     .expect("decryption share"),
             );

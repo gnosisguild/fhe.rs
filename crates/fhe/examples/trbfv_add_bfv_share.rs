@@ -149,11 +149,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     struct Party {
         pk_share: PublicKeyShare,
         sk_sss: Vec<Array2<u64>>,
-        esi_deal: Vec<SmudgingShare>,
+        esi_sss: Vec<SmudgingShare>,
         sk_sss_collected: Vec<Array2<u64>>,
-        es_shares_collected: Vec<SmudgingShare>,
+        es_sss_collected: Vec<SmudgingShare>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_aggregate: Option<AggregatedSmudgingShare>,
+        es_noise: Option<AggregatedSmudgingShare>,
         d_share_poly: Poly<PowerBasis>,
         // BFV keys for share encryption
         sk_bfv: SecretKey,
@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
 
                 let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-                let es_shares_collected: Vec<SmudgingShare> = Vec::with_capacity(num_parties);
+                let es_sss_collected: Vec<SmudgingShare> = Vec::with_capacity(num_parties);
                 let ctx = params_trbfv.context_at_level(0).unwrap();
                 let sk_poly_sum = Poly::<PowerBasis>::zero(ctx);
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
@@ -193,7 +193,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let esi_noise = trbfv
                     .generate_smudging_error(num_summed, 0, security, &mut rng)
                     .unwrap();
-                let esi_deal = share_manager
+                let esi_sss = share_manager
                     .deal_smudging_noise(esi_noise, &mut rng)
                     .unwrap();
 
@@ -203,11 +203,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Party {
                     pk_share,
                     sk_sss,
-                    esi_deal,
+                    esi_sss,
                     sk_sss_collected,
-                    es_shares_collected,
+                    es_sss_collected,
                     sk_poly_sum,
-                    es_aggregate: None,
+                    es_noise: None,
                     d_share_poly,
                     sk_bfv,
                     pk_bfv,
@@ -230,7 +230,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .enumerate()
                 .map(|(_sender_idx, party)| {
                     let mut sender_encrypted_shares = Vec::new();
-                    let deal = std::mem::take(&mut party.esi_deal);
+                    let deal = std::mem::take(&mut party.esi_sss);
 
                     for ((receiver_idx, receiver_pk), share) in pk_bfv_list
                         .iter()
@@ -298,7 +298,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     let payload = support::chunks_to_payload(&chunk_words);
                     let share = SmudgingShare::from_bytes(&payload, &params_trbfv).unwrap();
-                    party.es_shares_collected.push(share);
+                    party.es_sss_collected.push(share);
                 }
             });
     });
@@ -310,8 +310,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap();
             let noise_manager =
                 ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
-            let inbox = std::mem::take(&mut party.es_shares_collected);
-            party.es_aggregate = Some(noise_manager.aggregate_smudging_shares(inbox).unwrap());
+            let inbox = std::mem::take(&mut party.es_sss_collected);
+            party.es_noise = Some(noise_manager.aggregate_smudging_shares(inbox).unwrap());
         });
     });
 
@@ -345,12 +345,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let share_generation_start = Instant::now();
 
     parties.par_iter_mut().for_each(|party| {
-        let noise = party
-            .es_aggregate
-            .take()
-            .expect("aggregated noise per party");
+        let es_i = party.es_noise.take().expect("aggregated noise per party");
         party.d_share_poly = trbfv
-            .decryption_share(tally.clone(), party.sk_poly_sum.clone().into_ntt(), noise)
+            .decryption_share(tally.clone(), party.sk_poly_sum.clone().into_ntt(), es_i)
             .unwrap();
     });
 

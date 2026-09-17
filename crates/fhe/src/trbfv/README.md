@@ -70,7 +70,7 @@ layout.
 > `Vec<BigInt>`, and `ShareManager::bigints_to_poly` has been removed.
 > Sampled noise is now a non-cloneable `GeneratedSmudgingNoise` owner that
 > must be dealt with
-> `ShareManager::generate_secret_shares_from_smudging_noise`, which consumes
+> `ShareManager::deal_smudging_noise`, which consumes
 > it. Downstream code doing generate-then-convert must migrate to the
 > generate-then-deal flow shown under [Usage](#usage); the old symbols fail
 > to compile by design, since a cloneable noise representation cannot
@@ -223,16 +223,16 @@ let trbfv = TRBFV::new(n_parties, threshold, params.clone())?;
 // each dealt share is addressed to one recipient without exposing polynomials.
 let sk_shares = trbfv.generate_secret_shares_from_poly(sk_poly, &mut rng)?;
 let es_noise = trbfv.generate_smudging_error(num_ciphertexts, mult_depth, lambda, &mut rng)?;
-let es_deal = share_manager.deal_smudging_noise(es_noise, &mut rng)?;
+let esi_sss = share_manager.deal_smudging_noise(es_noise, &mut rng)?;
 
 // Each party: aggregate the share matrices received from the other parties
 // into its share of the joint secret key (and likewise for the noise)
 let sk_poly_sum = trbfv.aggregate_collected_shares(&collected_sk_shares)?;
-let es_noise_sum = share_manager.aggregate_smudging_shares(collected_es_shares)?;
+let es_i = share_manager.aggregate_smudging_shares(collected_es_shares)?;
 
 // Each decrypting party: compute a decryption share from its aggregated shares.
 // The noise aggregate is consumed, so one live aggregate backs one share.
-let d_share = trbfv.decryption_share(ciphertext.clone(), sk_poly_sum.into_ntt(), es_noise_sum)?;
+let d_share = trbfv.decryption_share(ciphertext.clone(), sk_poly_sum.into_ntt(), es_i)?;
 
 // Combine exactly threshold + 1 decryption shares; reconstructing_parties
 // holds the 1-based indices of the parties the shares came from
