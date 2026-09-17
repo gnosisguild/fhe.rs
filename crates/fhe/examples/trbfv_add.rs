@@ -135,7 +135,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sk_sss: Vec<Array2<u64>>,
         esi_sss: Vec<SmudgingShare>,
         sk_sss_collected: Vec<Array2<u64>>,
-        es_sss_collected: Vec<SmudgingShare>,
+        es_inbox: Vec<SmudgingShare>,
         sk_poly_sum: Poly<PowerBasis>,
         es_noise: Option<AggregatedSmudgingShare>,
         d_share_poly: Poly<PowerBasis>,
@@ -173,7 +173,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
                 let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-                let es_sss_collected: Vec<SmudgingShare> = Vec::with_capacity(num_parties);
+                let es_inbox: Vec<SmudgingShare> = Vec::with_capacity(num_parties);
                 let ctx = params.context_at_level(0).unwrap();
                 let sk_poly_sum = Poly::<PowerBasis>::zero(ctx);
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
@@ -190,7 +190,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sk_sss,
                     esi_sss,
                     sk_sss_collected,
-                    es_sss_collected,
+                    es_inbox,
                     sk_poly_sum,
                     es_noise: None,
                     d_share_poly,
@@ -222,7 +222,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for j in 0..num_parties {
         let deal = std::mem::take(&mut parties[j].esi_sss);
         for (receiver, share) in deal.into_iter().enumerate() {
-            parties[receiver].es_sss_collected.push(share);
+            parties[receiver].es_inbox.push(share);
         }
     }
 
@@ -232,7 +232,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
             let noise_manager = ShareManager::new(num_parties, threshold, params.clone()).unwrap();
-            let inbox = std::mem::take(&mut party.es_sss_collected);
+            let inbox = std::mem::take(&mut party.es_inbox);
             party.es_noise = Some(noise_manager.aggregate_smudging_shares(inbox).unwrap());
         });
     });

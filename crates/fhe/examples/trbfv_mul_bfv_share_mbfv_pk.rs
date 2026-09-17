@@ -158,7 +158,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sk_sss: Vec<Array2<u64>>, // sk_sss[m]: shape (num_parties, degree)
         esi_sss: Vec<SmudgingShare>, // one smudging share per recipient
         sk_sss_collected: Vec<Array2<u64>>, // collected from all senders; each (num_moduli, degree)
-        es_sss_collected: Vec<SmudgingShare>,
+        es_inbox: Vec<SmudgingShare>,
         sk_poly_sum: Poly<PowerBasis>,
         es_noise: Option<AggregatedSmudgingShare>,
         d_share_poly: Poly<PowerBasis>,
@@ -228,7 +228,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sk_sss,
                     esi_sss,
                     sk_sss_collected: Vec::with_capacity(num_parties),
-                    es_sss_collected: Vec::with_capacity(num_parties),
+                    es_inbox: Vec::with_capacity(num_parties),
                     sk_poly_sum: Poly::<PowerBasis>::zero(ctx0),
                     es_noise: None,
                     d_share_poly: Poly::<PowerBasis>::zero(ctx0),
@@ -338,7 +338,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     let payload = support::chunks_to_payload(&chunk_words);
                     let share = SmudgingShare::from_bytes(&payload, &params_trbfv).unwrap();
-                    party.es_sss_collected.push(share);
+                    party.es_inbox.push(share);
                 }
             });
     });
@@ -352,7 +352,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap();
             let noise_manager =
                 ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
-            let inbox = std::mem::take(&mut party.es_sss_collected);
+            let inbox = std::mem::take(&mut party.es_inbox);
             party.es_noise = Some(noise_manager.aggregate_smudging_shares(inbox).unwrap());
         });
     });
