@@ -649,12 +649,14 @@ mod tests {
             .unwrap()
     }
 
-    /// Small-degree parameters for exact oracle checks.
-    fn small_params(moduli: &[u64]) -> Arc<BfvParameters> {
+    /// Small-degree parameters with library-generated moduli for exact
+    /// oracle checks. No hand-picked primes: moduli come from the builder's
+    /// own prime generator.
+    fn small_params(modulus_sizes: &[usize]) -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
             .set_degree(8)
-            .set_plaintext_modulus(17)
-            .set_moduli(moduli)
+            .set_plaintext_modulus(2)
+            .set_moduli_sizes(modulus_sizes)
             .build_arc()
             .unwrap()
     }
@@ -1166,10 +1168,10 @@ mod tests {
 
     #[test]
     fn test_noise_small_bounds_match_centered_integers() {
-        // Exhaustive check on small parameters: every column must encode
-        // exactly one centered integer across all RNS rows.
-        let moduli = &[1153u64, 4611686018326724609, 4611686018309947393];
-        let params = small_params(moduli);
+        // Exhaustive check on small generated parameters: every column must
+        // encode exactly one centered integer across all RNS rows.
+        let params = small_params(&[11, 11, 11]);
+        let moduli = params.moduli().to_vec();
         let mut rng = ChaCha8Rng::seed_from_u64(172_101);
         for b in [1u64, 2, 3, 7, 100, 500] {
             let bound = BigUint::from(b);
@@ -1194,7 +1196,8 @@ mod tests {
     fn test_noise_small_bound_is_approximately_uniform() {
         // B = 2 gives M = 5 single-limb values; over 4096 samples each of the
         // five centered values must appear at a roughly even rate.
-        let params = small_params(&[1153]);
+        let params = small_params(&[11, 11, 11]);
+        let moduli = params.moduli().to_vec();
         let mut rng = ChaCha8Rng::seed_from_u64(172_102);
         let mut counts = [0usize; 5];
         for _ in 0..512 {
@@ -1203,13 +1206,12 @@ mod tests {
                 .generate_smudging_error(&mut rng)
                 .unwrap()
                 .into_poly();
-            for &residue in poly.coefficients().iter() {
-                let x = if residue <= 2 {
-                    residue as i64
-                } else {
-                    residue as i64 - 1153
-                };
-                assert!((-2..=2).contains(&x), "residue {residue} outside [-2, 2]");
+            for col in 0..params.degree() {
+                let residues: Vec<u64> = (0..moduli.len())
+                    .map(|row| poly.coefficients()[[row, col]])
+                    .collect();
+                let x = crt_centered_integer(&residues, &moduli).to_i64().unwrap();
+                assert!((-2..=2).contains(&x));
                 counts[(x + 2) as usize] += 1;
             }
         }
@@ -1224,14 +1226,9 @@ mod tests {
 
     #[test]
     fn test_noise_limb_boundaries_match_oracle() {
-        // Bounds straddling 64-bit limb edges. Three ~62-bit moduli give
-        // Q ~ 2^186, well above twice each bound.
-        let moduli = &[
-            4611686018326724609,
-            4611686018309947393,
-            4611686018282684417,
-        ];
-        let params = small_params(moduli);
+        // Bounds straddling 64-bit limb edges. Three generated 62-bit moduli
+        // give Q ~ 2^186, well above twice each bound.
+        let params = small_params(&[62, 62, 62]);
         let mut rng = ChaCha8Rng::seed_from_u64(172_103);
         let bounds = [
             (BigUint::from(1u32) << 63) - BigUint::from(1u32), // M = 2^64 - 1
@@ -1248,17 +1245,10 @@ mod tests {
 
     #[test]
     fn test_noise_wide_bound_beyond_five_limbs() {
-        // B = 2^320 gives M = 2^321 + 1 (six limbs). Six ~62-bit moduli give
-        // Q ~ 2^372, well above 2 * B, so the CRT oracle recovers each sample.
-        let moduli = &[
-            4611686018326724609,
-            4611686018309947393,
-            4611686018282684417,
-            4611686018257518593,
-            4611686018232352769,
-            4611686018171535361,
-        ];
-        let params = small_params(moduli);
+        // B = 2^320 gives M = 2^321 + 1 (six limbs). Six generated 62-bit
+        // moduli give Q ~ 2^372, well above 2 * B, so the CRT oracle recovers
+        // each sample.
+        let params = small_params(&[62, 62, 62, 62, 62, 62]);
         let mut rng = ChaCha8Rng::seed_from_u64(172_104);
         let bound: BigUint = BigUint::from(1u32) << 320;
         assert!(bound.bits() > 5 * 64, "test requires a >5-limb bound");
