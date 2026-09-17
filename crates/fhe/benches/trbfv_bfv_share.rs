@@ -121,16 +121,16 @@ fn bench_data_sizes(c: &mut Criterion) {
     let mut encrypted_shares_count = 0;
     let mut total_encrypted_size = 0;
 
-    for sender_idx in 0..num_parties {
-        let deal = std::mem::take(&mut parties[sender_idx].5);
-        for ((receiver_idx, receiver_party), share) in
-            parties.iter().enumerate().take(num_parties).zip(deal)
+    let receiver_pks: Vec<PublicKey> = parties.iter().map(|party| party.3.clone()).collect();
+    for sender in parties.iter_mut() {
+        let deal = std::mem::take(&mut sender.5);
+        for ((receiver_idx, receiver_pk), share) in
+            receiver_pks.iter().enumerate().take(num_parties).zip(deal)
         {
-            let receiver_pk = &receiver_party.3;
             let mut rng = make_rng();
 
             // Encrypt sk shares
-            for sk_sss_m in parties[sender_idx].4.iter().take(num_moduli) {
+            for sk_sss_m in sender.4.iter().take(num_moduli) {
                 let share_row = sk_sss_m.row(receiver_idx);
                 let share_vec: Vec<u64> = share_row.to_vec();
 
