@@ -14,10 +14,13 @@ use crate::Error;
 /// - Distributed RLK error accounting via `accepted_participant_count * B_e`
 /// - Sampler-aligned `B_enc` (CBD support for small variance, `sqrt(3*var)` for large)
 use crate::bfv::BfvParameters;
+use fhe_math::Rq;
+use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::rq::{Poly, PowerBasis};
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
+use prost::Message;
 use rand::{CryptoRng, RngCore};
 use std::fmt;
 use std::sync::Arc;
@@ -549,7 +552,7 @@ impl Drop for SampleMatrix {
 /// Freshly sampled smudging noise with private wipe-on-drop storage.
 ///
 /// The underlying polynomial is private and the owner is consumed by the
-/// smudging dealing operation ([`ShareManager::generate_secret_shares_from_smudging_noise`]).
+/// smudging dealing operation ([`ShareManager::deal_smudging_noise`]).
 /// There is intentionally no `Clone`, `Copy`, coefficient accessor, or
 /// generic serialization: duplicating one-time noise across decryptions
 /// breaks the statistical hiding argument.
@@ -582,6 +585,241 @@ impl fmt::Debug for GeneratedSmudgingNoise {
     }
 }
 
+/// One dealer's smudging-noise share for one recipient.
+///
+/// Created by dealing a [`GeneratedSmudgingNoise`] owner through
+/// [`ShareManager::deal_smudging_noise`]; there is one
+/// share per committee member, each with logical layout
+/// `[modulus][coefficient]`. Collected shares aggregate into an
+/// [`AggregatedSmudgingShare`].
+///
+/// The storage is private and wiped on drop. There is intentionally no
+/// `Clone`, `Copy`, coefficient accessor, or serialization.
+///
+/// ```compile_fail
+/// # use fhe::trbfv::SmudgingShare;
+/// fn duplicate(share: &SmudgingShare) -> SmudgingShare {
+///     share.clone()
+/// }
+/// ```
+pub struct SmudgingShare {
+    residues: Array2<u64>,
+    #[cfg(test)]
+    wipe_observer: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl SmudgingShare {
+    /// Wrap already-dealt canonical residues.
+    ///
+    /// Crate-private so only the dedicated dealing operation constructs
+    /// shares; external code cannot inject arbitrary matrices.
+    pub(crate) fn new(residues: Array2<u64>) -> Self {
+        Self {
+            residues,
+            #[cfg(test)]
+            wipe_observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_wipe_observer(
+        residues: Array2<u64>,
+        wipe_observer: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            residues,
+            wipe_observer: Some(wipe_observer),
+        }
+    }
+
+    /// Borrow the share residues for aggregation.
+    ///
+    /// Crate-private so aggregation is the only reader; external code never
+    /// observes raw share values.
+    pub(crate) fn residues(&self) -> ArrayView2<'_, u64> {
+        self.residues.view()
+    }
+}
+
+impl Drop for SmudgingShare {
+    fn drop(&mut self) {
+        self.residues.iter_mut().for_each(|coeff| coeff.zeroize());
+        #[cfg(test)]
+        if let Some(observer) = &self.wipe_observer {
+            use std::sync::atomic::Ordering;
+            observer.store(
+                self.residues.iter().all(|&coeff| coeff == 0),
+                Ordering::SeqCst,
+            );
+        }
+    }
+}
+
+impl fmt::Debug for SmudgingShare {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SmudgingShare")
+            .finish_non_exhaustive()
+    }
+}
+
+/// One recipient's aggregate over dealer smudging shares for one noise unit.
+///
+/// Created by consuming the collected [`SmudgingShare`] values through
+/// [`ShareManager::aggregate_smudging_shares`]. The aggregate is the only
+/// noise input the decryption operation accepts, and it is consumed even
+/// when decryption fails, so safe Rust cannot apply one live aggregate to
+/// two decryption calls.
+///
+/// The storage is private and wiped on drop. There is intentionally no
+/// `Clone`, `Copy`, coefficient accessor, or serialization.
+///
+/// ```compile_fail
+/// # use fhe::trbfv::AggregatedSmudgingShare;
+/// fn duplicate(aggregate: &AggregatedSmudgingShare) -> AggregatedSmudgingShare {
+///     aggregate.clone()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// # use fhe::trbfv::AggregatedSmudgingShare;
+/// fn consume_twice(aggregate: AggregatedSmudgingShare) {
+///     let _first = aggregate;
+///     let _second = aggregate;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// # use fhe::trbfv::AggregatedSmudgingShare;
+/// fn extract_raw_poly(aggregate: AggregatedSmudgingShare) {
+///     // No borrowed or owned raw-polynomial accessor exists: the only
+///     // consumer is the decryption operation.
+///     let _poly = aggregate.into_poly();
+/// }
+/// ```
+pub struct AggregatedSmudgingShare {
+    poly: Zeroizing<Poly<PowerBasis>>,
+}
+
+impl AggregatedSmudgingShare {
+    /// Wrap an aggregated noise polynomial.
+    ///
+    /// Crate-private so only the dedicated aggregation operation constructs
+    /// aggregates; external code cannot inject an arbitrary polynomial.
+    pub(crate) fn from_poly(poly: Zeroizing<Poly<PowerBasis>>) -> Self {
+        Self { poly }
+    }
+
+    /// Consume the owner and release the aggregate polynomial.
+    ///
+    /// Crate-private so the decryption operation is the only consumer;
+    /// external code cannot extract a reusable raw polynomial.
+    pub(crate) fn into_poly(self) -> Zeroizing<Poly<PowerBasis>> {
+        self.poly
+    }
+}
+
+impl fmt::Debug for AggregatedSmudgingShare {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AggregatedSmudgingShare")
+            .finish_non_exhaustive()
+    }
+}
+
+// Explicit transport boundary for smudging material.
+//
+// Both owner types below export to the same `Rq` polynomial encoding every
+// other secret in this workspace uses (see `fhe_math::Rq` and the
+// `fhe_traits::Serialize` implementations for keys and ciphertexts). Export
+// always consumes the owner; import validates the payload against `params`
+// before rebuilding it. Copied bytes live outside the library's
+// one-live-owner guarantee; durable replay prevention is the integrator's
+// responsibility (see issue #109).
+
+impl SmudgingShare {
+    /// Export this share into an opaque transport payload, consuming it.
+    ///
+    /// # Errors
+    /// Returns an error if the level-0 context cannot be derived from
+    /// `params`.
+    ///
+    /// ```compile_fail
+    /// # use std::sync::Arc;
+    /// # use fhe::bfv::BfvParameters;
+    /// # use fhe::trbfv::SmudgingShare;
+    /// fn export_twice(share: SmudgingShare, params: &Arc<BfvParameters>) {
+    ///     let _first = share.export(params);
+    ///     let _second = share.export(params);
+    /// }
+    /// ```
+    pub fn export(self, params: &Arc<BfvParameters>) -> Result<Vec<u8>, Error> {
+        let ctx = params.context_at_level(0)?;
+        // The share cannot move out of this wipe-on-drop owner, so the
+        // payload is a copy; `self` drops (and wipes) here.
+        let poly = Poly::<PowerBasis>::from_coeffs_matrix(self.residues().to_owned(), ctx)?;
+        Ok(Rq::from(&*poly).encode_to_vec())
+    }
+
+    /// Rebuild a share from a transported payload, validating dimensions
+    /// against `params` and canonical residues.
+    ///
+    /// # Errors
+    /// Returns an error if the payload is malformed, targets different
+    /// parameters, or holds non-canonical residues.
+    pub fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self, Error> {
+        let proto = Rq::decode(bytes).map_err(|_| {
+            Error::SerializationError(crate::SerializationError::Decode {
+                object: crate::SerializedObject::SmudgingShare,
+            })
+        })?;
+        let ctx = params.context_at_level(0)?;
+        let poly = Poly::<PowerBasis>::try_convert_from(&proto, ctx, false)?;
+        let flat = Vec::<u64>::try_from(&poly).map_err(Error::from)?;
+        let residues = Array2::from_shape_vec((params.moduli().len(), params.degree()), flat)
+            .map_err(|_| {
+                Error::SerializationError(crate::SerializationError::InvalidFormat {
+                    reason: "smudging share residues do not fill the parameter shape".to_string(),
+                })
+            })?;
+        Ok(Self::new(residues))
+    }
+}
+
+impl AggregatedSmudgingShare {
+    /// Export this aggregate into an opaque transport payload, consuming it.
+    ///
+    /// ```compile_fail
+    /// # use fhe::trbfv::AggregatedSmudgingShare;
+    /// fn export_twice(aggregate: AggregatedSmudgingShare) {
+    ///     let _first = aggregate.export();
+    ///     let _second = aggregate.export();
+    /// }
+    /// ```
+    #[must_use]
+    pub fn export(self) -> Vec<u8> {
+        // `self` drops (and wipes) here; the payload copy above is the
+        // exported transport material.
+        Rq::from(&*self.poly).encode_to_vec()
+    }
+
+    /// Rebuild an aggregate from a transported payload, validating dimensions
+    /// against `params` and canonical residues.
+    ///
+    /// # Errors
+    /// Returns an error if the payload is malformed, targets different
+    /// parameters, or holds non-canonical residues.
+    pub fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self, Error> {
+        let proto = Rq::decode(bytes).map_err(|_| {
+            Error::SerializationError(crate::SerializationError::Decode {
+                object: crate::SerializedObject::SmudgingAggregate,
+            })
+        })?;
+        let ctx = params.context_at_level(0)?;
+        let poly = Poly::<PowerBasis>::try_convert_from(&proto, ctx, false)?;
+        Ok(Self::from_poly(Zeroizing::new(poly)))
+    }
+}
 impl SmudgingNoiseGenerator {
     /// Create a new noise generator with calculated variance.
     #[must_use]
@@ -1254,6 +1492,44 @@ mod tests {
         assert!(
             wiped.load(Ordering::SeqCst),
             "partially written secrets must be wiped on unwind"
+        );
+    }
+
+    #[test]
+    fn test_share_import_rejects_noncanonical_residues() {
+        use fhe_math::zq::Modulus;
+
+        // Export a real share, then rewrite its first residue to exactly q_0
+        // (representable in the packed encoding but not canonical).
+        let params = small_params(&[11, 11, 11]);
+        let moduli = params.moduli().to_vec();
+        let degree = params.degree();
+        let mut rng = ChaCha8Rng::seed_from_u64(172_105);
+        let generator = SmudgingNoiseGenerator::new(params.clone(), BigUint::from(100u32));
+        let noise = generator.generate_smudging_error(&mut rng).unwrap();
+        let mut manager = crate::trbfv::ShareManager::new(3, 1, params.clone()).unwrap();
+        let share = manager
+            .deal_smudging_noise(noise, &mut rng)
+            .unwrap()
+            .remove(0);
+        let bytes = share.export(&params).unwrap();
+
+        let mut proto = Rq::decode(bytes.as_slice()).unwrap();
+        let qi = Modulus::new(moduli[0]).unwrap();
+        let row_len = qi.serialization_length(degree);
+        let mut first_row = vec![0u64; degree];
+        first_row[0] = moduli[0];
+        let mut coefficients = qi.serialize_vec(&first_row);
+        coefficients.extend_from_slice(&proto.coefficients[row_len..]);
+        proto.coefficients = coefficients;
+
+        let err = SmudgingShare::from_bytes(&proto.encode_to_vec(), &params).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::MathError(fhe_math::Error::NonCanonicalValue { .. })
+            ),
+            "non-canonical residue must be rejected, got: {err}"
         );
     }
 

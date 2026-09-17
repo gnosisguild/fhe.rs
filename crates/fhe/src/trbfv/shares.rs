@@ -6,7 +6,7 @@ use crate::Error;
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::rns_shamir::RnsShamir;
 use crate::trbfv::config::validate_threshold_config;
-use crate::trbfv::smudging::GeneratedSmudgingNoise;
+use crate::trbfv::smudging::{AggregatedSmudgingShare, GeneratedSmudgingNoise, SmudgingShare};
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
 use fhe_math::{
@@ -20,7 +20,7 @@ use rand::{CryptoRng, RngCore};
 use rayon::prelude::*;
 use std::convert::TryFrom;
 use std::sync::Arc;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Manager for threshold BFV share operations.
 ///
@@ -140,18 +140,115 @@ impl ShareManager {
         let ctx = self.params.context_at_level(0)?;
         self.coeffs_to_poly(coeffs, ctx)
     }
-    /// Generate Shamir Secret Shares for smudging noise from a noise owner.
+    /// Deal freshly sampled smudging noise into one protected share per
+    /// recipient, consuming the noise owner.
     ///
-    /// This is the supported dealing operation for freshly sampled smudging
-    /// noise: it consumes the [`GeneratedSmudgingNoise`] owner and deals the
-    /// underlying polynomial with the same layout as
-    /// [`ShareManager::generate_secret_shares_from_poly`].
-    pub fn generate_secret_shares_from_smudging_noise<R: RngCore + CryptoRng>(
+    /// "Dealing" is the Shamir secret-sharing distribution phase: each
+    /// committee member receives one share of the dealt secret.
+    ///
+    /// This is the only supported dealing operation for generated smudging
+    /// noise: the generic [`ShareManager::generate_secret_shares_from_poly`]
+    /// path remains for ordinary secret-key material but must not be used
+    /// for noise. Each returned [`SmudgingShare`] holds one recipient's
+    /// `[modulus][coefficient]` residues; the per-modulus intermediates are
+    /// wiped before they are dropped.
+    pub fn deal_smudging_noise<R: RngCore + CryptoRng>(
         &mut self,
         noise: GeneratedSmudgingNoise,
         rng: &mut R,
-    ) -> Result<Vec<Array2<u64>>, Error> {
-        self.generate_secret_shares_from_poly(noise.into_poly(), rng)
+    ) -> Result<Vec<SmudgingShare>, Error> {
+        let mut per_modulus = self.generate_secret_shares_from_poly(noise.into_poly(), rng)?;
+        let mut shares: Vec<Array2<u64>> = (0..self.n)
+            .map(|_| Array2::zeros((self.params.moduli().len(), self.params.degree())))
+            .collect();
+        for (modulus_index, modulus_shares) in per_modulus.iter().enumerate() {
+            for (share, recipient_row) in shares.iter_mut().zip(modulus_shares.rows()) {
+                share.row_mut(modulus_index).assign(&recipient_row);
+            }
+        }
+        // The secrets now live in `shares`; wipe the intermediates so no
+        // copy is abandoned in freed memory.
+        for modulus_shares in per_modulus.iter_mut() {
+            modulus_shares.iter_mut().for_each(|coeff| coeff.zeroize());
+        }
+        Ok(shares.into_iter().map(SmudgingShare::new).collect())
+    }
+
+    /// Aggregate collected smudging shares into one recipient aggregate,
+    /// consuming the shares.
+    ///
+    /// Accepts one [`SmudgingShare`] per contributing dealer (at most `n`;
+    /// fewer is allowed, e.g. when some parties aborted during dealing) and
+    /// returns the modular sum as an [`AggregatedSmudgingShare`], the only
+    /// noise input the decryption operation accepts. Every contribution must
+    /// hold canonical residues, validated exactly like
+    /// [`ShareManager::aggregate_collected_shares`].
+    pub fn aggregate_smudging_shares(
+        &self,
+        shares: Vec<SmudgingShare>,
+    ) -> Result<AggregatedSmudgingShare, Error> {
+        if shares.is_empty() {
+            return Err(Error::share_count_mismatch(0, 1));
+        }
+        if shares.len() > self.n {
+            return Err(Error::share_count_mismatch(shares.len(), self.n));
+        }
+        let expected_shape = (self.params.moduli().len(), self.params.degree());
+        for (contribution_index, share) in shares.iter().enumerate() {
+            let residues = share.residues();
+            if residues.dim() != expected_shape {
+                return Err(Error::malformed_shares(
+                    contribution_index,
+                    format!(
+                        "share matrix has shape {:?}, expected {expected_shape:?}",
+                        residues.dim()
+                    ),
+                ));
+            }
+            for (row, share_row) in residues.rows().into_iter().enumerate() {
+                let q_i = self.params.moduli().get(row).copied().ok_or_else(|| {
+                    Error::malformed_shares(
+                        contribution_index,
+                        "modulus index out of range".to_string(),
+                    )
+                })?;
+                for (col, &value) in share_row.iter().enumerate() {
+                    if value >= q_i {
+                        return Err(Error::malformed_shares(
+                            contribution_index,
+                            format!(
+                                "share coefficient at row {row} (modulus q_i = {q_i}), column \
+                                 {col} is not a canonical residue in [0, {q_i})"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        let ctx = self.params.context_at_level(0)?;
+
+        let mut sum = Array2::<u64>::zeros(expected_shape);
+        for (row, mut acc_row) in sum.outer_iter_mut().enumerate() {
+            let &modulus = self.params.moduli().get(row).ok_or_else(|| {
+                Error::malformed_shares(row, "modulus index out of range".to_string())
+            })?;
+            let q = Modulus::new(modulus).map_err(Error::MathError)?;
+            let acc = acc_row
+                .as_slice_mut()
+                .ok_or(fhe_math::Error::NonContiguousCoefficients)?;
+            for share in &shares {
+                let residues = share.residues();
+                let item_row = residues.row(row);
+                let contribution = item_row
+                    .as_slice()
+                    .ok_or(fhe_math::Error::NonContiguousCoefficients)?;
+                q.add_vec(acc, contribution);
+            }
+        }
+
+        let mut sum_poly = Poly::<PowerBasis>::zero(ctx);
+        sum_poly.set_coefficients(sum);
+        Ok(AggregatedSmudgingShare::from_poly(Zeroizing::new(sum_poly)))
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
@@ -288,13 +385,15 @@ impl ShareManager {
     ///
     /// This function computes a party's contribution to the threshold decryption process.
     /// Each party uses their aggregated key and noise shares to compute a decryption share.
+    /// The noise aggregate is consumed whether decryption-share computation
+    /// succeeds or fails, so one live aggregate cannot back two shares.
     ///
     /// # Arguments
     /// - `ciphertext`: The ciphertext to decrypt (contains c0, c1 polynomials)
     /// - `sk_i`: This party's aggregated share of the joint secret key (output of
     ///   [`ShareManager::aggregate_collected_shares`]), not a party's own secret key
-    /// - `es_i`: This party's aggregated share of the joint smudging noise,
-    ///   aggregated the same way from the dealt noise shares
+    /// - `noise`: This party's [`AggregatedSmudgingShare`], aggregated from the
+    ///   dealt noise shares
     ///
     /// # Returns
     /// A decryption share polynomial that contributes to the final decryption
@@ -303,7 +402,7 @@ impl ShareManager {
         &self,
         ciphertext: Arc<Ciphertext>,
         sk_i: Poly<Ntt>,
-        es_i: Poly<PowerBasis>,
+        es_i: AggregatedSmudgingShare,
     ) -> Result<Poly<PowerBasis>, Error> {
         if ciphertext.params != self.params {
             return Err(Error::ParameterMismatch {
@@ -335,7 +434,9 @@ impl ShareManager {
         c1.disallow_variable_time_computations();
         let mut sk_i = sk_i;
         sk_i.disallow_variable_time_computations();
-        let mut es_i = es_i;
+        // The aggregate stays wrapped until the end of this call, so
+        // validation failures below still consume (and wipe) the noise.
+        let mut es_i = es_i.into_poly();
         es_i.disallow_variable_time_computations();
         if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
             return Err(Error::ParameterMismatch {
@@ -344,7 +445,8 @@ impl ShareManager {
             });
         }
         let c1sk = (&c1 * &sk_i).into_power_basis();
-        let d_share_poly = c0 + c1sk + es_i;
+        let mut d_share_poly = &c0 + &c1sk;
+        d_share_poly += &*es_i;
         Ok(d_share_poly)
     }
 
@@ -595,19 +697,108 @@ mod tests {
 
         let generator = SmudgingNoiseGenerator::new(params.clone(), BigUint::from(1000u64));
         let noise = generator.generate_smudging_error(&mut rng).unwrap();
-        let shares = manager
-            .generate_secret_shares_from_smudging_noise(noise, &mut rng)
-            .unwrap();
+        let shares = manager.deal_smudging_noise(noise, &mut rng).unwrap();
 
-        // Same layout as secret-key dealing: one [n, degree] matrix per modulus.
-        assert_eq!(shares.len(), params.moduli().len());
-        for (share_matrix, &qi) in shares.iter().zip(params.moduli().iter()) {
-            assert_eq!(share_matrix.dim(), (n, params.degree()));
-            for &value in share_matrix.iter() {
-                assert!(value < qi);
+        // One protected share per recipient, each `[moduli, degree]` with
+        // canonical residues.
+        assert_eq!(shares.len(), n);
+        for share in &shares {
+            let residues = share.residues();
+            assert_eq!(residues.dim(), (params.moduli().len(), params.degree()));
+            for (row, &qi) in params.moduli().iter().enumerate() {
+                for &value in residues.row(row) {
+                    assert!(value < qi);
+                }
             }
         }
         // The one-time owner is moved into the call above and cannot be dealt twice.
+    }
+
+    #[test]
+    #[allow(clippy::panic, reason = "test simulates dropping a share mid-protocol")]
+    fn test_smudging_share_wipes_secrets_on_drop() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let params = test_params();
+        let shape = (params.moduli().len(), params.degree());
+        let wiped = Arc::new(AtomicBool::new(false));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut residues = Array2::zeros(shape);
+            residues.iter_mut().for_each(|coeff| *coeff = 0xA5A5);
+            let _share = SmudgingShare::with_wipe_observer(residues, wiped.clone());
+            panic!("simulated transport failure");
+        }));
+        assert!(result.is_err(), "simulated failure must propagate");
+        assert!(
+            wiped.load(Ordering::SeqCst),
+            "dropped share secrets must be wiped"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_smudging_shares_sums_contributions() {
+        let params = test_params();
+        let n = 5;
+        let threshold = 2;
+        let mut rng = rng();
+
+        // Two dealers contribute noise for recipient 0.
+        let mut collected = Vec::new();
+        for _ in 0..2 {
+            let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
+            let generator = SmudgingNoiseGenerator::new(params.clone(), BigUint::from(1000u64));
+            let noise = generator.generate_smudging_error(&mut rng).unwrap();
+            let mut dealt = manager.deal_smudging_noise(noise, &mut rng).unwrap();
+            collected.push(dealt.remove(0));
+        }
+        let expected: Vec<u64> = {
+            let first = collected[0].residues();
+            let second = collected[1].residues();
+            let mut sums = Vec::with_capacity(params.moduli().len() * params.degree());
+            for (row, &qi) in params.moduli().iter().enumerate() {
+                for (&a, &b) in first.row(row).iter().zip(second.row(row).iter()) {
+                    sums.push((a + b) % qi);
+                }
+            }
+            sums
+        };
+
+        let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
+        let aggregate = manager.aggregate_smudging_shares(collected).unwrap();
+        let poly = aggregate.into_poly();
+        assert_eq!(
+            poly.coefficients().dim(),
+            (params.moduli().len(), params.degree())
+        );
+        assert_eq!(
+            poly.coefficients().iter().copied().collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_aggregate_smudging_shares_rejects_bad_input() {
+        let params = test_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+
+        assert!(manager.aggregate_smudging_shares(vec![]).is_err());
+
+        let too_many: Vec<SmudgingShare> = (0..6)
+            .map(|_| SmudgingShare::new(Array2::zeros((params.moduli().len(), params.degree()))))
+            .collect();
+        assert!(manager.aggregate_smudging_shares(too_many).is_err());
+
+        let non_canonical = SmudgingShare::new({
+            let mut residues = Array2::zeros((params.moduli().len(), params.degree()));
+            residues[[0, 0]] = params.moduli()[0];
+            residues
+        });
+        assert!(
+            manager
+                .aggregate_smudging_shares(vec![non_canonical])
+                .is_err()
+        );
     }
 
     #[test]
@@ -670,7 +861,11 @@ mod tests {
 
         // Compute decryption share.
         let decryption_share = manager
-            .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
+            .decryption_share(
+                ct.clone(),
+                (*sk_poly).clone().into_ntt(),
+                AggregatedSmudgingShare::from_poly(Zeroizing::new(es_poly)),
+            )
             .unwrap();
         assert!(!decryption_share.allows_variable_time_computations());
 
@@ -708,7 +903,7 @@ mod tests {
         let result = manager.decryption_share(
             Arc::new(ciphertext),
             (*secret_poly).clone().into_ntt(),
-            Poly::<PowerBasis>::zero(context),
+            AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(context))),
         );
 
         assert_eq!(
@@ -804,10 +999,11 @@ mod tests {
         for i in 0..(threshold + 1) {
             let ctx = params.context_at_level(0).unwrap();
             //Setting smuding noise to be zero in this test
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let es_i =
+                AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
 
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_i)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -889,9 +1085,10 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let es_i =
+                AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_i)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -973,9 +1170,10 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let es_i =
+                AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_i)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1053,9 +1251,10 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let es_i =
+                AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_i)
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1362,9 +1561,10 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let es_i =
+                AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_i)
                 .unwrap();
             decryption_shares.push(share);
         }

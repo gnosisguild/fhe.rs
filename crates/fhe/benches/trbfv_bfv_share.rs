@@ -56,7 +56,6 @@ fn bench_data_sizes(c: &mut Criterion) {
     println!("\n📊 Generating party keys...");
     let mut parties = Vec::new();
     let mut all_sk_shares = Vec::new();
-    let mut all_esi_shares = Vec::new();
 
     for _party_id in 0..num_parties {
         let mut rng = make_rng();
@@ -81,7 +80,7 @@ fn bench_data_sizes(c: &mut Criterion) {
             .generate_smudging_error(100, 0, Lambda::secure(preset.lambda).unwrap(), &mut rng)
             .unwrap();
         let esi_sss = share_manager
-            .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
+            .deal_smudging_noise(esi_noise, &mut rng)
             .unwrap();
 
         // Generate BFV keys for share encryption
@@ -89,7 +88,6 @@ fn bench_data_sizes(c: &mut Criterion) {
         let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
 
         all_sk_shares.push(sk_sss.clone());
-        all_esi_shares.push(esi_sss.clone());
         parties.push((sk_share, pk_share, sk_bfv, pk_bfv, sk_sss, esi_sss));
     }
 
@@ -123,13 +121,16 @@ fn bench_data_sizes(c: &mut Criterion) {
     let mut encrypted_shares_count = 0;
     let mut total_encrypted_size = 0;
 
-    for (_, _, _, _, sk_sss, esi_sss) in parties.iter() {
-        for (receiver_idx, receiver_party) in parties.iter().enumerate().take(num_parties) {
-            let receiver_pk = &receiver_party.3;
+    let receiver_pks: Vec<PublicKey> = parties.iter().map(|party| party.3.clone()).collect();
+    for sender in parties.iter_mut() {
+        let deal = std::mem::take(&mut sender.5);
+        for ((receiver_idx, receiver_pk), share) in
+            receiver_pks.iter().enumerate().take(num_parties).zip(deal)
+        {
             let mut rng = make_rng();
 
             // Encrypt sk shares
-            for sk_sss_m in sk_sss.iter().take(num_moduli) {
+            for sk_sss_m in sender.4.iter().take(num_moduli) {
                 let share_row = sk_sss_m.row(receiver_idx);
                 let share_vec: Vec<u64> = share_row.to_vec();
 
@@ -142,12 +143,11 @@ fn bench_data_sizes(c: &mut Criterion) {
                 encrypted_shares_count += 1;
             }
 
-            // Encrypt esi shares
-            for esi_sss_m in esi_sss.iter().take(num_moduli) {
-                let share_row = esi_sss_m.row(receiver_idx);
-                let share_vec: Vec<u64> = share_row.to_vec();
-
-                let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv).unwrap();
+            // Encrypt the recipient's exported smudging share payload in
+            // plaintext-sized chunks.
+            let payload = share.export(&params_trbfv).unwrap();
+            for chunk in support::payload_to_chunks(&payload, degree) {
+                let pt = Plaintext::try_encode(&chunk, Encoding::poly(), &params_bfv).unwrap();
                 let _ct = receiver_pk.try_encrypt(&pt, &mut rng).unwrap();
 
                 let ct_size = 2 * degree * moduli_bfv.len() * 8;
@@ -174,14 +174,13 @@ fn bench_data_sizes(c: &mut Criterion) {
 
     println!("\n📦 BFV Encrypted Share Sizes:");
     println!(
-        "  - Total encrypted shares: {} ({} parties × {} receivers × {} moduli × 2 share types)",
-        encrypted_shares_count, num_parties, num_parties, num_moduli
+        "  - Total encrypted shares: {} ({} parties × {} receivers × sk rows + smudging payload chunks)",
+        encrypted_shares_count, num_parties, num_parties
     );
     println!(
-        "  - Encryptions per party: {} ({} receivers × {} moduli × 2 share types)",
+        "  - Encryptions per party: {} ({} receivers × sk rows + smudging payload chunks)",
         encrypted_shares_count / num_parties,
         num_parties,
-        num_moduli
     );
     let single_ct_size = 2 * degree * moduli_bfv.len() * 8;
     println!(
@@ -192,10 +191,9 @@ fn bench_data_sizes(c: &mut Criterion) {
     );
     let broadcast_size_per_party = total_encrypted_size / num_parties;
     println!(
-        "  - Broadcast size per party: {} ({} parties × {} moduli × 2 share types × {})",
+        "  - Broadcast size per party: {} ({} parties × sk rows + smudging payload chunks × {})",
         format_bytes(broadcast_size_per_party),
         num_parties,
-        num_moduli,
         format_bytes(single_ct_size)
     );
     println!(

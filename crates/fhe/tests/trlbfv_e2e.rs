@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use fhe::aggregate::AggregateIter;
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, SecretKey};
-use fhe::trbfv::{Lambda, ShareManager, TRBFV};
+use fhe::trbfv::{Lambda, ShareManager, SmudgingShare, TRBFV};
 use fhe::trlbfv::{LBFVPublicKey, PublicKeyShare, RelinKeyShare, aggregate_relinearization_key};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
@@ -95,11 +95,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     // ── Shamir share deal / collect / aggregate (SK + noise) ╌─────────
     struct Party {
         sk_sss: Vec<Array2<u64>>,
-        esi_sss: Vec<Array2<u64>>,
         sk_sss_collected: Vec<Array2<u64>>,
-        es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
     }
 
     let ctx_level0 = params.context_at_level(0).expect("level-0 context");
@@ -116,32 +113,37 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
                 .generate_secret_shares_from_poly(sk_poly, &mut rng)
                 .expect("sk share generation");
 
-            // Shamir‑share this party's smudging noise, consuming its
-            // one-time owner.
-            let esi_sss = share_manager
-                .generate_secret_shares_from_smudging_noise(
-                    smudging_noises.next().expect("one noise owner per party"),
-                    &mut rng,
-                )
-                .expect("esi share generation");
-
             Party {
                 sk_sss,
-                esi_sss,
                 sk_sss_collected: Vec::with_capacity(N),
-                es_sss_collected: Vec::with_capacity(N),
                 sk_poly_sum: Poly::<PowerBasis>::zero(ctx_level0),
-                es_poly_sum: Poly::<PowerBasis>::zero(ctx_level0),
             }
         })
         .collect();
 
+    // Each party deals its smudging noise (consuming its one-time owner) and
+    // addresses one protected share to every recipient's inbox.
+    let mut es_inboxes: Vec<Vec<SmudgingShare>> = (0..N).map(|_| Vec::new()).collect();
+    for _ in 0..N {
+        let mut share_manager =
+            ShareManager::new(N, THRESHOLD, params.clone()).expect("share manager");
+        let noise = smudging_noises.next().expect("one noise owner per party");
+        for (receiver, share) in share_manager
+            .deal_smudging_noise(noise, &mut rng)
+            .expect("esi share dealing")
+            .into_iter()
+            .enumerate()
+        {
+            es_inboxes[receiver].push(share);
+        }
+    }
+
     // Each party collects the row addressed to it from every other party's
-    // share matrix (simulated as local access — no encrypted transport).
+    // secret-key share matrix (simulated as local access — no encrypted
+    // transport). Noise shares arrive addressed in the recipient inboxes.
     // Collect all rows before pushing to avoid double borrows.
     for receiver_idx in 0..N {
         let mut sk_rows: Vec<Array2<u64>> = Vec::with_capacity(N);
-        let mut es_rows: Vec<Array2<u64>> = Vec::with_capacity(N);
         for sender in parties.iter() {
             let collect_row = |sss: &[Array2<u64>]| -> Array2<u64> {
                 let mut rows = Array::zeros((0, params.degree()));
@@ -152,20 +154,15 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
                 rows
             };
             sk_rows.push(collect_row(&sender.sk_sss));
-            es_rows.push(collect_row(&sender.esi_sss));
         }
         parties[receiver_idx].sk_sss_collected = sk_rows;
-        parties[receiver_idx].es_sss_collected = es_rows;
     }
 
-    // Aggregate collected SK and noise shares into per-party polynomials.
+    // Aggregate collected SK shares into per-party polynomials.
     for party in parties.iter_mut() {
         party.sk_poly_sum = trbfv
             .aggregate_collected_shares(&party.sk_sss_collected)
             .expect("aggregate sk shares");
-        party.es_poly_sum = trbfv
-            .aggregate_collected_shares(&party.es_sss_collected)
-            .expect("aggregate es shares");
     }
 
     // ── Encrypt, multiply, relinearize ╌───────────────────────────────
@@ -198,12 +195,15 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
         .iter()
         .map(|&party_id| {
             let party = &parties[party_id - 1];
+            // Each decrypting party aggregates its own noise inbox and
+            // consumes the resulting aggregate in exactly one call.
+            let inbox = std::mem::take(&mut es_inboxes[party_id - 1]);
+            let es_i = ShareManager::new(N, THRESHOLD, params.clone())
+                .expect("share manager")
+                .aggregate_smudging_shares(inbox)
+                .expect("aggregate smudging shares");
             trbfv
-                .decryption_share(
-                    tally.clone(),
-                    party.sk_poly_sum.clone().into_ntt(),
-                    party.es_poly_sum.clone(),
-                )
+                .decryption_share(tally.clone(), party.sk_poly_sum.clone().into_ntt(), es_i)
                 .expect("decryption share")
         })
         .collect();

@@ -17,7 +17,7 @@ use console::style;
 use fhe::{
     bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{Lambda, ShareManager, TRBFV},
+    trbfv::{AggregatedSmudgingShare, Lambda, ShareManager, SmudgingShare, TRBFV},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -133,11 +133,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     struct Party {
         pk_share: PublicKeyShare,
         sk_sss: Vec<Array2<u64>>,
-        esi_sss: Vec<Array2<u64>>,
+        esi_sss: Vec<SmudgingShare>,
         sk_sss_collected: Vec<Array2<u64>>,
-        es_sss_collected: Vec<Array2<u64>>,
+        es_inbox: Vec<SmudgingShare>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
+        es_noise: Option<AggregatedSmudgingShare>,
         d_share_poly: Poly<PowerBasis>,
     }
 
@@ -173,17 +173,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
                 let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-                let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
+                let es_inbox: Vec<SmudgingShare> = Vec::with_capacity(num_parties);
                 let ctx = params.context_at_level(0).unwrap();
                 let sk_poly_sum = Poly::<PowerBasis>::zero(ctx);
-                let es_poly_sum = Poly::<PowerBasis>::zero(ctx);
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
 
                 let esi_noise = trbfv
                     .generate_smudging_error(num_summed, 0, security, &mut rng)
                     .unwrap();
                 let esi_sss = share_manager
-                    .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
+                    .deal_smudging_noise(esi_noise, &mut rng)
                     .unwrap();
 
                 Party {
@@ -191,9 +190,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sk_sss,
                     esi_sss,
                     sk_sss_collected,
-                    es_sss_collected,
+                    es_inbox,
                     sk_poly_sum,
-                    es_poly_sum,
+                    es_noise: None,
                     d_share_poly,
                 }
             })
@@ -208,30 +207,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         {
             for j in 0..num_parties {
                 let mut node_share_m = Array::zeros((0, degree));
-                let mut es_node_share_m = Array::zeros((0, degree));
                 for m in 0..params.moduli().len() {
                     node_share_m
                         .push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).clone()))
                         .unwrap();
-                    es_node_share_m
-                        .push_row(ArrayView::from(&parties[j].esi_sss[m].row(i).clone()))
-                        .unwrap();
                 }
                 parties[i].sk_sss_collected.push(node_share_m);
-                parties[i].es_sss_collected.push(es_node_share_m);
             }
             i += 1;
         }
     );
+
+    // Move each dealt smudging share to its recipient inbox.
+    for j in 0..num_parties {
+        let deal = std::mem::take(&mut parties[j].esi_sss);
+        for (receiver, share) in deal.into_iter().enumerate() {
+            parties[receiver].es_inbox.push(share);
+        }
+    }
 
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
             party.sk_poly_sum = trbfv
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
-            party.es_poly_sum = trbfv
-                .aggregate_collected_shares(&party.es_sss_collected)
-                .unwrap();
+            let noise_manager = ShareManager::new(num_parties, threshold, params.clone()).unwrap();
+            let inbox = std::mem::take(&mut party.es_inbox);
+            party.es_noise = Some(noise_manager.aggregate_smudging_shares(inbox).unwrap());
         });
     });
 
@@ -269,12 +271,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let share_generation_start = Instant::now();
 
     parties.par_iter_mut().for_each(|party| {
+        let es_i = party.es_noise.take().expect("aggregated noise per party");
         party.d_share_poly = trbfv
-            .decryption_share(
-                tally.clone(),
-                party.sk_poly_sum.clone().into_ntt(),
-                party.es_poly_sum.clone(),
-            )
+            .decryption_share(tally.clone(), party.sk_poly_sum.clone().into_ntt(), es_i)
             .unwrap();
     });
 

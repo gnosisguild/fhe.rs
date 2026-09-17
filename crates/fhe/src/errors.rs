@@ -460,6 +460,8 @@ pub enum SerializedObject {
     RelinearizationKey,
     RgswCiphertext,
     SecretKey,
+    SmudgingShare,
+    SmudgingAggregate,
 }
 
 /// Required field in a protobuf object.
