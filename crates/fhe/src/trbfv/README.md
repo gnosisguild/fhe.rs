@@ -65,6 +65,17 @@ arithmetic. Callers should use `TRBFV` or `ShareManager`; their high-level share
 generation, aggregation, and reconstruction APIs retain the same logical share
 layout.
 
+> **Breaking change:** `TRBFV::generate_smudging_error` and
+> `TRBFV::generate_smudging_error_with_participant_count` no longer return
+> `Vec<BigInt>`, and `ShareManager::bigints_to_poly` has been removed.
+> Sampled noise is now a non-cloneable `GeneratedSmudgingNoise` owner that
+> must be dealt with
+> `ShareManager::generate_secret_shares_from_smudging_noise`, which consumes
+> it. Downstream code doing generate-then-convert must migrate to the
+> generate-then-deal flow shown under [Usage](#usage); the old symbols fail
+> to compile by design, since a cloneable noise representation cannot
+> enforce one-time use.
+
 ## Noise and Correctness Formulas (Urban–Rambaud 2024)
 
 This section summarises the formulas implemented in
