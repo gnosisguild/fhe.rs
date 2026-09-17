@@ -246,7 +246,7 @@ impl ShareManager {
                             party_idx,
                             format!(
                                 "share coefficient at row {row} (modulus q_i = {q_i}), column \
-                                 {col} is {value}; expected a canonical residue in [0, {q_i})"
+                                 {col} is not a canonical residue in [0, {q_i})"
                             ),
                         ));
                     }
@@ -1160,7 +1160,9 @@ mod tests {
         let shape = (moduli.len(), params.degree());
 
         // u64::MAX would wrap to a small residue if reduced; it must be
-        // rejected as malformed instead of being reduced.
+        // rejected as malformed instead of being reduced. The error reports
+        // party, row, column, and modulus only: secret share values must not
+        // appear in error strings.
         let mut shares = Array2::zeros(shape);
         shares[[0, 0]] = u64::MAX;
         let err = manager
@@ -1171,8 +1173,16 @@ mod tests {
         };
         assert_eq!(*party_id, 0);
         assert!(
-            reason.contains(&u64::MAX.to_string()),
-            "offending value missing from reason: {reason}"
+            reason.contains("row 0") && reason.contains("column 0"),
+            "row/column context missing from reason: {reason}"
+        );
+        assert!(
+            reason.contains(&moduli[0].to_string()),
+            "row modulus missing from reason: {reason}"
+        );
+        assert!(
+            !reason.contains(&u64::MAX.to_string()),
+            "secret share value must not appear in reason: {reason}"
         );
     }
 
