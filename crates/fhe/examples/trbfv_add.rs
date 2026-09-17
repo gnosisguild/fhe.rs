@@ -135,9 +135,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         sk_sss: Vec<Array2<u64>>,
         esi_deal: Vec<SmudgingShare>,
         sk_sss_collected: Vec<Array2<u64>>,
-        es_sss_collected: Vec<SmudgingShare>,
+        es_shares_collected: Vec<SmudgingShare>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_noise: Option<AggregatedSmudgingShare>,
+        es_aggregate: Option<AggregatedSmudgingShare>,
         d_share_poly: Poly<PowerBasis>,
     }
 
@@ -173,7 +173,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
                 let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-                let es_sss_collected: Vec<SmudgingShare> = Vec::with_capacity(num_parties);
+                let es_shares_collected: Vec<SmudgingShare> = Vec::with_capacity(num_parties);
                 let ctx = params.context_at_level(0).unwrap();
                 let sk_poly_sum = Poly::<PowerBasis>::zero(ctx);
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
@@ -190,9 +190,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sk_sss,
                     esi_deal,
                     sk_sss_collected,
-                    es_sss_collected,
+                    es_shares_collected,
                     sk_poly_sum,
-                    es_noise: None,
+                    es_aggregate: None,
                     d_share_poly,
                 }
             })
@@ -222,7 +222,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for j in 0..num_parties {
         let deal = std::mem::take(&mut parties[j].esi_deal);
         for (receiver, share) in deal.into_iter().enumerate() {
-            parties[receiver].es_sss_collected.push(share);
+            parties[receiver].es_shares_collected.push(share);
         }
     }
 
@@ -232,8 +232,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
             let noise_manager = ShareManager::new(num_parties, threshold, params.clone()).unwrap();
-            let inbox = std::mem::take(&mut party.es_sss_collected);
-            party.es_noise = Some(noise_manager.aggregate_smudging_shares(inbox).unwrap());
+            let inbox = std::mem::take(&mut party.es_shares_collected);
+            party.es_aggregate = Some(noise_manager.aggregate_smudging_shares(inbox).unwrap());
         });
     });
 
@@ -271,7 +271,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let share_generation_start = Instant::now();
 
     parties.par_iter_mut().for_each(|party| {
-        let noise = party.es_noise.take().expect("aggregated noise per party");
+        let noise = party
+            .es_aggregate
+            .take()
+            .expect("aggregated noise per party");
         party.d_share_poly = trbfv
             .decryption_share(tally.clone(), party.sk_poly_sum.clone().into_ntt(), noise)
             .unwrap();

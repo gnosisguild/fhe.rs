@@ -688,6 +688,15 @@ impl fmt::Debug for SmudgingShare {
 ///     let _second = aggregate;
 /// }
 /// ```
+///
+/// ```compile_fail
+/// # use fhe::trbfv::AggregatedSmudgingShare;
+/// fn extract_raw_poly(aggregate: AggregatedSmudgingShare) {
+///     // No borrowed or owned raw-polynomial accessor exists: the only
+///     // consumer is the decryption operation.
+///     let _poly = aggregate.into_poly();
+/// }
+/// ```
 pub struct AggregatedSmudgingShare {
     poly: Zeroizing<Poly<PowerBasis>>,
 }

@@ -143,6 +143,9 @@ impl ShareManager {
     /// Deal freshly sampled smudging noise into one protected share per
     /// recipient, consuming the noise owner.
     ///
+    /// "Dealing" is the Shamir secret-sharing distribution phase: each
+    /// committee member receives one share of the dealt secret.
+    ///
     /// This is the only supported dealing operation for generated smudging
     /// noise: the generic [`ShareManager::generate_secret_shares_from_poly`]
     /// path remains for ordinary secret-key material but must not be used

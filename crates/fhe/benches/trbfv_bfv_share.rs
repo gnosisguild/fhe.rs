@@ -21,22 +21,6 @@ fn format_bytes(bytes: usize) -> String {
     }
 }
 
-fn payload_to_chunks(payload: &[u8], degree: usize) -> Vec<Vec<u64>> {
-    // Byte-valued chunks survive BFV plaintext encoding exactly; arbitrary
-    // `u64` words would be reduced modulo the plaintext modulus.
-    let mut values = Vec::with_capacity(1 + payload.len());
-    values.push(payload.len() as u64);
-    values.extend(payload.iter().map(|&byte| u64::from(byte)));
-    values
-        .chunks(degree)
-        .map(|chunk| {
-            let mut padded = chunk.to_vec();
-            padded.resize(degree, 0);
-            padded
-        })
-        .collect()
-}
-
 fn bench_data_sizes(c: &mut Criterion) {
     let group = c.benchmark_group("BFV Encrypted Shares Data Sizes");
     let preset = support::secure8192().unwrap();
@@ -162,7 +146,7 @@ fn bench_data_sizes(c: &mut Criterion) {
             // Encrypt the recipient's exported smudging share payload in
             // plaintext-sized chunks.
             let payload = share.export(&params_trbfv).unwrap();
-            for chunk in payload_to_chunks(&payload, degree) {
+            for chunk in support::payload_to_chunks(&payload, degree) {
                 let pt = Plaintext::try_encode(&chunk, Encoding::poly(), &params_bfv).unwrap();
                 let _ct = receiver_pk.try_encrypt(&pt, &mut rng).unwrap();
 

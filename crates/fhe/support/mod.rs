@@ -208,3 +208,33 @@ pub fn seed(value: u8) -> [u8; 32] {
 pub fn rng(value: u8) -> ChaCha8Rng {
     ChaCha8Rng::from_seed(seed(value))
 }
+
+/// Split an opaque transport payload into degree-sized plaintext chunks.
+///
+/// Every transported value is a raw byte (< 256), so BFV plaintext encoding
+/// under the share-encryption parameters carries it exactly; arbitrary `u64`
+/// words would be reduced modulo the plaintext modulus and corrupted. The
+/// first value prefixes the exact byte length so reassembly needs no
+/// parameter knowledge.
+#[must_use]
+pub fn payload_to_chunks(payload: &[u8], degree: usize) -> Vec<Vec<u64>> {
+    let mut values = Vec::with_capacity(1 + payload.len());
+    values.push(payload.len() as u64);
+    values.extend(payload.iter().map(|&byte| u64::from(byte)));
+    values
+        .chunks(degree)
+        .map(|chunk| {
+            let mut padded = chunk.to_vec();
+            padded.resize(degree, 0);
+            padded
+        })
+        .collect()
+}
+
+/// Reassemble chunks into the exact payload bytes.
+#[must_use]
+pub fn chunks_to_payload(chunk_values: &[u64]) -> Vec<u8> {
+    let mut values = chunk_values.iter();
+    let byte_len = values.next().copied().unwrap_or(0) as usize;
+    values.take(byte_len).map(|&value| value as u8).collect()
+}
