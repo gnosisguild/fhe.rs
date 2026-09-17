@@ -73,6 +73,10 @@ required-features = ["experimental-mbfv"]
 name = "trbfv_shamir"
 harness = false
 
+[[bench]]
+name = "trbfv_smudging"
+harness = false
+
 [[example]]
 name = "bfv_basic"
 
