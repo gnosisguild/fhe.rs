@@ -271,6 +271,10 @@ impl<R: RepresentationTag> Poly<R> {
     }
 
     /// Compute the Shoup representation of the coefficients.
+    ///
+    /// Uses the contiguous fast path when a coefficient row exposes a slice
+    /// and falls back to element-wise evaluation otherwise, so non-standard
+    /// layouts installed via [`Self::set_coefficients`] cannot panic here.
     fn compute_coefficients_shoup(&mut self) {
         let mut coefficients_shoup = Array2::zeros((self.ctx.q.len(), self.ctx.degree));
         izip!(
@@ -278,12 +282,12 @@ impl<R: RepresentationTag> Poly<R> {
             self.coefficients.outer_iter(),
             self.ctx.q.iter()
         )
-        .for_each(|(mut v_shoup, v, qi)| {
-            v_shoup
-                .as_slice_mut()
-                .unwrap()
-                .copy_from_slice(&qi.shoup_vec(v.as_slice().unwrap()))
-        });
+        .for_each(
+            |(mut v_shoup, v, qi)| match (v_shoup.as_slice_mut(), v.as_slice()) {
+                (Some(dst), Some(src)) => dst.copy_from_slice(&qi.shoup_vec(src)),
+                _ => izip!(v_shoup, v).for_each(|(dst, &c)| *dst = qi.shoup(c)),
+            },
+        );
         self.coefficients_shoup = Some(coefficients_shoup)
     }
 
@@ -1486,9 +1490,13 @@ mod tests {
         let mut rng = rand::rng();
         let mut poly = Poly::<NttShoup>::random(&ctx, &mut rng);
         assert!(poly.coefficients().iter().any(|&coeff| coeff != 0));
+        let shoup = poly.coefficients_shoup.as_ref().unwrap();
+        assert!(shoup.iter().any(|&coeff| coeff != 0));
 
         poly.zeroize();
         assert!(poly.coefficients().iter().all(|&coeff| coeff == 0));
+        let shoup = poly.coefficients_shoup.as_ref().unwrap();
+        assert!(shoup.iter().all(|&coeff| coeff == 0));
         Ok(())
     }
 
@@ -1506,6 +1514,40 @@ mod tests {
         poly.set_coefficients(second);
         assert!(poly.coefficients().iter().all(|&coeff| coeff == 42));
         assert!(!poly.coefficients().iter().any(|&coeff| coeff == 7));
+        Ok(())
+    }
+
+    #[test]
+    fn set_coefficients_recomputes_shoup_for_noncontiguous_ntt_shoup() -> Result<(), Box<dyn Error>>
+    {
+        let ctx = Arc::new(Context::new(MODULI, 16)?);
+        let mut rng = rand::rng();
+        let mut poly = Poly::<NttShoup>::random(&ctx, &mut rng);
+        assert!(poly.coefficients_shoup.is_some());
+
+        // Non-standard layout with canonical values on every row.
+        let mut secrets = ndarray::Array2::zeros((16, MODULI.len())).reversed_axes();
+        assert_eq!(secrets.dim(), (MODULI.len(), 16));
+        secrets
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, coeff)| *coeff = (i % 1000) as u64);
+        assert!(
+            secrets.as_slice_mut().is_none(),
+            "test requires a non-standard layout without a contiguous slice"
+        );
+        // Installing this layout in an NttShoup polynomial panicked before
+        // layout-independent Shoup recomputation.
+        poly.set_coefficients(secrets);
+
+        assert!(poly.coefficients().iter().all(|&coeff| coeff < 1000));
+        let shoup = poly.coefficients_shoup.as_ref().unwrap();
+        assert_eq!(shoup.dim(), (MODULI.len(), 16));
+        for (row, qi) in ctx.q.iter().enumerate() {
+            for col in 0..16 {
+                assert_eq!(shoup[[row, col]], qi.shoup(poly.coefficients()[[row, col]]));
+            }
+        }
         Ok(())
     }
 }

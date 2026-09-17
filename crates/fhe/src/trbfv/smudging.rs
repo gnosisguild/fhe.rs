@@ -1,7 +1,3 @@
-#![expect(
-    clippy::indexing_slicing,
-    reason = "indices are bounded by validated matrix dimensions"
-)]
 use crate::Error;
 /// Threshold BFV Smudging Noise Generation (Urban–Rambaud 2024, Appendix C).
 ///
@@ -484,6 +480,72 @@ fn limbs_mod(limbs: &[u64], qi: u64) -> u64 {
     acc
 }
 
+/// Wipe-on-drop guard for the in-progress smudging sample matrix.
+///
+/// Sampled residues live in this matrix until it is moved into the
+/// wipe-on-drop noise polynomial. If sampling unwinds partway (for example
+/// the RNG panics), dropping the guard erases the partially written secrets
+/// instead of abandoning them.
+struct SampleMatrix {
+    matrix: Option<Array2<u64>>,
+    #[cfg(test)]
+    wipe_observer: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl SampleMatrix {
+    fn new(modulus_count: usize, degree: usize) -> Self {
+        Self {
+            matrix: Some(Array2::zeros((modulus_count, degree))),
+            #[cfg(test)]
+            wipe_observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_wipe_observer(
+        matrix: Array2<u64>,
+        wipe_observer: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            matrix: Some(matrix),
+            wipe_observer: Some(wipe_observer),
+        }
+    }
+
+    fn set(&mut self, row: usize, col: usize, value: u64) {
+        if let Some(matrix) = self.matrix.as_mut() {
+            matrix[[row, col]] = value;
+        }
+    }
+
+    /// Release the matrix without wiping: ownership (and erasure duty)
+    /// transfers to the wipe-on-drop polynomial.
+    fn release(mut self) -> Array2<u64> {
+        // The matrix is always present: the only mutation is this consuming
+        // take, so the fallback is unreachable by construction.
+        self.matrix.take().unwrap_or_else(|| Array2::zeros((0, 0)))
+    }
+}
+
+impl Drop for SampleMatrix {
+    fn drop(&mut self) {
+        if let Some(matrix) = self.matrix.as_mut() {
+            matrix.iter_mut().for_each(|coeff| coeff.zeroize());
+        }
+        #[cfg(test)]
+        if let Some(observer) = &self.wipe_observer {
+            use std::sync::atomic::Ordering;
+            observer.store(
+                self.matrix
+                    .as_ref()
+                    .map(|matrix| matrix.iter().all(|&coeff| coeff == 0))
+                    .unwrap_or(true),
+                Ordering::SeqCst,
+            );
+        }
+    }
+}
+
 /// Freshly sampled smudging noise with private wipe-on-drop storage.
 ///
 /// The underlying polynomial is private and the owner is consumed by the
@@ -583,9 +645,10 @@ impl SmudgingNoiseGenerator {
             .map(|&qi| limbs_mod(&bound_limbs, qi))
             .collect();
 
-        // Owned matrix; moved into the wipe-on-drop polynomial below without
-        // any intermediate drop, so no partial secret is abandoned.
-        let mut matrix = Array2::zeros((moduli.len(), degree));
+        // Guarded output matrix: wiped on drop if sampling unwinds
+        // partway, and moved unwiped into the wipe-on-drop polynomial once
+        // every coefficient is written.
+        let mut matrix = SampleMatrix::new(moduli.len(), degree);
         let mut candidate = Zeroizing::new(vec![0u64; nlimbs]);
         for col in 0..degree {
             // Exact rejection sampling of u in [0, M): candidates are uniform
@@ -605,16 +668,20 @@ impl SmudgingNoiseGenerator {
             }
             for (row, (&qi, &bound_qi)) in moduli.iter().zip(&bound_mod).enumerate() {
                 let u_mod = limbs_mod(&candidate, qi);
-                matrix[[row, col]] = if u_mod >= bound_qi {
-                    u_mod - bound_qi
-                } else {
-                    u_mod + qi - bound_qi
-                };
+                matrix.set(
+                    row,
+                    col,
+                    if u_mod >= bound_qi {
+                        u_mod - bound_qi
+                    } else {
+                        u_mod + qi - bound_qi
+                    },
+                );
             }
             // Wipe the consumed candidate limbs.
             candidate.as_mut_slice().zeroize();
         }
-        let poly = Poly::<PowerBasis>::from_coeffs_matrix(matrix, ctx)?;
+        let poly = Poly::<PowerBasis>::from_coeffs_matrix(matrix.release(), ctx)?;
         Ok(GeneratedSmudgingNoise { poly })
     }
 
@@ -632,6 +699,10 @@ impl SmudgingNoiseGenerator {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "tests use fixed validated dimensions"
+)]
 mod tests {
     use super::*;
     use crate::bfv::BfvParametersBuilder;
@@ -1164,6 +1235,26 @@ mod tests {
                 // Acceptable for some parameter sets
             }
         }
+    }
+
+    #[test]
+    #[allow(clippy::panic, reason = "test simulates an RNG failure mid-sampling")]
+    fn sample_matrix_wipes_partially_written_secrets_on_unwind() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let wiped = Arc::new(AtomicBool::new(false));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut guard = SampleMatrix::with_wipe_observer(Array2::zeros((2, 8)), wiped.clone());
+            guard.set(0, 0, 0xA5A5_A5A5_A5A5_A5A5);
+            guard.set(1, 7, 0x5A5A_5A5A_5A5A_5A5A);
+            panic!("simulated RNG failure");
+        }));
+        assert!(result.is_err(), "RNG panic must propagate");
+        assert!(
+            wiped.load(Ordering::SeqCst),
+            "partially written secrets must be wiped on unwind"
+        );
     }
 
     #[test]
