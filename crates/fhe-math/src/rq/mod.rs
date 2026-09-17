@@ -525,6 +525,11 @@ impl<R: RepresentationTag> Poly<R> {
     /// Any Shoup representation is invalidated by the replacement: it is
     /// recomputed for `NttShoup` polynomials and cleared otherwise.
     pub fn set_coefficients(&mut self, new_coeffs: Array2<u64>) {
+        debug_assert_eq!(
+            new_coeffs.dim(),
+            (self.ctx.q.len(), self.ctx.degree),
+            "coefficient matrix shape must match the polynomial context"
+        );
         self.coefficients
             .iter_mut()
             .for_each(|coeff| coeff.zeroize());
@@ -1498,6 +1503,17 @@ mod tests {
         let shoup = poly.coefficients_shoup.as_ref().unwrap();
         assert!(shoup.iter().all(|&coeff| coeff == 0));
         Ok(())
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "coefficient matrix shape")]
+    fn set_coefficients_rejects_mismatched_shape() {
+        let ctx = Arc::new(Context::new(MODULI, 16).unwrap());
+        let mut poly = Poly::<PowerBasis>::zero(&ctx);
+        // Wrong row count: silently installing this would corrupt every
+        // later operation that assumes one row per modulus.
+        poly.set_coefficients(ndarray::Array2::zeros((MODULI.len() - 1, 16)));
     }
 
     #[test]

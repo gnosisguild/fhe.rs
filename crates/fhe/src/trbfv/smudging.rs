@@ -462,6 +462,9 @@ pub struct SmudgingNoiseGenerator {
 /// Little-endian limb comparison: returns whether `a < b`.
 /// Both slices must have the same length.
 fn limbs_lt(a: &[u64], b: &[u64]) -> bool {
+    // The comparison walks from the most significant limb and relies on
+    // equal lengths: `zip` would silently truncate a mismatch.
+    debug_assert_eq!(a.len(), b.len(), "limb comparison requires equal lengths");
     for (ai, bi) in a.iter().zip(b).rev() {
         if ai != bi {
             return ai < bi;
@@ -671,6 +674,8 @@ impl SmudgingNoiseGenerator {
                 matrix.set(
                     row,
                     col,
+                    // Both residues are in [0, qi), and NTT-compatible moduli
+                    // are < 2^62, so the wrap-around sum cannot overflow u64.
                     if u_mod >= bound_qi {
                         u_mod - bound_qi
                     } else {
@@ -681,8 +686,15 @@ impl SmudgingNoiseGenerator {
             // Wipe the consumed candidate limbs.
             candidate.as_mut_slice().zeroize();
         }
-        let poly = Poly::<PowerBasis>::from_coeffs_matrix(matrix.release(), ctx)?;
-        Ok(GeneratedSmudgingNoise { poly })
+        // Build the noise polynomial directly rather than through
+        // `from_coeffs_matrix`: this path is infallible, so the released
+        // matrix is always moved into the wipe-on-drop polynomial and can
+        // never be dropped unwiped by an error path.
+        let mut poly = Poly::<PowerBasis>::zero(ctx);
+        poly.set_coefficients(matrix.release());
+        Ok(GeneratedSmudgingNoise {
+            poly: Zeroizing::new(poly),
+        })
     }
 
     /// Get the polynomial degree.
