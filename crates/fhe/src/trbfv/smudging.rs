@@ -1,3 +1,7 @@
+#![expect(
+    clippy::indexing_slicing,
+    reason = "indices are bounded by validated matrix dimensions"
+)]
 use crate::Error;
 /// Threshold BFV Smudging Noise Generation (Urban–Rambaud 2024, Appendix C).
 ///
@@ -14,11 +18,14 @@ use crate::Error;
 /// - Distributed RLK error accounting via `accepted_participant_count * B_e`
 /// - Sampler-aligned `B_enc` (CBD support for small variance, `sqrt(3*var)` for large)
 use crate::bfv::BfvParameters;
-
-use num_bigint::{BigInt, BigUint};
+use fhe_math::rq::{Poly, PowerBasis};
+use ndarray::Array2;
+use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use rand::{CryptoRng, RngCore};
+use std::fmt;
 use std::sync::Arc;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Minimum statistical security parameter accepted for production use.
 ///
@@ -443,14 +450,74 @@ impl SmudgingBoundCalculator {
     }
 }
 
-/// Smudging noise generator using simple uniform sampling.
+/// Smudging noise generator using exact centered uniform sampling.
 ///
-/// Since calculated variances (180+ bits) always exceed i64 bounds, we directly
-/// use maximum safe sampling range without arbitrary precision overhead.
+/// Each coefficient is sampled uniformly from `[-B_sm, B_sm]` directly into
+/// RNS representation, as specified for the smudging noise in the trBFV
+/// paper. The secret sampling path uses plain `u64` limb arithmetic only;
+/// arbitrary-precision integers appear solely for the public bound, range,
+/// and moduli.
 #[derive(Debug)]
 pub struct SmudgingNoiseGenerator {
     params: Arc<BfvParameters>,
     smudging_bound: BigUint,
+}
+
+/// Little-endian limb comparison: returns whether `a < b`.
+/// Both slices must have the same length.
+fn limbs_lt(a: &[u64], b: &[u64]) -> bool {
+    for (ai, bi) in a.iter().zip(b).rev() {
+        if ai != bi {
+            return ai < bi;
+        }
+    }
+    false
+}
+
+/// Reduce a little-endian limb value modulo `qi`.
+/// Requires `qi > 0`; an empty limb slice reduces to zero.
+fn limbs_mod(limbs: &[u64], qi: u64) -> u64 {
+    let mut acc = 0u64;
+    for &limb in limbs.iter().rev() {
+        acc = ((u128::from(acc) << 64 | u128::from(limb)) % u128::from(qi)) as u64;
+    }
+    acc
+}
+
+/// Freshly sampled smudging noise with private wipe-on-drop storage.
+///
+/// The underlying polynomial is private and the owner is consumed by the
+/// smudging dealing operation ([`ShareManager::generate_secret_shares_from_smudging_noise`]).
+/// There is intentionally no `Clone`, `Copy`, coefficient accessor, or
+/// generic serialization: duplicating one-time noise across decryptions
+/// breaks the statistical hiding argument.
+///
+/// ```compile_fail
+/// # use fhe::trbfv::{GeneratedSmudgingNoise, ShareManager};
+/// fn duplicate(noise: &GeneratedSmudgingNoise) -> GeneratedSmudgingNoise {
+///     noise.clone()
+/// }
+/// ```
+pub struct GeneratedSmudgingNoise {
+    poly: Zeroizing<Poly<PowerBasis>>,
+}
+
+impl GeneratedSmudgingNoise {
+    /// Consume the owner and release the noise polynomial.
+    ///
+    /// Crate-private so the supported dealing operation is the only consumer;
+    /// external code cannot extract a reusable raw polynomial.
+    pub(crate) fn into_poly(self) -> Zeroizing<Poly<PowerBasis>> {
+        self.poly
+    }
+}
+
+impl fmt::Debug for GeneratedSmudgingNoise {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GeneratedSmudgingNoise")
+            .finish_non_exhaustive()
+    }
 }
 
 impl SmudgingNoiseGenerator {
@@ -470,29 +537,85 @@ impl SmudgingNoiseGenerator {
         Ok(Self::new(params, smudging_bound))
     }
 
-    /// Generate smudging error coefficients using the calculated bound.
+    /// Generate smudging noise using the calculated bound.
     ///
-    /// The coefficients are sampled uniformly from `[-B_sm, B_sm]`, as
-    /// specified for the smudging noise in the trBFV paper.
+    /// Each coefficient is sampled exactly uniformly from `[-B_sm, B_sm]`, as
+    /// specified for the smudging noise in the trBFV paper, and written
+    /// directly into RNS representation: with `M = 2 * B_sm + 1`, a candidate
+    /// `u` is drawn uniformly from `[0, M)` by rejection sampling into a
+    /// runtime-sized wipe-on-drop limb buffer, and the same accepted `u` is
+    /// reduced under every RNS modulus as
+    /// `(u mod q_i - B_sm mod q_i) mod q_i`.
     ///
     /// # Returns
-    /// A vector of uniformly sampled BigInt coefficients
+    /// A non-cloneable owner of the sampled noise polynomial, consumed by
+    /// the smudging dealing operation.
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
-    ) -> Result<Vec<BigInt>, Error> {
+    ) -> Result<GeneratedSmudgingNoise, Error> {
+        let ctx = self.params.context_at_level(0)?;
         let degree = self.params.degree();
-        Ok(self.sample_uniform_coefficients(degree, rng))
-    }
+        let moduli = self.params.moduli();
+        if self.smudging_bound == BigUint::from(0u64) {
+            return Ok(GeneratedSmudgingNoise {
+                poly: Zeroizing::new(Poly::<PowerBasis>::zero(ctx)),
+            });
+        }
 
-    /// Sample uniform coefficients from `[-bound, bound]`.
-    fn sample_uniform_coefficients<R: RngCore + CryptoRng>(
-        &self,
-        count: usize,
-        rng: &mut R,
-    ) -> Vec<BigInt> {
-        let bound = BigInt::from(self.smudging_bound.clone());
-        fhe_math::rq::sample_uniform_coefficients_bigint(&bound, count, rng)
+        // Public range size M = 2 * B_sm + 1 as little-endian limbs.
+        let m = BigUint::from(2u32) * &self.smudging_bound + BigUint::from(1u32);
+        let m_bits = m.bits();
+        let nlimbs = m_bits.div_ceil(64) as usize;
+        let mut m_limbs = m.to_u64_digits();
+        m_limbs.resize(nlimbs, 0);
+        let excess = nlimbs as u64 * 64 - m_bits;
+        let top_mask = if excess == 0 {
+            u64::MAX
+        } else {
+            u64::MAX >> excess
+        };
+
+        // Public per-modulus reductions of the bound.
+        let bound_limbs = self.smudging_bound.to_u64_digits();
+        let bound_mod: Vec<u64> = moduli
+            .iter()
+            .map(|&qi| limbs_mod(&bound_limbs, qi))
+            .collect();
+
+        // Owned matrix; moved into the wipe-on-drop polynomial below without
+        // any intermediate drop, so no partial secret is abandoned.
+        let mut matrix = Array2::zeros((moduli.len(), degree));
+        let mut candidate = Zeroizing::new(vec![0u64; nlimbs]);
+        for col in 0..degree {
+            // Exact rejection sampling of u in [0, M): candidates are uniform
+            // over [0, 2^bits(M)), so acceptance probability is at least 1/2.
+            loop {
+                for limb in candidate.iter_mut() {
+                    *limb = rng.next_u64();
+                }
+                if let Some(top) = candidate.last_mut() {
+                    *top &= top_mask;
+                }
+                if limbs_lt(&candidate, &m_limbs) {
+                    break;
+                }
+                // Wipe the rejected candidate before reuse.
+                candidate.as_mut_slice().zeroize();
+            }
+            for (row, (&qi, &bound_qi)) in moduli.iter().zip(&bound_mod).enumerate() {
+                let u_mod = limbs_mod(&candidate, qi);
+                matrix[[row, col]] = if u_mod >= bound_qi {
+                    u_mod - bound_qi
+                } else {
+                    u_mod + qi - bound_qi
+                };
+            }
+            // Wipe the consumed candidate limbs.
+            candidate.as_mut_slice().zeroize();
+        }
+        let poly = Poly::<PowerBasis>::from_coeffs_matrix(matrix, ctx)?;
+        Ok(GeneratedSmudgingNoise { poly })
     }
 
     /// Get the polynomial degree.
@@ -512,9 +635,9 @@ impl SmudgingNoiseGenerator {
 mod tests {
     use super::*;
     use crate::bfv::BfvParametersBuilder;
-    use num_traits::Signed;
-    use num_traits::Zero;
-    use rand::rng;
+    use num_bigint::BigInt;
+    use rand::{SeedableRng, rng};
+    use rand_chacha::ChaCha8Rng;
     use std::str::FromStr;
 
     fn test_params() -> Arc<BfvParameters> {
@@ -524,6 +647,87 @@ mod tests {
             .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
             .build_arc()
             .unwrap()
+    }
+
+    /// Small-degree parameters for exact oracle checks.
+    fn small_params(moduli: &[u64]) -> Arc<BfvParameters> {
+        BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(17)
+            .set_moduli(moduli)
+            .build_arc()
+            .unwrap()
+    }
+
+    /// Test-only modular inverse for the CRT oracle (inputs are coprime).
+    fn modinv_u64(a: u64, m: u64) -> u64 {
+        let (mut t, mut new_t) = (0i128, 1i128);
+        let (mut r, mut new_r) = (m as i128, a as i128);
+        while new_r != 0 {
+            let quotient = r / new_r;
+            let tmp_t = t - quotient * new_t;
+            t = new_t;
+            new_t = tmp_t;
+            let tmp_r = r - quotient * new_r;
+            r = new_r;
+            new_r = tmp_r;
+        }
+        assert!(r == 1, "modular inverse does not exist");
+        t.rem_euclid(m as i128) as u64
+    }
+
+    /// Test oracle (arbitrary precision): reconstruct the centered integer
+    /// represented by one residue per modulus via Garner/CRT.
+    fn crt_centered_integer(residues: &[u64], moduli: &[u64]) -> BigInt {
+        let mut x = BigUint::from(0u64);
+        let mut prod = BigUint::from(1u64);
+        for (&r, &q) in residues.iter().zip(moduli.iter()) {
+            let q_big = BigUint::from(q);
+            let x_mod_q = &x % &q_big;
+            let r_big = BigUint::from(r);
+            let diff = if r_big >= x_mod_q {
+                r_big - &x_mod_q
+            } else {
+                &r_big + &q_big - &x_mod_q
+            };
+            let t = diff * modinv_u64((&prod % &q_big).to_u64().unwrap(), q) % &q_big;
+            x += &prod * &t;
+            prod *= &q_big;
+        }
+        let x = x % &prod;
+        if x.clone() * BigUint::from(2u32) > prod.clone() {
+            BigInt::from(x) - BigInt::from(prod)
+        } else {
+            BigInt::from(x)
+        }
+    }
+
+    /// Assert every coefficient of the owned noise is a canonical RNS
+    /// encoding of one centered integer in `[-bound, bound]` shared by all
+    /// rows. Consumes the owner, mirroring the dealing operation.
+    fn assert_noise_in_bound(
+        noise: GeneratedSmudgingNoise,
+        bound: &BigUint,
+        params: &Arc<BfvParameters>,
+    ) {
+        let poly = noise.into_poly();
+        let moduli = params.moduli();
+        assert_eq!(poly.coefficients().dim(), (moduli.len(), params.degree()));
+        let neg_bound = -BigInt::from(bound.clone());
+        let pos_bound = BigInt::from(bound.clone());
+        for col in 0..params.degree() {
+            let residues: Vec<u64> = (0..moduli.len())
+                .map(|row| poly.coefficients()[[row, col]])
+                .collect();
+            for (&r, &q) in residues.iter().zip(moduli.iter()) {
+                assert!(r < q, "residue {r} not canonical modulo {q}");
+            }
+            let x = crt_centered_integer(&residues, moduli);
+            assert!(
+                x >= neg_bound && x <= pos_bound,
+                "sample {x} outside [-bound, bound]"
+            );
+        }
     }
 
     /// Parameters with a large error1_variance so the uniform sampler branch
@@ -884,17 +1088,16 @@ mod tests {
         let mut rng = rng();
         let params = test_params();
         let bound = BigUint::from(1000u64);
-        let generator = SmudgingNoiseGenerator::new(params.clone(), bound);
+        let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
 
-        let result = generator.generate_smudging_error(&mut rng);
-        assert!(result.is_ok());
-
-        let coefficients = result.unwrap();
-        assert_eq!(coefficients.len(), params.degree());
-
-        for coeff in &coefficients {
-            assert!(coeff.abs() <= BigInt::from(1000u64));
-        }
+        let noise = generator.generate_smudging_error(&mut rng).unwrap();
+        let poly = noise.into_poly();
+        assert_eq!(
+            poly.coefficients().dim(),
+            (params.moduli().len(), params.degree())
+        );
+        assert!(poly.coefficients().iter().any(|&c| c != 0));
+        assert_noise_in_bound(GeneratedSmudgingNoise { poly }, &bound, &params);
     }
 
     #[test]
@@ -904,27 +1107,35 @@ mod tests {
         let bound = BigUint::from(0u64);
         let generator = SmudgingNoiseGenerator::new(params.clone(), bound);
 
-        let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
-        assert_eq!(coefficients.len(), params.degree());
-        assert!(coefficients.iter().all(|x| x.is_zero()));
+        let poly = generator
+            .generate_smudging_error(&mut rng)
+            .unwrap()
+            .into_poly();
+        assert_eq!(
+            poly.coefficients().dim(),
+            (params.moduli().len(), params.degree())
+        );
+        assert!(poly.coefficients().iter().all(|&c| c == 0));
     }
 
     #[test]
     fn test_noise_generation_large_bound() {
         let mut rng = rng();
         let params = test_params();
-        let large_bound = BigUint::from_str("123456789012345678901234567890").unwrap();
+        let large_bound: BigUint = (BigUint::from(1u32) << 96) + BigUint::from(12345u32);
         let generator = SmudgingNoiseGenerator::new(params.clone(), large_bound.clone());
 
-        let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
-        assert_eq!(coefficients.len(), params.degree());
-
-        let non_zero_count = coefficients.iter().filter(|x| !x.is_zero()).count();
-        assert!(non_zero_count > coefficients.len() / 4);
-
-        for coeff in &coefficients {
-            assert!(coeff.abs() <= BigInt::from(large_bound.clone()));
-        }
+        let poly = generator
+            .generate_smudging_error(&mut rng)
+            .unwrap()
+            .into_poly();
+        assert_eq!(
+            poly.coefficients().dim(),
+            (params.moduli().len(), params.degree())
+        );
+        let nonzero = poly.coefficients().iter().filter(|&&c| c != 0).count();
+        assert!(nonzero > params.degree() * params.moduli().len() / 4);
+        assert_noise_in_bound(GeneratedSmudgingNoise { poly }, &large_bound, &params);
     }
 
     #[test]
@@ -944,13 +1155,116 @@ mod tests {
         match bound_result {
             Ok(bound) => {
                 let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
-                let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
-                assert_eq!(coefficients.len(), params.degree());
+                let noise = generator.generate_smudging_error(&mut rng).unwrap();
+                assert_noise_in_bound(noise, &bound, &params);
             }
             Err(_) => {
                 // Acceptable for some parameter sets
             }
         }
+    }
+
+    #[test]
+    fn test_noise_small_bounds_match_centered_integers() {
+        // Exhaustive check on small parameters: every column must encode
+        // exactly one centered integer across all RNS rows.
+        let moduli = &[1153u64, 4611686018326724609, 4611686018309947393];
+        let params = small_params(moduli);
+        let mut rng = ChaCha8Rng::seed_from_u64(172_101);
+        for b in [1u64, 2, 3, 7, 100, 500] {
+            let bound = BigUint::from(b);
+            let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
+            let noise = generator.generate_smudging_error(&mut rng).unwrap();
+            let poly = noise.into_poly();
+            for col in 0..params.degree() {
+                let matches: Vec<i64> = (-(b as i64)..=b as i64)
+                    .filter(|&x| {
+                        moduli.iter().enumerate().all(|(row, &q)| {
+                            poly.coefficients()[[row, col]] == x.rem_euclid(q as i64) as u64
+                        })
+                    })
+                    .collect();
+                assert_eq!(matches.len(), 1, "bound {b}, column {col}");
+            }
+            assert_noise_in_bound(GeneratedSmudgingNoise { poly }, &bound, &params);
+        }
+    }
+
+    #[test]
+    fn test_noise_small_bound_is_approximately_uniform() {
+        // B = 2 gives M = 5 single-limb values; over 4096 samples each of the
+        // five centered values must appear at a roughly even rate.
+        let params = small_params(&[1153]);
+        let mut rng = ChaCha8Rng::seed_from_u64(172_102);
+        let mut counts = [0usize; 5];
+        for _ in 0..512 {
+            let generator = SmudgingNoiseGenerator::new(params.clone(), BigUint::from(2u32));
+            let poly = generator
+                .generate_smudging_error(&mut rng)
+                .unwrap()
+                .into_poly();
+            for &residue in poly.coefficients().iter() {
+                let x = if residue <= 2 {
+                    residue as i64
+                } else {
+                    residue as i64 - 1153
+                };
+                assert!((-2..=2).contains(&x), "residue {residue} outside [-2, 2]");
+                counts[(x + 2) as usize] += 1;
+            }
+        }
+        assert_eq!(counts.iter().sum::<usize>(), 512 * params.degree());
+        for (value, &count) in (-2i64..=2).zip(counts.iter()) {
+            assert!(
+                (500..=1150).contains(&count),
+                "value {value} sampled {count} times, expected ~819"
+            );
+        }
+    }
+
+    #[test]
+    fn test_noise_limb_boundaries_match_oracle() {
+        // Bounds straddling 64-bit limb edges. Three ~62-bit moduli give
+        // Q ~ 2^186, well above twice each bound.
+        let moduli = &[
+            4611686018326724609,
+            4611686018309947393,
+            4611686018282684417,
+        ];
+        let params = small_params(moduli);
+        let mut rng = ChaCha8Rng::seed_from_u64(172_103);
+        let bounds = [
+            (BigUint::from(1u32) << 63) - BigUint::from(1u32), // M = 2^64 - 1
+            BigUint::from(1u32) << 63,                         // M = 2^64 + 1
+            BigUint::from(u64::MAX),                           // M = 2^65 - 1
+            (BigUint::from(1u32) << 100) + BigUint::from(12345u32),
+        ];
+        for bound in &bounds {
+            let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
+            let noise = generator.generate_smudging_error(&mut rng).unwrap();
+            assert_noise_in_bound(noise, bound, &params);
+        }
+    }
+
+    #[test]
+    fn test_noise_wide_bound_beyond_five_limbs() {
+        // B = 2^320 gives M = 2^321 + 1 (six limbs). Six ~62-bit moduli give
+        // Q ~ 2^372, well above 2 * B, so the CRT oracle recovers each sample.
+        let moduli = &[
+            4611686018326724609,
+            4611686018309947393,
+            4611686018282684417,
+            4611686018257518593,
+            4611686018232352769,
+            4611686018171535361,
+        ];
+        let params = small_params(moduli);
+        let mut rng = ChaCha8Rng::seed_from_u64(172_104);
+        let bound: BigUint = BigUint::from(1u32) << 320;
+        assert!(bound.bits() > 5 * 64, "test requires a >5-limb bound");
+        let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
+        let noise = generator.generate_smudging_error(&mut rng).unwrap();
+        assert_noise_in_bound(noise, &bound, &params);
     }
 
     /// depth=0 (additive) produces a smaller bound than depth=1 (one multiplication),

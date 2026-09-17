@@ -191,12 +191,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let es_poly_sum = Poly::<PowerBasis>::zero(ctx);
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
 
-                let esi_coeffs = trbfv
+                let esi_noise = trbfv
                     .generate_smudging_error(num_summed, 0, security, &mut rng)
                     .unwrap();
-                let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager
-                    .generate_secret_shares_from_poly(esi_poly, &mut rng)
+                    .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
                     .unwrap();
 
                 let sk_bfv = SecretKey::random(&params_bfv, &mut rng);

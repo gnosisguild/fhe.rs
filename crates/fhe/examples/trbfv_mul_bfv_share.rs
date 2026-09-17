@@ -212,7 +212,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications,
                 // accepted l-BFV participant count = num_parties).
-                let esi_coeffs = trbfv
+                let esi_noise = trbfv
                     .generate_smudging_error_with_participant_count(
                         3,
                         preset.multiplicative_depth.unwrap(),
@@ -221,9 +221,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         &mut rng,
                     )
                     .unwrap();
-                let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
                 let esi_sss = share_manager
-                    .generate_secret_shares_from_poly(esi_poly, &mut rng)
+                    .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
                     .unwrap();
 
                 // l-BFV PK contribution (shared crp_a, same a_j across all parties).
