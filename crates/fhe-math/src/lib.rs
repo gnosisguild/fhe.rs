@@ -12,6 +12,10 @@ pub mod rq;
 pub mod zq;
 
 pub use errors::{Error, PolynomialSerializationError, Result};
+/// Polynomial wire format, re-exported so threshold schemes can build the
+/// explicit transport boundary for protected smudging material on the same
+/// encoding as every other polynomial.
+pub use proto::rq::Rq;
 
 #[cfg(test)]
 #[macro_use]

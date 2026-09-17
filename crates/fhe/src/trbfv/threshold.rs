@@ -44,8 +44,8 @@ use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::shares::ShareManager;
 use crate::trbfv::smudging::{
-    GeneratedSmudgingNoise, Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
-    SmudgingNoiseGenerator,
+    AggregatedSmudgingShare, GeneratedSmudgingNoise, Lambda, SmudgingBoundCalculator,
+    SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
 };
 use fhe_math::rq::{Ntt, Poly, PowerBasis};
 use fhe_traits::FheParametrized;
@@ -221,17 +221,17 @@ impl TRBFV {
     ///
     /// Each party calls this method to compute their contribution to the threshold decryption.
     /// The result should be sent to the party coordinating the decryption.
+    /// The noise aggregate is consumed whether share computation succeeds or
+    /// fails, so one live aggregate cannot back two shares.
     ///
     /// # Arguments
     /// * `ciphertext` - The ciphertext to decrypt
     /// * `sk_i` - This party's *aggregated share of the joint secret key*, i.e. the
     ///   output of [`TRBFV::aggregate_collected_shares`] over the key share matrices
     ///   received from all parties — not a party's own secret key
-    /// * `es_i` - This party's *aggregated share of the joint smudging noise*,
-    ///   aggregated the same way from the dealt noise shares. Do not pass an
-    ///   undealt [`TRBFV::generate_smudging_error`] owner here: unshared noise
-    ///   is blown up by the Lagrange coefficients during reconstruction and
-    ///   breaks correctness
+    /// * `noise` - This party's [`AggregatedSmudgingShare`], aggregated from the
+    ///   dealt noise shares. Unshared noise would be blown up by the Lagrange
+    ///   coefficients during reconstruction and break correctness
     ///
     /// # Returns
     /// Decryption share polynomial. The ciphertext must be at level 0;
@@ -240,10 +240,10 @@ impl TRBFV {
         &self,
         ciphertext: Arc<Ciphertext>,
         sk_i: Poly<Ntt>,
-        es_i: Poly<PowerBasis>,
+        noise: AggregatedSmudgingShare,
     ) -> Result<Poly<PowerBasis>, Error> {
         let share_manager = ShareManager::new(self.n, self.threshold, self.params.clone())?;
-        share_manager.decryption_share(ciphertext, sk_i, es_i)
+        share_manager.decryption_share(ciphertext, sk_i, noise)
     }
 
     /// Decrypt ciphertext from collected decryption shares.
@@ -360,16 +360,17 @@ mod tests {
             .unwrap();
         // The one-time owner deals straight into Shamir shares.
         let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
-        let shares = manager
-            .generate_secret_shares_from_smudging_noise(noise, &mut rng)
-            .unwrap();
-        assert_eq!(shares.len(), params.moduli().len());
-        for share_matrix in &shares {
-            assert_eq!(share_matrix.dim(), (n, params.degree()));
+        let shares = manager.deal_smudging_noise(noise, &mut rng).unwrap();
+        assert_eq!(shares.len(), n);
+        for share in &shares {
+            assert_eq!(
+                share.residues().dim(),
+                (params.moduli().len(), params.degree())
+            );
         }
         // Smudging noise at a secure bound is overwhelmingly nonzero.
         assert!(
-            shares.iter().any(|m| m.iter().any(|&c| c != 0)),
+            shares.iter().any(|s| s.residues().iter().any(|&c| c != 0)),
             "secure smudging shares should not all be zero"
         );
     }
@@ -387,14 +388,15 @@ mod tests {
             .generate_smudging_error(10, 0, Lambda::secure(80).unwrap(), &mut rng)
             .unwrap();
         let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
-        let shares = manager
-            .generate_secret_shares_from_smudging_noise(noise, &mut rng)
-            .unwrap();
-        assert_eq!(shares.len(), params.moduli().len());
-        for share_matrix in &shares {
-            assert_eq!(share_matrix.dim(), (n, params.degree()));
+        let shares = manager.deal_smudging_noise(noise, &mut rng).unwrap();
+        assert_eq!(shares.len(), n);
+        for share in &shares {
+            assert_eq!(
+                share.residues().dim(),
+                (params.moduli().len(), params.degree())
+            );
         }
-        assert!(shares.iter().any(|m| m.iter().any(|&c| c != 0)));
+        assert!(shares.iter().any(|s| s.residues().iter().any(|&c| c != 0)));
     }
 
     #[test]
@@ -429,12 +431,13 @@ mod tests {
             )
             .expect("valid participant count should succeed");
         let mut manager = ShareManager::new(n, 2, params.clone()).unwrap();
-        let shares = manager
-            .generate_secret_shares_from_smudging_noise(noise, &mut rng)
-            .unwrap();
-        assert_eq!(shares.len(), params.moduli().len());
-        for share_matrix in &shares {
-            assert_eq!(share_matrix.dim(), (n, params.degree()));
+        let shares = manager.deal_smudging_noise(noise, &mut rng).unwrap();
+        assert_eq!(shares.len(), n);
+        for share in &shares {
+            assert_eq!(
+                share.residues().dim(),
+                (params.moduli().len(), params.degree())
+            );
         }
     }
 
@@ -513,6 +516,41 @@ mod tests {
     }
 
     #[test]
+    fn failed_decryption_share_consumes_noise() {
+        let mut rng = rng();
+        let params = test_params();
+        let n = 3;
+        let threshold = 1;
+        let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let pt = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let mut ct = pk.try_encrypt(&pt, &mut rng).unwrap();
+        ct.switch_down().unwrap();
+
+        let share_manager = ShareManager::new(n, threshold, params.clone()).unwrap();
+        let sk_poly = share_manager
+            .coeffs_to_poly_level0(sk.coeffs.as_ref())
+            .unwrap();
+        let ctx = params.context_at_level(0).unwrap();
+        let noise =
+            AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
+
+        // The level-1 ciphertext is rejected, and the moved-in aggregate is
+        // consumed (dropped and wiped) by the failed call.
+        let result = trbfv.decryption_share(Arc::new(ct), (*sk_poly).clone().into_ntt(), noise);
+        assert_eq!(
+            result,
+            Err(Error::InvalidLevel {
+                level: 1,
+                min_level: 0,
+                max_level: 0
+            })
+        );
+    }
+
+    #[test]
     fn test_decryption_share_generation() {
         let mut rng = rng();
         let params = test_params();
@@ -534,10 +572,11 @@ mod tests {
             .coeffs_to_poly_level0(sk.coeffs.as_ref())
             .unwrap();
         let ctx = params.context_at_level(0).unwrap();
-        let es_poly = Poly::<PowerBasis>::zero(ctx);
+        let noise =
+            AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
 
         let decryption_share = trbfv
-            .decryption_share(ct, (*sk_poly).clone().into_ntt(), es_poly)
+            .decryption_share(ct, (*sk_poly).clone().into_ntt(), noise)
             .unwrap();
 
         assert_eq!(decryption_share.coefficients().ncols(), params.degree());
@@ -578,10 +617,11 @@ mod tests {
                 .coeffs_to_poly_level0(secret_keys[i].coeffs.as_ref())
                 .unwrap();
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let noise =
+                AggregatedSmudgingShare::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)));
 
             let share = trbfv_instances[i]
-                .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
+                .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), noise)
                 .unwrap();
             decryption_shares.push(share);
         }

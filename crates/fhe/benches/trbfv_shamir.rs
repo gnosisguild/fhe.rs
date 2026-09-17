@@ -12,7 +12,6 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::trbfv::ShareManager;
-use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheEncoder, FheEncrypter};
 use ndarray::Array2;
 use rand::SeedableRng;
@@ -61,18 +60,38 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
                 .try_encrypt(&plaintext, &mut setup_rng)
                 .expect("encryption must succeed"),
         );
-        let context = params
-            .context_at_level(0)
-            .expect("level-zero context must exist");
         let party_ids: Vec<_> = (1..=threshold + 1).collect();
+        // Zero-noise aggregates (one per reconstructing party): exercise
+        // decryption through the dedicated dealing/aggregation pipeline.
+        let zero_generator = fhe::trbfv::smudging::SmudgingNoiseGenerator::new(
+            params.clone(),
+            num_bigint::BigUint::from(0u32),
+        );
+        let zero_noise = zero_generator
+            .generate_smudging_error(&mut setup_rng)
+            .expect("zero-noise generation must succeed");
+        let mut inboxes: Vec<Vec<fhe::trbfv::SmudgingShare>> =
+            (0..party_count).map(|_| Vec::new()).collect();
+        for (recipient, share) in manager
+            .deal_smudging_noise(zero_noise, &mut setup_rng)
+            .expect("zero-noise dealing must succeed")
+            .into_iter()
+            .enumerate()
+        {
+            inboxes[recipient].push(share);
+        }
         let decryption_shares: Vec<_> = party_ids
             .iter()
             .map(|&party_id| {
+                let inbox = std::mem::take(&mut inboxes[party_id - 1]);
+                let noise = manager
+                    .aggregate_smudging_shares(inbox)
+                    .expect("zero-noise aggregation must succeed");
                 manager
                     .decryption_share(
                         ciphertext.clone(),
                         aggregated_shares[party_id - 1].clone().into_ntt(),
-                        Poly::<PowerBasis>::zero(context),
+                        noise,
                     )
                     .expect("decryption-share generation must succeed")
             })

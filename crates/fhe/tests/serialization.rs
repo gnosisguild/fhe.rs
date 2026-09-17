@@ -127,3 +127,102 @@ fn ciphertext_deserialization_rejects_truncation_and_parameter_mismatch() {
     assert!(Ciphertext::from_bytes(truncated_ciphertext, &params).is_err());
     assert!(Ciphertext::from_bytes(&[0xff], &params).is_err());
 }
+
+#[test]
+fn smudging_owners_round_trip_through_transport_boundary() {
+    use fhe::trbfv::{
+        AggregatedSmudgingShare, Lambda, MIN_SECURE_LAMBDA, ShareManager, SmudgingShare, TRBFV,
+    };
+
+    for profile in support::profiles().unwrap() {
+        let trbfv = TRBFV::new(
+            profile.num_parties,
+            profile.threshold,
+            profile.parameters.clone(),
+        )
+        .unwrap();
+        let lambda = if profile.lambda < MIN_SECURE_LAMBDA {
+            Lambda::insecure(profile.lambda)
+        } else {
+            Lambda::secure(profile.lambda).unwrap()
+        };
+        let mult_depth = profile.multiplicative_depth.unwrap_or(0);
+        let mut rng = support::rng(71);
+        let mut manager = ShareManager::new(
+            profile.num_parties,
+            profile.threshold,
+            profile.parameters.clone(),
+        )
+        .unwrap();
+
+        let noise = trbfv
+            .generate_smudging_error(profile.max_ciphertexts, mult_depth, lambda, &mut rng)
+            .unwrap();
+        let shares = manager.deal_smudging_noise(noise, &mut rng).unwrap();
+        assert_eq!(shares.len(), profile.num_parties);
+
+        // Share round-trip: re-exporting the imported share must reproduce
+        // the exact payload bytes.
+        let mut shares = shares.into_iter();
+        let first = shares.next().unwrap();
+        let share_bytes = first.export(&profile.parameters).unwrap();
+        let imported = SmudgingShare::from_bytes(&share_bytes, &profile.parameters).unwrap();
+        assert_eq!(
+            imported.export(&profile.parameters).unwrap(),
+            share_bytes,
+            "profile {} share round-trip must preserve bytes",
+            profile.name
+        );
+
+        // Aggregate round-trip over the remaining shares.
+        let aggregate = manager.aggregate_smudging_shares(shares.collect()).unwrap();
+        let aggregate_bytes = aggregate.export();
+        let imported_aggregate =
+            AggregatedSmudgingShare::from_bytes(&aggregate_bytes, &profile.parameters).unwrap();
+        assert_eq!(
+            imported_aggregate.export(),
+            aggregate_bytes,
+            "profile {} aggregate round-trip must preserve bytes",
+            profile.name
+        );
+    }
+}
+
+#[test]
+fn smudging_transport_rejects_truncation_and_parameter_mismatch() {
+    use fhe::trbfv::{Lambda, ShareManager, SmudgingShare, TRBFV};
+
+    let profile = support::insecure().unwrap();
+    let other_params = support::secure8192().unwrap().parameters;
+    let trbfv = TRBFV::new(
+        profile.num_parties,
+        profile.threshold,
+        profile.parameters.clone(),
+    )
+    .unwrap();
+    let mut rng = support::rng(72);
+    let mut manager = ShareManager::new(
+        profile.num_parties,
+        profile.threshold,
+        profile.parameters.clone(),
+    )
+    .unwrap();
+    let noise = trbfv
+        .generate_smudging_error(
+            profile.max_ciphertexts,
+            0,
+            Lambda::insecure(profile.lambda),
+            &mut rng,
+        )
+        .unwrap();
+    let share = manager
+        .deal_smudging_noise(noise, &mut rng)
+        .unwrap()
+        .remove(0);
+    let bytes = share.export(&profile.parameters).unwrap();
+
+    assert!(SmudgingShare::from_bytes(&bytes, &other_params).is_err());
+    let truncated = &bytes[..bytes.len() / 2];
+    assert!(SmudgingShare::from_bytes(truncated, &profile.parameters).is_err());
+    assert!(SmudgingShare::from_bytes(&[0xff], &profile.parameters).is_err());
+}

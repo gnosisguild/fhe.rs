@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::{Lambda, ShareManager, TRBFV};
+use fhe::trbfv::{Lambda, ShareManager, SmudgingShare, TRBFV};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::Array2;
@@ -41,21 +41,26 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
         .generate_secret_shares_from_poly(sk_poly, &mut rng)
         .expect("secret key share generation");
 
-    let es_sss: Vec<Vec<Array2<u64>>> = (0..N)
-        .map(|_| {
-            // The evaluated ciphertext below is the sum of two fresh encryptions.
-            let noise = trbfv
-                .generate_smudging_error(2, 0, Lambda::secure(LAMBDA_VALUE).unwrap(), &mut rng)
-                .expect("smudging noise generation");
-            managers[0]
-                .generate_secret_shares_from_smudging_noise(noise, &mut rng)
-                .expect("smudging noise share generation")
-        })
-        .collect();
+    // Each party samples one noise owner and deals it; dealing consumes the
+    // owner, so the intermediate polynomial is never exposed.
+    let mut es_inboxes: Vec<Vec<SmudgingShare>> = (0..N).map(|_| Vec::new()).collect();
+    for _ in 0..N {
+        // The evaluated ciphertext below is the sum of two fresh encryptions.
+        let noise = trbfv
+            .generate_smudging_error(2, 0, Lambda::secure(LAMBDA_VALUE).unwrap(), &mut rng)
+            .expect("smudging noise generation");
+        for (receiver, share) in managers[0]
+            .deal_smudging_noise(noise, &mut rng)
+            .expect("smudging noise dealing")
+            .into_iter()
+            .enumerate()
+        {
+            es_inboxes[receiver].push(share);
+        }
+    }
 
     let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..N).map(|_| Vec::new()).collect();
-    let mut es_sss_collected: Vec<Vec<Array2<u64>>> = (0..N).map(|_| Vec::new()).collect();
-    for receiver_idx in 0..N {
+    for (receiver_idx, collected) in sk_sss_collected.iter_mut().enumerate().take(N) {
         let mut sk_rows = Array2::zeros((0, params.degree()));
         for shares_for_modulus in sk_sss.iter().take(params.moduli().len()) {
             sk_rows
@@ -64,19 +69,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
                 ))
                 .expect("append secret key share row");
         }
-        sk_sss_collected[receiver_idx].push(sk_rows);
-
-        for noise_shares in &es_sss {
-            let mut es_rows = Array2::zeros((0, params.degree()));
-            for shares_for_modulus in noise_shares.iter().take(params.moduli().len()) {
-                es_rows
-                    .push_row(ndarray::ArrayView::from(
-                        shares_for_modulus.row(receiver_idx),
-                    ))
-                    .expect("append smudging share row");
-            }
-            es_sss_collected[receiver_idx].push(es_rows);
-        }
+        collected.push(sk_rows);
     }
 
     let sk_poly_sums: Vec<Poly<PowerBasis>> = managers
@@ -86,15 +79,6 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
             manager
                 .aggregate_collected_shares(&sk_sss_collected[i])
                 .expect("aggregate secret key shares")
-        })
-        .collect();
-    let es_poly_sums: Vec<Poly<PowerBasis>> = managers
-        .iter()
-        .enumerate()
-        .map(|(i, manager)| {
-            manager
-                .aggregate_collected_shares(&es_sss_collected[i])
-                .expect("aggregate smudging shares")
         })
         .collect();
 
@@ -110,19 +94,25 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     let ciphertext = Arc::new(&ct_a + &ct_b);
 
     let reconstructing = vec![1, 2];
-    let decryption_shares: Vec<Poly<PowerBasis>> = reconstructing
-        .iter()
-        .map(|&party_id| {
-            let index = party_id - 1;
+    let mut decryption_shares = Vec::new();
+    for &party_id in &reconstructing {
+        let index = party_id - 1;
+        // Each decrypting party aggregates its own inbox and consumes the
+        // resulting aggregate in exactly one decryption-share call.
+        let inbox = std::mem::take(&mut es_inboxes[index]);
+        let noise = managers[index]
+            .aggregate_smudging_shares(inbox)
+            .expect("aggregate smudging shares");
+        decryption_shares.push(
             trbfv
                 .decryption_share(
                     ciphertext.clone(),
                     sk_poly_sums[index].clone().into_ntt(),
-                    es_poly_sums[index].clone(),
+                    noise,
                 )
-                .expect("decryption share")
-        })
-        .collect();
+                .expect("decryption share"),
+        );
+    }
 
     assert!(
         trbfv

@@ -19,7 +19,7 @@
 //     its Lagrange evaluation point of the combined secret key SK = Σ sk_j.
 //  4. Two values are encrypted under the combined mbfv PublicKey, multiplied and
 //     relinearized using the aggregated RLK, then threshold-decrypted by t+1 parties.
-#![allow(missing_docs)]
+#![allow(clippy::expect_used, missing_docs)]
 
 #[path = "../support/mod.rs"]
 mod support;
@@ -32,7 +32,7 @@ use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
-    trbfv::{Lambda, ShareManager, TRBFV},
+    trbfv::{AggregatedSmudgingShare, Lambda, ShareManager, SmudgingShare, TRBFV},
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
@@ -62,6 +62,34 @@ fn print_notice_and_exit(error: Option<String>) {
         println!("{} {}", style("     error:").red().bold(), error);
     }
     exit(0);
+}
+
+/// Split an opaque transport payload into degree-sized plaintext chunks.
+///
+/// Every transported value is a raw byte (< 256), so BFV plaintext encoding
+/// under the share-encryption parameters carries it exactly; arbitrary `u64`
+/// words would be reduced modulo the plaintext modulus and corrupted. The
+/// first value prefixes the exact byte length so reassembly needs no
+/// parameter knowledge.
+fn payload_to_chunks(payload: &[u8], degree: usize) -> Vec<Vec<u64>> {
+    let mut values = Vec::with_capacity(1 + payload.len());
+    values.push(payload.len() as u64);
+    values.extend(payload.iter().map(|&byte| u64::from(byte)));
+    values
+        .chunks(degree)
+        .map(|chunk| {
+            let mut padded = chunk.to_vec();
+            padded.resize(degree, 0);
+            padded
+        })
+        .collect()
+}
+
+/// Reassemble chunks into the exact payload bytes.
+fn chunks_to_payload(chunk_values: &[u64]) -> Vec<u8> {
+    let mut values = chunk_values.iter();
+    let byte_len = values.next().copied().unwrap_or(0) as usize;
+    values.take(byte_len).map(|&value| value as u8).collect()
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -155,12 +183,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     struct Party {
         pk_share: MBFVPublicKeyShare,
-        sk_sss: Vec<Array2<u64>>,  // sk_sss[m]: shape (num_parties, degree)
-        esi_sss: Vec<Array2<u64>>, // smudging error Shamir shares, same shape
+        sk_sss: Vec<Array2<u64>>, // sk_sss[m]: shape (num_parties, degree)
+        esi_deal: Vec<SmudgingShare>, // one smudging share per recipient
         sk_sss_collected: Vec<Array2<u64>>, // collected from all senders; each (num_moduli, degree)
-        es_sss_collected: Vec<Array2<u64>>,
+        es_sss_collected: Vec<SmudgingShare>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
+        es_noise: Option<AggregatedSmudgingShare>,
         d_share_poly: Poly<PowerBasis>,
         pk_lbfv_share: PublicKeyShare, // l-BFV PK contribution (CRS = pk_seed)
         rlk_share: RelinKeyShare,
@@ -203,8 +231,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         &mut rng,
                     )
                     .unwrap();
-                let esi_sss = share_manager
-                    .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
+                let esi_deal = share_manager
+                    .deal_smudging_noise(esi_noise, &mut rng)
                     .unwrap();
 
                 // l-BFV PK contribution (CRS seed = pk_seed, shared by all parties).
@@ -226,11 +254,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Party {
                     pk_share,
                     sk_sss,
-                    esi_sss,
+                    esi_deal,
                     sk_sss_collected: Vec::with_capacity(num_parties),
                     es_sss_collected: Vec::with_capacity(num_parties),
                     sk_poly_sum: Poly::<PowerBasis>::zero(ctx0),
-                    es_poly_sum: Poly::<PowerBasis>::zero(ctx0),
+                    es_noise: None,
                     d_share_poly: Poly::<PowerBasis>::zero(ctx0),
                     pk_lbfv_share,
                     rlk_share,
@@ -259,17 +287,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     //
     // encrypted_shares[sender][receiver] = (Vec<Ciphertext>, Vec<Ciphertext>)
     //   first  vec: one ciphertext per modulus for the sk share row
-    //   second vec: one ciphertext per modulus for the smudging error share row
+    //   second vec: chunked ciphertexts of the recipient's exported smudging
+    //               share payload, reassembled and validated on receipt
     let pk_share_enc_list: Vec<PublicKey> =
         parties.iter().map(|p| p.pk_share_enc.clone()).collect();
 
     let encrypted_shares: Vec<Vec<(Vec<Ciphertext>, Vec<Ciphertext>)>> =
         timeit!("Share encryption (parallel)", {
             parties
-                .par_iter()
+                .par_iter_mut()
                 .map(|party| {
+                    let deal = std::mem::take(&mut party.esi_deal);
                     (0..num_parties)
-                        .map(|receiver_idx| {
+                        .zip(deal.into_iter())
+                        .map(|(receiver_idx, share)| {
                             let mut rng = rand::rng();
                             let rpk = pk_share_enc_list.get(receiver_idx).unwrap();
 
@@ -287,12 +318,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 })
                                 .collect();
 
-                            let enc_es: Vec<Ciphertext> = (0..num_moduli)
-                                .map(|m| {
-                                    let row =
-                                        party.esi_sss.get(m).unwrap().row(receiver_idx).to_vec();
+                            let payload = share.export(&params_trbfv).unwrap();
+                            let enc_es: Vec<Ciphertext> = payload_to_chunks(&payload, degree)
+                                .into_iter()
+                                .map(|chunk| {
                                     let pt = Plaintext::try_encode(
-                                        &row,
+                                        &chunk,
                                         Encoding::poly(),
                                         &params_share_enc,
                                     )
@@ -325,13 +356,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     party.sk_sss_collected.push(node_sk);
 
-                    let mut node_es = Array::zeros((0, degree));
+                    let mut chunk_words = Vec::new();
                     for ct in enc_es {
                         let pt = party.sk_share_enc.try_decrypt(ct).unwrap();
-                        let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
-                        node_es.push_row(ArrayView::from(&row)).unwrap();
+                        let chunk: Vec<u64> =
+                            Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
+                        chunk_words.extend(chunk);
                     }
-                    party.es_sss_collected.push(node_es);
+                    let payload = chunks_to_payload(&chunk_words);
+                    let share = SmudgingShare::from_bytes(&payload, &params_trbfv).unwrap();
+                    party.es_sss_collected.push(share);
                 }
             });
     });
@@ -343,9 +377,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             party.sk_poly_sum = temp_trbfv
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
-            party.es_poly_sum = temp_trbfv
-                .aggregate_collected_shares(&party.es_sss_collected)
-                .unwrap();
+            let noise_manager =
+                ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
+            let inbox = std::mem::take(&mut party.es_sss_collected);
+            party.es_noise = Some(noise_manager.aggregate_smudging_shares(inbox).unwrap());
         });
     });
 
@@ -396,12 +431,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Threshold decryption ──────────────────────────────────────────────────
     let t_start = Instant::now();
     parties.par_iter_mut().for_each(|party| {
+        let noise = party.es_noise.take().expect("aggregated noise per party");
         party.d_share_poly = trbfv
-            .decryption_share(
-                product.clone(),
-                party.sk_poly_sum.clone().into_ntt(),
-                party.es_poly_sum.clone(),
-            )
+            .decryption_share(product.clone(), party.sk_poly_sum.clone().into_ntt(), noise)
             .unwrap();
     });
     println!(
