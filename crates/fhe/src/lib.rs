@@ -3,6 +3,7 @@
 #![doc = include_str!("../README.md")]
 
 mod errors;
+mod rns_shamir;
 
 pub mod aggregate;
 pub mod bfv;

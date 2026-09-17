@@ -794,6 +794,13 @@ impl Modulus {
         rng.sample_iter(self.distribution).take(size).collect_vec()
     }
 
+    /// Fills a vector with independent uniformly random residues.
+    pub fn fill_random<R: RngCore + CryptoRng>(&self, values: &mut [u64], rng: &mut R) {
+        values
+            .iter_mut()
+            .for_each(|value| *value = rng.sample(self.distribution));
+    }
+
     /// Length of the serialization of a vector of size `size`.
     ///
     /// Panics if the size is not a multiple of 8.
@@ -837,7 +844,8 @@ mod tests {
     use itertools::{Itertools, izip};
     use proptest::collection::vec as prop_vec;
     use proptest::prelude::{BoxedStrategy, Just, Strategy, any};
-    use rand::{RngCore, rng};
+    use rand::{RngCore, SeedableRng, rng};
+    use rand_chacha::ChaCha8Rng;
 
     // Utility functions for the proptests.
 
@@ -856,6 +864,19 @@ mod tests {
                 (Just(vec), prop_vec(any::<u64>(), len))
             })
             .boxed()
+    }
+
+    #[test]
+    fn fill_random_matches_allocating_sampler() {
+        let modulus = Modulus::new(1613).unwrap();
+        let mut allocating_rng = ChaCha8Rng::seed_from_u64(17);
+        let mut filling_rng = ChaCha8Rng::seed_from_u64(17);
+        let expected = modulus.random_vec(64, &mut allocating_rng);
+        let mut actual = vec![0; 64];
+
+        modulus.fill_random(&mut actual, &mut filling_rng);
+
+        assert_eq!(actual, expected);
     }
 
     proptest! {

@@ -52,12 +52,18 @@ identity/session binding at their protocol boundary.
 
 The module follows a modular design with clear separation of concerns:
 
-- `shamir.rs` - Shamir Secret Sharing implementation with field operations and polynomial interpolation
+- `../rns_shamir.rs` - crate-private direct RNS Shamir arithmetic shared by threshold schemes
 - `smudging.rs` - Smudging noise generation with optimal variance calculation using arbitrary precision arithmetic  
 - `shares.rs` - Share aggregation and decryption operations management
 - `threshold.rs` - Main TRBFV coordinator struct
 - `config.rs` - Parameter validation
 - `errors.rs` - Threshold-specific error types
+
+The former public `trbfv::shamir` module and `ShamirSecretSharing` type were
+removed when share generation and reconstruction moved to direct RNS
+arithmetic. Callers should use `TRBFV` or `ShareManager`; their high-level share
+generation, aggregation, and reconstruction APIs retain the same logical share
+layout.
 
 ## Noise and Correctness Formulas (Urban–Rambaud 2024)
 
@@ -209,8 +215,7 @@ The security of the threshold scheme relies on:
 - Protection of individual secret key shares
 - Appropriate smudging noise generation
 
-Note that the Shamir secret sharing operations use arbitrary-precision integer
-arithmetic that is not constant-time. These computations are local to each
-party (shares and secrets never traverse a timing-observable boundary during
-them), so this is a low-severity caveat, but co-located attacker models should
-take it into account.
+Shamir secret sharing operates directly on canonical RNS residues. Operations
+on secret coefficients use the constant-time `Modulus` arithmetic; Lagrange
+inversion depends only on public party coordinates and prime ciphertext
+moduli.
