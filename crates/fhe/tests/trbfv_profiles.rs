@@ -6,9 +6,7 @@
 mod support;
 
 use fhe::bfv::Ciphertext;
-use fhe::trbfv::{
-    Lambda, MIN_SECURE_LAMBDA, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
-};
+use fhe::trbfv::{ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
 use fhe::{Error, ThresholdError};
 use fhe_math::rq::{Poly, PowerBasis};
 use num_traits::Zero;
@@ -57,11 +55,9 @@ fn profiles_match_threshold_configuration() {
 #[test]
 fn named_profiles_have_feasible_smudging_bounds() {
     for profile in profiles() {
-        let lambda = if profile.lambda < MIN_SECURE_LAMBDA {
-            Lambda::insecure(profile.lambda)
-        } else {
-            Lambda::secure(profile.lambda).unwrap()
-        };
+        // Lambda is caller-chosen policy; the library only rejects values
+        // above fhe::trbfv::smudging::MAX_LAMBDA.
+        let lambda = profile.lambda;
         let config = match profile.multiplicative_depth {
             Some(depth) => SmudgingBoundCalculatorConfig::new_multiplicative(
                 profile.parameters.clone(),

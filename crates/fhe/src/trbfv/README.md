@@ -124,8 +124,8 @@ Let `mult_depth` be the number of multiplication levels.
     `accepted_participant_count` (the size of the *l*-BFV accepted set).
 
 - **Smudging bound:** `B&#x209b;&#x2098; = 2^(lambda + 1) &middot; d &middot; B&#x1d9c;` where
-  `lambda` is the statistical security parameter (see
-  [`MIN_SECURE_LAMBDA`]) and `d` is the polynomial ring degree. The extra
+  `lambda` is the statistical security parameter and `d` is the polynomial
+  ring degree. The extra
   factor `2 &middot; d` is the whole-transcript policy (issue #108): a single
   decryption reveals all `d` coefficients of the smudging noise at once, so a
   union bound over the coefficients adds a factor `d`, and `2^(lambda + 1)`
@@ -179,12 +179,17 @@ include the complete robust protocol stack from Urban–Rambaud&nbsp;2024:
 Callers who need full end-to-end robust threshold FHE must provide these
 components externally.
 
-### `MIN_SECURE_LAMBDA` is a statistical-hiding policy
+### `lambda` is a caller-chosen policy
 
-[`MIN_SECURE_LAMBDA`] is a policy threshold for statistical hiding — a larger
-`lambda` produces a stronger noise-flooding guarantee.  It is **not** a
-computational-security bound or a claim about bit-security.  See the
-[`Lambda`] type documentation.
+The statistical security parameter `lambda` is a plain `usize` in
+`0..=smudging::MAX_LAMBDA`. A larger `lambda` produces a stronger noise-flooding
+guarantee — it is **not** a computational-security bound or a claim about
+bit-security. The library enforces only representability: values above
+`smudging::MAX_LAMBDA` are rejected, while values below the deployment's own
+policy minimum are accepted and are simply weaker. Since achievability
+depends on the full parameter set (degree, moduli, plaintext modulus,
+circuit depth), the library does not impose a universal minimum; callers
+validate against their own policy.
 
 ## Usage
 
@@ -199,8 +204,7 @@ Basic usage pattern:
 
 ```rust
 use fhe::trbfv::{
-    Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
-    SmudgingNoiseGenerator,
+    ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
 };
 
 // Setup threshold scheme; each party holds its own manager instance

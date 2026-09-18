@@ -490,7 +490,7 @@ mod tests {
     use crate::ThresholdError;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use crate::trbfv::smudging::{
-        Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
+        SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
     };
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use num_bigint::BigUint;
@@ -507,7 +507,7 @@ mod tests {
 
     /// Smudging-bound tests below use a degree-8192 profile: the larger
     /// modulus chain leaves room for the statistically-hiding noise bound
-    /// that `Lambda::secure(80)` requires.
+    /// that lambda = 80 requires.
     fn secure8192_params() -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
             .set_degree(8192)
@@ -643,14 +643,8 @@ mod tests {
 
         // The supported flow: compute the bound with the smudging machinery,
         // sample the noise, and deal it into Shamir shares immediately.
-        let config = SmudgingBoundCalculatorConfig::new_multiplicative(
-            params.clone(),
-            n,
-            1,
-            0,
-            Lambda::secure(80).unwrap(),
-        )
-        .unwrap();
+        let config =
+            SmudgingBoundCalculatorConfig::new_multiplicative(params.clone(), n, 1, 0, 80).unwrap();
         let generator =
             SmudgingNoiseGenerator::from_bound_calculator(SmudgingBoundCalculator::new(config))
                 .unwrap();

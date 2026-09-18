@@ -59,12 +59,6 @@ impl Error {
         Error::Threshold(ThresholdError::NonInvertibleShares)
     }
 
-    /// Create an insecure lambda error.
-    #[must_use]
-    pub fn insecure_lambda(lambda: usize, min: usize) -> Self {
-        Error::Threshold(ThresholdError::InsecureLambda { lambda, min })
-    }
-
     /// Create a smudging bound infeasibility error.
     pub fn smudging_bound_infeasible<S: Into<String>>(reason: S) -> Self {
         Error::Threshold(ThresholdError::SmudgingBoundInfeasible {
@@ -144,12 +138,6 @@ mod tests {
         assert!(matches!(
             error,
             Error::Threshold(ThresholdError::NonInvertibleShares)
-        ));
-
-        let error = Error::insecure_lambda(2, 50);
-        assert!(matches!(
-            error,
-            Error::Threshold(ThresholdError::InsecureLambda { lambda: 2, min: 50 })
         ));
 
         let error = Error::smudging_bound_infeasible("test");

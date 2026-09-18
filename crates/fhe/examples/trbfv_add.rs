@@ -18,7 +18,7 @@ use fhe::{
     bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
     trbfv::{
-        Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+        ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
         SmudgingNoiseGenerator,
     },
 };
@@ -121,9 +121,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // The parameters are within bound, let's go! Let's first display some
     // information about the threshold sum.
-    // Secure example: rejects lambda below the secure minimum. See
-    // trbfv_add_bfv_share_insecure.rs for the explicit insecure test mode.
-    let security = Lambda::secure(lambda)?;
+    // Lambda is caller-chosen policy: larger values give a stronger
+    // statistical-hiding guarantee, bounded above by smudging's MAX_LAMBDA.
 
     println!("# Addition with trBFV");
     println!("\tnum_summed = {num_summed}");
@@ -188,7 +187,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     num_parties,
                     num_summed,
                     0,
-                    security,
+                    lambda,
                 )
                 .unwrap();
                 let generator = SmudgingNoiseGenerator::from_bound_calculator(

@@ -13,6 +13,6 @@ pub mod smudging;
 // Re-export main types for convenience
 pub use shares::ShareManager;
 pub use smudging::{
-    GeneratedSmudgingNoise, Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator,
-    SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
+    GeneratedSmudgingNoise, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+    SmudgingNoiseGenerator,
 };

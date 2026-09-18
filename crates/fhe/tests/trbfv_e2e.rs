@@ -10,8 +10,7 @@ use std::sync::Arc;
 
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::trbfv::{
-    Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
-    SmudgingNoiseGenerator,
+    ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
@@ -49,7 +48,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
                 N,
                 2,
                 0,
-                Lambda::secure(LAMBDA_VALUE).unwrap(),
+                LAMBDA_VALUE,
             )
             .expect("smudging config");
             let generator =

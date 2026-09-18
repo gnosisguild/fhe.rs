@@ -3,7 +3,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
-use fhe::trbfv::{Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
+use fhe::trbfv::{SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
 use num_bigint::BigUint;
 
 #[test]
@@ -49,7 +49,7 @@ fn secure8192_profile_is_feasible_and_covers_share_moduli() {
         preset.parameters.clone(),
         preset.num_parties,
         preset.max_ciphertexts,
-        Lambda::secure(preset.lambda).unwrap(),
+        preset.lambda,
     )
     .unwrap();
     let bound = SmudgingBoundCalculator::new(config)
@@ -98,7 +98,7 @@ fn secure16384_profile_is_feasible_and_covers_share_moduli() {
         preset.num_parties,
         preset.max_ciphertexts,
         preset.multiplicative_depth.unwrap(),
-        Lambda::secure(preset.lambda).unwrap(),
+        preset.lambda,
     )
     .unwrap();
     let bound = SmudgingBoundCalculator::new(config)

@@ -8,7 +8,7 @@ use crate::Error;
 /// Key features:
 /// - Arbitrary precision variance calculation using BigUint
 /// - Efficient noise generation using standard uniform sampling
-/// - Statistical security parameter λ (see [`Lambda`] and [`MIN_SECURE_LAMBDA`])
+/// - Statistical security parameter λ, bounded above by [`MAX_LAMBDA`]
 /// - Correctness enforced via strict `2 * (B_C + n * B_sm) < Delta` with `Delta = floor(Q / t)`
 /// - Multiplicative-depth noise recursion via Prop.&nbsp;20
 /// - Distributed RLK error accounting via `accepted_participant_count * B_e`
@@ -24,74 +24,16 @@ use std::fmt;
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
-/// Minimum statistical security parameter accepted for production use.
+/// Maximum statistical security parameter accepted for the smudging bound.
 ///
-/// This is a statistical-hiding policy threshold: noise with
-/// `B_sm = 2^(lambda + 1) * d * B_C` (`d` = polynomial degree) is intended to
-/// statistically hide the decryption noise for a whole decryption transcript
-/// (all `d` coefficients revealed at once), not just a single coefficient.
-/// A larger lambda gives a stronger guarantee, not a computational one.
-/// [`MIN_SECURE_LAMBDA`] is a policy choice, not derived from a cryptographic
-/// reduction.
-pub const MIN_SECURE_LAMBDA: usize = 31;
-
-/// Maximum lambda value beyond which `2^(lambda + 1) * d * B_C` is
-/// computationally infeasible to represent. Rejecting values above this
-/// ceiling prevents massive memory allocations from huge BigUint shifts.
-const MAX_FEASIBLE_LAMBDA: usize = 256;
-
-/// Statistical security level for smudging noise generation.
-///
-/// The smudging bound is always computed as `B_sm = 2^(lambda + 1) * d * B_C`
-/// (`d` = polynomial degree, accounting for all `d` coefficients a single
-/// decryption reveals at once — see issue #108); this type only controls
-/// which values of lambda the library accepts. Production code must use
-/// [`Lambda::secure`], which rejects lambda below [`MIN_SECURE_LAMBDA`]. Test
-/// setups that deliberately trade security for speed must opt in explicitly
-/// via [`Lambda::insecure`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lambda {
-    /// Statistical security parameter validated to be >= [`MIN_SECURE_LAMBDA`].
-    /// Construct via [`Lambda::secure`].
-    Secure(usize),
-    /// NOT SECURE: lambda below [`MIN_SECURE_LAMBDA`], so the smudging noise
-    /// does not statistically hide the decryption noise. For testing only.
-    /// Construct via [`Lambda::insecure`].
-    Insecure(usize),
-}
-
-impl Lambda {
-    /// Create a secure level. Fails if `lambda < MIN_SECURE_LAMBDA`.
-    pub fn secure(lambda: usize) -> Result<Self, Error> {
-        if lambda < MIN_SECURE_LAMBDA {
-            return Err(Error::insecure_lambda(lambda, MIN_SECURE_LAMBDA));
-        }
-        Ok(Self::Secure(lambda))
-    }
-
-    /// Create an explicitly insecure level for fast testing (lambda clamped to >= 2).
-    ///
-    /// The smudging noise generated under this level does NOT hide the
-    /// decryption noise. Never use in production.
-    #[must_use]
-    pub fn insecure(lambda: usize) -> Self {
-        Self::Insecure(lambda.max(2))
-    }
-
-    /// The statistical security parameter lambda.
-    #[must_use]
-    pub fn value(&self) -> usize {
-        match self {
-            Self::Secure(lambda) | Self::Insecure(lambda) => *lambda,
-        }
-    }
-
-    /// Whether this level meets the secure minimum.
-    #[must_use]
-    pub fn is_secure(&self) -> bool {
-        matches!(self, Self::Secure(_))
-    }
-}
+/// The smudging bound is `B_sm = 2^(lambda + 1) * d * B_C` (`d` = polynomial
+/// degree); larger values are computationally infeasible to represent, so
+/// values above this ceiling are rejected to prevent massive allocations
+/// from huge BigUint shifts. How much statistical hiding a given lambda
+/// provides depends on the full parameter set (degree, moduli, plaintext
+/// modulus, circuit depth), so this is the only lambda bound the library
+/// enforces: callers choose lambda according to their deployment's policy.
+pub const MAX_LAMBDA: usize = 256;
 
 /// Configuration for calculating optimal smudging variance in threshold BFV.
 ///
@@ -118,8 +60,11 @@ pub struct SmudgingBoundCalculatorConfig {
     pub public_key_error: u64,
     /// Secret key poly infinity-norm bound
     pub secret_key_bound: u64,
-    /// Statistical security level
-    pub lambda: Lambda,
+    /// Statistical security parameter: the smudging bound grows as
+    /// `2^(lambda + 1) * d * B_C`. Larger values give stronger statistical
+    /// hiding; values above [`MAX_LAMBDA`] are rejected. Choosing lambda for
+    /// a deployment is the caller's policy.
+    pub lambda: usize,
     /// Multiplicative circuit depth (0 for additive-only circuits).
     ///
     /// When non-zero, `calculate_sm_bound` applies the Prop. 20 noise growth
@@ -170,12 +115,13 @@ impl SmudgingBoundCalculatorConfig {
     /// * `lambda` - Statistical security level
     ///
     /// # Errors
-    /// Returns an error when `n` or `m` is zero.
+    /// Returns an error when `n` or `m` is zero, or when `lambda` exceeds
+    /// [`MAX_LAMBDA`].
     pub fn new(
         params: Arc<BfvParameters>,
         n: usize,
         m: usize,
-        lambda: Lambda,
+        lambda: usize,
     ) -> Result<Self, Error> {
         if n == 0 {
             return Err(Error::smudging_bound_infeasible(
@@ -186,6 +132,11 @@ impl SmudgingBoundCalculatorConfig {
             return Err(Error::smudging_bound_infeasible(
                 "number of ciphertexts m must be positive",
             ));
+        }
+        if lambda > MAX_LAMBDA {
+            return Err(Error::smudging_bound_infeasible(format!(
+                "lambda {lambda} exceeds maximum feasible value {MAX_LAMBDA}"
+            )));
         }
         let variance = params.variance();
         let b_enc = compute_b_enc(params.get_error1_variance());
@@ -213,13 +164,14 @@ impl SmudgingBoundCalculatorConfig {
     /// * `lambda` - Statistical security level
     ///
     /// # Errors
-    /// Returns an error when `n` or `m` is zero.
+    /// Returns an error when `n` or `m` is zero, or when `lambda` exceeds
+    /// [`MAX_LAMBDA`].
     pub fn new_multiplicative(
         params: Arc<BfvParameters>,
         n: usize,
         m: usize,
         mult_depth: u32,
-        lambda: Lambda,
+        lambda: usize,
     ) -> Result<Self, Error> {
         let mut config = Self::new(params, n, m, lambda)?;
         config.mult_depth = mult_depth;
@@ -306,7 +258,7 @@ impl SmudgingBoundCalculator {
     /// Returns error if:
     /// - Inputs are invalid (zero n/m, empty moduli, zero plaintext, zero variance)
     /// - Accepted participant count is zero or exceeds n
-    /// - Lambda exceeds [`MAX_FEASIBLE_LAMBDA`]
+    /// - `lambda` exceeds [`MAX_LAMBDA`]
     /// - `2 * B_C >= Delta` (circuit too deep or parameters too small)
     /// - `2 * (B_C + n * B_sm) >= Delta` (security requirement infeasible)
     pub fn calculate_sm_bound(&self) -> Result<BigUint, Error> {
@@ -348,11 +300,11 @@ impl SmudgingBoundCalculator {
             ));
         }
 
-        let lambda = self.config.lambda.value();
+        let lambda = self.config.lambda;
         // Reject infeasible lambda before any large allocation.
-        if lambda > MAX_FEASIBLE_LAMBDA {
+        if lambda > MAX_LAMBDA {
             return Err(Error::smudging_bound_infeasible(format!(
-                "lambda {lambda} exceeds maximum feasible value {MAX_FEASIBLE_LAMBDA}"
+                "lambda {lambda} exceeds maximum feasible value {MAX_LAMBDA}"
             )));
         }
 
@@ -430,7 +382,7 @@ impl SmudgingBoundCalculator {
         // statistical distance for a single coefficient; the union bound over
         // the `d` coefficients requires the additional degree factor.
         // Use BigUint shift to avoid usize → u32 truncation.
-        // `lambda` was already validated against MAX_FEASIBLE_LAMBDA above.
+        // `lambda` was already validated against MAX_LAMBDA above.
         let two_pow_lambda_plus_one = BigUint::from(1_u64) << (lambda + 1);
         let b_sm = two_pow_lambda_plus_one * &d * &b_c;
 
@@ -910,26 +862,21 @@ mod tests {
     #[test]
     fn config_new_uses_computed_b_enc() {
         let params = test_params();
-        let config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2, Lambda::secure(80).unwrap())
-                .unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2, 80).unwrap();
         assert_eq!(config.b_enc, compute_b_enc(params.get_error1_variance()));
     }
 
     #[test]
     fn zero_party_or_ciphertext_config_is_rejected() {
         let params = test_params();
-        assert!(
-            SmudgingBoundCalculatorConfig::new(params.clone(), 0, 1, Lambda::insecure(2),).is_err()
-        );
-        assert!(SmudgingBoundCalculatorConfig::new(params, 1, 0, Lambda::insecure(2)).is_err());
+        assert!(SmudgingBoundCalculatorConfig::new(params.clone(), 0, 1, 2,).is_err());
+        assert!(SmudgingBoundCalculatorConfig::new(params, 1, 0, 2).is_err());
     }
 
     #[test]
     fn calculate_sm_bound_revalidates_party_and_ciphertext_counts() {
         let params = test_params();
-        let mut config =
-            SmudgingBoundCalculatorConfig::new(params, 1, 1, Lambda::insecure(2)).unwrap();
+        let mut config = SmudgingBoundCalculatorConfig::new(params, 1, 1, 2).unwrap();
         config.n = 0;
         assert!(
             SmudgingBoundCalculator::new(config)
@@ -937,8 +884,7 @@ mod tests {
                 .is_err()
         );
 
-        let mut config =
-            SmudgingBoundCalculatorConfig::new(test_params(), 1, 1, Lambda::insecure(2)).unwrap();
+        let mut config = SmudgingBoundCalculatorConfig::new(test_params(), 1, 1, 2).unwrap();
         config.m = 0;
         assert!(
             SmudgingBoundCalculator::new(config)
@@ -967,10 +913,12 @@ mod tests {
 
     #[test]
     fn strict_inequality_rejects_boundary() {
-        // Use injected B_C to construct an exact boundary case.
-        // With n=1, lambda=0 → B_sm = B_C.
-        // 2*(B_C + n*B_sm) = 2*(B_C + B_C) = 4*B_C.
-        // We pick Delta = 4*B_C exactly, so the strict `<` must reject.
+        // Exercise the strict-inequality rejection path with an injected B_C
+        // that passes the earlier `2 * B_C < Delta` check. Note: the
+        // historical premise "lambda=0 → B_sm = B_C" is unreachable under
+        // B_sm = 2^(lambda + 1) * d * B_C (the multiplier is >= 2*d), so the
+        // rejection here fires well away from exact equality.
+        // TODO: redesign for a true `2*(B_C + n*B_sm) == Delta` boundary.
         let params = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(2)
@@ -992,7 +940,7 @@ mod tests {
             "B_C * 4 should equal Delta"
         );
 
-        let lambda = Lambda::insecure(0);
+        let lambda = 0;
         let config = SmudgingBoundCalculatorConfig::new(params.clone(), 1, 1, lambda).unwrap();
         let err = SmudgingBoundCalculator::new(config)
             .with_initial_ciphertext_noise_bound(bc)
@@ -1010,7 +958,7 @@ mod tests {
     #[test]
     fn accepted_participant_count_defaults_to_n() {
         let params = test_params();
-        let config = SmudgingBoundCalculatorConfig::new(params, 7, 1, Lambda::insecure(2)).unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params, 7, 1, 2).unwrap();
         let calc = SmudgingBoundCalculator::new(config);
         // Not directly accessible, but verified through behavior:
         // setting count to 7 should NOT error.
@@ -1021,7 +969,7 @@ mod tests {
     #[test]
     fn accepted_participant_count_rejects_zero() {
         let params = test_params();
-        let config = SmudgingBoundCalculatorConfig::new(params, 5, 1, Lambda::insecure(2)).unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params, 5, 1, 2).unwrap();
         let err = SmudgingBoundCalculator::new(config)
             .with_accepted_participant_count(0)
             .calculate_sm_bound()
@@ -1032,7 +980,7 @@ mod tests {
     #[test]
     fn accepted_participant_count_rejects_above_n() {
         let params = test_params();
-        let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, Lambda::insecure(2)).unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, 2).unwrap();
         let err = SmudgingBoundCalculator::new(config)
             .with_accepted_participant_count(4)
             .calculate_sm_bound()
@@ -1043,14 +991,8 @@ mod tests {
     #[test]
     fn accepted_participant_count_increases_bound() {
         let params = test_params();
-        let config = SmudgingBoundCalculatorConfig::new_multiplicative(
-            params.clone(),
-            5,
-            1,
-            1,
-            Lambda::insecure(2),
-        )
-        .unwrap();
+        let config =
+            SmudgingBoundCalculatorConfig::new_multiplicative(params.clone(), 5, 1, 1, 2).unwrap();
         let bound_all = SmudgingBoundCalculator::new(config.clone())
             .with_accepted_participant_count(5)
             .calculate_sm_bound()
@@ -1073,7 +1015,7 @@ mod tests {
         let params = test_params();
         let d = BigUint::from(params.degree());
         let injected = BigUint::from(12345_u64);
-        let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, Lambda::insecure(2)).unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, 2).unwrap();
         let bound = SmudgingBoundCalculator::new(config)
             .with_initial_ciphertext_noise_bound(injected.clone())
             .calculate_sm_bound()
@@ -1083,21 +1025,16 @@ mod tests {
         assert_eq!(bound, BigUint::from(8_u64) * &d * &injected);
     }
 
-    // ── Lambda handling (no u32 truncation) ──────────────────────────────
+    // ── Lambda MAX bound (no truncation) ─────────────────────────────────
 
     #[test]
     fn huge_lambda_rejected_before_allocation() {
         // lambda = u32::MAX + 1 would truncate with `as u32`, but our code
-        // rejects it before computing 2^lambda.
+        // rejects it at configuration time, before computing 2^lambda.
         let huge_lambda = (u32::MAX as usize) + 1;
         assert!(huge_lambda > u32::MAX as usize); // on 64-bit only
         let params = test_params();
-        let config =
-            SmudgingBoundCalculatorConfig::new(params, 3, 1, Lambda::insecure(huge_lambda))
-                .unwrap();
-        let err = SmudgingBoundCalculator::new(config)
-            .calculate_sm_bound()
-            .unwrap_err();
+        let err = SmudgingBoundCalculatorConfig::new(params, 3, 1, huge_lambda).unwrap_err();
         assert!(err.to_string().contains("lambda"));
     }
 
@@ -1106,16 +1043,14 @@ mod tests {
         // 2^256 is huge but should not truncate.  The correctness check
         // will likely fail, but we verify no silent truncation.
         let params = test_params();
-        let config =
-            SmudgingBoundCalculatorConfig::new(params, 1, 1, Lambda::insecure(MAX_FEASIBLE_LAMBDA))
-                .unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params, 1, 1, MAX_LAMBDA).unwrap();
         let result = SmudgingBoundCalculator::new(config).calculate_sm_bound();
         // Whether it succeeds or fails depends on parameters — either way,
         // we assert that if it succeeds, the bound uses the full lambda
         // multiplier (i.e., it is huge, not truncated to <= 2^u32::MAX).
         if let Ok(bound) = result {
             // The bound should have at least lambda+1 bits if B_C >= 1.
-            assert!(bound.bits() as usize > MAX_FEASIBLE_LAMBDA);
+            assert!(bound.bits() as usize > MAX_LAMBDA);
         }
     }
 
@@ -1123,8 +1058,7 @@ mod tests {
     fn lambda_floor_is_exact_no_rounding() {
         // lambda=35: B_sm = 2^36 * d * B_C exactly.
         let params = test_params();
-        let config =
-            SmudgingBoundCalculatorConfig::new(params, 3, 1, Lambda::secure(35).unwrap()).unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, 35).unwrap();
         let calc = SmudgingBoundCalculator::new(config);
         // For these test params the bound should be feasible.
         let bound = calc.calculate_sm_bound().unwrap();
@@ -1139,14 +1073,12 @@ mod tests {
     #[test]
     fn test_smudging_bound_calculator_config() {
         let params = test_params();
-        let config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2, Lambda::secure(80).unwrap())
-                .unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2, 80).unwrap();
 
         assert_eq!(config.params, params);
         assert_eq!(config.n, 5);
         assert_eq!(config.m, 2);
-        assert_eq!(config.lambda.value(), 80);
+        assert_eq!(config.lambda, 80);
         assert_eq!(config.b_enc, compute_b_enc(params.get_error1_variance()));
         assert_eq!(config.b_e, (params.variance() * 2) as u64);
         assert_eq!(
@@ -1154,15 +1086,13 @@ mod tests {
             (config.n as u64) * (2 * params.variance()) as u64
         );
         assert_eq!(config.secret_key_bound, 5);
-        assert_eq!(config.lambda.value(), 80);
+        assert_eq!(config.lambda, 80);
     }
 
     #[test]
     fn test_smudging_bound_calculator_minimal_case() {
         let params = test_params();
-        let config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::secure(80).unwrap())
-                .unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 80).unwrap();
         let calculator = SmudgingBoundCalculator::new(config);
 
         let result = calculator.calculate_sm_bound();
@@ -1196,9 +1126,7 @@ mod tests {
     #[test]
     fn test_smudging_noise_generator_from_calculator() {
         let params = test_params();
-        let config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::secure(80).unwrap())
-                .unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 80).unwrap();
         let calculator = SmudgingBoundCalculator::new(config);
 
         let result = SmudgingNoiseGenerator::from_bound_calculator(calculator);
@@ -1368,9 +1296,7 @@ mod tests {
         let n = 3;
         let m = 1;
 
-        let config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), n, m, Lambda::secure(80).unwrap())
-                .unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), n, m, 80).unwrap();
         let calculator = SmudgingBoundCalculator::new(config);
 
         let bound_result = calculator.calculate_sm_bound();
@@ -1511,7 +1437,7 @@ mod tests {
             .set_moduli_sizes(&[62, 62, 62, 62, 62, 62])
             .build_arc()
             .unwrap();
-        let lambda = Lambda::insecure(2);
+        let lambda = 2;
 
         // n=3: verify depth=1 strictly exceeds depth=0.
         let bound_add = SmudgingBoundCalculator::new(
@@ -1558,7 +1484,7 @@ mod tests {
     #[test]
     fn smudging_bound_is_nonzero_for_feasible_params() {
         let params = test_params();
-        let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, Lambda::insecure(2)).unwrap();
+        let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, 2).unwrap();
         let bound = SmudgingBoundCalculator::new(config)
             .calculate_sm_bound()
             .unwrap();
@@ -1568,10 +1494,8 @@ mod tests {
     #[test]
     fn smudging_bound_increases_with_more_ciphertexts() {
         let params = test_params();
-        let m1_config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::insecure(2)).unwrap();
-        let m2_config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 2, Lambda::insecure(2)).unwrap();
+        let m1_config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 2).unwrap();
+        let m2_config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 2, 2).unwrap();
         let b1 = SmudgingBoundCalculator::new(m1_config)
             .calculate_sm_bound()
             .unwrap();
@@ -1584,10 +1508,8 @@ mod tests {
     #[test]
     fn smudging_bound_increases_with_larger_lambda() {
         let params = test_params();
-        let l10_config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::insecure(10)).unwrap();
-        let l11_config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::insecure(11)).unwrap();
+        let l10_config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 10).unwrap();
+        let l11_config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 11).unwrap();
         let b10 = SmudgingBoundCalculator::new(l10_config)
             .calculate_sm_bound()
             .unwrap();
@@ -1604,10 +1526,8 @@ mod tests {
         // (2^(lambda + 1) * d) doesn't depend on n directly — but B_fresh
         // depends on n through public_key_error. So larger n → larger B_C
         // → larger B_sm for the same lambda.
-        let n1_config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 1, 1, Lambda::insecure(2)).unwrap();
-        let n3_config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::insecure(2)).unwrap();
+        let n1_config = SmudgingBoundCalculatorConfig::new(params.clone(), 1, 1, 2).unwrap();
+        let n3_config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 2).unwrap();
         let b1 = SmudgingBoundCalculator::new(n1_config)
             .calculate_sm_bound()
             .unwrap();
@@ -1620,14 +1540,14 @@ mod tests {
     #[test]
     fn zero_ciphertexts_rejected() {
         let params = test_params();
-        let result = SmudgingBoundCalculatorConfig::new(params, 3, 0, Lambda::insecure(2));
+        let result = SmudgingBoundCalculatorConfig::new(params, 3, 0, 2);
         assert!(result.unwrap_err().to_string().contains("ciphertexts"));
     }
 
     #[test]
     fn zero_parties_rejected() {
         let params = test_params();
-        let result = SmudgingBoundCalculatorConfig::new(params, 0, 1, Lambda::insecure(2));
+        let result = SmudgingBoundCalculatorConfig::new(params, 0, 1, 2);
         assert!(result.unwrap_err().to_string().contains("parties"));
     }
 }

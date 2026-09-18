@@ -33,7 +33,7 @@ use fhe::{
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
     trbfv::{
-        Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+        ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
         SmudgingNoiseGenerator,
     },
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
@@ -140,7 +140,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
     }
 
-    let security = Lambda::secure(lambda)?;
     let mut rng = rand::rng();
 
     println!("\n# Threshold BFV multiplication");
@@ -204,7 +203,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     num_parties,
                     3,
                     preset.multiplicative_depth.unwrap(),
-                    security,
+                    lambda,
                 )
                 .unwrap();
                 let generator = SmudgingNoiseGenerator::from_bound_calculator(

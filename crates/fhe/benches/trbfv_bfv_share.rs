@@ -6,8 +6,7 @@ use fhe::bfv::CommonRandomPoly;
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::PublicKeyShare;
 use fhe::trbfv::{
-    Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
-    SmudgingNoiseGenerator,
+    ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
@@ -83,7 +82,7 @@ fn bench_data_sizes(c: &mut Criterion) {
             num_parties,
             100,
             0,
-            Lambda::secure(preset.lambda).unwrap(),
+            preset.lambda,
         )
         .unwrap();
         let generator =

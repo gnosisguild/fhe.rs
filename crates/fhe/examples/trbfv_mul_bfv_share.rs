@@ -1,6 +1,6 @@
 // Threshold BFV multiplication with distributed l-BFV RLK and encrypted share transport.
 //
-// Smudging noise is computed via the secure `Lambda::secure(lambda)` API with
+// Smudging noise is computed via the smudging machinery with
 // `SmudgingBoundCalculator::with_accepted_participant_count(num_parties)` so the
 // accepted l-BFV participant count is explicit in the smudging bound. Paper-conforming
 // robustness requires odd n = 2t + 1; even n is accepted for compatibility but lies
@@ -39,7 +39,7 @@ use fhe::{
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     trbfv::{
-        Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+        ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
         SmudgingNoiseGenerator,
     },
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
@@ -62,9 +62,9 @@ fn print_notice_and_exit(error: Option<String>) {
         style("     usage:").magenta().bold()
     );
     println!(
-        "{} T ≤ (N-1)/2, N ≥ 1, L ≥ {}. Paper-conforming robustness requires odd N (N = 2t + 1);",
+        "{} T ≤ (N-1)/2, N ≥ 1, L ≤ {}. Paper-conforming robustness requires odd N (N = 2t + 1);",
         style("constraints:").magenta().bold(),
-        fhe::trbfv::MIN_SECURE_LAMBDA,
+        fhe::trbfv::smudging::MAX_LAMBDA,
     );
     println!(
         "{} even N is accepted for compatibility but lies outside the paper's theorem.",
@@ -159,13 +159,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Use the secure-16384 design point supplied for the depth-3 preset.
-    let security = Lambda::secure(lambda)?;
     let mut rng = rand::rng();
 
     println!("\n# Threshold BFV multiplication");
     println!("  num_parties       = {num_parties}  (params: n=20, k=1000, z=3, λ=31)");
     println!("  threshold         = {threshold}");
-    println!("  lambda            = {lambda}  (secure, >= fhe::trbfv::MIN_SECURE_LAMBDA)");
+    println!("  lambda            = {lambda}  (bounded by fhe::trbfv::smudging::MAX_LAMBDA)");
     println!(
         "  l-BFV participants = {num_parties}  (accepted RLK contributors for smudging bound)"
     );
@@ -220,7 +219,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     num_parties,
                     3,
                     preset.multiplicative_depth.unwrap(),
-                    security,
+                    lambda,
                 )
                 .unwrap();
                 let calculator = SmudgingBoundCalculator::new(config)

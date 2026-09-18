@@ -17,7 +17,7 @@ use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
     trbfv::{
-        Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+        ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
         SmudgingNoiseGenerator,
     },
 };
@@ -141,7 +141,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Insecure test mode: small lambda for speed; the smudging noise does NOT
     // hide the decryption noise. Never use this in production.
-    let security = Lambda::insecure(lambda);
 
     println!("# Addition with trBFV (with encrypted share transmission)");
     println!("\tnum_summed = {num_summed}");
@@ -201,7 +200,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     num_parties,
                     num_summed,
                     0,
-                    security,
+                    lambda,
                 )
                 .unwrap();
                 let generator = SmudgingNoiseGenerator::from_bound_calculator(
