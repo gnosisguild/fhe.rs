@@ -198,7 +198,7 @@ use fhe::trbfv::{ShareManager, TRBFV};
 
 // Setup threshold scheme
 let trbfv = TRBFV::new(n_parties, threshold, params.clone())?;
-let share_manager = ShareManager::new(n_parties, threshold, params.clone())?;
+let mut share_manager = ShareManager::new(n_parties, threshold, params.clone())?;
 
 // Each party: deal secret shares of its key and smudging noise contributions.
 // The noise owner is one-time material consumed by the dealing operation;

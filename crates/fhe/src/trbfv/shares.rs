@@ -155,6 +155,15 @@ impl ShareManager {
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
+    ///
+    /// # One-time use
+    ///
+    /// Unlike [`ShareManager::generate_secret_shares_from_smudging_noise`],
+    /// this method accepts any caller-provided polynomial and therefore
+    /// cannot enforce one-time use: nothing here prevents dealing the same
+    /// polynomial twice. Callers dealing smudging noise must sample it fresh
+    /// for every decryption; reusing noise breaks the statistical hiding
+    /// argument.
     pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
         &mut self,
         poly: Zeroizing<Poly<PowerBasis>>,
@@ -593,7 +602,8 @@ mod tests {
         let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
         let mut rng = rng();
 
-        let generator = SmudgingNoiseGenerator::new(params.clone(), BigUint::from(1000u64));
+        let generator =
+            SmudgingNoiseGenerator::new(params.clone(), BigUint::from(1000u64)).unwrap();
         let noise = generator.generate_smudging_error(&mut rng).unwrap();
         let shares = manager
             .generate_secret_shares_from_smudging_noise(noise, &mut rng)

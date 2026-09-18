@@ -15,6 +15,7 @@ use crate::Error;
 /// - Sampler-aligned `B_enc` (CBD support for small variance, `sqrt(3*var)` for large)
 use crate::bfv::BfvParameters;
 use fhe_math::rq::{Poly, PowerBasis};
+use fhe_math::zq::Modulus;
 use ndarray::Array2;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -450,8 +451,11 @@ impl SmudgingBoundCalculator {
 ///
 /// Each coefficient is sampled uniformly from `[-B_sm, B_sm]` directly into
 /// RNS representation, as specified for the smudging noise in the trBFV
-/// paper. The secret sampling path uses plain `u64` limb arithmetic only;
-/// arbitrary-precision integers appear solely for the public bound, range,
+/// paper. The secret sampling path uses constant-time `u64`/`u128` limb
+/// arithmetic only — a branch-free limb comparison and Barrett reductions
+/// from the context's modulus operators, never secret-dependent branches or
+/// hardware division — so its timing does not depend on the sampled values.
+/// Arbitrary-precision integers appear solely for the public bound, range,
 /// and moduli.
 #[derive(Debug)]
 pub struct SmudgingNoiseGenerator {
@@ -459,26 +463,40 @@ pub struct SmudgingNoiseGenerator {
     smudging_bound: BigUint,
 }
 
-/// Little-endian limb comparison: returns whether `a < b`.
-/// Both slices must have the same length.
+/// Little-endian limb comparison: returns whether `a < b` in constant time.
+///
+/// The comparison walks every limb and never returns early: bailing out at
+/// the first differing limb would leak the position of that limb, and with
+/// it the top bits of the secret candidate, through timing. Instead each
+/// limb is folded into a branch-free decision, so the running time depends
+/// only on the (public) limb count. Both slices must have the same length.
 fn limbs_lt(a: &[u64], b: &[u64]) -> bool {
-    // The comparison walks from the most significant limb and relies on
-    // equal lengths: `zip` would silently truncate a mismatch.
     debug_assert_eq!(a.len(), b.len(), "limb comparison requires equal lengths");
+    // Decision state: 0 = no difference seen yet, 1 = a < b, 2 = a > b.
+    // `u64` comparisons compile to branchless flag instructions, and the
+    // mask stops limbs after the first difference from changing the
+    // decision, so the loop always scans all limbs.
+    let mut decision = 0u64;
     for (ai, bi) in a.iter().zip(b).rev() {
-        if ai != bi {
-            return ai < bi;
-        }
+        let step = ((ai < bi) as u64) | (((ai > bi) as u64) << 1);
+        let undecided = ((decision == 0) as u64).wrapping_neg();
+        decision |= undecided & step;
     }
-    false
+    decision == 1
 }
 
-/// Reduce a little-endian limb value modulo `qi`.
-/// Requires `qi > 0`; an empty limb slice reduces to zero.
-fn limbs_mod(limbs: &[u64], qi: u64) -> u64 {
+/// Reduce a little-endian limb value modulo `qi` in constant time.
+///
+/// Each step folds one 64-bit limb into an accumulator below `qi < 2^62`
+/// and reduces the resulting 128-bit window with the modulus' Barrett
+/// reduction. A hardware `u128 % u128` would compile to a `__umodti3` call
+/// whose running time depends on the secret value being reduced. Requires
+/// `qi <= 2^62` (all RNS moduli are NTT-compatible 62-bit primes); an
+/// empty limb slice reduces to zero.
+fn limbs_mod(limbs: &[u64], qi: &Modulus) -> u64 {
     let mut acc = 0u64;
     for &limb in limbs.iter().rev() {
-        acc = ((u128::from(acc) << 64 | u128::from(limb)) % u128::from(qi)) as u64;
+        acc = qi.reduce_u128((u128::from(acc) << 64) | u128::from(limb));
     }
     acc
 }
@@ -523,10 +541,16 @@ impl SampleMatrix {
 
     /// Release the matrix without wiping: ownership (and erasure duty)
     /// transfers to the wipe-on-drop polynomial.
+    #[expect(
+        clippy::expect_used,
+        reason = "the matrix is only removed by this consuming take, so it is \
+                  always present; the expect states the invariant instead of \
+                  hiding it behind an unreachable fallback"
+    )]
     fn release(mut self) -> Array2<u64> {
-        // The matrix is always present: the only mutation is this consuming
-        // take, so the fallback is unreachable by construction.
-        self.matrix.take().unwrap_or_else(|| Array2::zeros((0, 0)))
+        self.matrix
+            .take()
+            .expect("sample matrix must be present until release() consumes it")
     }
 }
 
@@ -586,20 +610,40 @@ impl fmt::Debug for GeneratedSmudgingNoise {
 }
 
 impl SmudgingNoiseGenerator {
-    /// Create a new noise generator with calculated variance.
-    #[must_use]
-    pub fn new(params: Arc<BfvParameters>, smudging_bound: BigUint) -> Self {
-        Self {
+    /// Create a new noise generator with the given smudging bound.
+    ///
+    /// # Errors
+    /// Returns an error when `2 * B_sm + 1` reaches the ciphertext modulus
+    /// `Q`: candidate values in `[0, 2 * B_sm + 1)` would then wrap modulo
+    /// `Q`, silently breaking the exact uniform sampling of centered
+    /// integers in `[-B_sm, B_sm]`. Bounds computed by the smudging bound
+    /// calculator satisfy `2 * (B_C + n * B_sm) < Delta` and cannot hit
+    /// this; hand-built bounds are validated here.
+    pub fn new(params: Arc<BfvParameters>, smudging_bound: BigUint) -> Result<Self, Error> {
+        let m = BigUint::from(2u32) * &smudging_bound + BigUint::from(1u32);
+        let q: BigUint = params
+            .moduli()
+            .iter()
+            .map(|&qi| BigUint::from(qi))
+            .product();
+        if m >= q {
+            return Err(Error::smudging_bound_infeasible(format!(
+                "2*B_sm + 1 = {m} must be smaller than the ciphertext modulus Q = {q}: \
+                 otherwise smudging samples wrap modulo Q and stop encoding centered \
+                 integers in [-B_sm, B_sm]"
+            )));
+        }
+        Ok(Self {
             params,
             smudging_bound,
-        }
+        })
     }
 
     /// Create a noise generator from a smudging bound calculator.
     pub fn from_bound_calculator(calculator: SmudgingBoundCalculator) -> Result<Self, Error> {
         let params = calculator.config.params.clone();
         let smudging_bound = calculator.calculate_sm_bound()?;
-        Ok(Self::new(params, smudging_bound))
+        Self::new(params, smudging_bound)
     }
 
     /// Generate smudging noise using the calculated bound.
@@ -612,6 +656,12 @@ impl SmudgingNoiseGenerator {
     /// reduced under every RNS modulus as
     /// `(u mod q_i - B_sm mod q_i) mod q_i`.
     ///
+    /// The secret-dependent arithmetic is constant-time: the rejection
+    /// comparison is branch-free, reductions use the modulus' Barrett
+    /// reduction instead of `u128` division, and the centered subtraction is
+    /// a constant-time modular addition. The rejection loop count depends
+    /// only on the RNG stream, never on the accepted values.
+    ///
     /// # Returns
     /// A non-cloneable owner of the sampled noise polynomial, consumed by
     /// the smudging dealing operation.
@@ -621,7 +671,9 @@ impl SmudgingNoiseGenerator {
     ) -> Result<GeneratedSmudgingNoise, Error> {
         let ctx = self.params.context_at_level(0)?;
         let degree = self.params.degree();
-        let moduli = self.params.moduli();
+        // Constant-time Barrett reduction operators, one per RNS modulus in
+        // the same order as `self.params.moduli()`.
+        let moduli = ctx.moduli_operators();
         if self.smudging_bound == BigUint::from(0u64) {
             return Ok(GeneratedSmudgingNoise {
                 poly: Zeroizing::new(Poly::<PowerBasis>::zero(ctx)),
@@ -645,7 +697,7 @@ impl SmudgingNoiseGenerator {
         let bound_limbs = self.smudging_bound.to_u64_digits();
         let bound_mod: Vec<u64> = moduli
             .iter()
-            .map(|&qi| limbs_mod(&bound_limbs, qi))
+            .map(|qi| limbs_mod(&bound_limbs, qi))
             .collect();
 
         // Guarded output matrix: wiped on drop if sampling unwinds
@@ -669,19 +721,14 @@ impl SmudgingNoiseGenerator {
                 // Wipe the rejected candidate before reuse.
                 candidate.as_mut_slice().zeroize();
             }
-            for (row, (&qi, &bound_qi)) in moduli.iter().zip(&bound_mod).enumerate() {
+            for (row, (qi, &bound_qi)) in moduli.iter().zip(&bound_mod).enumerate() {
                 let u_mod = limbs_mod(&candidate, qi);
-                matrix.set(
-                    row,
-                    col,
-                    // Both residues are in [0, qi), and NTT-compatible moduli
-                    // are < 2^62, so the wrap-around sum cannot overflow u64.
-                    if u_mod >= bound_qi {
-                        u_mod - bound_qi
-                    } else {
-                        u_mod + qi - bound_qi
-                    },
-                );
+                // (u - B_sm) mod qi as a constant-time modular negation and
+                // addition: `neg` turns `-B_sm mod qi` into a canonical
+                // residue and `add` performs the wrap-around conditional
+                // subtraction itself, so no branch depends on the secret
+                // residues. Both operands stay in [0, qi).
+                matrix.set(row, col, qi.add(u_mod, qi.neg(bound_qi)));
             }
             // Wipe the consumed candidate limbs.
             candidate.as_mut_slice().zeroize();
@@ -719,7 +766,7 @@ mod tests {
     use super::*;
     use crate::bfv::BfvParametersBuilder;
     use num_bigint::BigInt;
-    use rand::{SeedableRng, rng};
+    use rand::{RngCore, SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::str::FromStr;
 
@@ -1138,7 +1185,7 @@ mod tests {
     fn test_smudging_noise_generator_creation() {
         let params = test_params();
         let bound = BigUint::from(12345u64);
-        let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
+        let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone()).unwrap();
 
         assert_eq!(generator.params, params);
         assert_eq!(generator.smudging_bound, bound);
@@ -1173,7 +1220,7 @@ mod tests {
         let mut rng = rng();
         let params = test_params();
         let bound = BigUint::from(1000u64);
-        let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
+        let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone()).unwrap();
 
         let noise = generator.generate_smudging_error(&mut rng).unwrap();
         let poly = noise.into_poly();
@@ -1190,7 +1237,7 @@ mod tests {
         let mut rng = rng();
         let params = test_params();
         let bound = BigUint::from(0u64);
-        let generator = SmudgingNoiseGenerator::new(params.clone(), bound);
+        let generator = SmudgingNoiseGenerator::new(params.clone(), bound).unwrap();
 
         let poly = generator
             .generate_smudging_error(&mut rng)
@@ -1204,11 +1251,102 @@ mod tests {
     }
 
     #[test]
+    fn test_noise_generation_rejects_bounds_reaching_the_ciphertext_modulus() {
+        let params = test_params();
+        let q: BigUint = params
+            .moduli()
+            .iter()
+            .map(|&qi| BigUint::from(qi))
+            .product();
+        assert!(q.clone() % BigUint::from(2u32) == BigUint::from(1u32));
+
+        // Widest accepted bound: 2*B_sm + 1 stays strictly below Q.
+        let widest = (&q - BigUint::from(1u32)) / BigUint::from(2u32) - BigUint::from(1u32);
+        assert!(
+            SmudgingNoiseGenerator::new(params.clone(), widest).is_ok(),
+            "a bound with 2*B_sm + 1 < Q must be accepted"
+        );
+
+        // 2*B_sm + 1 = Q already fills the whole ciphertext range.
+        let at_q = (&q - BigUint::from(1u32)) / BigUint::from(2u32);
+        assert!(
+            SmudgingNoiseGenerator::new(params.clone(), at_q.clone()).is_err(),
+            "a bound with 2*B_sm + 1 >= Q must be rejected"
+        );
+
+        // 2*B_sm + 1 > Q wraps modulo Q.
+        let beyond_q = at_q + BigUint::from(1u32);
+        let error = SmudgingNoiseGenerator::new(params, beyond_q).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must be smaller than the ciphertext modulus"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Rebuild an unsigned integer from little-endian 64-bit limbs.
+    fn biguint_from_limbs(limbs: &[u64]) -> BigUint {
+        limbs.iter().rev().fold(BigUint::from(0u64), |acc, &limb| {
+            (acc << 64usize) | BigUint::from(limb)
+        })
+    }
+
+    #[test]
+    fn limbs_lt_compares_without_early_exit() {
+        // Equal limbs, differences in the top limb (e.g. M = 2^64 + 1),
+        // and differences only in low limbs.
+        let cases = [
+            (vec![0u64], vec![0u64], false),
+            (vec![0], vec![1], true),
+            (vec![1], vec![0], false),
+            (vec![u64::MAX], vec![0], false),
+            (vec![0], vec![u64::MAX], true),
+            (vec![1, 1], vec![1, 1], false),
+            (vec![1, 1], vec![2, 1], true),
+            (vec![2, 1], vec![1, 1], false),
+            // Equal top limbs: low limbs decide (little-endian limbs).
+            (vec![u64::MAX, 5], vec![0, 5], false),
+            (vec![0, 5], vec![u64::MAX, 5], true),
+        ];
+        for (a, b, expected) in cases {
+            assert_eq!(limbs_lt(&a, &b), expected, "a = {a:?}, b = {b:?}");
+        }
+        // Pseudorandom cross-check against arbitrary-precision comparison.
+        let mut rng = ChaCha8Rng::seed_from_u64(172_107);
+        for _ in 0..512 {
+            let a: Vec<u64> = (0..3).map(|_| rng.next_u64()).collect();
+            let b: Vec<u64> = (0..3).map(|_| rng.next_u64()).collect();
+            let expected = biguint_from_limbs(&a) < biguint_from_limbs(&b);
+            assert_eq!(limbs_lt(&a, &b), expected, "a = {a:?}, b = {b:?}");
+        }
+    }
+
+    #[test]
+    fn limbs_mod_matches_biguint_oracle() {
+        for qi in [11u64, 1153, 0x1ffffffea0001] {
+            let modulus = Modulus::new(qi).unwrap();
+            assert_eq!(limbs_mod(&[], &modulus), 0);
+            let mut rng = ChaCha8Rng::seed_from_u64(172_108);
+            for _ in 0..256 {
+                let nlimbs = 1 + (rng.next_u64() % 4) as usize;
+                let limbs: Vec<u64> = (0..nlimbs).map(|_| rng.next_u64()).collect();
+                let expected = biguint_from_limbs(&limbs) % BigUint::from(qi);
+                assert_eq!(
+                    limbs_mod(&limbs, &modulus),
+                    expected.to_u64().unwrap(),
+                    "limbs = {limbs:?}, qi = {qi}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_noise_generation_large_bound() {
         let mut rng = rng();
         let params = test_params();
         let large_bound: BigUint = (BigUint::from(1u32) << 96) + BigUint::from(12345u32);
-        let generator = SmudgingNoiseGenerator::new(params.clone(), large_bound.clone());
+        let generator = SmudgingNoiseGenerator::new(params.clone(), large_bound.clone()).unwrap();
 
         let poly = generator
             .generate_smudging_error(&mut rng)
@@ -1239,7 +1377,7 @@ mod tests {
 
         match bound_result {
             Ok(bound) => {
-                let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
+                let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone()).unwrap();
                 let noise = generator.generate_smudging_error(&mut rng).unwrap();
                 assert_noise_in_bound(noise, &bound, &params);
             }
@@ -1278,7 +1416,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(172_101);
         for b in [1u64, 2, 3, 7, 100, 500] {
             let bound = BigUint::from(b);
-            let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
+            let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone()).unwrap();
             let noise = generator.generate_smudging_error(&mut rng).unwrap();
             let poly = noise.into_poly();
             for col in 0..params.degree() {
@@ -1304,7 +1442,8 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(172_102);
         let mut counts = [0usize; 5];
         for _ in 0..512 {
-            let generator = SmudgingNoiseGenerator::new(params.clone(), BigUint::from(2u32));
+            let generator =
+                SmudgingNoiseGenerator::new(params.clone(), BigUint::from(2u32)).unwrap();
             let poly = generator
                 .generate_smudging_error(&mut rng)
                 .unwrap()
@@ -1340,7 +1479,7 @@ mod tests {
             (BigUint::from(1u32) << 100) + BigUint::from(12345u32),
         ];
         for bound in &bounds {
-            let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
+            let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone()).unwrap();
             let noise = generator.generate_smudging_error(&mut rng).unwrap();
             assert_noise_in_bound(noise, bound, &params);
         }
@@ -1355,7 +1494,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(172_104);
         let bound: BigUint = BigUint::from(1u32) << 320;
         assert!(bound.bits() > 5 * 64, "test requires a >5-limb bound");
-        let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
+        let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone()).unwrap();
         let noise = generator.generate_smudging_error(&mut rng).unwrap();
         assert_noise_in_bound(noise, &bound, &params);
     }
