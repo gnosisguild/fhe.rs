@@ -717,19 +717,11 @@ impl SmudgingNoiseGenerator {
 mod tests {
     use super::*;
     use crate::bfv::BfvParametersBuilder;
+    use crate::trbfv::test_support::params_8192;
     use num_bigint::BigInt;
     use rand::{RngCore, SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::str::FromStr;
-
-    fn test_params() -> Arc<BfvParameters> {
-        BfvParametersBuilder::new()
-            .set_degree(8192)
-            .set_plaintext_modulus(16384)
-            .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
-            .build_arc()
-            .unwrap()
-    }
 
     /// Small-degree parameters with library-generated moduli for exact
     /// oracle checks. No hand-picked primes: moduli come from the builder's
@@ -831,7 +823,7 @@ mod tests {
     #[test]
     fn b_enc_cbd_branch_is_support_bound() {
         // Variance=10 (< 16) takes the CBD branch: B_enc = 2 * variance = 20.
-        let params = test_params(); // error1_variance = 10
+        let params = params_8192(); // error1_variance = 10
         assert_eq!(params.variance(), 10);
         assert_eq!(params.get_error1_variance(), &BigUint::from(10_u32));
 
@@ -861,21 +853,21 @@ mod tests {
 
     #[test]
     fn config_new_uses_computed_b_enc() {
-        let params = test_params();
+        let params = params_8192();
         let config = SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2, 80).unwrap();
         assert_eq!(config.b_enc, compute_b_enc(params.get_error1_variance()));
     }
 
     #[test]
     fn zero_party_or_ciphertext_config_is_rejected() {
-        let params = test_params();
+        let params = params_8192();
         assert!(SmudgingBoundCalculatorConfig::new(params.clone(), 0, 1, 2,).is_err());
         assert!(SmudgingBoundCalculatorConfig::new(params, 1, 0, 2).is_err());
     }
 
     #[test]
     fn calculate_sm_bound_revalidates_party_and_ciphertext_counts() {
-        let params = test_params();
+        let params = params_8192();
         let mut config = SmudgingBoundCalculatorConfig::new(params, 1, 1, 2).unwrap();
         config.n = 0;
         assert!(
@@ -884,7 +876,7 @@ mod tests {
                 .is_err()
         );
 
-        let mut config = SmudgingBoundCalculatorConfig::new(test_params(), 1, 1, 2).unwrap();
+        let mut config = SmudgingBoundCalculatorConfig::new(params_8192(), 1, 1, 2).unwrap();
         config.m = 0;
         assert!(
             SmudgingBoundCalculator::new(config)
@@ -897,7 +889,7 @@ mod tests {
 
     #[test]
     fn delta_is_q_div_t_floor() {
-        let params = test_params();
+        let params = params_8192();
         let q = modulus_product(params.moduli());
         let t = BigUint::from(params.plaintext());
         let delta = compute_delta(&q, &t);
@@ -957,7 +949,7 @@ mod tests {
 
     #[test]
     fn accepted_participant_count_defaults_to_n() {
-        let params = test_params();
+        let params = params_8192();
         let config = SmudgingBoundCalculatorConfig::new(params, 7, 1, 2).unwrap();
         let calc = SmudgingBoundCalculator::new(config);
         // Not directly accessible, but verified through behavior:
@@ -968,7 +960,7 @@ mod tests {
 
     #[test]
     fn accepted_participant_count_rejects_zero() {
-        let params = test_params();
+        let params = params_8192();
         let config = SmudgingBoundCalculatorConfig::new(params, 5, 1, 2).unwrap();
         let err = SmudgingBoundCalculator::new(config)
             .with_accepted_participant_count(0)
@@ -979,7 +971,7 @@ mod tests {
 
     #[test]
     fn accepted_participant_count_rejects_above_n() {
-        let params = test_params();
+        let params = params_8192();
         let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, 2).unwrap();
         let err = SmudgingBoundCalculator::new(config)
             .with_accepted_participant_count(4)
@@ -990,7 +982,7 @@ mod tests {
 
     #[test]
     fn accepted_participant_count_increases_bound() {
-        let params = test_params();
+        let params = params_8192();
         let config =
             SmudgingBoundCalculatorConfig::new_multiplicative(params.clone(), 5, 1, 1, 2).unwrap();
         let bound_all = SmudgingBoundCalculator::new(config.clone())
@@ -1012,7 +1004,7 @@ mod tests {
 
     #[test]
     fn injected_bc0_is_used_directly_additive() {
-        let params = test_params();
+        let params = params_8192();
         let d = BigUint::from(params.degree());
         let injected = BigUint::from(12345_u64);
         let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, 2).unwrap();
@@ -1033,7 +1025,7 @@ mod tests {
         // rejects it at configuration time, before computing 2^lambda.
         let huge_lambda = (u32::MAX as usize) + 1;
         assert!(huge_lambda > u32::MAX as usize); // on 64-bit only
-        let params = test_params();
+        let params = params_8192();
         let err = SmudgingBoundCalculatorConfig::new(params, 3, 1, huge_lambda).unwrap_err();
         assert!(err.to_string().contains("lambda"));
     }
@@ -1042,7 +1034,7 @@ mod tests {
     fn lambda_at_max_feasible_still_truncation_free() {
         // 2^256 is huge but should not truncate.  The correctness check
         // will likely fail, but we verify no silent truncation.
-        let params = test_params();
+        let params = params_8192();
         let config = SmudgingBoundCalculatorConfig::new(params, 1, 1, MAX_LAMBDA).unwrap();
         let result = SmudgingBoundCalculator::new(config).calculate_sm_bound();
         // Whether it succeeds or fails depends on parameters — either way,
@@ -1057,7 +1049,7 @@ mod tests {
     #[test]
     fn lambda_floor_is_exact_no_rounding() {
         // lambda=35: B_sm = 2^36 * d * B_C exactly.
-        let params = test_params();
+        let params = params_8192();
         let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, 35).unwrap();
         let calc = SmudgingBoundCalculator::new(config);
         // For these test params the bound should be feasible.
@@ -1072,7 +1064,7 @@ mod tests {
 
     #[test]
     fn test_smudging_bound_calculator_config() {
-        let params = test_params();
+        let params = params_8192();
         let config = SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2, 80).unwrap();
 
         assert_eq!(config.params, params);
@@ -1091,7 +1083,7 @@ mod tests {
 
     #[test]
     fn test_smudging_bound_calculator_minimal_case() {
-        let params = test_params();
+        let params = params_8192();
         let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 80).unwrap();
         let calculator = SmudgingBoundCalculator::new(config);
 
@@ -1113,7 +1105,7 @@ mod tests {
 
     #[test]
     fn test_smudging_noise_generator_creation() {
-        let params = test_params();
+        let params = params_8192();
         let bound = BigUint::from(12345u64);
         let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone()).unwrap();
 
@@ -1125,7 +1117,7 @@ mod tests {
 
     #[test]
     fn test_smudging_noise_generator_from_calculator() {
-        let params = test_params();
+        let params = params_8192();
         let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 80).unwrap();
         let calculator = SmudgingBoundCalculator::new(config);
 
@@ -1146,7 +1138,7 @@ mod tests {
     #[test]
     fn test_noise_generation_small_bound() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_8192();
         let bound = BigUint::from(1000u64);
         let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone()).unwrap();
 
@@ -1163,7 +1155,7 @@ mod tests {
     #[test]
     fn test_noise_generation_zero_bound() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_8192();
         let bound = BigUint::from(0u64);
         let generator = SmudgingNoiseGenerator::new(params.clone(), bound).unwrap();
 
@@ -1180,7 +1172,7 @@ mod tests {
 
     #[test]
     fn test_noise_generation_rejects_bounds_reaching_the_ciphertext_modulus() {
-        let params = test_params();
+        let params = params_8192();
         let q: BigUint = params
             .moduli()
             .iter()
@@ -1272,7 +1264,7 @@ mod tests {
     #[test]
     fn test_noise_generation_large_bound() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_8192();
         let large_bound: BigUint = (BigUint::from(1u32) << 96) + BigUint::from(12345u32);
         let generator = SmudgingNoiseGenerator::new(params.clone(), large_bound.clone()).unwrap();
 
@@ -1292,7 +1284,7 @@ mod tests {
     #[test]
     fn test_realistic_parameters_workflow() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_8192();
         let n = 3;
         let m = 1;
 
@@ -1483,7 +1475,7 @@ mod tests {
 
     #[test]
     fn smudging_bound_is_nonzero_for_feasible_params() {
-        let params = test_params();
+        let params = params_8192();
         let config = SmudgingBoundCalculatorConfig::new(params, 3, 1, 2).unwrap();
         let bound = SmudgingBoundCalculator::new(config)
             .calculate_sm_bound()
@@ -1493,7 +1485,7 @@ mod tests {
 
     #[test]
     fn smudging_bound_increases_with_more_ciphertexts() {
-        let params = test_params();
+        let params = params_8192();
         let m1_config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 2).unwrap();
         let m2_config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 2, 2).unwrap();
         let b1 = SmudgingBoundCalculator::new(m1_config)
@@ -1507,7 +1499,7 @@ mod tests {
 
     #[test]
     fn smudging_bound_increases_with_larger_lambda() {
-        let params = test_params();
+        let params = params_8192();
         let l10_config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 10).unwrap();
         let l11_config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, 11).unwrap();
         let b10 = SmudgingBoundCalculator::new(l10_config)
@@ -1521,7 +1513,7 @@ mod tests {
 
     #[test]
     fn smudging_bound_increases_with_larger_n() {
-        let params = test_params();
+        let params = params_8192();
         // n=3 has less correctness headroom than n=1, but the B_sm multiplier
         // (2^(lambda + 1) * d) doesn't depend on n directly — but B_fresh
         // depends on n through public_key_error. So larger n → larger B_C
@@ -1539,14 +1531,14 @@ mod tests {
 
     #[test]
     fn zero_ciphertexts_rejected() {
-        let params = test_params();
+        let params = params_8192();
         let result = SmudgingBoundCalculatorConfig::new(params, 3, 0, 2);
         assert!(result.unwrap_err().to_string().contains("ciphertexts"));
     }
 
     #[test]
     fn zero_parties_rejected() {
-        let params = test_params();
+        let params = params_8192();
         let result = SmudgingBoundCalculatorConfig::new(params, 0, 1, 2);
         assert!(result.unwrap_err().to_string().contains("parties"));
     }

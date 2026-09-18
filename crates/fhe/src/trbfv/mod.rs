@@ -10,6 +10,10 @@ pub mod shares;
 /// Smudging abstractions and implementations
 pub mod smudging;
 
+/// Unit-test parameter fixtures shared by the trBFV unit tests.
+#[cfg(test)]
+mod test_support;
+
 // Re-export main types for convenience
 pub use shares::ShareManager;
 pub use smudging::{
