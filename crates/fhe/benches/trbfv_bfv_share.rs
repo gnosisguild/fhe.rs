@@ -76,13 +76,12 @@ fn bench_data_sizes(c: &mut Criterion) {
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        // Generate smudging error shares
-        let esi_coeffs = trbfv
+        // Generate smudging noise shares
+        let esi_noise = trbfv
             .generate_smudging_error(100, 0, Lambda::secure(preset.lambda).unwrap(), &mut rng)
             .unwrap();
-        let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
         let esi_sss = share_manager
-            .generate_secret_shares_from_poly(esi_poly, &mut rng)
+            .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
             .unwrap();
 
         // Generate BFV keys for share encryption

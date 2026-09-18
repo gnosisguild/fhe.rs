@@ -15,6 +15,7 @@ pub mod threshold;
 // Re-export main types for convenience
 pub use shares::ShareManager;
 pub use smudging::{
-    Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+    GeneratedSmudgingNoise, Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator,
+    SmudgingBoundCalculatorConfig,
 };
 pub use threshold::TRBFV;

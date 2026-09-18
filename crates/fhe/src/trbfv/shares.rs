@@ -6,6 +6,7 @@ use crate::Error;
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::rns_shamir::RnsShamir;
 use crate::trbfv::config::validate_threshold_config;
+use crate::trbfv::smudging::GeneratedSmudgingNoise;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
 use fhe_math::{
@@ -14,7 +15,6 @@ use fhe_math::{
 };
 use itertools::Itertools;
 use ndarray::Array2;
-use num_bigint::BigInt;
 use num_bigint::BigUint;
 use rand::{CryptoRng, RngCore};
 use rayon::prelude::*;
@@ -140,17 +140,30 @@ impl ShareManager {
         let ctx = self.params.context_at_level(0)?;
         self.coeffs_to_poly(coeffs, ctx)
     }
-    /// Convert a vector of BigInt coefficients into a Poly in full RNS representation
-    /// at level 0 using the BFV context.
-    pub fn bigints_to_poly(
-        &self,
-        bigints: &[BigInt],
-    ) -> Result<Zeroizing<Poly<PowerBasis>>, Error> {
-        let ctx = self.params.context_at_level(0)?;
-        Poly::<PowerBasis>::from_bigints(bigints, ctx).map_err(Error::from)
+    /// Generate Shamir Secret Shares for smudging noise from a noise owner.
+    ///
+    /// This is the supported dealing operation for freshly sampled smudging
+    /// noise: it consumes the [`GeneratedSmudgingNoise`] owner and deals the
+    /// underlying polynomial with the same layout as
+    /// [`ShareManager::generate_secret_shares_from_poly`].
+    pub fn generate_secret_shares_from_smudging_noise<R: RngCore + CryptoRng>(
+        &mut self,
+        noise: GeneratedSmudgingNoise,
+        rng: &mut R,
+    ) -> Result<Vec<Array2<u64>>, Error> {
+        self.generate_secret_shares_from_poly(noise.into_poly(), rng)
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
+    ///
+    /// # One-time use
+    ///
+    /// Unlike [`ShareManager::generate_secret_shares_from_smudging_noise`],
+    /// this method accepts any caller-provided polynomial and therefore
+    /// cannot enforce one-time use: nothing here prevents dealing the same
+    /// polynomial twice. Callers dealing smudging noise must sample it fresh
+    /// for every decryption; reusing noise breaks the statistical hiding
+    /// argument.
     pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
         &mut self,
         poly: Zeroizing<Poly<PowerBasis>>,
@@ -246,7 +259,7 @@ impl ShareManager {
                             party_idx,
                             format!(
                                 "share coefficient at row {row} (modulus q_i = {q_i}), column \
-                                 {col} is {value}; expected a canonical residue in [0, {q_i})"
+                                 {col} is not a canonical residue in [0, {q_i})"
                             ),
                         ));
                     }
@@ -477,7 +490,9 @@ mod tests {
     use super::*;
     use crate::ThresholdError;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
+    use crate::trbfv::smudging::SmudgingNoiseGenerator;
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
+    use num_bigint::BigUint;
     use rand::rng;
 
     fn test_params() -> Arc<BfvParameters> {
@@ -580,28 +595,29 @@ mod tests {
     }
 
     #[test]
-    fn test_bigints_to_poly() {
+    fn test_smudging_noise_dealing_consumes_owner() {
         let params = test_params();
-        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let n = 5;
+        let threshold = 2;
+        let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
+        let mut rng = rng();
 
-        // Create BigInt coefficients (full degree)
-        let degree = params.degree();
-        let bigints: Vec<BigInt> = (0..degree).map(|i| BigInt::from(i as i64)).collect();
+        let generator =
+            SmudgingNoiseGenerator::new(params.clone(), BigUint::from(1000u64)).unwrap();
+        let noise = generator.generate_smudging_error(&mut rng).unwrap();
+        let shares = manager
+            .generate_secret_shares_from_smudging_noise(noise, &mut rng)
+            .unwrap();
 
-        let poly = manager.bigints_to_poly(&bigints).unwrap();
-        assert_eq!(poly.coefficients().ncols(), degree);
-        assert_eq!(poly.coefficients().nrows(), params.moduli().len());
-    }
-
-    #[test]
-    fn test_bigints_to_poly_wrong_size() {
-        let params = test_params();
-        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
-
-        // Wrong number of coefficients
-        let bigints = vec![BigInt::from(1), BigInt::from(2)]; // Too few
-        let result = manager.bigints_to_poly(&bigints);
-        assert!(result.is_err());
+        // Same layout as secret-key dealing: one [n, degree] matrix per modulus.
+        assert_eq!(shares.len(), params.moduli().len());
+        for (share_matrix, &qi) in shares.iter().zip(params.moduli().iter()) {
+            assert_eq!(share_matrix.dim(), (n, params.degree()));
+            for &value in share_matrix.iter() {
+                assert!(value < qi);
+            }
+        }
+        // The one-time owner is moved into the call above and cannot be dealt twice.
     }
 
     #[test]
@@ -1160,7 +1176,9 @@ mod tests {
         let shape = (moduli.len(), params.degree());
 
         // u64::MAX would wrap to a small residue if reduced; it must be
-        // rejected as malformed instead of being reduced.
+        // rejected as malformed instead of being reduced. The error reports
+        // party, row, column, and modulus only: secret share values must not
+        // appear in error strings.
         let mut shares = Array2::zeros(shape);
         shares[[0, 0]] = u64::MAX;
         let err = manager
@@ -1171,8 +1189,16 @@ mod tests {
         };
         assert_eq!(*party_id, 0);
         assert!(
-            reason.contains(&u64::MAX.to_string()),
-            "offending value missing from reason: {reason}"
+            reason.contains("row 0") && reason.contains("column 0"),
+            "row/column context missing from reason: {reason}"
+        );
+        assert!(
+            reason.contains(&moduli[0].to_string()),
+            "row modulus missing from reason: {reason}"
+        );
+        assert!(
+            !reason.contains(&u64::MAX.to_string()),
+            "secret share value must not appear in reason: {reason}"
         );
     }
 

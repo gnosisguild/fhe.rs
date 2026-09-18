@@ -18,7 +18,6 @@ use fhe::trlbfv::{LBFVPublicKey, PublicKeyShare, RelinKeyShare, aggregate_reline
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2};
-use num_bigint::BigInt;
 
 #[path = "../support/mod.rs"]
 mod support;
@@ -76,7 +75,9 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     let aggregated_rlk = aggregate_relinearization_key(&rlk_shares, &pk).expect("RLK aggregation");
 
     // ── Smudging noise (pre-shared, one‑time per party) ╌─────────────
-    let smudging_noises: Vec<Vec<BigInt>> = (0..N)
+    // Each party samples one noise owner; dealing below consumes it
+    // straight into Shamir shares without exposing the polynomial.
+    let mut smudging_noises = (0..N)
         .map(|_| {
             trbfv
                 .generate_smudging_error_with_participant_count(
@@ -88,7 +89,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
                 )
                 .expect("smudging noise generation")
         })
-        .collect();
+        .collect::<Vec<_>>()
+        .into_iter();
 
     // ── Shamir share deal / collect / aggregate (SK + noise) ╌─────────
     struct Party {
@@ -114,12 +116,13 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
                 .generate_secret_shares_from_poly(sk_poly, &mut rng)
                 .expect("sk share generation");
 
-            // Shamir‑share this party's smudging noise
-            let esi_poly = share_manager
-                .bigints_to_poly(&smudging_noises[i])
-                .expect("esi to poly");
+            // Shamir‑share this party's smudging noise, consuming its
+            // one-time owner.
             let esi_sss = share_manager
-                .generate_secret_shares_from_poly(esi_poly, &mut rng)
+                .generate_secret_shares_from_smudging_noise(
+                    smudging_noises.next().expect("one noise owner per party"),
+                    &mut rng,
+                )
                 .expect("esi share generation");
 
             Party {

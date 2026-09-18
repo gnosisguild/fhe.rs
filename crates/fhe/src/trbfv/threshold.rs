@@ -44,12 +44,12 @@ use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::shares::ShareManager;
 use crate::trbfv::smudging::{
-    Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
+    GeneratedSmudgingNoise, Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+    SmudgingNoiseGenerator,
 };
 use fhe_math::rq::{Ntt, Poly, PowerBasis};
 use fhe_traits::FheParametrized;
 use ndarray::Array2;
-use num_bigint::BigInt;
 use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
@@ -121,10 +121,11 @@ impl TRBFV {
         share_manager.aggregate_collected_shares(sk_sss_collected)
     }
 
-    /// Generate smudging error coefficients for noise.
+    /// Generate smudging noise for threshold decryption.
     ///
-    /// Creates noise that will be added to decryption shares.
-    /// Uses optimal variance calculation based on security parameters and number of ciphertexts.
+    /// Creates noise that will be dealt to the parties and added to
+    /// decryption shares. Uses optimal bound calculation based on security
+    /// parameters and number of ciphertexts.
     ///
     /// This is a convenience wrapper that uses all parties as the accepted
     /// participant set. For explicit control over relinearization key
@@ -144,14 +145,15 @@ impl TRBFV {
     /// * `rng` - Cryptographically secure random number generator
     ///
     /// # Returns
-    /// Vector of smudging error coefficients
+    /// A non-cloneable owner of the sampled noise, consumed by the smudging
+    /// dealing operation.
     pub fn generate_smudging_error<R: RngCore + CryptoRng>(
         &self,
         num_ciphertexts: usize,
         mult_depth: u32,
         lambda: Lambda,
         rng: &mut R,
-    ) -> Result<Vec<BigInt>, Error> {
+    ) -> Result<GeneratedSmudgingNoise, Error> {
         // Forward to the explicit API using all n parties as the accepted set.
         self.generate_smudging_error_with_participant_count(
             num_ciphertexts,
@@ -162,7 +164,7 @@ impl TRBFV {
         )
     }
 
-    /// Generate smudging error coefficients with an explicit accepted
+    /// Generate smudging noise with an explicit accepted
     /// participant count.
     ///
     /// The `accepted_participant_count` must equal the number of parties that
@@ -187,7 +189,8 @@ impl TRBFV {
     /// * `rng` - Cryptographically secure random number generator
     ///
     /// # Returns
-    /// Vector of smudging error coefficients
+    /// A non-cloneable owner of the sampled noise, consumed by the smudging
+    /// dealing operation.
     ///
     /// # Errors
     /// Returns error if:
@@ -200,7 +203,7 @@ impl TRBFV {
         accepted_participant_count: usize,
         lambda: Lambda,
         rng: &mut R,
-    ) -> Result<Vec<BigInt>, Error> {
+    ) -> Result<GeneratedSmudgingNoise, Error> {
         let config = SmudgingBoundCalculatorConfig::new_multiplicative(
             self.params.clone(),
             self.n,
@@ -225,9 +228,10 @@ impl TRBFV {
     ///   output of [`TRBFV::aggregate_collected_shares`] over the key share matrices
     ///   received from all parties — not a party's own secret key
     /// * `es_i` - This party's *aggregated share of the joint smudging noise*,
-    ///   aggregated the same way from the dealt noise shares. Do not pass raw
-    ///   [`TRBFV::generate_smudging_error`] output here: unshared noise is blown up
-    ///   by the Lagrange coefficients during reconstruction and breaks correctness
+    ///   aggregated the same way from the dealt noise shares. Do not pass an
+    ///   undealt [`TRBFV::generate_smudging_error`] owner here: unshared noise
+    ///   is blown up by the Lagrange coefficients during reconstruction and
+    ///   breaks correctness
     ///
     /// # Returns
     /// Decryption share polynomial. The ciphertext must be at level 0;
@@ -278,7 +282,6 @@ mod tests {
     use crate::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
     use fhe_math::rq::Poly;
     use fhe_traits::{FheEncoder, FheEncrypter};
-    use num_traits::Zero;
     use rand::rng;
 
     fn test_params() -> Arc<BfvParameters> {
@@ -352,19 +355,23 @@ mod tests {
         let trbfv = TRBFV::new(n, threshold, params.clone()).unwrap();
 
         let mut rng = rng();
-        let result = trbfv.generate_smudging_error(1, 0, Lambda::secure(80).unwrap(), &mut rng);
-        //Checking if all the coefficients of the smudging noise are different than 0,
-        //having one equal to zero is hardly likely to happen if the smudging noise was generated.
-        //TODO: add a test that calculates the empirical variance from the coefficients, so as to
-        //compare with the variance used when generating the coefficients.
-        for (poly_idx, poly) in result.iter().enumerate() {
-            for (coeff_idx, coeff) in poly.iter().enumerate() {
-                assert!(
-                    !coeff.is_zero(),
-                    "Zero coefficient at poly[{poly_idx}][{coeff_idx}] used as smudging noise"
-                );
-            }
+        let noise = trbfv
+            .generate_smudging_error(1, 0, Lambda::secure(80).unwrap(), &mut rng)
+            .unwrap();
+        // The one-time owner deals straight into Shamir shares.
+        let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
+        let shares = manager
+            .generate_secret_shares_from_smudging_noise(noise, &mut rng)
+            .unwrap();
+        assert_eq!(shares.len(), params.moduli().len());
+        for share_matrix in &shares {
+            assert_eq!(share_matrix.dim(), (n, params.degree()));
         }
+        // Smudging noise at a secure bound is overwhelmingly nonzero.
+        assert!(
+            shares.iter().any(|m| m.iter().any(|&c| c != 0)),
+            "secure smudging shares should not all be zero"
+        );
     }
 
     #[test]
@@ -376,17 +383,18 @@ mod tests {
 
         // Test with multiple ciphertexts (this should increase the bound requirements)
         let mut rng = rng();
-        let result = trbfv.generate_smudging_error(10, 0, Lambda::secure(80).unwrap(), &mut rng);
-
-        for (poly_idx, poly) in result.iter().enumerate() {
-            for (coeff_idx, coeff) in poly.iter().enumerate() {
-                assert!(
-                    !coeff.is_zero(),
-                    "Zero coefficient at poly[{poly_idx}][{coeff_idx}], this is hardly likely to happen"
-                );
-            }
+        let noise = trbfv
+            .generate_smudging_error(10, 0, Lambda::secure(80).unwrap(), &mut rng)
+            .unwrap();
+        let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
+        let shares = manager
+            .generate_secret_shares_from_smudging_noise(noise, &mut rng)
+            .unwrap();
+        assert_eq!(shares.len(), params.moduli().len());
+        for share_matrix in &shares {
+            assert_eq!(share_matrix.dim(), (n, params.degree()));
         }
-        assert_eq!(result.unwrap().len(), params.degree());
+        assert!(shares.iter().any(|m| m.iter().any(|&c| c != 0)));
     }
 
     #[test]
@@ -411,17 +419,23 @@ mod tests {
         let mut rng = rng();
 
         // Use an accepted_participant_count that is a strict subset (3 of 5).
-        let result = trbfv.generate_smudging_error_with_participant_count(
-            1,
-            0,
-            3,
-            Lambda::secure(80).unwrap(),
-            &mut rng,
-        );
-        assert!(result.is_ok(), "valid participant count should succeed");
-        let coeffs = result.unwrap();
-        assert_eq!(coeffs.len(), params.degree());
-        assert!(coeffs.iter().any(|c| !c.is_zero()));
+        let noise = trbfv
+            .generate_smudging_error_with_participant_count(
+                1,
+                0,
+                3,
+                Lambda::secure(80).unwrap(),
+                &mut rng,
+            )
+            .expect("valid participant count should succeed");
+        let mut manager = ShareManager::new(n, 2, params.clone()).unwrap();
+        let shares = manager
+            .generate_secret_shares_from_smudging_noise(noise, &mut rng)
+            .unwrap();
+        assert_eq!(shares.len(), params.moduli().len());
+        for share_matrix in &shares {
+            assert_eq!(share_matrix.dim(), (n, params.degree()));
+        }
     }
 
     #[test]
@@ -496,9 +510,6 @@ mod tests {
             explicit_result.is_ok(),
             "default and explicit(n) should both succeed or both fail"
         );
-        if let (Ok(d), Ok(e)) = (default_result.as_ref(), explicit_result.as_ref()) {
-            assert_eq!(d.len(), e.len());
-        }
     }
 
     #[test]

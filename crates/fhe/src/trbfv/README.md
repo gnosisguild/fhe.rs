@@ -65,6 +65,17 @@ arithmetic. Callers should use `TRBFV` or `ShareManager`; their high-level share
 generation, aggregation, and reconstruction APIs retain the same logical share
 layout.
 
+> **Breaking change:** `TRBFV::generate_smudging_error` and
+> `TRBFV::generate_smudging_error_with_participant_count` no longer return
+> `Vec<BigInt>`, and `ShareManager::bigints_to_poly` has been removed.
+> Sampled noise is now a non-cloneable `GeneratedSmudgingNoise` owner that
+> must be dealt with
+> `ShareManager::generate_secret_shares_from_smudging_noise`, which consumes
+> it. Downstream code doing generate-then-convert must migrate to the
+> generate-then-deal flow shown under [Usage](#usage); the old symbols fail
+> to compile by design, since a cloneable noise representation cannot
+> enforce one-time use.
+
 ## Noise and Correctness Formulas (Urban–Rambaud 2024)
 
 This section summarises the formulas implemented in
@@ -183,14 +194,18 @@ cargo run --release --example trbfv_add -- --num_parties=10 --threshold=4
 Basic usage pattern:
 
 ```rust
-use fhe::trbfv::TRBFV;
+use fhe::trbfv::{ShareManager, TRBFV};
 
 // Setup threshold scheme
 let trbfv = TRBFV::new(n_parties, threshold, params.clone())?;
+let mut share_manager = ShareManager::new(n_parties, threshold, params.clone())?;
 
-// Each party: deal secret shares of its key and smudging noise contributions
+// Each party: deal secret shares of its key and smudging noise contributions.
+// The noise owner is one-time material consumed by the dealing operation;
+// the intermediate noise polynomial is never exposed.
 let sk_shares = trbfv.generate_secret_shares_from_poly(sk_poly, &mut rng)?;
-let es_coeffs = trbfv.generate_smudging_error(num_ciphertexts, mult_depth, lambda, &mut rng)?;
+let es_noise = trbfv.generate_smudging_error(num_ciphertexts, mult_depth, lambda, &mut rng)?;
+let es_shares = share_manager.generate_secret_shares_from_smudging_noise(es_noise, &mut rng)?;
 
 // Each party: aggregate the share matrices received from the other parties
 // into its share of the joint secret key (and likewise for the noise)

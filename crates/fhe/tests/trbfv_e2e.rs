@@ -13,7 +13,6 @@ use fhe::trbfv::{Lambda, ShareManager, TRBFV};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::Array2;
-use num_bigint::BigInt;
 
 #[path = "../support/mod.rs"]
 mod support;
@@ -42,22 +41,14 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
         .generate_secret_shares_from_poly(sk_poly, &mut rng)
         .expect("secret key share generation");
 
-    let smudging_noises: Vec<Vec<BigInt>> = (0..N)
+    let es_sss: Vec<Vec<Array2<u64>>> = (0..N)
         .map(|_| {
             // The evaluated ciphertext below is the sum of two fresh encryptions.
-            trbfv
+            let noise = trbfv
                 .generate_smudging_error(2, 0, Lambda::secure(LAMBDA_VALUE).unwrap(), &mut rng)
-                .expect("smudging noise generation")
-        })
-        .collect();
-    let es_sss: Vec<Vec<Array2<u64>>> = smudging_noises
-        .iter()
-        .map(|noise| {
-            let es_poly = managers[0]
-                .bigints_to_poly(noise)
-                .expect("smudging noise to polynomial");
+                .expect("smudging noise generation");
             managers[0]
-                .generate_secret_shares_from_poly(es_poly, &mut rng)
+                .generate_secret_shares_from_smudging_noise(noise, &mut rng)
                 .expect("smudging noise share generation")
         })
         .collect();
