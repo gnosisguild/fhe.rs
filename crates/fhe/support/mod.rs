@@ -57,6 +57,57 @@ pub mod insecure_512 {
     }
 }
 
+/// Degree-128 depth-3 parameters for correctness testing. Not secure.
+///
+/// `n = 19` (`t = 9`), `z = 3`, `k = 100`, `lambda = 2`. Every bound matches
+/// [`fhe::trbfv::SmudgingBoundCalculator`] with no overrides, at its default
+/// accepted participant count `|S| = n`; the strict check
+/// `2 * (B_C + n * B_sm) < Delta` passes with a 8.5x margin.
+pub mod insecure_128 {
+    /// Polynomial ring degree.
+    pub const DEGREE: usize = 128;
+    /// Number of parties (ciphernodes). Paper-conforming: `n = 2t + 1`, `t = 9`.
+    pub const NUM_PARTIES: usize = 19;
+    /// Multiplicative depth supported by the design point.
+    pub const MULT_DEPTH: u32 = 3;
+    /// Number of initial noise terms (ciphertexts) folded into `B_C`.
+    pub const MAX_CIPHERTEXTS: usize = 3;
+    /// Statistical security parameter of the design point.
+    ///
+    /// Far below [`fhe::trbfv::MIN_SECURE_LAMBDA`], so it must be constructed
+    /// via [`fhe::trbfv::Lambda::insecure`], whose floor of 2 this matches
+    /// exactly.
+    pub const LAMBDA: usize = 2;
+
+    /// First parameter set: threshold BFV computation.
+    pub mod threshold {
+        /// Plaintext modulus `k` (7 bits).
+        pub const PLAINTEXT_MODULUS: u64 = 100;
+        /// Ciphertext moduli (3 x 56 bits).
+        pub const MODULI: &[u64] = &[
+            0x00ff_ffff_ffff_c601,
+            0x00ff_ffff_ffff_c301,
+            0x00ff_ffff_ffff_a501,
+        ];
+        /// Error-1 variance `B(B+1)/3` for `B = 389120`, giving the library's
+        /// `B_Enc = floor(sqrt(3 * Var)) = 389120` exactly.
+        pub const ERROR1_VARIANCE: &str = "50471587840";
+        /// Secret/error variance (CBD, `B = 20`).
+        pub const VARIANCE: usize = 10;
+    }
+
+    /// Second parameter set: BFV transport of the Shamir shares.
+    pub mod share_enc {
+        /// Plaintext modulus, equal to the largest first-set modulus so every
+        /// share value lies in `[0, q_i) subset [0, k)`.
+        pub const PLAINTEXT_MODULUS: u64 = 72_057_594_037_913_089;
+        /// Ciphertext moduli (2 x 57 bits).
+        pub const MODULI: &[u64] = &[0x01ff_ffff_ffff_9001, 0x01ff_ffff_ffff_9501];
+        /// Secret/error variance (CBD, `B = 20`).
+        pub const VARIANCE: usize = 10;
+    }
+}
+
 /// A computation profile and its optional encrypted-share transport profile.
 #[derive(Clone)]
 pub struct Preset {
@@ -121,6 +172,42 @@ pub fn insecure() -> Result<Preset> {
         threshold: (insecure_512::NUM_PARTIES as usize - 1) / 2,
         lambda: insecure_512::DEFAULT_INSECURE_LAMBDA,
         multiplicative_depth: Some(insecure_512::INSECURE_512_MULT_DEPTH),
+    })
+}
+
+/// Build the supplied degree-128 depth-3 multiplication profile.
+///
+/// This profile provides no security at all: degree 128 against a ~168-bit
+/// ciphertext modulus is trivially broken, and `lambda` is far below
+/// [`fhe::trbfv::MIN_SECURE_LAMBDA`]. It exists only to exercise correctness of
+/// the depth-3 threshold multiplication pipeline quickly.
+pub fn insecure128() -> Result<Preset> {
+    let parameters = BfvParametersBuilder::new()
+        .set_degree(insecure_128::DEGREE)
+        .set_plaintext_modulus(insecure_128::threshold::PLAINTEXT_MODULUS)
+        .set_moduli(insecure_128::threshold::MODULI)
+        .set_variance(insecure_128::threshold::VARIANCE)
+        .set_error1_variance_str(insecure_128::threshold::ERROR1_VARIANCE)?
+        .build_arc()?;
+    // Share transport uses standard BFV; the large threshold-BFV e1 variance
+    // belongs only to the computation parameters above.
+    let share_parameters = BfvParametersBuilder::new()
+        .set_degree(insecure_128::DEGREE)
+        .set_plaintext_modulus(insecure_128::share_enc::PLAINTEXT_MODULUS)
+        .set_moduli(insecure_128::share_enc::MODULI)
+        .set_variance(insecure_128::share_enc::VARIANCE)
+        .build_arc()?;
+
+    Ok(Preset {
+        name: "insecure128",
+        parameters,
+        share_parameters: Some(share_parameters),
+        simd: false,
+        max_ciphertexts: insecure_128::MAX_CIPHERTEXTS,
+        num_parties: insecure_128::NUM_PARTIES,
+        threshold: (insecure_128::NUM_PARTIES - 1) / 2,
+        lambda: insecure_128::LAMBDA,
+        multiplicative_depth: Some(insecure_128::MULT_DEPTH),
     })
 }
 

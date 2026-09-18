@@ -1,19 +1,22 @@
 // Threshold BFV multiplication with distributed l-BFV RLK and encrypted share transport.
 //
-// Smudging noise is computed via the secure `Lambda::secure(lambda)` API and
-// `generate_smudging_error_with_participant_count(..., num_parties, ...)` so the
-// accepted l-BFV participant count is explicit in the smudging bound. Paper-conforming
-// robustness requires odd n = 2t + 1; even n is accepted for compatibility but lies
-// outside the theorem.
+// Smudging noise is computed via `generate_smudging_error_with_participant_count(...,
+// num_parties, ...)` so the accepted l-BFV participant count is explicit in the smudging
+// bound. Paper-conforming robustness requires odd n = 2t + 1; even n is accepted for
+// compatibility but lies outside the theorem.
 //
-// Two BFV parameter sets:
+// Two profiles, selected with `--params=` (default `secure16384`):
 //
-//   First set  (computation) — n=20, z=3, k=1000, d=16384, 5×51-bit moduli, λ=31.
+//   secure16384 — uses `Lambda::secure(lambda)`.
+//     First set  (computation) — n=20, z=3, k=1000, d=16384, 5×51-bit moduli, λ=31.
+//     Second set (share encryption) — k = q[1] of first set ≈ 2^50, d=16384,
+//                2×53-bit moduli. Each Shamir share value lies in [0, q_i) ⊆ [0, k),
+//                so it encodes directly as a BFV plaintext.
+//                BFV decrypt is correct because k ≈ 2^50 < q₀/2 ≈ 2^52.0000  ✓
 //
-//   Second set (share encryption) — k = q[1] of first set ≈ 2^50, d=16384,
-//              2×53-bit moduli. Each Shamir share value lies in [0, q_i) ⊆ [0, k),
-//              so it encodes directly as a BFV plaintext.
-//              BFV decrypt is correct because k ≈ 2^50 < q₀/2 ≈ 2^52.0000  ✓
+//   insecure128 — CORRECTNESS ONLY, not secure: n=19 (t=9), z=3, k=100, d=128, λ=2.
+//     Uses the explicitly opt-in `Lambda::insecure(lambda)`. See
+//     `support::insecure_128`.
 //
 // Protocol:
 //  1. Each party generates: an l-BFV pk share, an l-BFV RLK share, Shamir shares of
@@ -38,7 +41,7 @@ use fhe::{
     aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
-    trbfv::{Lambda, ShareManager, TRBFV},
+    trbfv::{Lambda, MIN_SECURE_LAMBDA, ShareManager, TRBFV},
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
@@ -55,8 +58,20 @@ fn print_notice_and_exit(error: Option<String>) {
         style("  overview:").magenta().bold()
     );
     println!(
-        "{} trbfv_mul_bfv_share [-h] [--num_parties=N] [--threshold=T] [--lambda=L]",
+        "{} trbfv_mul_bfv_share [-h] [--params=P] [--num_parties=N] [--threshold=T] [--lambda=L]",
         style("     usage:").magenta().bold()
+    );
+    println!(
+        "{} [--accepted_participants=S]   (1 <= S <= N, default N)",
+        style("           ").magenta().bold()
+    );
+    println!(
+        "{} P in {{secure16384, insecure128}} (default secure16384). insecure128 is a",
+        style("    params:").magenta().bold()
+    );
+    println!(
+        "{} correctness-only degree-128 profile with no security whatsoever.",
+        style("           ").magenta().bold()
     );
     println!(
         "{} T ≤ (N-1)/2, N ≥ 1, L ≥ {}. Paper-conforming robustness requires odd N (N = 2t + 1);",
@@ -74,8 +89,28 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let preset = support::secure16384()?;
-    println!("Building trBFV parameters (first set)...");
+    // ── CLI argument parsing ──────────────────────────────────────────────────
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
+        print_notice_and_exit(None)
+    }
+
+    // The profile selects both parameter sets, so it is resolved before they are
+    // built; the remaining arguments are parsed once the defaults are known.
+    let profile = match args.iter().find_map(|arg| arg.strip_prefix("--params=")) {
+        None => "secure16384",
+        Some(name @ ("secure16384" | "insecure128")) => name,
+        Some(name) => {
+            print_notice_and_exit(Some(format!("Unknown `--params` profile: {name}")));
+            unreachable!()
+        }
+    };
+    let preset = match profile {
+        "insecure128" => support::insecure128()?,
+        _ => support::secure16384()?,
+    };
+
+    println!("Building trBFV parameters (first set, profile {profile})...");
     let params_trbfv: Arc<bfv::BfvParameters> =
         timeit!("Parameters generation (trBFV)", preset.parameters.clone());
     let degree = params_trbfv.degree();
@@ -109,18 +144,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         plaintext_modulus_share_enc
     );
 
-    // ── CLI argument parsing ──────────────────────────────────────────────────
-    let args: Vec<String> = env::args().skip(1).collect();
-    if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
-        print_notice_and_exit(None)
-    }
-
+    // ── Remaining CLI arguments ───────────────────────────────────────────────
     let mut num_parties = preset.num_parties;
     let mut threshold = preset.threshold;
     let mut lambda = preset.lambda;
+    // |S| in Eq. (30): the aggregate RLK error is `|S| * B_e`. Defaults to every
+    // party contributing.
+    let mut accepted_participants: Option<usize> = None;
 
     for arg in &args {
-        if arg.starts_with("--num_parties") {
+        if arg.starts_with("--params") {
+            // Already resolved above.
+        } else if arg.starts_with("--num_parties") {
             let a: Vec<&str> = arg.rsplit('=').collect();
             if a.len() != 2 || a[0].parse::<usize>().is_err() {
                 print_notice_and_exit(Some("Invalid `--num_parties` argument".to_string()))
@@ -141,6 +176,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 lambda = a[0].parse::<usize>()?
             }
+        } else if arg.starts_with("--accepted_participants") {
+            let a: Vec<&str> = arg.rsplit('=').collect();
+            if a.len() != 2 || a[0].parse::<usize>().is_err() {
+                print_notice_and_exit(Some(
+                    "Invalid `--accepted_participants` argument".to_string(),
+                ))
+            } else {
+                accepted_participants = Some(a[0].parse::<usize>()?)
+            }
         } else {
             print_notice_and_exit(Some(format!("Unrecognized argument: {arg}")))
         }
@@ -154,18 +198,53 @@ fn main() -> Result<(), Box<dyn Error>> {
             "Threshold must be at most (num_parties - 1) / 2".to_string(),
         ))
     }
+    let accepted_participants = accepted_participants.unwrap_or(num_parties);
+    if accepted_participants == 0 || accepted_participants > num_parties {
+        print_notice_and_exit(Some(
+            "`--accepted_participants` must be in 1..=num_parties".to_string(),
+        ))
+    }
 
-    // Use the secure-16384 design point supplied for the depth-3 preset.
-    let security = Lambda::secure(lambda)?;
+    // Profiles below MIN_SECURE_LAMBDA must opt in to the explicitly insecure
+    // smudging level; secure profiles keep the validated constructor.
+    let security = if lambda >= MIN_SECURE_LAMBDA {
+        Lambda::secure(lambda)?
+    } else {
+        Lambda::insecure(lambda)
+    };
     let mut rng = rand::rng();
 
-    println!("\n# Threshold BFV multiplication");
-    println!("  num_parties       = {num_parties}  (params: n=20, k=1000, z=3, λ=31)");
-    println!("  threshold         = {threshold}");
-    println!("  lambda            = {lambda}  (secure, >= fhe::trbfv::MIN_SECURE_LAMBDA)");
-    println!(
-        "  l-BFV participants = {num_parties}  (accepted RLK contributors for smudging bound)"
+    let plaintext_modulus = params_trbfv.plaintext();
+    let mult_depth = preset.multiplicative_depth.unwrap();
+    let max_ciphertexts = preset.max_ciphertexts;
+    assert_eq!(
+        mult_depth, 3,
+        "this example hardcodes a depth-3 multiplication chain"
     );
+    println!("\n# Threshold BFV multiplication");
+    println!(
+        "  num_parties       = {num_parties}  (params: {}, d={degree}, k={plaintext_modulus}, z={mult_depth})",
+        preset.name
+    );
+    println!("  threshold         = {threshold}");
+    if security.is_secure() {
+        println!("  lambda            = {lambda}  (secure, >= fhe::trbfv::MIN_SECURE_LAMBDA)");
+    } else {
+        println!(
+            "  lambda            = {}  (⚠️  INSECURE: below fhe::trbfv::MIN_SECURE_LAMBDA = {MIN_SECURE_LAMBDA})",
+            security.value()
+        );
+    }
+    println!(
+        "  l-BFV participants = {accepted_participants}  (|S|, accepted RLK contributors in the smudging bound)"
+    );
+    if accepted_participants != num_parties {
+        println!(
+            "  {}  |S| = {accepted_participants} < n = {num_parties}: the aggregate RLK error term |S|·B_e",
+            style("note:").yellow().bold()
+        );
+        println!("         understates the {num_parties} shares actually aggregated into the RLK.");
+    }
 
     // ── Party setup ───────────────────────────────────────────────────────────
     // Two shared CRP vectors for the l-BFV RLK protocol. In deployment these would
@@ -210,13 +289,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .generate_secret_shares_from_poly(sk_poly, &mut rng)
                     .unwrap();
 
-                // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications,
+                // Smudging noise shares (m initial noise terms, z multiplications,
                 // accepted l-BFV participant count = num_parties).
                 let esi_coeffs = trbfv
                     .generate_smudging_error_with_participant_count(
-                        3,
-                        preset.multiplicative_depth.unwrap(),
-                        num_parties,
+                        max_ciphertexts,
+                        mult_depth,
+                        accepted_participants,
                         security,
                         &mut rng,
                     )
@@ -368,9 +447,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
 
     // ── Homomorphic multiplication (depth 3) ─────────────────────────────────
-    // k=1000. Three chained multiplications: ((a×b)×c)×d.
-    // Values in [1,5] so the max product is 5⁴=625 < 1000.
-    let dist = Uniform::new_inclusive(1u64, 5).unwrap();
+    // Three chained multiplications: ((a×b)×c)×d. Operands are drawn from
+    // [1, v_max] where v_max is the largest value whose fourth power still fits
+    // in the plaintext space, so the product never wraps modulo k.
+    let Some(v_max) = (1u64..).take_while(|v| v.pow(4) < plaintext_modulus).last() else {
+        print_notice_and_exit(Some(
+            "Plaintext modulus too small for a depth-3 product".to_string(),
+        ));
+        unreachable!()
+    };
+    println!(
+        "  operand range     = [1, {v_max}]  (v_max⁴ = {} < k)",
+        v_max.pow(4)
+    );
+    let dist = Uniform::new_inclusive(1u64, v_max).unwrap();
     let a = dist.sample(&mut rng);
     let b = dist.sample(&mut rng);
     let c = dist.sample(&mut rng);
