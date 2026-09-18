@@ -1,7 +1,7 @@
 // Threshold BFV multiplication with distributed l-BFV RLK and encrypted share transport.
 //
-// Smudging noise is computed via the secure `Lambda::secure(lambda)` API and
-// `generate_smudging_error_with_participant_count(..., num_parties, ...)` so the
+// Smudging noise is computed via the secure `Lambda::secure(lambda)` API with
+// `SmudgingBoundCalculator::with_accepted_participant_count(num_parties)` so the
 // accepted l-BFV participant count is explicit in the smudging bound. Paper-conforming
 // robustness requires odd n = 2t + 1; even n is accepted for compatibility but lies
 // outside the theorem.
@@ -38,7 +38,10 @@ use fhe::{
     aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
-    trbfv::{Lambda, ShareManager, TRBFV},
+    trbfv::{
+        Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+        SmudgingNoiseGenerator,
+    },
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
@@ -188,7 +191,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         pk_share_enc: PublicKey,
     }
 
-    let trbfv: TRBFV = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
+    let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
     let num_moduli = params_trbfv.moduli().len();
 
     println!("\n💻 Available CPU cores: {}", rayon::current_num_threads());
@@ -206,21 +209,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
                     .unwrap();
 
-                let sk_sss = trbfv
+                let sk_sss = share_manager
                     .generate_secret_shares_from_poly(sk_poly, &mut rng)
                     .unwrap();
 
                 // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications,
                 // accepted l-BFV participant count = num_parties).
-                let esi_noise = trbfv
-                    .generate_smudging_error_with_participant_count(
-                        3,
-                        preset.multiplicative_depth.unwrap(),
-                        num_parties,
-                        security,
-                        &mut rng,
-                    )
-                    .unwrap();
+                let config = SmudgingBoundCalculatorConfig::new_multiplicative(
+                    params_trbfv.clone(),
+                    num_parties,
+                    3,
+                    preset.multiplicative_depth.unwrap(),
+                    security,
+                )
+                .unwrap();
+                let calculator = SmudgingBoundCalculator::new(config)
+                    .with_accepted_participant_count(num_parties);
+                let generator = SmudgingNoiseGenerator::from_bound_calculator(calculator).unwrap();
+                let esi_noise = generator.generate_smudging_error(&mut rng).unwrap();
                 let esi_sss = share_manager
                     .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
                     .unwrap();
@@ -356,11 +362,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Lagrange share aggregation ────────────────────────────────────────────
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
-            let temp_trbfv = trbfv.clone();
-            party.sk_poly_sum = temp_trbfv
+            party.sk_poly_sum = share_manager
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
-            party.es_poly_sum = temp_trbfv
+            party.es_poly_sum = share_manager
                 .aggregate_collected_shares(&party.es_sss_collected)
                 .unwrap();
         });
@@ -407,7 +412,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Threshold decryption ──────────────────────────────────────────────────
     let t_start = Instant::now();
     parties.par_iter_mut().for_each(|party| {
-        party.d_share_poly = trbfv
+        party.d_share_poly = share_manager
             .decryption_share(
                 product.clone(),
                 party.sk_poly_sum.clone().into_ntt(),
@@ -429,8 +434,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let result = timeit!("Combine shares and decrypt", {
         let party_indices: Vec<usize> = (1..=threshold + 1).collect();
-        let pt = trbfv
-            .decrypt(d_shares, party_indices, product.clone())
+        let pt = share_manager
+            .decrypt_from_shares(d_shares, party_indices, product.clone())
             .unwrap();
         let v = Vec::<u64>::try_decode(&pt, Encoding::poly())?;
         Ok::<u64, Box<dyn Error>>(v[0])

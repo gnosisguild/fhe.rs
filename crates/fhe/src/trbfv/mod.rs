@@ -9,13 +9,10 @@ pub mod errors;
 pub mod shares;
 /// Smudging abstractions and implementations
 pub mod smudging;
-/// Main threshold BFV orchestrator
-pub mod threshold;
 
 // Re-export main types for convenience
 pub use shares::ShareManager;
 pub use smudging::{
     GeneratedSmudgingNoise, Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator,
-    SmudgingBoundCalculatorConfig,
+    SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
 };
-pub use threshold::TRBFV;

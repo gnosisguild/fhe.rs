@@ -1,4 +1,4 @@
-//! Benchmarks for direct RNS Shamir operations through the public TRBFV API.
+//! Benchmarks for direct RNS Shamir operations through the public ShareManager API.
 
 #![expect(
     clippy::expect_used,

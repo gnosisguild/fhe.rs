@@ -5,7 +5,10 @@ mod support;
 use fhe::bfv::CommonRandomPoly;
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::PublicKeyShare;
-use fhe::trbfv::{Lambda, ShareManager, TRBFV};
+use fhe::trbfv::{
+    Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+    SmudgingNoiseGenerator,
+};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
 
@@ -49,9 +52,6 @@ fn bench_data_sizes(c: &mut Criterion) {
     // Generate Common Reference Polynomial
     let crp = CommonRandomPoly::new(&params_trbfv, &mut make_rng()).unwrap();
 
-    // Setup trBFV
-    let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
-
     // Generate parties with threshold BFV keys and BFV encryption keys
     println!("\n📊 Generating party keys...");
     let mut parties = Vec::new();
@@ -72,14 +72,24 @@ fn bench_data_sizes(c: &mut Criterion) {
             .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
             .unwrap();
 
-        let sk_sss = trbfv
+        let sk_sss = share_manager
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
             .unwrap();
 
-        // Generate smudging noise shares
-        let esi_noise = trbfv
-            .generate_smudging_error(100, 0, Lambda::secure(preset.lambda).unwrap(), &mut rng)
-            .unwrap();
+        // Generate smudging noise shares: compute the bound with the
+        // smudging machinery, sample the noise, and deal it immediately.
+        let config = SmudgingBoundCalculatorConfig::new_multiplicative(
+            params_trbfv.clone(),
+            num_parties,
+            100,
+            0,
+            Lambda::secure(preset.lambda).unwrap(),
+        )
+        .unwrap();
+        let generator =
+            SmudgingNoiseGenerator::from_bound_calculator(SmudgingBoundCalculator::new(config))
+                .unwrap();
+        let esi_noise = generator.generate_smudging_error(&mut rng).unwrap();
         let esi_sss = share_manager
             .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
             .unwrap();
@@ -337,17 +347,16 @@ fn bench_timing_operations(c: &mut Criterion) {
     // Benchmark: Generate Shamir shares
     let mut rng = make_rng();
     let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-    let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
 
     group.bench_function("generate_shamir_shares", |b| {
-        let share_manager =
+        let mut share_manager =
             ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
             .unwrap();
 
         b.iter(|| {
-            trbfv
+            share_manager
                 .generate_secret_shares_from_poly(sk_poly.clone(), &mut rng)
                 .unwrap()
         });
