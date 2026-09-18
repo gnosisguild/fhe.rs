@@ -31,9 +31,8 @@ use zeroize::Zeroizing;
 ///
 /// `threshold` is the degree `T` of the Shamir sharing polynomial, read as the
 /// maximum number of corrupted parties the deployment tolerates. Reconstruction
-/// requires `T + 1` shares. As a trBFV type, `ShareManager` enforces the same
-/// invariants as [`TRBFV`](crate::trbfv::TRBFV): `n >= 3` and `T = (n - 1) / 2`
-/// (see [`validate_threshold_config`]).
+/// requires `T + 1` shares. `ShareManager` enforces the trBFV invariants
+/// `n >= 3` and `T = (n - 1) / 2` (see [`validate_threshold_config`]).
 ///
 /// # Protocol Flow
 /// 1. Each party generates secret shares using secret sharing
@@ -81,7 +80,7 @@ impl ShareManager {
     /// modulus (the MPC protocol assumes the Shamir evaluation points `1..=n`
     /// are distinct units modulo every modulus).
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
-        // Enforce the same `n >= 3` and `T = (n - 1) / 2` invariants as TRBFV.
+        // Enforce the `n >= 3` and `T = (n - 1) / 2` invariants of the trBFV protocol.
         validate_threshold_config(n, threshold)?;
 
         let min_modulus = params
@@ -490,7 +489,9 @@ mod tests {
     use super::*;
     use crate::ThresholdError;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
-    use crate::trbfv::smudging::SmudgingNoiseGenerator;
+    use crate::trbfv::smudging::{
+        Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
+    };
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use num_bigint::BigUint;
     use rand::rng;
@@ -500,6 +501,18 @@ mod tests {
             .set_degree(2048)
             .set_plaintext_modulus(4096)
             .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
+            .build_arc()
+            .unwrap()
+    }
+
+    /// Smudging-bound tests below use a degree-8192 profile: the larger
+    /// modulus chain leaves room for the statistically-hiding noise bound
+    /// that `Lambda::secure(80)` requires.
+    fn secure8192_params() -> Arc<BfvParameters> {
+        BfvParametersBuilder::new()
+            .set_degree(8192)
+            .set_plaintext_modulus(16384)
+            .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
             .build_arc()
             .unwrap()
     }
@@ -618,6 +631,42 @@ mod tests {
             }
         }
         // The one-time owner is moved into the call above and cannot be dealt twice.
+    }
+
+    #[test]
+    fn smudging_noise_from_calculator_deals_shares() {
+        let params = secure8192_params();
+        let n = 3;
+        let threshold = 1;
+        let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
+        let mut rng = rng();
+
+        // The supported flow: compute the bound with the smudging machinery,
+        // sample the noise, and deal it into Shamir shares immediately.
+        let config = SmudgingBoundCalculatorConfig::new_multiplicative(
+            params.clone(),
+            n,
+            1,
+            0,
+            Lambda::secure(80).unwrap(),
+        )
+        .unwrap();
+        let generator =
+            SmudgingNoiseGenerator::from_bound_calculator(SmudgingBoundCalculator::new(config))
+                .unwrap();
+        let noise = generator.generate_smudging_error(&mut rng).unwrap();
+        let shares = manager
+            .generate_secret_shares_from_smudging_noise(noise, &mut rng)
+            .unwrap();
+        assert_eq!(shares.len(), params.moduli().len());
+        for share_matrix in &shares {
+            assert_eq!(share_matrix.dim(), (n, params.degree()));
+        }
+        // Smudging noise at a secure bound is overwhelmingly nonzero.
+        assert!(
+            shares.iter().any(|m| m.iter().any(|&c| c != 0)),
+            "secure smudging shares should not all be zero"
+        );
     }
 
     #[test]

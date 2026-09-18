@@ -13,7 +13,10 @@ use std::sync::Arc;
 
 use fhe::aggregate::AggregateIter;
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, SecretKey};
-use fhe::trbfv::{Lambda, ShareManager, TRBFV};
+use fhe::trbfv::{
+    Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+    SmudgingNoiseGenerator,
+};
 use fhe::trlbfv::{LBFVPublicKey, PublicKeyShare, RelinKeyShare, aggregate_relinearization_key};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
@@ -37,7 +40,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     let share_params = preset.share_parameters.unwrap();
     assert_eq!(share_params.degree(), params.degree());
     assert_eq!(share_params.moduli().len(), 2);
-    let trbfv = TRBFV::new(N, THRESHOLD, params.clone()).expect("n=3, t=1 must validate");
+    let manager = ShareManager::new(N, THRESHOLD, params.clone()).expect("n=3, t=1 must validate");
 
     // ── Common CRS / URS seeds ╌───────────────────────────────────────
     let mut rng = support::rng(81);
@@ -79,14 +82,20 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     // straight into Shamir shares without exposing the polynomial.
     let mut smudging_noises = (0..N)
         .map(|_| {
-            trbfv
-                .generate_smudging_error_with_participant_count(
-                    1,
-                    MULT_DEPTH,
-                    N, // all n parties contribute to the RLK
-                    Lambda::secure(LAMBDA_VALUE).expect("secure lambda"),
-                    &mut rng,
-                )
+            let config = SmudgingBoundCalculatorConfig::new_multiplicative(
+                params.clone(),
+                N,
+                1,
+                MULT_DEPTH,
+                Lambda::secure(LAMBDA_VALUE).expect("secure lambda"),
+            )
+            .expect("smudging config");
+            // All n parties contribute to the RLK.
+            let calculator =
+                SmudgingBoundCalculator::new(config).with_accepted_participant_count(N);
+            SmudgingNoiseGenerator::from_bound_calculator(calculator)
+                .expect("smudging generator")
+                .generate_smudging_error(&mut rng)
                 .expect("smudging noise generation")
         })
         .collect::<Vec<_>>()
@@ -160,10 +169,10 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
 
     // Aggregate collected SK and noise shares into per-party polynomials.
     for party in parties.iter_mut() {
-        party.sk_poly_sum = trbfv
+        party.sk_poly_sum = manager
             .aggregate_collected_shares(&party.sk_sss_collected)
             .expect("aggregate sk shares");
-        party.es_poly_sum = trbfv
+        party.es_poly_sum = manager
             .aggregate_collected_shares(&party.es_sss_collected)
             .expect("aggregate es shares");
     }
@@ -198,7 +207,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
         .iter()
         .map(|&party_id| {
             let party = &parties[party_id - 1];
-            trbfv
+            manager
                 .decryption_share(
                     tally.clone(),
                     party.sk_poly_sum.clone().into_ntt(),
@@ -209,7 +218,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
         .collect();
 
     // A single share must be insufficient.
-    let one_share_result = trbfv.decrypt(
+    let one_share_result = manager.decrypt_from_shares(
         vec![d_share_polys[0].clone()],
         vec![reconstructing[0]],
         tally.clone(),
@@ -221,8 +230,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     );
 
     // Exactly threshold + 1 shares must decrypt to the correct product.
-    let decrypted = trbfv
-        .decrypt(d_share_polys, reconstructing, tally)
+    let decrypted = manager
+        .decrypt_from_shares(d_share_polys, reconstructing, tally)
         .expect("threshold decryption with t+1 shares");
     let result_vec =
         Vec::<u64>::try_decode(&decrypted, Encoding::poly()).expect("decode decryption result");

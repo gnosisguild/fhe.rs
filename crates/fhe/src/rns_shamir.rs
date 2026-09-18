@@ -27,7 +27,7 @@ pub(crate) struct RnsShareSet {
 }
 
 impl RnsShareSet {
-    /// Transfers shares to the established unprotected TRBFV API boundary.
+    /// Transfers shares to the established unprotected trBFV API boundary.
     pub(crate) fn into_matrices(mut self) -> Vec<Array2<u64>> {
         let mut matrices = Vec::with_capacity(self.matrices.len());
         for matrix in &mut self.matrices {

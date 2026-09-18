@@ -16,7 +16,10 @@ use console::style;
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{Lambda, ShareManager, TRBFV},
+    trbfv::{
+        Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+        SmudgingNoiseGenerator,
+    },
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -162,7 +165,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut rng = rand::rng();
     let crp = CommonRandomPoly::new(&params_trbfv, &mut rng)?;
-    let trbfv: TRBFV = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
+    let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
 
     println!("💻 Available CPU cores: {}", rayon::current_num_threads());
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
@@ -180,7 +183,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
                     .unwrap();
 
-                let sk_sss = trbfv
+                let sk_sss = share_manager
                     .generate_secret_shares_from_poly(sk_poly, &mut rng)
                     .unwrap();
 
@@ -191,9 +194,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let es_poly_sum = Poly::<PowerBasis>::zero(ctx);
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
 
-                let esi_noise = trbfv
-                    .generate_smudging_error(num_summed, 0, security, &mut rng)
-                    .unwrap();
+                // Smudging noise shares: compute the bound with the smudging
+                // machinery, sample the noise, and deal it immediately.
+                let config = SmudgingBoundCalculatorConfig::new_multiplicative(
+                    params_trbfv.clone(),
+                    num_parties,
+                    num_summed,
+                    0,
+                    security,
+                )
+                .unwrap();
+                let generator = SmudgingNoiseGenerator::from_bound_calculator(
+                    SmudgingBoundCalculator::new(config),
+                )
+                .unwrap();
+                let esi_noise = generator.generate_smudging_error(&mut rng).unwrap();
                 let esi_sss = share_manager
                     .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
                     .unwrap();
@@ -303,10 +318,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
-            party.sk_poly_sum = trbfv
+            party.sk_poly_sum = share_manager
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
-            party.es_poly_sum = trbfv
+            party.es_poly_sum = share_manager
                 .aggregate_collected_shares(&party.es_sss_collected)
                 .unwrap();
         });
@@ -342,7 +357,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let share_generation_start = Instant::now();
 
     parties.par_iter_mut().for_each(|party| {
-        party.d_share_poly = trbfv
+        party.d_share_poly = share_manager
             .decryption_share(
                 tally.clone(),
                 party.sk_poly_sum.clone().into_ntt(),
@@ -370,8 +385,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = timeit!("Share combination and final decryption", {
         // Parties are 1-based for Shamir x-coordinates; we used the first (threshold+1) parties
         let reconstructing_parties: Vec<usize> = (1..=threshold + 1).collect();
-        let open_results = trbfv
-            .decrypt(d_share_polys, reconstructing_parties, tally.clone())
+        let open_results = share_manager
+            .decrypt_from_shares(d_share_polys, reconstructing_parties, tally.clone())
             .unwrap();
         let result_vec = Vec::<u64>::try_decode(&open_results, Encoding::poly())?;
         Ok::<u64, Box<dyn Error>>(result_vec[0])
