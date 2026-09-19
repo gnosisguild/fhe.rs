@@ -9,9 +9,7 @@
 use std::sync::Arc;
 
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::{
-    ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
-};
+use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::Array2;
@@ -43,19 +41,11 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     let es_sss: Vec<Vec<Array2<u64>>> = (0..N)
         .map(|_| {
             // The evaluated ciphertext below is the sum of two fresh encryptions.
-            let config = SmudgingBoundCalculatorConfig::new_multiplicative(
-                params.clone(),
-                N,
-                2,
-                0,
-                LAMBDA_VALUE,
-            )
-            .expect("smudging config");
-            let generator =
-                SmudgingNoiseGenerator::from_bound_calculator(SmudgingBoundCalculator::new(config))
-                    .expect("smudging generator");
+            let config =
+                SmudgingConfig::new(params.clone(), N, 2, LAMBDA_VALUE).expect("smudging config");
+            let generator = SmudgingNoiseGenerator::new(config).expect("smudging generator");
             let noise = generator
-                .generate_smudging_error(&mut rng)
+                .generate(&mut rng)
                 .expect("smudging noise generation");
             manager
                 .generate_secret_shares_from_smudging_noise(noise, &mut rng)

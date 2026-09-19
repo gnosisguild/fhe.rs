@@ -5,9 +5,7 @@ mod support;
 use fhe::bfv::CommonRandomPoly;
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::PublicKeyShare;
-use fhe::trbfv::{
-    ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
-};
+use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
 
@@ -77,18 +75,10 @@ fn bench_data_sizes(c: &mut Criterion) {
 
         // Generate smudging noise shares: compute the bound with the
         // smudging machinery, sample the noise, and deal it immediately.
-        let config = SmudgingBoundCalculatorConfig::new_multiplicative(
-            params_trbfv.clone(),
-            num_parties,
-            100,
-            0,
-            preset.lambda,
-        )
-        .unwrap();
-        let generator =
-            SmudgingNoiseGenerator::from_bound_calculator(SmudgingBoundCalculator::new(config))
-                .unwrap();
-        let esi_noise = generator.generate_smudging_error(&mut rng).unwrap();
+        let config =
+            SmudgingConfig::new(params_trbfv.clone(), num_parties, 100, preset.lambda).unwrap();
+        let generator = SmudgingNoiseGenerator::new(config).unwrap();
+        let esi_noise = generator.generate(&mut rng).unwrap();
         let esi_sss = share_manager
             .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
             .unwrap();

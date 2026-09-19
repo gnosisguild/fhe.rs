@@ -32,10 +32,7 @@ use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
-    trbfv::{
-        ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
-        SmudgingNoiseGenerator,
-    },
+    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
@@ -198,19 +195,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications).
                 // The default accepted set is all n parties.
-                let config = SmudgingBoundCalculatorConfig::new_multiplicative(
-                    params_trbfv.clone(),
-                    num_parties,
-                    3,
-                    preset.multiplicative_depth.unwrap(),
-                    lambda,
-                )
-                .unwrap();
-                let generator = SmudgingNoiseGenerator::from_bound_calculator(
-                    SmudgingBoundCalculator::new(config),
-                )
-                .unwrap();
-                let esi_noise = generator.generate_smudging_error(&mut rng).unwrap();
+                let mut config =
+                    SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda).unwrap();
+                config.mult_depth = preset.multiplicative_depth.unwrap();
+                let generator = SmudgingNoiseGenerator::new(config).unwrap();
+                let esi_noise = generator.generate(&mut rng).unwrap();
                 let esi_sss = share_manager
                     .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
                     .unwrap();

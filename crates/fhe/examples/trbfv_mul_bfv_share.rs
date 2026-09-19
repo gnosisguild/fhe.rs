@@ -1,7 +1,7 @@
 // Threshold BFV multiplication with distributed l-BFV RLK and encrypted share transport.
 //
 // Smudging noise is computed via the smudging machinery with
-// `SmudgingBoundCalculator::with_accepted_participant_count(num_parties)` so the
+// smudging configuration uses `num_parties` as the conservative RLK bound so the
 // accepted l-BFV participant count is explicit in the smudging bound. Paper-conforming
 // robustness requires odd n = 2t + 1; even n is accepted for compatibility but lies
 // outside the theorem.
@@ -38,10 +38,7 @@ use fhe::{
     aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
-    trbfv::{
-        ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
-        SmudgingNoiseGenerator,
-    },
+    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
@@ -214,18 +211,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications,
                 // accepted l-BFV participant count = num_parties).
-                let config = SmudgingBoundCalculatorConfig::new_multiplicative(
-                    params_trbfv.clone(),
-                    num_parties,
-                    3,
-                    preset.multiplicative_depth.unwrap(),
-                    lambda,
-                )
-                .unwrap();
-                let calculator = SmudgingBoundCalculator::new(config)
-                    .with_accepted_participant_count(num_parties);
-                let generator = SmudgingNoiseGenerator::from_bound_calculator(calculator).unwrap();
-                let esi_noise = generator.generate_smudging_error(&mut rng).unwrap();
+                let mut config =
+                    SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda).unwrap();
+                config.mult_depth = preset.multiplicative_depth.unwrap();
+                let generator = SmudgingNoiseGenerator::new(config).unwrap();
+                let esi_noise = generator.generate(&mut rng).unwrap();
                 let esi_sss = share_manager
                     .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
                     .unwrap();

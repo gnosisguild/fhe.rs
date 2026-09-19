@@ -6,7 +6,7 @@
 mod support;
 
 use fhe::bfv::Ciphertext;
-use fhe::trbfv::{ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
+use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe::{Error, ThresholdError};
 use fhe_math::rq::{Poly, PowerBasis};
 use num_traits::Zero;
@@ -59,15 +59,18 @@ fn named_profiles_have_feasible_smudging_bounds() {
         // above fhe::trbfv::smudging::MAX_LAMBDA.
         let lambda = profile.lambda;
         let config = match profile.multiplicative_depth {
-            Some(depth) => SmudgingBoundCalculatorConfig::new_multiplicative(
-                profile.parameters.clone(),
-                profile.num_parties,
-                profile.max_ciphertexts,
-                depth,
-                lambda,
-            )
-            .unwrap(),
-            None => SmudgingBoundCalculatorConfig::new(
+            Some(depth) => {
+                let mut config = SmudgingConfig::new(
+                    profile.parameters.clone(),
+                    profile.num_parties,
+                    profile.max_ciphertexts,
+                    lambda,
+                )
+                .unwrap();
+                config.mult_depth = depth;
+                config
+            }
+            None => SmudgingConfig::new(
                 profile.parameters.clone(),
                 profile.num_parties,
                 profile.max_ciphertexts,
@@ -76,9 +79,8 @@ fn named_profiles_have_feasible_smudging_bounds() {
             .unwrap(),
         };
 
-        let bound = SmudgingBoundCalculator::new(config)
-            .calculate_sm_bound()
-            .unwrap();
+        let generator = SmudgingNoiseGenerator::new(config).unwrap();
+        let bound = generator.smudging_bound();
         assert!(
             !bound.is_zero(),
             "profile {} must produce a non-zero smudging bound",

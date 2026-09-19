@@ -3,7 +3,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
-use fhe::trbfv::{SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
+use fhe::trbfv::{SmudgingConfig, SmudgingNoiseGenerator};
 use num_bigint::BigUint;
 
 #[test]
@@ -45,16 +45,17 @@ fn secure8192_profile_is_feasible_and_covers_share_moduli() {
     assert_eq!(preset.lambda, 45);
     assert_eq!(preset.multiplicative_depth, None);
 
-    let config = SmudgingBoundCalculatorConfig::new(
+    let config = SmudgingConfig::new(
         preset.parameters.clone(),
         preset.num_parties,
         preset.max_ciphertexts,
         preset.lambda,
     )
     .unwrap();
-    let bound = SmudgingBoundCalculator::new(config)
-        .calculate_sm_bound()
-        .unwrap();
+    let bound = SmudgingNoiseGenerator::new(config)
+        .unwrap()
+        .smudging_bound()
+        .clone();
     assert_eq!(
         bound,
         BigUint::parse_bytes(b"132922799578495921427264261134328266752000000", 10).unwrap()
@@ -93,18 +94,18 @@ fn secure16384_profile_is_feasible_and_covers_share_moduli() {
     assert_eq!(preset.lambda, 31);
     assert_eq!(preset.multiplicative_depth, Some(3));
 
-    let config = SmudgingBoundCalculatorConfig::new_multiplicative(
+    let mut config = SmudgingConfig::new(
         preset.parameters.clone(),
         preset.num_parties,
         preset.max_ciphertexts,
-        preset.multiplicative_depth.unwrap(),
         preset.lambda,
     )
     .unwrap();
-    let bound = SmudgingBoundCalculator::new(config)
-        .with_accepted_participant_count(preset.num_parties)
-        .calculate_sm_bound()
-        .unwrap();
+    config.mult_depth = preset.multiplicative_depth.unwrap();
+    let bound = SmudgingNoiseGenerator::new(config)
+        .unwrap()
+        .smudging_bound()
+        .clone();
     assert!(bound > BigUint::from(0_u64));
 
     assert!(

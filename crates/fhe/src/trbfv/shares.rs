@@ -6,7 +6,7 @@ use crate::Error;
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::rns_shamir::RnsShamir;
 use crate::trbfv::config::validate_threshold_config;
-use crate::trbfv::smudging::GeneratedSmudgingNoise;
+use crate::trbfv::smudging::SmudgingNoise;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
 use fhe_math::{
@@ -142,12 +142,12 @@ impl ShareManager {
     /// Generate Shamir Secret Shares for smudging noise from a noise owner.
     ///
     /// This is the supported dealing operation for freshly sampled smudging
-    /// noise: it consumes the [`GeneratedSmudgingNoise`] owner and deals the
+    /// noise: it consumes the [`SmudgingNoise`] owner and deals the
     /// underlying polynomial with the same layout as
     /// [`ShareManager::generate_secret_shares_from_poly`].
     pub fn generate_secret_shares_from_smudging_noise<R: RngCore + CryptoRng>(
         &mut self,
-        noise: GeneratedSmudgingNoise,
+        noise: SmudgingNoise,
         rng: &mut R,
     ) -> Result<Vec<Array2<u64>>, Error> {
         self.generate_secret_shares_from_poly(noise.into_poly(), rng)
@@ -489,12 +489,9 @@ mod tests {
     use super::*;
     use crate::ThresholdError;
     use crate::bfv::{Encoding, PublicKey, SecretKey};
-    use crate::trbfv::smudging::{
-        SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
-    };
+    use crate::trbfv::smudging::{SmudgingConfig, SmudgingNoiseGenerator};
     use crate::trbfv::test_support::{params_2048, params_8192};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
-    use num_bigint::BigUint;
     use rand::rng;
 
     #[test]
@@ -596,8 +593,9 @@ mod tests {
         let mut rng = rng();
 
         let generator =
-            SmudgingNoiseGenerator::new(params.clone(), BigUint::from(1000u64)).unwrap();
-        let noise = generator.generate_smudging_error(&mut rng).unwrap();
+            SmudgingNoiseGenerator::new(SmudgingConfig::new(params.clone(), n, 1, 0).unwrap())
+                .unwrap();
+        let noise = generator.generate(&mut rng).unwrap();
         let shares = manager
             .generate_secret_shares_from_smudging_noise(noise, &mut rng)
             .unwrap();
@@ -614,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn smudging_noise_from_calculator_deals_shares() {
+    fn smudging_noise_deals_shares() {
         let params = params_8192();
         let n = 3;
         let threshold = 1;
@@ -623,12 +621,9 @@ mod tests {
 
         // The supported flow: compute the bound with the smudging machinery,
         // sample the noise, and deal it into Shamir shares immediately.
-        let config =
-            SmudgingBoundCalculatorConfig::new_multiplicative(params.clone(), n, 1, 0, 80).unwrap();
-        let generator =
-            SmudgingNoiseGenerator::from_bound_calculator(SmudgingBoundCalculator::new(config))
-                .unwrap();
-        let noise = generator.generate_smudging_error(&mut rng).unwrap();
+        let config = SmudgingConfig::new(params.clone(), n, 1, 80).unwrap();
+        let generator = SmudgingNoiseGenerator::new(config).unwrap();
+        let noise = generator.generate(&mut rng).unwrap();
         let shares = manager
             .generate_secret_shares_from_smudging_noise(noise, &mut rng)
             .unwrap();

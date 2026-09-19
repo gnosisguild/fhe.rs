@@ -16,7 +16,4 @@ mod test_support;
 
 // Re-export main types for convenience
 pub use shares::ShareManager;
-pub use smudging::{
-    GeneratedSmudgingNoise, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
-    SmudgingNoiseGenerator,
-};
+pub use smudging::{SmudgingConfig, SmudgingNoise, SmudgingNoiseGenerator};
