@@ -199,7 +199,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 let sk_share = SecretKey::random(&params_trbfv, &mut rng);
 
-                let mut share_manager =
+                let share_manager =
                     ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
                 let sk_poly = share_manager
                     .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())

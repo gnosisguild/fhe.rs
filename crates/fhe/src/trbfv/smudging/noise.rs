@@ -353,7 +353,7 @@ impl SmudgingNoiseGenerator {
 mod tests {
     use super::*;
     use crate::bfv::BfvParametersBuilder;
-    use crate::trbfv::test_support::params_8192;
+    use crate::support::secure8192;
     use num_bigint::BigInt;
     use num_traits::{ToPrimitive, Zero};
     use rand::{RngCore, SeedableRng, rng};
@@ -451,7 +451,7 @@ mod tests {
 
     #[test]
     fn config_validates_basic_inputs() {
-        let params = params_8192();
+        let params = secure8192().unwrap().parameters;
         assert!(SmudgingConfig::new(params.clone(), 0, 1, 2).is_err());
         assert!(SmudgingConfig::new(params.clone(), 1, 0, 2).is_err());
         assert!(SmudgingConfig::new(params, 1, 1, MAX_LAMBDA + 1).is_err());
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn generator_revalidates_public_config_fields() {
-        let params = params_8192();
+        let params = secure8192().unwrap().parameters;
         let mut config = SmudgingConfig::new(params.clone(), 1, 1, 2).unwrap();
         config.n = 0;
         assert!(SmudgingNoiseGenerator::new(config).is_err());
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn delta_is_q_div_t_floor() {
-        let params = params_8192();
+        let params = secure8192().unwrap().parameters;
         let q = modulus_product(params.moduli());
         let t = BigUint::from(params.plaintext());
         let delta = compute_delta(&q, &t);
@@ -495,7 +495,8 @@ mod tests {
 
     #[test]
     fn lambda_at_max_is_not_truncated() {
-        let config = SmudgingConfig::new(params_8192(), 1, 1, MAX_LAMBDA).unwrap();
+        let config =
+            SmudgingConfig::new(secure8192().unwrap().parameters, 1, 1, MAX_LAMBDA).unwrap();
         if let Ok(generator) = SmudgingNoiseGenerator::new(config) {
             assert!(generator.smudging_bound().bits() as usize > MAX_LAMBDA);
         }
@@ -503,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_smudging_noise_generator_creation() {
-        let params = params_8192();
+        let params = secure8192().unwrap().parameters;
         let config = SmudgingConfig::new(params.clone(), 3, 1, 35).unwrap();
         let generator = SmudgingNoiseGenerator::new(config).unwrap();
         assert_eq!(generator.params, params);
@@ -513,7 +514,7 @@ mod tests {
     #[test]
     fn test_noise_generation_small_bound() {
         let mut rng = rng();
-        let params = params_8192();
+        let params = secure8192().unwrap().parameters;
         let bound = BigUint::from(1000u64);
         let generator = generator_with_bound(params.clone(), bound.clone());
         let noise = generator.generate(&mut rng).unwrap();
@@ -523,7 +524,7 @@ mod tests {
     #[test]
     fn test_noise_generation_zero_bound() {
         let mut rng = rng();
-        let params = params_8192();
+        let params = secure8192().unwrap().parameters;
         let generator = generator_with_bound(params.clone(), BigUint::zero());
         let poly = generator.generate(&mut rng).unwrap().into_poly();
         assert!(poly.coefficients().iter().all(|&c| c == 0));
@@ -628,7 +629,7 @@ mod tests {
 
     #[test]
     fn smudging_bound_monotonicity() {
-        let params = params_8192();
+        let params = secure8192().unwrap().parameters;
         let b1 = SmudgingNoiseGenerator::new(SmudgingConfig::new(params.clone(), 3, 1, 2).unwrap())
             .unwrap()
             .smudging_bound()

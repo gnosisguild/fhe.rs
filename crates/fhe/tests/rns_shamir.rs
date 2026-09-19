@@ -21,7 +21,7 @@ fn share_manager_generation_is_deterministic_across_thread_counts() {
             .build()
             .unwrap()
             .install(|| {
-                let mut manager = ShareManager::new(5, 2, params.clone()).unwrap();
+                let manager = ShareManager::new(5, 2, params.clone()).unwrap();
                 let secret = manager
                     .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
                     .unwrap();

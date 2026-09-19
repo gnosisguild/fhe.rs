@@ -28,7 +28,7 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
     let modulus_count = params.moduli().len();
 
     for (party_count, threshold) in [(3usize, 1usize), (5, 2), (20, 9)] {
-        let mut manager =
+        let manager =
             ShareManager::new(party_count, threshold, params.clone()).expect("valid committee");
         let mut setup_rng = ChaCha8Rng::seed_from_u64(1);
         let secret_key = SecretKey::random(&params, &mut setup_rng);

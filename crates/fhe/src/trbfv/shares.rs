@@ -1,8 +1,9 @@
+//! Share collection and management for threshold BFV.
+//!
+//! This module provides the ShareManager struct that handles aggregation of secret shares
+//! and computation of decryption shares in the threshold BFV scheme.
+
 use crate::Error;
-/// Share collection and management for threshold BFV.
-///
-/// This module provides the ShareManager struct that handles aggregation of secret shares
-/// and computation of decryption shares in the threshold BFV scheme.
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::rns_shamir::RnsShamir;
 use crate::trbfv::config::validate_threshold_config;
@@ -60,7 +61,7 @@ pub struct ShareManager {
     /// Reconstruction requires `T + 1` shares.
     threshold: usize,
     /// BFV parameters (degree, moduli, etc.)
-    pub params: Arc<BfvParameters>,
+    params: Arc<BfvParameters>,
 }
 
 impl ShareManager {
@@ -111,6 +112,14 @@ impl ShareManager {
         self.threshold
     }
 
+    /// Returns the BFV parameters used by this manager.
+    #[must_use]
+    pub fn params(&self) -> &Arc<BfvParameters> {
+        &self.params
+    }
+}
+
+impl ShareManager {
     /// Utility to create a Zeroizing<Poly> from coefficients.
     ///
     /// # Arguments
@@ -146,7 +155,7 @@ impl ShareManager {
     /// underlying polynomial with the same layout as
     /// [`ShareManager::generate_secret_shares_from_poly`].
     pub fn generate_secret_shares_from_smudging_noise<R: RngCore + CryptoRng>(
-        &mut self,
+        &self,
         noise: SmudgingNoise,
         rng: &mut R,
     ) -> Result<Vec<Array2<u64>>, Error> {
@@ -164,7 +173,7 @@ impl ShareManager {
     /// for every decryption; reusing noise breaks the statistical hiding
     /// argument.
     pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
-        &mut self,
+        &self,
         poly: Zeroizing<Poly<PowerBasis>>,
         rng: &mut R,
     ) -> Result<Vec<Array2<u64>>, Error> {
@@ -185,7 +194,6 @@ impl ShareManager {
         .share(poly.coefficients(), rng)
         .map(|shares| shares.into_matrices())
     }
-
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
     ///
     /// This function takes shares collected from other parties and aggregates them
@@ -291,7 +299,6 @@ impl ShareManager {
         sum_poly.set_coefficients(sum);
         Ok(sum_poly)
     }
-
     /// Compute decryption share from ciphertext and secret/smudging polynomials.
     ///
     /// This function computes a party's contribution to the threshold decryption process.
@@ -313,29 +320,7 @@ impl ShareManager {
         sk_i: Poly<Ntt>,
         es_i: Poly<PowerBasis>,
     ) -> Result<Poly<PowerBasis>, Error> {
-        if ciphertext.params != self.params {
-            return Err(Error::ParameterMismatch {
-                left: crate::ParameterSource::Ciphertext,
-                right: crate::ParameterSource::Parameters,
-            });
-        }
-        if ciphertext.level != 0 {
-            return Err(Error::InvalidLevel {
-                level: ciphertext.level,
-                min_level: 0,
-                max_level: 0,
-            });
-        }
-        // A degree-2 (unrelinearized) ciphertext has 3 components; silently
-        // ignoring c[2] would produce a wrong plaintext.
-        if ciphertext.c.len() != 2 {
-            return Err(crate::CiphertextError::InvalidPolynomialCount {
-                operation: crate::CiphertextOperation::MultipartyKeySwitch,
-                actual: ciphertext.c.len(),
-                expected: 2,
-            }
-            .into());
-        }
+        self.validate_ciphertext(&ciphertext)?;
         let mut c0 = ciphertext.c[0].clone();
         c0.disallow_variable_time_computations();
         let c0 = c0.into_power_basis();
@@ -377,19 +362,7 @@ impl ShareManager {
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
-        if ciphertext.params != self.params {
-            return Err(Error::ParameterMismatch {
-                left: crate::ParameterSource::Ciphertext,
-                right: crate::ParameterSource::Parameters,
-            });
-        }
-        if ciphertext.level != 0 {
-            return Err(Error::InvalidLevel {
-                level: ciphertext.level,
-                min_level: 0,
-                max_level: 0,
-            });
-        }
+        self.validate_ciphertext_parameters(&ciphertext)?;
         let ctx = self.params.context_at_level(0)?;
         for d_share_poly in &d_share_polys {
             if d_share_poly.ctx().as_ref() != ctx.as_ref() {
@@ -411,6 +384,7 @@ impl ShareManager {
         )?
         .reconstruct(&share_views, &reconstructing_parties)?
         .into_matrix();
+        self.validate_ciphertext_shape(&ciphertext)?;
 
         // Scale the reconstructed polynomial into the plaintext space.
         let mut result_poly = Poly::<PowerBasis>::zero(ctx);
@@ -476,38 +450,75 @@ impl ShareManager {
         };
         Ok(pt)
     }
+
+    /// Validate the ciphertext accepted by threshold decryption.
+    fn validate_ciphertext(&self, ciphertext: &Ciphertext) -> Result<(), Error> {
+        self.validate_ciphertext_parameters(ciphertext)?;
+        self.validate_ciphertext_shape(ciphertext)
+    }
+
+    fn validate_ciphertext_parameters(&self, ciphertext: &Ciphertext) -> Result<(), Error> {
+        if ciphertext.params != self.params {
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Ciphertext,
+                right: crate::ParameterSource::Parameters,
+            });
+        }
+        if ciphertext.level != 0 {
+            return Err(Error::InvalidLevel {
+                level: ciphertext.level,
+                min_level: 0,
+                max_level: 0,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_ciphertext_shape(&self, ciphertext: &Ciphertext) -> Result<(), Error> {
+        // A degree-2 (unrelinearized) ciphertext has 3 components; silently
+        // ignoring c[2] would produce a wrong plaintext.
+        if ciphertext.c.len() != 2 {
+            return Err(crate::CiphertextError::InvalidPolynomialCount {
+                operation: crate::CiphertextOperation::MultipartyKeySwitch,
+                actual: ciphertext.c.len(),
+                expected: 2,
+            }
+            .into());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic
-)]
 mod tests {
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic
+    )]
     use super::*;
     use crate::ThresholdError;
     use crate::bfv::{Encoding, PublicKey, SecretKey};
+    use crate::support::{insecure, secure8192};
     use crate::trbfv::smudging::{SmudgingConfig, SmudgingNoiseGenerator};
-    use crate::trbfv::test_support::{params_2048, params_8192};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
 
     #[test]
     fn test_share_manager_creation() {
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         assert_eq!(manager.n(), 5);
         assert_eq!(manager.threshold(), 2);
-        assert_eq!(manager.params, params);
+        assert_eq!(manager.params(), &params);
     }
 
     #[test]
     fn test_share_manager_rejects_threshold_zero() {
         // A degree-0 Shamir sharing polynomial is the secret itself, so every
         // party would hold the full secret.
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let err = ShareManager::new(5, 0, params)
             .expect_err("threshold 0 must be rejected (degree-0 sharing reveals the secret)");
         assert!(matches!(
@@ -522,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_share_manager_rejects_invalid_threshold_config() {
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
 
         for (n, threshold) in [(0usize, 1usize), (1, 0), (1, 1), (2, 0), (2, 1)] {
             assert!(
@@ -558,7 +569,7 @@ mod tests {
 
     #[test]
     fn test_share_manager_accepts_valid_threshold_config() {
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         for (n, threshold) in [(3usize, 1usize), (4, 1), (5, 2), (10, 4), (20, 9), (21, 10)] {
             let manager = ShareManager::new(n, threshold, params.clone())
                 .expect("a valid threshold config must be accepted");
@@ -569,7 +580,7 @@ mod tests {
 
     #[test]
     fn test_coeffs_to_poly_utility() {
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
 
         // Test with i64 coefficients
@@ -586,10 +597,10 @@ mod tests {
 
     #[test]
     fn test_smudging_noise_dealing_consumes_owner() {
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let n = 5;
         let threshold = 2;
-        let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
+        let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
         let mut rng = rng();
 
         let generator =
@@ -613,15 +624,15 @@ mod tests {
 
     #[test]
     fn smudging_noise_deals_shares() {
-        let params = params_8192();
+        let params = secure8192().unwrap().parameters;
         let n = 3;
         let threshold = 1;
-        let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
+        let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
         let mut rng = rng();
 
         // The supported flow: compute the bound with the smudging machinery,
         // sample the noise, and deal it into Shamir shares immediately.
-        let config = SmudgingConfig::new(params.clone(), n, 1, 80).unwrap();
+        let config = SmudgingConfig::new(params.clone(), n, 1, 45).unwrap();
         let generator = SmudgingNoiseGenerator::new(config).unwrap();
         let noise = generator.generate(&mut rng).unwrap();
         let shares = manager
@@ -640,8 +651,8 @@ mod tests {
 
     #[test]
     fn test_share_generation_rejects_wrong_context_and_noncanonical_secret() {
-        let params = params_2048();
-        let mut manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let mut rng = rng();
 
         let wrong_context = params.context_at_level(1).unwrap();
@@ -671,7 +682,7 @@ mod tests {
     #[test]
     fn test_decryption_share_computation() {
         let mut rng = rng();
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let n = 3;
         // ShareManager now enforces T = (n - 1) / 2, so the minimal valid
         // configuration is (n = 3, threshold = 1), requiring two shares.
@@ -682,7 +693,7 @@ mod tests {
         let sk = SecretKey::random(&params, &mut rng);
         let pk = PublicKey::new(&sk, &mut rng);
 
-        let mut plaintext_data = vec![42u64, 100, 400];
+        let mut plaintext_data = vec![42u64, 10, 40];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct: Arc<Ciphertext> = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
@@ -721,7 +732,7 @@ mod tests {
     #[test]
     fn test_decryption_share_rejects_nonzero_ciphertext_level() {
         let mut rng = rng();
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
         let public_key = PublicKey::new(&secret_key, &mut rng);
@@ -752,7 +763,7 @@ mod tests {
     #[test]
     fn test_decrypt_from_shares_rejects_nonzero_ciphertext_level() {
         let mut rng = rng();
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
         let public_key = PublicKey::new(&secret_key, &mut rng);
@@ -775,16 +786,49 @@ mod tests {
     }
 
     #[test]
+    fn test_decrypt_from_shares_rejects_invalid_ciphertext_shape() {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
+        ciphertext.c.pop();
+
+        let context = params.context_at_level(0).unwrap();
+        let result = manager.decrypt_from_shares(
+            vec![
+                Poly::<PowerBasis>::zero(context),
+                Poly::<PowerBasis>::zero(context),
+            ],
+            vec![1, 2],
+            Arc::new(ciphertext),
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::Ciphertext(
+                crate::CiphertextError::InvalidPolynomialCount {
+                    actual: 1,
+                    expected: 2,
+                    ..
+                }
+            ))
+        ));
+    }
+
+    #[test]
     fn test_threshold_decryption_workflow() {
         let mut rng = rng();
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let n = 3;
         let threshold = 1;
 
         let ctx = params.context_at_level(0).unwrap();
 
         // Setup multiple share managers (simulating different parties)
-        let mut managers: Vec<ShareManager> = (0..n)
+        let managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
             .collect();
 
@@ -819,7 +863,7 @@ mod tests {
 
         // Create a test ciphertext
         let pk = PublicKey::new(&secret_key, &mut rng);
-        let mut plaintext_data = vec![123u64];
+        let mut plaintext_data = vec![23u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
@@ -860,14 +904,14 @@ mod tests {
     #[test]
     fn test_threshold_decryption_workflow_arbitrary_parties_small() {
         let mut rng = rng();
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let n = 5;
         let threshold = 2; // need 3 parties
 
         let ctx = params.context_at_level(0).unwrap();
 
         // Setup multiple share managers (simulating different parties)
-        let mut managers: Vec<ShareManager> = (0..n)
+        let managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
             .collect();
 
@@ -903,7 +947,7 @@ mod tests {
 
         // Create a test ciphertext
         let pk = PublicKey::new(&secret_key, &mut rng);
-        let mut plaintext_data = vec![321u64];
+        let mut plaintext_data = vec![32u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
@@ -942,14 +986,14 @@ mod tests {
     #[test]
     fn test_threshold_decryption_workflow_arbitrary_parties_large() {
         let mut rng = rng();
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let n = 20;
         let threshold = 9; // (n - 1) / 2 for n = 20; need 10 parties
 
         let ctx = params.context_at_level(0).unwrap();
 
         // Setup multiple share managers (simulating different parties)
-        let mut managers: Vec<ShareManager> = (0..n)
+        let managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
             .collect();
 
@@ -984,7 +1028,7 @@ mod tests {
 
         // Create a test ciphertext
         let pk = PublicKey::new(&secret_key, &mut rng);
-        let mut plaintext_data = vec![777u64];
+        let mut plaintext_data = vec![77u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
@@ -1026,14 +1070,14 @@ mod tests {
     #[test]
     fn test_threshold_decryption_wrong_indices_fails() {
         let mut rng = rng();
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let n = 10;
         let threshold = 4; // need 5 parties
 
         let ctx = params.context_at_level(0).unwrap();
 
         // Setup multiple share managers (simulating different parties)
-        let mut managers: Vec<ShareManager> = (0..n)
+        let managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
             .collect();
 
@@ -1068,7 +1112,7 @@ mod tests {
 
         // Create a test ciphertext
         let pk = PublicKey::new(&secret_key, &mut rng);
-        let mut plaintext_data = vec![555u64];
+        let mut plaintext_data = vec![55u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
@@ -1130,7 +1174,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_collected_shares_rejects_bad_input() {
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let shape = (params.moduli().len(), params.degree());
 
@@ -1152,7 +1196,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_collected_shares_rejects_non_canonical_q_at_each_row() {
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
@@ -1188,7 +1232,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_collected_shares_rejects_u64_max() {
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
@@ -1222,7 +1266,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_collected_shares_accepts_q_minus_one_boundary() {
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
@@ -1245,7 +1289,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_collected_shares_rejects_invalid_after_valid() {
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
@@ -1273,7 +1317,7 @@ mod tests {
     #[test]
     fn test_decrypt_from_shares_rejects_invalid_party_indices() {
         let mut rng = rng();
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let n = 5;
         let threshold = 2; // needs exactly 3 shares
         let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
@@ -1332,14 +1376,14 @@ mod tests {
     #[test]
     fn test_threshold_decryption_random_party_order() {
         let mut rng = rng();
-        let params = params_2048();
+        let params = insecure().unwrap().parameters;
         let n = 15;
         let threshold = 7; // need 8 parties
 
         let ctx = params.context_at_level(0).unwrap();
 
         // Setup multiple share managers (simulating different parties)
-        let mut managers: Vec<ShareManager> = (0..n)
+        let managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
             .collect();
 
@@ -1374,7 +1418,7 @@ mod tests {
 
         // Create a test ciphertext
         let pk = PublicKey::new(&secret_key, &mut rng);
-        let mut plaintext_data = vec![222u64];
+        let mut plaintext_data = vec![22u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
