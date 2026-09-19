@@ -313,14 +313,18 @@ impl SmudgingNoiseGenerator {
                 // Wipe the rejected candidate before reuse.
                 candidate.as_mut_slice().zeroize();
             }
-            for (row, (qi, &bound_qi)) in moduli.iter().zip(&bound_mod).enumerate() {
+            for (cell, (qi, &bound_qi)) in matrix
+                .column_mut(col)
+                .iter_mut()
+                .zip(moduli.iter().zip(&bound_mod))
+            {
                 let u_mod = limbs_mod(&candidate, qi);
                 // (u - B_sm) mod qi as a constant-time modular negation and
                 // addition: `neg` turns `-B_sm mod qi` into a canonical
                 // residue and `add` performs the wrap-around conditional
                 // subtraction itself, so no branch depends on the secret
                 // residues. Both operands stay in [0, qi).
-                matrix[[row, col]] = qi.add(u_mod, qi.neg(bound_qi));
+                *cell = qi.add(u_mod, qi.neg(bound_qi));
             }
             // Wipe the consumed candidate limbs.
             candidate.as_mut_slice().zeroize();
