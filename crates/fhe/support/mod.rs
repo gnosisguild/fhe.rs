@@ -9,51 +9,46 @@ use fhe::bfv::{BfvParameters, BfvParametersBuilder};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-/// Supplied small-scale parameters for insecure integration testing.
-pub mod insecure_512 {
+/// Degree-128 depth-3 parameters for correctness testing. Not secure.
+///
+/// `n = 19` (`t = 9`), `z = 3`, `k = 100`, `lambda = 2`. Its smudging bound
+/// is configured for the default accepted participant count `|S| = n`.
+pub mod insecure_128 {
     /// Polynomial ring degree.
-    pub const DEGREE: usize = 512;
-    /// Number of parties used by the test profile.
-    pub const NUM_PARTIES: u128 = 5;
+    pub const DEGREE: usize = 128;
+    /// Number of parties (ciphernodes).
+    pub const NUM_PARTIES: usize = 19;
+    /// Multiplicative depth supported by the design point.
+    pub const MULT_DEPTH: u32 = 3;
+    /// Number of initial noise terms folded into `B_C`.
+    pub const MAX_CIPHERTEXTS: usize = 3;
+    /// Statistical security parameter of the design point.
+    pub const LAMBDA: usize = 2;
 
-    /// Threshold BFV parameters.
+    /// Threshold BFV computation parameters.
     pub mod threshold {
         /// Plaintext modulus.
         pub const PLAINTEXT_MODULUS: u64 = 100;
-        /// Ciphertext moduli.
-        pub const MODULI: &[u64] = &[0xffffee001, 0xffffc4001];
-        /// Error-1 variance.
-        pub const ERROR1_VARIANCE: &str = "3";
-        /// Error-1 variance as a small integer.
-        pub const ERROR1_VARIANCE_BIGUINT: u32 = 3;
+        /// Ciphertext moduli (3 x 56 bits).
+        pub const MODULI: &[u64] = &[
+            0x00ff_ffff_ffff_c601,
+            0x00ff_ffff_ffff_c301,
+            0x00ff_ffff_ffff_a501,
+        ];
+        /// Error-1 variance for the supplied smudging bound.
+        pub const ERROR1_VARIANCE: &str = "50471587840";
+        /// Secret/error variance.
+        pub const VARIANCE: usize = 10;
     }
 
-    /// DKG/share-transport BFV parameters.
-    pub mod dkg {
+    /// BFV parameters used to encrypt Shamir shares.
+    pub mod share_enc {
         /// Plaintext modulus.
-        pub const PLAINTEXT_MODULUS: u64 = 0xffffee001;
-        /// Ciphertext moduli.
-        pub const MODULI: &[u64] = &[0x7fffffffe0001];
-        /// Error-1 variance.
-        pub const ERROR1_VARIANCE: &str = "10";
-        /// Default variance.
-        pub const VARIANCE: u32 = 3;
-    }
-
-    /// Default variance for profiles that do not override it.
-    pub const VARIANCE: usize = 10;
-    /// Default insecure statistical parameter.
-    pub const DEFAULT_INSECURE_LAMBDA: usize = 2;
-    /// No multiplicative depth is supported by this profile.
-    pub const INSECURE_512_MULT_DEPTH: u32 = 0;
-
-    /// Search defaults associated with the supplied insecure configuration.
-    pub mod insecure_search_defaults {
-        pub const B: u128 = 20;
-        pub const B_CHI: u128 = 1;
-        pub const SEARCH_N: u128 = 7;
-        pub const SEARCH_K: u128 = 131072;
-        pub const SEARCH_Z: u128 = 1024;
+        pub const PLAINTEXT_MODULUS: u64 = 72_057_594_037_913_089;
+        /// Ciphertext moduli (2 x 57 bits).
+        pub const MODULI: &[u64] = &[0x01ff_ffff_ffff_9001, 0x01ff_ffff_ffff_9501];
+        /// Secret/error variance.
+        pub const VARIANCE: usize = 10;
     }
 }
 
@@ -92,35 +87,34 @@ impl Preset {
     }
 }
 
-/// Build the supplied degree-512 profile used for fast breadth and negative tests.
+/// Build the supplied degree-128 profile used for fast correctness tests.
 ///
 /// This profile must never be used as evidence for a security claim.
 pub fn insecure() -> Result<Preset> {
     let parameters = BfvParametersBuilder::new()
-        .set_degree(insecure_512::DEGREE)
-        .set_plaintext_modulus(insecure_512::threshold::PLAINTEXT_MODULUS)
-        .set_moduli(insecure_512::threshold::MODULI)
-        .set_variance(insecure_512::VARIANCE)
-        .set_error1_variance_str(insecure_512::threshold::ERROR1_VARIANCE)?
+        .set_degree(insecure_128::DEGREE)
+        .set_plaintext_modulus(insecure_128::threshold::PLAINTEXT_MODULUS)
+        .set_moduli(insecure_128::threshold::MODULI)
+        .set_variance(insecure_128::threshold::VARIANCE)
+        .set_error1_variance_str(insecure_128::threshold::ERROR1_VARIANCE)?
         .build_arc()?;
-    let dkg_parameters = BfvParametersBuilder::new()
-        .set_degree(insecure_512::DEGREE)
-        .set_plaintext_modulus(insecure_512::dkg::PLAINTEXT_MODULUS)
-        .set_moduli(insecure_512::dkg::MODULI)
-        .set_variance(insecure_512::dkg::VARIANCE as usize)
-        .set_error1_variance_str(insecure_512::dkg::ERROR1_VARIANCE)?
+    let share_parameters = BfvParametersBuilder::new()
+        .set_degree(insecure_128::DEGREE)
+        .set_plaintext_modulus(insecure_128::share_enc::PLAINTEXT_MODULUS)
+        .set_moduli(insecure_128::share_enc::MODULI)
+        .set_variance(insecure_128::share_enc::VARIANCE)
         .build_arc()?;
 
     Ok(Preset {
         name: "insecure",
         parameters,
-        share_parameters: Some(dkg_parameters),
+        share_parameters: Some(share_parameters),
         simd: false,
-        max_ciphertexts: 1,
-        num_parties: insecure_512::NUM_PARTIES as usize,
-        threshold: (insecure_512::NUM_PARTIES as usize - 1) / 2,
-        lambda: insecure_512::DEFAULT_INSECURE_LAMBDA,
-        multiplicative_depth: Some(insecure_512::INSECURE_512_MULT_DEPTH),
+        max_ciphertexts: insecure_128::MAX_CIPHERTEXTS,
+        num_parties: insecure_128::NUM_PARTIES,
+        threshold: (insecure_128::NUM_PARTIES - 1) / 2,
+        lambda: insecure_128::LAMBDA,
+        multiplicative_depth: Some(insecure_128::MULT_DEPTH),
     })
 }
 

@@ -7,24 +7,36 @@ use fhe::trbfv::{SmudgingConfig, SmudgingNoiseGenerator};
 use num_bigint::BigUint;
 
 #[test]
-fn insecure_profile_matches_supplied_512_parameters() {
+fn insecure_profile_matches_supplied_128_parameters() {
     let preset = support::insecure().unwrap();
-    assert_eq!(preset.parameters.degree(), 512);
+    assert_eq!(preset.parameters.degree(), 128);
     assert_eq!(preset.parameters.plaintext(), 100);
-    assert_eq!(preset.parameters.moduli(), &[0xffffee001, 0xffffc4001]);
+    assert_eq!(
+        preset.parameters.moduli(),
+        &[
+            0x00ff_ffff_ffff_c601,
+            0x00ff_ffff_ffff_c301,
+            0x00ff_ffff_ffff_a501,
+        ]
+    );
     assert_eq!(preset.parameters.variance(), 10);
-    assert_eq!(preset.parameters.get_error1_variance().to_string(), "3");
-    assert_eq!(preset.num_parties, 5);
-    assert_eq!(preset.threshold, 2);
+    assert_eq!(
+        preset.parameters.get_error1_variance().to_string(),
+        "50471587840"
+    );
+    assert_eq!(preset.num_parties, 19);
+    assert_eq!(preset.threshold, 9);
     assert_eq!(preset.lambda, 2);
-    assert_eq!(preset.multiplicative_depth, Some(0));
+    assert_eq!(preset.multiplicative_depth, Some(3));
 
-    let dkg_parameters = preset.share_parameters.as_ref().unwrap();
-    assert_eq!(dkg_parameters.degree(), 512);
-    assert_eq!(dkg_parameters.plaintext(), 0xffffee001);
-    assert_eq!(dkg_parameters.moduli(), &[0x7fffffffe0001]);
-    assert_eq!(dkg_parameters.variance(), 3);
-    assert_eq!(dkg_parameters.get_error1_variance().to_string(), "10");
+    let share_parameters = preset.share_parameters.as_ref().unwrap();
+    assert_eq!(share_parameters.degree(), 128);
+    assert_eq!(share_parameters.plaintext(), 72_057_594_037_913_089);
+    assert_eq!(
+        share_parameters.moduli(),
+        &[0x01ff_ffff_ffff_9001, 0x01ff_ffff_ffff_9501]
+    );
+    assert_eq!(share_parameters.variance(), 10);
 }
 
 #[test]

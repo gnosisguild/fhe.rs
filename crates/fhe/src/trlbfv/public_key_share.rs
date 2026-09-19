@@ -123,14 +123,15 @@ impl DeserializeParametrized for PublicKeyShare {
 mod tests {
     use super::*;
     use crate::aggregate::{Aggregate, AggregateIter};
-    use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
+    use crate::bfv::{Encoding, Plaintext, SecretKey};
+    use crate::support::insecure;
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{SeedableRng, rng};
 
     #[test]
     fn contributions_aggregate_into_operational_key() -> Result<()> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sks = [
             SecretKey::random(&params, &mut rng),
             SecretKey::random(&params, &mut rng),
@@ -156,7 +157,7 @@ mod tests {
     #[test]
     fn aggregation_rejects_inconsistent_crs() -> Result<()> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk1 = SecretKey::random(&params, &mut rng);
         let sk2 = SecretKey::random(&params, &mut rng);
         let seed1 = <ChaCha8Rng as SeedableRng>::Seed::default();
@@ -174,7 +175,7 @@ mod tests {
     #[test]
     fn crp_components_and_serialization_roundtrip() -> Result<()> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
         let crp = CommonRandomPolyVec::new(&params, &mut rng)?;
         let share = PublicKeyShare::contribute_with_crp(&sk, &crp, &mut rng)?;

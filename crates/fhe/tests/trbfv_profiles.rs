@@ -113,10 +113,14 @@ fn reconstruction_rejects_invalid_public_inputs() {
         }) if expected == profile.threshold + 1
     ));
 
+    let share_count = profile.threshold + 1;
+    let duplicate_parties: Vec<_> = (0..share_count)
+        .map(|index| if index == 1 { 1 } else { index + 1 })
+        .collect();
     let duplicate = manager
         .decrypt_from_shares(
-            vec![share(), share(), share()],
-            vec![1, 1, 2],
+            (0..share_count).map(|_| share()).collect(),
+            duplicate_parties,
             ciphertext.clone(),
         )
         .unwrap_err();
@@ -125,8 +129,14 @@ fn reconstruction_rejects_invalid_public_inputs() {
         Error::Threshold(ThresholdError::DuplicatePartyId { party_id: 1 })
     ));
 
-    let zero_id =
-        manager.decrypt_from_shares(vec![share(), share(), share()], vec![0, 2, 3], ciphertext);
+    let zero_id_parties: Vec<_> = (0..share_count)
+        .map(|index| if index == 0 { 0 } else { index + 1 })
+        .collect();
+    let zero_id = manager.decrypt_from_shares(
+        (0..share_count).map(|_| share()).collect(),
+        zero_id_parties,
+        ciphertext,
+    );
     assert!(matches!(
         zero_id.unwrap_err(),
         Error::Threshold(ThresholdError::InvalidPartyId { party_id: 0, n })

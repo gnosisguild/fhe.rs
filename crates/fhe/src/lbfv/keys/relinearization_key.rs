@@ -901,6 +901,7 @@ impl DeserializeParametrized for LBFVRelinearizationKey {
 mod tests {
     use super::*;
     use crate::bfv::{Encoding, Plaintext};
+    use crate::support::insecure;
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use rand::rng;
     use std::error::Error;
@@ -911,7 +912,7 @@ mod tests {
     #[test]
     fn test_serialize_deserialize() -> Result<(), Box<dyn std::error::Error>> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng)?;
 
@@ -949,6 +950,9 @@ mod tests {
     #[test]
     fn test_multiplication() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
+        // Keep the small local profile here because this test intentionally
+        // covers both polynomial and SIMD encodings. The shared insecure
+        // profile does not provide SIMD parameters.
         let params = BfvParameters::default_arc(6, 8);
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng)?;
@@ -984,7 +988,7 @@ mod tests {
     #[test]
     fn new_leveled_accepts_seedless_public_key_and_explicit_d1() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
 
         let seeded = LBFVPublicKey::new_with_seed(&sk, [51u8; 32], &mut rng)?;
@@ -1038,7 +1042,7 @@ mod tests {
         use fhe_math::rq::traits::TryConvertFrom as TryConvertFromPoly;
 
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
         let ctx = params.context_at_level(0)?;
 
@@ -1109,7 +1113,7 @@ mod tests {
     #[test]
     fn tampered_pk_concrete_a_rejected_by_seeded_rlk_path() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
 
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
