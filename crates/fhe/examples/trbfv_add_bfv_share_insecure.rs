@@ -1,8 +1,8 @@
-//! Threshold BFV addition with plaintext Shamir shares (insecure demo).
+//! Threshold BFV addition with encrypted Shamir shares using the insecure profile.
 //!
-//! Demonstrates the encrypted-share pipeline from [`trbfv_add_bfv_share`] without
-//! BFV protection on shares. **Not for production** — use only to compare
-//! performance or debug the protocol layout.
+//! This is the fast correctness/debugging counterpart to
+//! [`trbfv_add_bfv_share`]. **Not for production** — the profile is intentionally
+//! insecure and is only suitable for testing the protocol layout.
 
 #![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 
@@ -50,7 +50,7 @@ fn print_notice_and_exit(error: Option<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let preset = support::secure8192()?;
+    let preset = support::insecure()?;
     println!("Building trBFV parameters...");
     let params_trbfv: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (threshold BFV)",
@@ -84,10 +84,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 3;
-    let mut num_parties = 5;
-    let mut threshold = 2;
-    let mut lambda = 2;
+    let mut num_summed = preset.max_ciphertexts;
+    let mut num_parties = preset.num_parties;
+    let mut threshold = preset.threshold;
+    let mut lambda = preset.lambda;
 
     // Update the number of users and/or number of parties / threshold depending on the
     // arguments provided.
@@ -135,9 +135,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             "Threshold must be exactly (num_parties - 1) / 2: maximal corruption tolerance with honest-majority reconstruction".to_string(),
         ))
     }
-
-    // Insecure test mode: small lambda for speed; the smudging noise does NOT
-    // hide the decryption noise. Never use this in production.
 
     println!("# Addition with trBFV (with encrypted share transmission)");
     println!("\tnum_summed = {num_summed}");

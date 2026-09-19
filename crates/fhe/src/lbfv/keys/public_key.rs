@@ -732,6 +732,7 @@ impl DeserializeParametrized for LBFVPublicKey {
 mod tests {
     use super::LBFVPublicKey;
     use crate::bfv::{BfvParameters, CommonRandomPolyVec, Encoding, Plaintext, SecretKey};
+    use crate::support::insecure;
     use fhe_math::rq::{Ntt, Poly, Representation};
     use fhe_math::zq::Modulus;
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
@@ -763,7 +764,7 @@ mod tests {
         let mut rng = rng();
         for params in [
             BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            insecure().unwrap().parameters,
         ] {
             for level in 0..params.max_level() {
                 for _ in 0..20 {
@@ -836,7 +837,7 @@ mod tests {
     #[test]
     fn extended_encrypt_witness_equations() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng)?;
 
@@ -869,7 +870,7 @@ mod tests {
         let mut rng = rng();
         for params in [
             BfvParameters::default_arc(1, 8),
-            BfvParameters::default_arc(6, 8),
+            insecure().unwrap().parameters,
         ] {
             let sk = SecretKey::random(&params, &mut rng);
             let pk = LBFVPublicKey::new(&sk, &mut rng)?;
@@ -882,7 +883,7 @@ mod tests {
     #[test]
     fn test_malformed_l_rejected() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng)?;
 
@@ -905,7 +906,7 @@ mod tests {
     #[test]
     fn test_tampered_seed_rejected() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng)?;
 
@@ -933,7 +934,7 @@ mod tests {
     #[test]
     fn test_from_parts_roundtrip() -> std::result::Result<(), Box<dyn Error>> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
 
         let pk_seeded = LBFVPublicKey::new(&sk, &mut rng)?;
@@ -963,7 +964,7 @@ mod tests {
     #[test]
     fn from_parts_rejects_inconsistent_seed() -> std::result::Result<(), Box<dyn Error>> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
 
         let pk_seeded = LBFVPublicKey::new(&sk, &mut rng)?;
@@ -1001,7 +1002,7 @@ mod tests {
     #[test]
     fn test_deterministic_public_key() -> std::result::Result<(), Box<dyn Error>> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
 
         // Create a fixed seed
@@ -1037,7 +1038,7 @@ mod tests {
     fn malformed_pk_rejected_by_encryption_and_extraction()
     -> std::result::Result<(), Box<dyn Error>> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng)?;
 
@@ -1093,7 +1094,7 @@ mod tests {
     fn new_with_crp_uses_concrete_a_from_seedless_vector() -> std::result::Result<(), Box<dyn Error>>
     {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
 
         let crp = CommonRandomPolyVec::new(&params, &mut rng)?;

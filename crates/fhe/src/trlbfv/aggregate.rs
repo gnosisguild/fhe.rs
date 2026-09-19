@@ -386,7 +386,8 @@ mod tests {
 
     use super::*;
     use crate::aggregate::AggregateIter;
-    use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
+    use crate::bfv::{Encoding, Plaintext, SecretKey};
+    use crate::support::insecure;
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{RngCore, SeedableRng};
     use rand_chacha::ChaCha8Rng;
@@ -394,7 +395,7 @@ mod tests {
     #[test]
     fn distributed_aggregation_works() -> Result<()> {
         let mut rng = rand::rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
 
         let sks: Vec<SecretKey> = (0..3)
             .map(|_| SecretKey::random(&params, &mut rng))

@@ -221,7 +221,8 @@ impl RelinKeyShare {
 mod tests {
     use super::*;
     use crate::aggregate::AggregateIter;
-    use crate::bfv::{BfvParameters, Encoding, Plaintext, SecretKey};
+    use crate::bfv::{Encoding, Plaintext, SecretKey};
+    use crate::support::insecure;
     use crate::trlbfv::{LBFVPublicKey, PublicKeyShare, aggregate_relinearization_key};
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{SeedableRng, rng};
@@ -230,7 +231,7 @@ mod tests {
     #[test]
     fn test_distributed_relinearization() -> Result<()> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
 
         let sks = [
             SecretKey::random(&params, &mut rng),
@@ -272,7 +273,7 @@ mod tests {
     #[test]
     fn test_distributed_relinearization_many_contributors() -> Result<()> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
 
         let sks: Vec<SecretKey> = (0..5)
             .map(|_| SecretKey::random(&params, &mut rng))
@@ -311,7 +312,7 @@ mod tests {
     #[test]
     fn rlk_aggregation_rejects_inconsistent_urs() -> Result<()> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sks = [
             SecretKey::random(&params, &mut rng),
             SecretKey::random(&params, &mut rng),
@@ -336,7 +337,7 @@ mod tests {
     #[test]
     fn rlk_aggregation_rejects_public_key_crs_mismatch() -> Result<()> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sks = [
             SecretKey::random(&params, &mut rng),
             SecretKey::random(&params, &mut rng),
@@ -363,7 +364,7 @@ mod tests {
     #[test]
     fn rlk_aggregation_rejects_zero_shares() -> Result<()> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
         let public_key = LBFVPublicKey::new(&sk, &mut rng)?;
 
@@ -374,7 +375,7 @@ mod tests {
     #[test]
     fn aggregation_is_functional_for_three_contributors() -> Result<()> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sks = [
             SecretKey::random(&params, &mut rng),
             SecretKey::random(&params, &mut rng),
@@ -416,7 +417,7 @@ mod tests {
     #[test]
     fn proof_components_roundtrip_preserves_rows_and_levels() -> Result<()> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
         let crp_d1 = CommonRandomPolyVec::new(&params, &mut rng)?;
         let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
@@ -493,7 +494,8 @@ impl DeserializeParametrized for RelinKeyShare {
 mod proto_tests {
     use super::*;
 
-    use crate::bfv::{BfvParameters, SecretKey};
+    use crate::bfv::SecretKey;
+    use crate::support::insecure;
     use fhe_traits::{DeserializeParametrized, Serialize};
     use rand::SeedableRng;
     use rand::rng;
@@ -502,7 +504,7 @@ mod proto_tests {
     #[test]
     fn rlk_share_roundtrip() -> Result<()> {
         let mut rng = rng();
-        let params = BfvParameters::default_arc(6, 8);
+        let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
         let a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         let d1_seed = <ChaCha8Rng as SeedableRng>::Seed::from([2u8; 32]);
