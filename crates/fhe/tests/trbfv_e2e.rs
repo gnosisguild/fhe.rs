@@ -28,7 +28,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     let params = preset.parameters;
     let mut rng = support::rng(91);
 
-    let mut manager = ShareManager::new(N, THRESHOLD, params.clone()).expect("share manager");
+    let manager = ShareManager::new(N, THRESHOLD, params.clone()).expect("share manager");
 
     let secret_key = SecretKey::random(&params, &mut rng);
     let sk_poly = manager

@@ -104,7 +104,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     let ctx_level0 = params.context_at_level(0).expect("level-0 context");
     let mut parties: Vec<Party> = (0..N)
         .map(|i| {
-            let mut share_manager =
+            let share_manager =
                 ShareManager::new(N, THRESHOLD, params.clone()).expect("share manager");
 
             // Shamir‑share this party's secret key

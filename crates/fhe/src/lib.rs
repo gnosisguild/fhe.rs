@@ -2,6 +2,13 @@
 #![crate_type = "lib"]
 #![doc = include_str!("../README.md")]
 
+#[cfg(test)]
+extern crate self as fhe;
+
+#[cfg(test)]
+#[path = "../support/mod.rs"]
+mod support;
+
 mod errors;
 mod rns_shamir;
 
