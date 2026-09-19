@@ -1,5 +1,4 @@
 [package]
-workspace = "../.."
 name = "fhe-traits"
 description = "Traits for the fhe.rs library"
 authors.workspace = true

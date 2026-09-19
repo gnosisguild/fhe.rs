@@ -17,7 +17,7 @@ use num_traits::{PrimInt as _, ToPrimitive};
 use prost::Message;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// A plaintext modulus with an optional machine-word fast path.
 ///
@@ -653,8 +653,6 @@ impl BfvParametersBuilder {
     ///
     /// Multiplication tables are initialized on the first ciphertext multiplication
     /// at each level. Addition-only workloads do not construct these tables.
-    /// An error during deferred initialization panics in the multiplication
-    /// operator instead of returning an error from this method.
     pub fn build(&self) -> Result<BfvParameters> {
         self.validate_configuration()?;
 
@@ -755,12 +753,31 @@ impl BfvParametersBuilder {
         // Reverse to get correct order (level 0 first)
         cipher_plain_contexts.reverse();
 
-        // Addition does not need the extended multiplication basis or its NTT tables.
+        // Generate and validate the extension primes here so parameter construction
+        // retains its fallible contract. Their expensive per-level NTT tables remain
+        // deferred until multiplication.
+        let mut extended_basis = Vec::with_capacity(moduli.len() + 1);
+        let mut upper_bound = 1 << 62;
+        while extended_basis.len() != moduli.len() + 1 {
+            upper_bound =
+                generate_prime(62, 2 * self.degree as u64, upper_bound).ok_or_else(|| {
+                    Error::ParametersError(ParametersError::NotEnoughPrimes {
+                        size: 62,
+                        degree: self.degree,
+                        needed: moduli.len() + 1,
+                        available: extended_basis.len(),
+                    })
+                })?;
+            if !extended_basis.contains(&upper_bound) && !moduli.contains(&upper_bound) {
+                extended_basis.push(upper_bound);
+            }
+        }
+
         let mul_params_source = Arc::new(MultiplicationParametersSource {
             moduli: moduli.clone(),
             plaintext: plaintext_big.clone(),
             degree: self.degree,
-            extended_basis: OnceLock::new(),
+            extended_basis: extended_basis.into(),
         });
 
         // The vector index remains the level. Only multiplication data is deferred.
@@ -865,7 +882,7 @@ pub(crate) struct MultiplicationParametersSource {
     moduli: Vec<u64>,
     plaintext: BigUint,
     degree: usize,
-    extended_basis: OnceLock<Vec<u64>>,
+    extended_basis: Box<[u64]>,
 }
 
 impl PartialEq for MultiplicationParametersSource {
@@ -884,18 +901,6 @@ impl MultiplicationParametersSource {
         reason = "the multiplication operator cannot return a parameter initialization error"
     )]
     pub(crate) fn build(&self, node: &ContextLevel) -> Result<MultiplicationParameters> {
-        let extended_basis = self.extended_basis.get_or_init(|| {
-            let mut basis = Vec::with_capacity(self.moduli.len() + 1);
-            let mut upper_bound = 1 << 62;
-            while basis.len() != self.moduli.len() + 1 {
-                upper_bound = generate_prime(62, 2 * self.degree as u64, upper_bound)
-                    .expect("not enough primes for the multiplication basis");
-                if !basis.contains(&upper_bound) && !self.moduli.contains(&upper_bound) {
-                    basis.push(upper_bound);
-                }
-            }
-            basis
-        });
         let level_moduli = node.poly_context.moduli();
         let modulus_size = level_moduli
             .iter()
@@ -903,7 +908,8 @@ impl MultiplicationParametersSource {
             .sum::<usize>();
         let n_moduli = (modulus_size + 60).div_ceil(62);
         // Each ciphertext modulus has at most 62 bits. The basis has n+1 entries.
-        let extension = extended_basis
+        let extension = self
+            .extended_basis
             .get(..n_moduli)
             .expect("multiplication basis covers the validated ciphertext moduli");
         let mut mul_moduli = level_moduli.to_vec();
@@ -965,8 +971,6 @@ mod tests {
                 .build()?;
             let bytes = params.to_bytes();
             let decoded = BfvParameters::try_deserialize(&bytes)?;
-            let head = params.context_levels.first().unwrap();
-            assert!(head.mul_params_source.extended_basis.get().is_none());
             assert!(
                 params
                     .context_levels
@@ -983,6 +987,16 @@ mod tests {
                     extended_basis.push(upper_bound);
                 }
             }
+            assert_eq!(
+                params
+                    .context_levels
+                    .first()
+                    .unwrap()
+                    .mul_params_source
+                    .extended_basis
+                    .as_ref(),
+                extended_basis
+            );
             for (level, node) in params.context_levels.iter().enumerate() {
                 assert!(node.mul_params.get().is_none());
                 let len = params.moduli.len() - level;
@@ -1028,17 +1042,6 @@ mod tests {
                 .iter()
                 .all(|node| node.mul_params.get().is_none())
         );
-        assert!(
-            params
-                .context_levels
-                .first()
-                .unwrap()
-                .mul_params_source
-                .extended_basis
-                .get()
-                .is_none()
-        );
-
         for level in 0..=params.max_level() {
             let mut switched = ct.clone();
             switched.switch_to_level(level)?;

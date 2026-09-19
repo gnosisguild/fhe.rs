@@ -1,5 +1,4 @@
 [package]
-workspace = "../.."
 name = "fhe"
 description = "Fully Homomorphic Encryption in Rust"
 authors.workspace = true
