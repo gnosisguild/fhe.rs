@@ -1,4 +1,5 @@
 [package]
+workspace = "../.."
 name = "fhe-util"
 description = "Utilities for the fhe.rs library"
 authors.workspace = true
