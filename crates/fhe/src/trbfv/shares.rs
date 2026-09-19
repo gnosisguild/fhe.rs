@@ -6,7 +6,7 @@ use crate::Error;
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::rns_shamir::RnsShamir;
 use crate::trbfv::config::validate_threshold_config;
-use crate::trbfv::smudging::GeneratedSmudgingNoise;
+use crate::trbfv::smudging::SmudgingNoise;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
 use fhe_math::{
@@ -142,12 +142,12 @@ impl ShareManager {
     /// Generate Shamir Secret Shares for smudging noise from a noise owner.
     ///
     /// This is the supported dealing operation for freshly sampled smudging
-    /// noise: it consumes the [`GeneratedSmudgingNoise`] owner and deals the
+    /// noise: it consumes the [`SmudgingNoise`] owner and deals the
     /// underlying polynomial with the same layout as
     /// [`ShareManager::generate_secret_shares_from_poly`].
     pub fn generate_secret_shares_from_smudging_noise<R: RngCore + CryptoRng>(
         &mut self,
-        noise: GeneratedSmudgingNoise,
+        noise: SmudgingNoise,
         rng: &mut R,
     ) -> Result<Vec<Array2<u64>>, Error> {
         self.generate_secret_shares_from_poly(noise.into_poly(), rng)
@@ -488,38 +488,15 @@ impl ShareManager {
 mod tests {
     use super::*;
     use crate::ThresholdError;
-    use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
-    use crate::trbfv::smudging::{
-        Lambda, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
-    };
+    use crate::bfv::{Encoding, PublicKey, SecretKey};
+    use crate::trbfv::smudging::{SmudgingConfig, SmudgingNoiseGenerator};
+    use crate::trbfv::test_support::{params_2048, params_8192};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
-    use num_bigint::BigUint;
     use rand::rng;
-
-    fn test_params() -> Arc<BfvParameters> {
-        BfvParametersBuilder::new()
-            .set_degree(2048)
-            .set_plaintext_modulus(4096)
-            .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
-            .build_arc()
-            .unwrap()
-    }
-
-    /// Smudging-bound tests below use a degree-8192 profile: the larger
-    /// modulus chain leaves room for the statistically-hiding noise bound
-    /// that `Lambda::secure(80)` requires.
-    fn secure8192_params() -> Arc<BfvParameters> {
-        BfvParametersBuilder::new()
-            .set_degree(8192)
-            .set_plaintext_modulus(16384)
-            .set_moduli(&[0x1ffffffea0001, 0x1ffffffe88001, 0x1ffffffe48001])
-            .build_arc()
-            .unwrap()
-    }
 
     #[test]
     fn test_share_manager_creation() {
-        let params = test_params();
+        let params = params_2048();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         assert_eq!(manager.n(), 5);
         assert_eq!(manager.threshold(), 2);
@@ -530,7 +507,7 @@ mod tests {
     fn test_share_manager_rejects_threshold_zero() {
         // A degree-0 Shamir sharing polynomial is the secret itself, so every
         // party would hold the full secret.
-        let params = test_params();
+        let params = params_2048();
         let err = ShareManager::new(5, 0, params)
             .expect_err("threshold 0 must be rejected (degree-0 sharing reveals the secret)");
         assert!(matches!(
@@ -545,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_share_manager_rejects_invalid_threshold_config() {
-        let params = test_params();
+        let params = params_2048();
 
         for (n, threshold) in [(0usize, 1usize), (1, 0), (1, 1), (2, 0), (2, 1)] {
             assert!(
@@ -581,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_share_manager_accepts_valid_threshold_config() {
-        let params = test_params();
+        let params = params_2048();
         for (n, threshold) in [(3usize, 1usize), (4, 1), (5, 2), (10, 4), (20, 9), (21, 10)] {
             let manager = ShareManager::new(n, threshold, params.clone())
                 .expect("a valid threshold config must be accepted");
@@ -592,7 +569,7 @@ mod tests {
 
     #[test]
     fn test_coeffs_to_poly_utility() {
-        let params = test_params();
+        let params = params_2048();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
 
         // Test with i64 coefficients
@@ -609,15 +586,16 @@ mod tests {
 
     #[test]
     fn test_smudging_noise_dealing_consumes_owner() {
-        let params = test_params();
+        let params = params_2048();
         let n = 5;
         let threshold = 2;
         let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
         let mut rng = rng();
 
         let generator =
-            SmudgingNoiseGenerator::new(params.clone(), BigUint::from(1000u64)).unwrap();
-        let noise = generator.generate_smudging_error(&mut rng).unwrap();
+            SmudgingNoiseGenerator::new(SmudgingConfig::new(params.clone(), n, 1, 0).unwrap())
+                .unwrap();
+        let noise = generator.generate(&mut rng).unwrap();
         let shares = manager
             .generate_secret_shares_from_smudging_noise(noise, &mut rng)
             .unwrap();
@@ -634,8 +612,8 @@ mod tests {
     }
 
     #[test]
-    fn smudging_noise_from_calculator_deals_shares() {
-        let params = secure8192_params();
+    fn smudging_noise_deals_shares() {
+        let params = params_8192();
         let n = 3;
         let threshold = 1;
         let mut manager = ShareManager::new(n, threshold, params.clone()).unwrap();
@@ -643,18 +621,9 @@ mod tests {
 
         // The supported flow: compute the bound with the smudging machinery,
         // sample the noise, and deal it into Shamir shares immediately.
-        let config = SmudgingBoundCalculatorConfig::new_multiplicative(
-            params.clone(),
-            n,
-            1,
-            0,
-            Lambda::secure(80).unwrap(),
-        )
-        .unwrap();
-        let generator =
-            SmudgingNoiseGenerator::from_bound_calculator(SmudgingBoundCalculator::new(config))
-                .unwrap();
-        let noise = generator.generate_smudging_error(&mut rng).unwrap();
+        let config = SmudgingConfig::new(params.clone(), n, 1, 80).unwrap();
+        let generator = SmudgingNoiseGenerator::new(config).unwrap();
+        let noise = generator.generate(&mut rng).unwrap();
         let shares = manager
             .generate_secret_shares_from_smudging_noise(noise, &mut rng)
             .unwrap();
@@ -671,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_share_generation_rejects_wrong_context_and_noncanonical_secret() {
-        let params = test_params();
+        let params = params_2048();
         let mut manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let mut rng = rng();
 
@@ -702,7 +671,7 @@ mod tests {
     #[test]
     fn test_decryption_share_computation() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_2048();
         let n = 3;
         // ShareManager now enforces T = (n - 1) / 2, so the minimal valid
         // configuration is (n = 3, threshold = 1), requiring two shares.
@@ -752,7 +721,7 @@ mod tests {
     #[test]
     fn test_decryption_share_rejects_nonzero_ciphertext_level() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_2048();
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
         let public_key = PublicKey::new(&secret_key, &mut rng);
@@ -783,7 +752,7 @@ mod tests {
     #[test]
     fn test_decrypt_from_shares_rejects_nonzero_ciphertext_level() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_2048();
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
         let public_key = PublicKey::new(&secret_key, &mut rng);
@@ -808,7 +777,7 @@ mod tests {
     #[test]
     fn test_threshold_decryption_workflow() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_2048();
         let n = 3;
         let threshold = 1;
 
@@ -891,7 +860,7 @@ mod tests {
     #[test]
     fn test_threshold_decryption_workflow_arbitrary_parties_small() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_2048();
         let n = 5;
         let threshold = 2; // need 3 parties
 
@@ -973,7 +942,7 @@ mod tests {
     #[test]
     fn test_threshold_decryption_workflow_arbitrary_parties_large() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_2048();
         let n = 20;
         let threshold = 9; // (n - 1) / 2 for n = 20; need 10 parties
 
@@ -1057,7 +1026,7 @@ mod tests {
     #[test]
     fn test_threshold_decryption_wrong_indices_fails() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_2048();
         let n = 10;
         let threshold = 4; // need 5 parties
 
@@ -1161,7 +1130,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_collected_shares_rejects_bad_input() {
-        let params = test_params();
+        let params = params_2048();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let shape = (params.moduli().len(), params.degree());
 
@@ -1183,7 +1152,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_collected_shares_rejects_non_canonical_q_at_each_row() {
-        let params = test_params();
+        let params = params_2048();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
@@ -1219,7 +1188,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_collected_shares_rejects_u64_max() {
-        let params = test_params();
+        let params = params_2048();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
@@ -1253,7 +1222,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_collected_shares_accepts_q_minus_one_boundary() {
-        let params = test_params();
+        let params = params_2048();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
@@ -1276,7 +1245,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_collected_shares_rejects_invalid_after_valid() {
-        let params = test_params();
+        let params = params_2048();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
         let shape = (moduli.len(), params.degree());
@@ -1304,7 +1273,7 @@ mod tests {
     #[test]
     fn test_decrypt_from_shares_rejects_invalid_party_indices() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_2048();
         let n = 5;
         let threshold = 2; // needs exactly 3 shares
         let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
@@ -1363,7 +1332,7 @@ mod tests {
     #[test]
     fn test_threshold_decryption_random_party_order() {
         let mut rng = rng();
-        let params = test_params();
+        let params = params_2048();
         let n = 15;
         let threshold = 7; // need 8 parties
 

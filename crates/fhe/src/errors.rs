@@ -205,18 +205,6 @@ pub enum ThresholdError {
     #[error("cannot batch-invert an empty field-element slice")]
     EmptyBatchInversion,
 
-    /// The statistical security parameter is below the secure minimum.
-    #[error(
-        "lambda {lambda} is below the secure minimum {min}; for testing, opt in explicitly \
-         with Lambda::insecure"
-    )]
-    InsecureLambda {
-        /// The provided lambda
-        lambda: usize,
-        /// The minimum secure lambda
-        min: usize,
-    },
-
     /// The smudging bound cannot satisfy both security and correctness.
     #[error("smudging bound infeasible: {reason}")]
     SmudgingBoundInfeasible {

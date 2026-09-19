@@ -17,10 +17,7 @@ use console::style;
 use fhe::{
     bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{
-        Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
-        SmudgingNoiseGenerator,
-    },
+    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -121,9 +118,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // The parameters are within bound, let's go! Let's first display some
     // information about the threshold sum.
-    // Secure example: rejects lambda below the secure minimum. See
-    // trbfv_add_bfv_share_insecure.rs for the explicit insecure test mode.
-    let security = Lambda::secure(lambda)?;
+    // Lambda is caller-chosen policy: larger values give a stronger
+    // statistical-hiding guarantee, bounded above by smudging's MAX_LAMBDA.
 
     println!("# Addition with trBFV");
     println!("\tnum_summed = {num_summed}");
@@ -183,19 +179,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Smudging noise shares: compute the bound with the smudging
                 // machinery, sample the noise, and deal it immediately.
-                let config = SmudgingBoundCalculatorConfig::new_multiplicative(
-                    params.clone(),
-                    num_parties,
-                    num_summed,
-                    0,
-                    security,
-                )
-                .unwrap();
-                let generator = SmudgingNoiseGenerator::from_bound_calculator(
-                    SmudgingBoundCalculator::new(config),
-                )
-                .unwrap();
-                let esi_noise = generator.generate_smudging_error(&mut rng).unwrap();
+                let config =
+                    SmudgingConfig::new(params.clone(), num_parties, num_summed, lambda).unwrap();
+                let generator = SmudgingNoiseGenerator::new(config).unwrap();
+                let esi_noise = generator.generate(&mut rng).unwrap();
                 let esi_sss = share_manager
                     .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
                     .unwrap();

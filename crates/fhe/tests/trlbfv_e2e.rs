@@ -13,10 +13,7 @@ use std::sync::Arc;
 
 use fhe::aggregate::AggregateIter;
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, SecretKey};
-use fhe::trbfv::{
-    Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
-    SmudgingNoiseGenerator,
-};
+use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe::trlbfv::{LBFVPublicKey, PublicKeyShare, RelinKeyShare, aggregate_relinearization_key};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
@@ -29,7 +26,7 @@ mod support;
 const N: usize = 3;
 const THRESHOLD: usize = 1; // (n - 1) / 2
 const MULT_DEPTH: u32 = 1;
-const LAMBDA_VALUE: usize = 31; // MIN_SECURE_LAMBDA
+const LAMBDA_VALUE: usize = 31;
 
 /// Distributed l-BFV PK + RLK contributions, Shamir-shared key/noise, depth-1
 /// multiplication, threshold decryption.
@@ -82,20 +79,13 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     // straight into Shamir shares without exposing the polynomial.
     let mut smudging_noises = (0..N)
         .map(|_| {
-            let config = SmudgingBoundCalculatorConfig::new_multiplicative(
-                params.clone(),
-                N,
-                1,
-                MULT_DEPTH,
-                Lambda::secure(LAMBDA_VALUE).expect("secure lambda"),
-            )
-            .expect("smudging config");
-            // All n parties contribute to the RLK.
-            let calculator =
-                SmudgingBoundCalculator::new(config).with_accepted_participant_count(N);
-            SmudgingNoiseGenerator::from_bound_calculator(calculator)
+            let mut config =
+                SmudgingConfig::new(params.clone(), N, 1, LAMBDA_VALUE).expect("smudging config");
+            config.mult_depth = MULT_DEPTH;
+            // Use n as the conservative aggregate RLK contribution count.
+            SmudgingNoiseGenerator::new(config)
                 .expect("smudging generator")
-                .generate_smudging_error(&mut rng)
+                .generate(&mut rng)
                 .expect("smudging noise generation")
         })
         .collect::<Vec<_>>()

@@ -37,7 +37,7 @@ use crate::Error;
 ///
 /// This forces `n >= 3` (the smallest `n` with a nonzero `T`; a degree-0
 /// sharing polynomial is the secret itself, so every party would hold it).
-pub fn validate_threshold_config(n: usize, threshold: usize) -> Result<(), Error> {
+pub(crate) fn validate_threshold_config(n: usize, threshold: usize) -> Result<(), Error> {
     if n == 0 {
         return Err(Error::invalid_party_count(n, 1));
     }
