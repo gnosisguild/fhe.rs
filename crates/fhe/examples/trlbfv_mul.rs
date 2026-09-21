@@ -35,7 +35,7 @@ use util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand::rng();
-    let preset = support::secure16384()?;
+    let preset = support::presets::secure16384()?;
 
     // ── Parameters ────────────────────────────────────────────────────────────
     let params: Arc<bfv::BfvParameters> = timeit!("Parameters", preset.parameters.clone());

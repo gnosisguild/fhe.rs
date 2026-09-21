@@ -66,7 +66,7 @@ fn print_notice_and_exit(error: Option<String>) -> ! {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let preset = support::secure16384()?;
+    let preset = support::presets::secure16384()?;
     println!("Building trBFV parameters (first set)...");
     let params_trbfv: Arc<bfv::BfvParameters> =
         timeit!("Parameters generation (trBFV)", preset.parameters.clone());

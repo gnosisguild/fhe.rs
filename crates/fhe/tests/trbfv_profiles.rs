@@ -11,10 +11,10 @@ use fhe::{Error, ThresholdError};
 use fhe_math::rq::{Poly, PowerBasis};
 use num_traits::Zero;
 use std::sync::Arc;
-use support::Preset;
+use support::presets::Preset;
 
 fn profiles() -> [Preset; 3] {
-    support::profiles().unwrap()
+    support::presets::profiles().unwrap()
 }
 
 #[test]

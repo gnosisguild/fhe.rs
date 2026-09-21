@@ -732,7 +732,7 @@ impl DeserializeParametrized for LBFVPublicKey {
 mod tests {
     use super::LBFVPublicKey;
     use crate::bfv::{BfvParameters, CommonRandomPolyVec, Encoding, Plaintext, SecretKey};
-    use crate::support::insecure;
+    use crate::support::presets::insecure;
     use fhe_math::rq::{Ntt, Poly, Representation};
     use fhe_math::zq::Modulus;
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};

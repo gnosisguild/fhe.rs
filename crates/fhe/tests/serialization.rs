@@ -15,8 +15,8 @@ use fhe_traits::{Deserialize, DeserializeParametrized, FheEncoder, FheEncrypter,
 
 #[test]
 fn representative_objects_round_trip_through_protobuf() {
-    let params = support::insecure().unwrap().parameters;
-    let mut rng = support::rng(61);
+    let params = support::presets::insecure().unwrap().parameters;
+    let mut rng = support::presets::rng(61);
     let parameter_bytes = params.to_bytes();
     assert_eq!(
         BfvParameters::try_deserialize(&parameter_bytes).unwrap(),
@@ -34,7 +34,7 @@ fn representative_objects_round_trip_through_protobuf() {
     );
     assert_eq!(PublicKey::from_bytes(&pk.to_bytes(), &params).unwrap(), pk);
 
-    let crp = CommonRandomPoly::new_deterministic(&params, support::seed(62)).unwrap();
+    let crp = CommonRandomPoly::new_deterministic(&params, support::presets::seed(62)).unwrap();
     assert_eq!(
         CommonRandomPoly::deserialize(&crp.to_bytes(), &params).unwrap(),
         crp
@@ -43,7 +43,7 @@ fn representative_objects_round_trip_through_protobuf() {
 
 #[test]
 fn secure_profiles_preserve_error1_variance_through_protobuf() {
-    for profile in support::profiles().unwrap().into_iter().skip(1) {
+    for profile in support::presets::profiles().unwrap().into_iter().skip(1) {
         let expected_error1_variance = profile.parameters.get_error1_variance().clone();
         let decoded = BfvParameters::try_deserialize(&profile.parameters.to_bytes()).unwrap();
 
@@ -63,17 +63,17 @@ fn secure_profiles_preserve_error1_variance_through_protobuf() {
 
 #[test]
 fn lbfv_keys_round_trip_and_reject_malformed_or_mismatched_inputs() {
-    let params = support::insecure().unwrap().parameters;
+    let params = support::presets::insecure().unwrap().parameters;
     let other_params = BfvParametersBuilder::new()
         .set_degree(64)
         .set_plaintext_modulus(1153)
         .set_moduli_sizes(&[40, 40])
         .build_arc()
         .unwrap();
-    let mut rng = support::rng(63);
+    let mut rng = support::presets::rng(63);
     let sk = SecretKey::random(&params, &mut rng);
-    let crp_a = CommonRandomPolyVec::from_seed(&params, support::seed(64)).unwrap();
-    let crp_d1 = CommonRandomPolyVec::from_seed(&params, support::seed(65)).unwrap();
+    let crp_a = CommonRandomPolyVec::from_seed(&params, support::presets::seed(64)).unwrap();
+    let crp_d1 = CommonRandomPolyVec::from_seed(&params, support::presets::seed(65)).unwrap();
     let pk = LBFVPublicKey::new_with_crp(&sk, &crp_a, &mut rng).unwrap();
     let rlk = LBFVRelinearizationKey::new_with_crp(&sk, &pk, &crp_d1, &mut rng).unwrap();
 
@@ -108,14 +108,14 @@ fn lbfv_keys_round_trip_and_reject_malformed_or_mismatched_inputs() {
 
 #[test]
 fn ciphertext_deserialization_rejects_truncation_and_parameter_mismatch() {
-    let params = support::insecure().unwrap().parameters;
+    let params = support::presets::insecure().unwrap().parameters;
     let other_params = BfvParametersBuilder::new()
         .set_degree(64)
         .set_plaintext_modulus(1153)
         .set_moduli_sizes(&[40, 40])
         .build_arc()
         .unwrap();
-    let mut rng = support::rng(66);
+    let mut rng = support::presets::rng(66);
     let sk = SecretKey::random(&params, &mut rng);
     let pk = PublicKey::new(&sk, &mut rng);
     let plaintext = Plaintext::try_encode(&[13_u64], Encoding::poly(), &params).unwrap();

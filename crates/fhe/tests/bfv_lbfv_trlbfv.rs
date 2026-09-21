@@ -11,7 +11,7 @@ use fhe::lbfv::{LBFVPublicKey, LBFVRelinearizationKey};
 use fhe::trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 
-use support::Preset;
+use support::presets::Preset;
 
 struct Profile {
     preset: Preset,
@@ -20,7 +20,7 @@ struct Profile {
 
 fn profiles() -> [Profile; 3] {
     let mut seeds = [11_u8, 22, 33].into_iter();
-    support::profiles().unwrap().map(|preset| Profile {
+    support::presets::profiles().unwrap().map(|preset| Profile {
         preset,
         seed: seeds.next().unwrap(),
     })
@@ -84,7 +84,7 @@ fn named_profiles_expose_complete_context_metadata() {
 #[test]
 fn bfv_addition_and_simd_round_trip_use_deterministic_profile() {
     for profile in profiles().into_iter().take(2) {
-        let mut rng = support::rng(profile.seed);
+        let mut rng = support::presets::rng(profile.seed);
         let sk = SecretKey::random(&profile.preset.parameters, &mut rng);
         let pk = PublicKey::new(&sk, &mut rng);
 
@@ -128,12 +128,14 @@ fn lbfv_multiplication_and_relinearization_round_trip() {
         .into_iter()
         .find(|profile| profile.preset.name == "secure16384")
         .unwrap();
-    let mut rng = support::rng(profile.seed);
+    let mut rng = support::presets::rng(profile.seed);
     let sk = SecretKey::random(&profile.preset.parameters, &mut rng);
     let crp_a =
-        CommonRandomPolyVec::from_seed(&profile.preset.parameters, support::seed(41)).unwrap();
+        CommonRandomPolyVec::from_seed(&profile.preset.parameters, support::presets::seed(41))
+            .unwrap();
     let crp_d1 =
-        CommonRandomPolyVec::from_seed(&profile.preset.parameters, support::seed(42)).unwrap();
+        CommonRandomPolyVec::from_seed(&profile.preset.parameters, support::presets::seed(42))
+            .unwrap();
     let pk = LBFVPublicKey::new_with_crp(&sk, &crp_a, &mut rng).unwrap();
     let rlk = LBFVRelinearizationKey::new_with_crp(&sk, &pk, &crp_d1, &mut rng).unwrap();
 
@@ -159,9 +161,10 @@ fn lbfv_multiplication_and_relinearization_round_trip() {
 #[test]
 fn trlbfv_public_key_aggregation_is_order_independent() {
     let profile = profiles().into_iter().next().unwrap();
-    let mut rng = support::rng(profile.seed);
+    let mut rng = support::presets::rng(profile.seed);
     let crp =
-        CommonRandomPolyVec::from_seed(&profile.preset.parameters, support::seed(52)).unwrap();
+        CommonRandomPolyVec::from_seed(&profile.preset.parameters, support::presets::seed(52))
+            .unwrap();
     let secret_keys: Vec<_> = (0..3)
         .map(|_| SecretKey::random(&profile.preset.parameters, &mut rng))
         .collect();
@@ -201,15 +204,15 @@ fn trlbfv_public_key_aggregation_is_order_independent() {
 #[test]
 fn trlbfv_aggregation_rejects_inconsistent_reference_strings() {
     let profile = profiles().into_iter().next().unwrap();
-    let mut rng = support::rng(profile.seed);
+    let mut rng = support::presets::rng(profile.seed);
     let secret_keys = [
         SecretKey::random(&profile.preset.parameters, &mut rng),
         SecretKey::random(&profile.preset.parameters, &mut rng),
     ];
-    let crs_seed = support::seed(53);
-    let other_crs_seed = support::seed(54);
-    let urs_seed = support::seed(55);
-    let other_urs_seed = support::seed(56);
+    let crs_seed = support::presets::seed(53);
+    let other_crs_seed = support::presets::seed(54);
+    let urs_seed = support::presets::seed(55);
+    let other_urs_seed = support::presets::seed(56);
 
     let inconsistent_pk_shares = [
         PublicKeyShare::new_with_seed(&secret_keys[0], crs_seed, &mut rng).unwrap(),

@@ -51,7 +51,7 @@ fn print_notice_and_exit(error: Option<String>) -> ! {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let preset = support::secure8192()?;
+    let preset = support::presets::secure8192()?;
     let params = timeit!("Parameters generation", preset.parameters.clone());
     let degree = params.degree();
 

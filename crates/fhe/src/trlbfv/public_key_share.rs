@@ -124,7 +124,7 @@ mod tests {
     use super::*;
     use crate::aggregate::{Aggregate, AggregateIter};
     use crate::bfv::{Encoding, Plaintext, SecretKey};
-    use crate::support::insecure;
+    use crate::support::presets::insecure;
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{SeedableRng, rng};
 

@@ -222,7 +222,7 @@ mod tests {
     use super::*;
     use crate::aggregate::AggregateIter;
     use crate::bfv::{Encoding, Plaintext, SecretKey};
-    use crate::support::insecure;
+    use crate::support::presets::insecure;
     use crate::trlbfv::{LBFVPublicKey, PublicKeyShare, aggregate_relinearization_key};
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{SeedableRng, rng};
@@ -495,7 +495,7 @@ mod proto_tests {
     use super::*;
 
     use crate::bfv::SecretKey;
-    use crate::support::insecure;
+    use crate::support::presets::insecure;
     use fhe_traits::{DeserializeParametrized, Serialize};
     use rand::SeedableRng;
     use rand::rng;

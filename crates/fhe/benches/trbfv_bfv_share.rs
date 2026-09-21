@@ -23,7 +23,7 @@ fn format_bytes(bytes: usize) -> String {
 
 fn bench_data_sizes(c: &mut Criterion) {
     let group = c.benchmark_group("BFV Encrypted Shares Data Sizes");
-    let preset = support::secure8192().unwrap();
+    let preset = support::presets::secure8192().unwrap();
 
     // Threshold BFV parameters
     let params_trbfv = preset.parameters.clone();
@@ -322,7 +322,7 @@ fn bench_data_sizes(c: &mut Criterion) {
 
 fn bench_timing_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("BFV Encrypted Shares Timing");
-    let preset = support::secure8192().unwrap();
+    let preset = support::presets::secure8192().unwrap();
 
     // Setup parameters (same as data sizes)
     let params_trbfv = preset.parameters.clone();

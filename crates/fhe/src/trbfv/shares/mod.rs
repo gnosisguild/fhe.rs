@@ -556,7 +556,7 @@ mod tests {
     use super::*;
     use crate::ThresholdError;
     use crate::bfv::{Encoding, PublicKey, SecretKey};
-    use crate::support::{insecure, secure8192};
+    use crate::support::presets::{insecure, secure8192};
     use crate::trbfv::smudging::{SmudgingConfig, SmudgingNoiseGenerator};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;

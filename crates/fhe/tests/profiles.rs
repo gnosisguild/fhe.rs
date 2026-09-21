@@ -8,7 +8,7 @@ use num_bigint::BigUint;
 
 #[test]
 fn insecure_profile_matches_supplied_128_parameters() {
-    let preset = support::insecure().unwrap();
+    let preset = support::presets::insecure().unwrap();
     assert_eq!(preset.parameters.degree(), 128);
     assert_eq!(preset.parameters.plaintext(), 100);
     assert_eq!(
@@ -41,7 +41,7 @@ fn insecure_profile_matches_supplied_128_parameters() {
 
 #[test]
 fn secure8192_profile_is_feasible_and_covers_share_moduli() {
-    let preset = support::secure8192().unwrap();
+    let preset = support::presets::secure8192().unwrap();
     assert_eq!(preset.parameters.degree(), 8192);
     assert_eq!(preset.parameters.plaintext(), 1_000_000);
     assert_eq!(
@@ -84,7 +84,7 @@ fn secure8192_profile_is_feasible_and_covers_share_moduli() {
 
 #[test]
 fn secure16384_profile_is_feasible_and_covers_share_moduli() {
-    let preset = support::secure16384().unwrap();
+    let preset = support::presets::secure16384().unwrap();
     assert_eq!(preset.parameters.degree(), 16384);
     assert_eq!(preset.parameters.plaintext(), 1_000);
     assert_eq!(
