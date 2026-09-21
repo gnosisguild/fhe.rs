@@ -47,7 +47,7 @@ use ndarray::{Array, ArrayView};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use support::trbfv::{TrbfvShares, parse_cli};
+use support::examples::trbfv::{TrbfvShares, parse_cli};
 use util::timeit::timeit;
 
 fn print_notice_and_exit(error: Option<String>) -> ! {
