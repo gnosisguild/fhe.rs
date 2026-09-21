@@ -49,10 +49,10 @@ use ndarray::{Array, ArrayView};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use trbfv_example::TrbfvShares;
+use trbfv_example::{TrbfvShares, parse_cli};
 use util::timeit::timeit;
 
-fn print_notice_and_exit(error: Option<String>) {
+fn print_notice_and_exit(error: Option<String>) -> ! {
     println!(
         "{} Threshold BFV multiplication with encrypted share transport",
         style("  overview:").magenta().bold()
@@ -118,45 +118,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_parties = preset.num_parties;
-    let mut threshold = preset.threshold;
-    let mut lambda = preset.lambda;
-
-    for arg in &args {
-        if arg.starts_with("--num_parties") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--num_parties` argument".to_string()))
-            } else {
-                num_parties = a[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--threshold") {
-            let parts: Vec<&str> = arg.rsplit('=').collect();
-            if parts.len() != 2 || parts[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--threshold` argument".to_string()))
-            } else {
-                threshold = parts[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--lambda") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--lambda` argument".to_string()))
-            } else {
-                lambda = a[0].parse::<usize>()?
-            }
-        } else {
-            print_notice_and_exit(Some(format!("Unrecognized argument: {arg}")))
-        }
-    }
-
-    if num_parties == 0 || lambda == 0 {
-        print_notice_and_exit(Some("Party count and lambda must be nonzero".to_string()))
-    }
-    if threshold > (num_parties - 1) / 2 {
-        print_notice_and_exit(Some(
-            "Threshold must be at most (num_parties - 1) / 2".to_string(),
-        ))
-    }
+    let cli = match parse_cli(
+        &args,
+        preset.num_parties,
+        preset.threshold,
+        preset.lambda,
+        None,
+    ) {
+        Ok(cli) => cli,
+        Err(error) => print_notice_and_exit(Some(error)),
+    };
+    let num_parties = cli.num_parties;
+    let threshold = cli.threshold;
+    let lambda = cli.lambda;
 
     // Use the secure-16384 design point supplied for the depth-3 preset.
     let mut rng = rand::rng();

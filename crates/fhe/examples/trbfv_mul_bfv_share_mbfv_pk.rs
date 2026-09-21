@@ -45,10 +45,10 @@ use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use trbfv_example::TrbfvShares;
+use trbfv_example::{TrbfvShares, parse_cli};
 use util::timeit::timeit;
 
-fn print_notice_and_exit(error: Option<String>) {
+fn print_notice_and_exit(error: Option<String>) -> ! {
     println!(
         "{} Threshold BFV multiplication with encrypted share transport",
         style("  overview:").magenta().bold()
@@ -109,36 +109,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_parties = 3;
-    let mut threshold = 1;
-    let mut lambda = preset.lambda;
-
-    fn parse_opt(arg: &str, prefix: &str) -> Option<usize> {
-        arg.strip_prefix(prefix)
-            .and_then(|v| v.strip_prefix('='))
-            .and_then(|v| v.parse::<usize>().ok())
-    }
-
-    for arg in &args {
-        if let Some(n) = parse_opt(arg, "--num_parties") {
-            num_parties = n;
-        } else if let Some(t) = parse_opt(arg, "--threshold") {
-            threshold = t;
-        } else if let Some(l) = parse_opt(arg, "--lambda") {
-            lambda = l;
-        } else {
-            print_notice_and_exit(Some(format!("Unrecognized argument: {arg}")))
-        }
-    }
-
-    if num_parties == 0 || lambda == 0 {
-        print_notice_and_exit(Some("Party count and lambda must be nonzero".to_string()))
-    }
-    if threshold > (num_parties - 1) / 2 {
-        print_notice_and_exit(Some(
-            "Threshold must be at most (num_parties - 1) / 2".to_string(),
-        ))
-    }
+    let cli = match parse_cli(&args, 3, 1, preset.lambda, None) {
+        Ok(cli) => cli,
+        Err(error) => print_notice_and_exit(Some(error)),
+    };
+    let num_parties = cli.num_parties;
+    let threshold = cli.threshold;
+    let lambda = cli.lambda;
 
     let mut rng = rand::rng();
 

@@ -8,6 +8,59 @@ use fhe::trbfv::{
 };
 use ndarray::{Array2, ArrayView};
 
+/// Common command-line values shared by all TRBFV examples.
+#[derive(Clone, Copy)]
+pub struct TrbfvCli {
+    pub num_summed: Option<usize>,
+    pub num_parties: usize,
+    pub threshold: usize,
+    pub lambda: usize,
+}
+
+/// Parse and validate the common TRBFV example arguments.
+pub fn parse_cli(
+    args: &[String],
+    default_num_parties: usize,
+    default_threshold: usize,
+    default_lambda: usize,
+    default_num_summed: Option<usize>,
+) -> Result<TrbfvCli, String> {
+    let mut values = TrbfvCli {
+        num_summed: default_num_summed,
+        num_parties: default_num_parties,
+        threshold: default_threshold,
+        lambda: default_lambda,
+    };
+
+    for argument in args {
+        let (name, value) = argument
+            .split_once('=')
+            .ok_or_else(|| format!("Invalid argument `{argument}`"))?;
+        let value = value
+            .parse::<usize>()
+            .map_err(|_| format!("Invalid `{name}` argument"))?;
+        match name {
+            "--num_summed" if values.num_summed.is_some() => values.num_summed = Some(value),
+            "--num_parties" => values.num_parties = value,
+            "--threshold" => values.threshold = value,
+            "--lambda" => values.lambda = value,
+            "--num_summed" => return Err("`--num_summed` is not supported here".into()),
+            _ => return Err(format!("Unrecognized argument: {argument}")),
+        }
+    }
+
+    if values.num_summed.is_some_and(|count| count == 0)
+        || values.num_parties == 0
+        || values.lambda == 0
+    {
+        return Err("Party, ciphertext, and lambda counts must be nonzero".into());
+    }
+    if values.threshold > (values.num_parties - 1) / 2 {
+        return Err("Threshold must be at most (num_parties - 1) / 2".into());
+    }
+    Ok(values)
+}
+
 /// Share material carried by the examples through their simulated transport
 /// and then through the protected in-memory ownership path.
 pub struct TrbfvShares {

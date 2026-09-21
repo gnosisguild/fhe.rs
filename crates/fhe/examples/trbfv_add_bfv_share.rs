@@ -27,10 +27,10 @@ use ndarray::{Array, Array2, ArrayView};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use trbfv_example::TrbfvShares;
+use trbfv_example::{TrbfvShares, parse_cli};
 use util::timeit::timeit;
 
-fn print_notice_and_exit(error: Option<String>) {
+fn print_notice_and_exit(error: Option<String>) -> ! {
     println!(
         "{} Addition with threshold BFV",
         style("  overview:").magenta().bold()
@@ -87,52 +87,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 50;
-    let mut num_parties = preset.num_parties;
-    let mut threshold = preset.threshold;
-    let mut lambda = preset.lambda;
+    let cli = match parse_cli(
+        &args,
+        preset.num_parties,
+        preset.threshold,
+        preset.lambda,
+        Some(50),
+    ) {
+        Ok(cli) => cli,
+        Err(error) => print_notice_and_exit(Some(error)),
+    };
+    let num_summed = cli
+        .num_summed
+        .expect("addition examples provide num_summed");
+    let num_parties = cli.num_parties;
+    let threshold = cli.threshold;
+    let lambda = cli.lambda;
 
-    // Update the number of users and/or number of parties / threshold depending on the
-    // arguments provided.
-    for arg in &args {
-        if arg.starts_with("--num_summed") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--num_summed` argument".to_string()))
-            } else {
-                num_summed = a[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--num_parties") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--num_parties` argument".to_string()))
-            } else {
-                num_parties = a[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--threshold") {
-            let parts: Vec<&str> = arg.rsplit('=').collect();
-            if parts.len() != 2 || parts[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--threshold` argument".to_string()))
-            } else {
-                threshold = parts[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--lambda") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--lambda` argument".to_string()))
-            } else {
-                lambda = a[0].parse::<usize>()?
-            }
-        } else {
-            print_notice_and_exit(Some(format!("Unrecognized argument: {arg}")))
-        }
-    }
-
-    if num_summed == 0 || num_parties == 0 || lambda == 0 {
-        print_notice_and_exit(Some(
-            "Users, threshold, party sizes, and lambda must be nonzero".to_string(),
-        ))
-    }
     if threshold != (num_parties - 1) / 2 {
         print_notice_and_exit(Some(
             "Threshold must be exactly (num_parties - 1) / 2: maximal corruption tolerance with honest-majority reconstruction".to_string(),
