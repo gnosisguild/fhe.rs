@@ -125,9 +125,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
                     &mut rng,
                 )
                 .expect("esi share generation")
-                .into_iter()
-                .map(SmudgingShare::into_transport)
-                .collect();
+                .into_transport();
 
             Party {
                 sk_sss,
@@ -170,10 +168,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
         party.es_poly_sum = Some(
             manager
                 .aggregate_smudging_shares(
-                    party
-                        .es_sss_collected
-                        .iter()
-                        .cloned()
+                    std::mem::take(&mut party.es_sss_collected)
+                        .into_iter()
                         .map(SmudgingShare::from_transport)
                         .collect(),
                 )

@@ -61,9 +61,7 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
         let smudging_shares = manager
             .generate_secret_shares_from_smudging_noise(smudging_noise, &mut setup_rng)
             .expect("smudging share generation must succeed")
-            .into_iter()
-            .map(SmudgingShare::into_transport)
-            .collect::<Vec<_>>();
+            .into_transport();
         let smudging_aggregates: Vec<_> = (0..party_count)
             .map(|party_index| {
                 let share = Array2::from_shape_fn(

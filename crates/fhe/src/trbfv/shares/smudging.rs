@@ -8,7 +8,46 @@ use fhe_math::rq::{Poly, PowerBasis};
 use ndarray::Array2;
 use zeroize::{Zeroize, Zeroizing};
 
-/// One dealt share of a smudging polynomial.
+/// The result of dealing one smudging polynomial.
+///
+/// Each entry is a modulus-plane with shape `[n, degree]`. It is deliberately
+/// distinct from [`SmudgingShare`], whose transport shape is
+/// `[moduli, degree]` for one recipient. The two layouts must be transposed by
+/// the protocol layer before aggregation.
+pub struct DealtSmudgingShares {
+    pub(crate) matrices: Vec<Array2<u64>>,
+}
+
+impl DealtSmudgingShares {
+    pub(crate) fn new(matrices: Vec<Array2<u64>>) -> Self {
+        Self { matrices }
+    }
+
+    /// Consume the dealt result at an application transport boundary.
+    #[must_use]
+    pub fn into_transport(mut self) -> Vec<Array2<u64>> {
+        std::mem::take(&mut self.matrices)
+    }
+}
+
+impl Drop for DealtSmudgingShares {
+    fn drop(&mut self) {
+        for matrix in &mut self.matrices {
+            matrix.iter_mut().for_each(u64::zeroize);
+        }
+    }
+}
+
+impl std::fmt::Debug for DealtSmudgingShares {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DealtSmudgingShares")
+            .finish_non_exhaustive()
+    }
+}
+
+/// One recipient's smudging share after the dealt modulus planes have been
+/// transposed into the `[moduli, degree]` transport layout.
 ///
 /// This type deliberately does not implement `Clone` or `Copy`. A share is
 /// consumed when it is aggregated, so the supported API cannot accidentally
@@ -38,6 +77,8 @@ impl SmudgingShare {
     /// Consume the owner into application transport storage.
     #[must_use]
     pub fn into_transport(mut self) -> Array2<u64> {
+        // `Drop` zeroizes the field, so replace it before moving the matrix
+        // out of the owner.
         std::mem::take(&mut self.coefficients)
     }
 }

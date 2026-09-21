@@ -52,9 +52,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
             manager
                 .generate_secret_shares_from_smudging_noise(noise, &mut rng)
                 .expect("smudging noise share generation")
-                .into_iter()
-                .map(SmudgingShare::into_transport)
-                .collect()
+                .into_transport()
         })
         .collect();
 
@@ -93,14 +91,13 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
         })
         .collect();
     let mut es_poly_sums: Vec<Option<AggregatedSmudgingShare>> = es_sss_collected
-        .iter()
+        .into_iter()
         .map(|collected| {
             Some(
                 manager
                     .aggregate_smudging_shares(
                         collected
-                            .iter()
-                            .cloned()
+                            .into_iter()
                             .map(SmudgingShare::from_transport)
                             .collect(),
                     )

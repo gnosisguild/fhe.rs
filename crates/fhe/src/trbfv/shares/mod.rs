@@ -5,7 +5,7 @@
 
 mod smudging;
 
-pub use smudging::{AggregatedSmudgingShare, SmudgingShare};
+pub use smudging::{AggregatedSmudgingShare, DealtSmudgingShares, SmudgingShare};
 
 use crate::Error;
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
@@ -162,9 +162,9 @@ impl ShareManager {
         &self,
         noise: SmudgingNoise,
         rng: &mut R,
-    ) -> Result<Vec<SmudgingShare>, Error> {
+    ) -> Result<DealtSmudgingShares, Error> {
         self.generate_secret_shares_from_poly(noise.into_poly(), rng)
-            .map(|shares| shares.into_iter().map(SmudgingShare::new).collect())
+            .map(DealtSmudgingShares::new)
     }
 
     /// Aggregate dealt smudging shares into one single-use decryption owner.
@@ -636,15 +636,12 @@ mod tests {
         let noise = generator.generate(&mut rng).unwrap();
         let shares = manager
             .generate_secret_shares_from_smudging_noise(noise, &mut rng)
-            .unwrap();
+            .unwrap()
+            .into_transport();
 
         // Same layout as secret-key dealing: one [n, degree] matrix per modulus.
         assert_eq!(shares.len(), params.moduli().len());
-        for (share_matrix, &qi) in shares
-            .into_iter()
-            .zip(params.moduli().iter())
-            .map(|(share, qi)| (share.into_transport(), qi))
-        {
+        for (share_matrix, &qi) in shares.into_iter().zip(params.moduli().iter()) {
             assert_eq!(share_matrix.dim(), (n, params.degree()));
             for &value in share_matrix.iter() {
                 assert!(value < qi);
@@ -668,12 +665,9 @@ mod tests {
         let noise = generator.generate(&mut rng).unwrap();
         let shares = manager
             .generate_secret_shares_from_smudging_noise(noise, &mut rng)
-            .unwrap();
+            .unwrap()
+            .into_transport();
         assert_eq!(shares.len(), params.moduli().len());
-        let shares: Vec<_> = shares
-            .into_iter()
-            .map(SmudgingShare::into_transport)
-            .collect();
         for share_matrix in &shares {
             assert_eq!(share_matrix.dim(), (n, params.degree()));
         }
@@ -1247,6 +1241,39 @@ mod tests {
         // Valid: between 1 and n well-formed matrices
         let ok: Vec<Array2<u64>> = (0..3).map(|_| Array2::zeros(shape)).collect();
         assert!(manager.aggregate_collected_shares(&ok).is_ok());
+    }
+
+    #[test]
+    fn test_aggregate_smudging_shares_rejects_bad_input() {
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let shape = (params.moduli().len(), params.degree());
+        let share = || SmudgingShare::from_transport(Array2::zeros(shape));
+
+        assert!(manager.aggregate_smudging_shares(Vec::new()).is_err());
+        assert!(
+            manager
+                .aggregate_smudging_shares((0..4).map(|_| share()).collect())
+                .is_err()
+        );
+        assert!(
+            manager
+                .aggregate_smudging_shares(vec![SmudgingShare::from_transport(Array2::zeros((
+                    params.degree(),
+                    params.moduli().len(),
+                )))])
+                .is_err()
+        );
+
+        let mut noncanonical = Array2::zeros(shape);
+        noncanonical[[0, 0]] = params.moduli()[0];
+        assert!(
+            manager
+                .aggregate_smudging_shares(vec![SmudgingShare::from_transport(noncanonical)])
+                .is_err()
+        );
+
+        assert!(manager.aggregate_smudging_shares(vec![share()]).is_ok());
     }
 
     #[test]

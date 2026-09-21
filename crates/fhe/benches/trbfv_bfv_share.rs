@@ -82,9 +82,7 @@ fn bench_data_sizes(c: &mut Criterion) {
         let esi_sss = share_manager
             .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
             .unwrap()
-            .into_iter()
-            .map(SmudgingShare::into_transport)
-            .collect();
+            .into_transport();
 
         // Generate BFV keys for share encryption
         let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
