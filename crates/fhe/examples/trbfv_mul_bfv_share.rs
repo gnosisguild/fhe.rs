@@ -29,6 +29,8 @@
 
 #[path = "../support/mod.rs"]
 mod support;
+#[path = "trbfv_example/mod.rs"]
+mod trbfv_example;
 mod util;
 
 use std::{env, error::Error, process::exit, sync::Arc};
@@ -38,18 +40,16 @@ use fhe::{
     aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
-    trbfv::{
-        AggregatedSecretKeyShare, AggregatedSmudgingShare, SecretKeyShare, ShareManager,
-        SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
-    },
+    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use ndarray::{Array, Array2, ArrayView};
+use ndarray::{Array, ArrayView};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
+use trbfv_example::TrbfvShares;
 use util::timeit::timeit;
 
 fn print_notice_and_exit(error: Option<String>) {
@@ -176,13 +176,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crp_d1 = CommonRandomPolyVec::new(&params_trbfv, &mut rng)?;
 
     struct Party {
-        // Explicit transport buffers; recipients rehydrate typed owners after receipt.
-        secret_key_shares_transport: Vec<Array2<u64>>, // secret_key_shares_transport[m]: shape (num_parties, degree)
-        smudging_shares_transport: Vec<Array2<u64>>,   // smudging error Shamir shares, same shape
-        secret_key_shares_collected: Vec<SecretKeyShare>, // collected from all senders; each (num_moduli, degree)
-        smudging_shares_collected: Vec<SmudgingShare>,
-        secret_key_aggregate: Option<AggregatedSecretKeyShare>,
-        smudging_aggregate: Option<AggregatedSmudgingShare>,
+        shares: TrbfvShares,
         decryption_share: Poly<PowerBasis>,
         pk_lbfv_share: PublicKeyShare, // l-BFV PK contribution (shared crs_a)
         rlk_share: RelinKeyShare,
@@ -247,12 +241,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 let ctx0 = params_trbfv.context_at_level(0).unwrap();
                 Party {
-                    secret_key_shares_transport,
-                    smudging_shares_transport,
-                    secret_key_shares_collected: Vec::with_capacity(num_parties),
-                    smudging_shares_collected: Vec::with_capacity(num_parties),
-                    secret_key_aggregate: None,
-                    smudging_aggregate: None,
+                    shares: TrbfvShares::new(
+                        secret_key_shares_transport,
+                        smudging_shares_transport,
+                    ),
                     decryption_share: Poly::<PowerBasis>::zero(ctx0),
                     pk_lbfv_share,
                     rlk_share,
@@ -300,7 +292,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                             let enc_sk: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
-                                    let row = party.secret_key_shares_transport[m]
+                                    let row = party.shares.secret_key_shares_transport[m]
                                         .row(receiver_idx)
                                         .to_vec();
                                     let pt = Plaintext::try_encode(
@@ -315,7 +307,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                             let enc_es: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
-                                    let row = party.smudging_shares_transport[m]
+                                    let row = party.shares.smudging_shares_transport[m]
                                         .row(receiver_idx)
                                         .to_vec();
                                     let pt = Plaintext::try_encode(
@@ -350,10 +342,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         secret_key_rows.push_row(ArrayView::from(&row)).unwrap();
                     }
-                    party
-                        .secret_key_shares_collected
-                        .push(SecretKeyShare::from_transport(secret_key_rows));
-
                     let mut smudging_rows = Array::zeros((0, degree));
                     for ct in enc_es {
                         let pt = party.secret_key_enc.try_decrypt(ct).unwrap();
@@ -361,8 +349,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         smudging_rows.push_row(ArrayView::from(&row)).unwrap();
                     }
                     party
-                        .smudging_shares_collected
-                        .push(SmudgingShare::from_transport(smudging_rows));
+                        .shares
+                        .collect_transport(secret_key_rows, smudging_rows);
                 }
             });
     });
@@ -370,18 +358,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Lagrange share aggregation ────────────────────────────────────────────
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
-            party.secret_key_aggregate = Some(
-                share_manager
-                    .aggregate_secret_key_shares(std::mem::take(
-                        &mut party.secret_key_shares_collected,
-                    ))
-                    .unwrap(),
-            );
-            party.smudging_aggregate = Some(
-                share_manager
-                    .aggregate_smudging_shares(std::mem::take(&mut party.smudging_shares_collected))
-                    .unwrap(),
-            );
+            party.shares.aggregate(&share_manager).unwrap();
         });
     });
 
@@ -426,12 +403,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Threshold decryption ──────────────────────────────────────────────────
     let t_start = Instant::now();
     parties.par_iter_mut().for_each(|party| {
+        let smudging = party.shares.take_smudging().unwrap();
+        let secret_key = party.shares.secret_key().unwrap();
         party.decryption_share = share_manager
-            .decryption_share(
-                product.clone(),
-                party.secret_key_aggregate.as_ref().unwrap(),
-                party.smudging_aggregate.take().unwrap(),
-            )
+            .decryption_share(product.clone(), secret_key, smudging)
             .unwrap();
     });
     println!(
