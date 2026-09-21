@@ -18,8 +18,8 @@ use fhe::{
     bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
     trbfv::{
-        AggregatedSmudgingShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
-        SmudgingShare,
+        AggregatedSecretKeyShare, AggregatedSmudgingShare, SecretKeyShare, ShareManager,
+        SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
     },
 };
 
@@ -134,13 +134,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     // public key.
     struct Party {
         pk_share: PublicKeyShare,
-        sk_sss: Vec<Array2<u64>>,
-        esi_sss: Vec<Array2<u64>>,
-        sk_sss_collected: Vec<Array2<u64>>,
-        es_sss_collected: Vec<Array2<u64>>,
-        sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Option<AggregatedSmudgingShare>,
-        d_share_poly: Poly<PowerBasis>,
+        // Explicit transport buffers; recipients rehydrate typed owners after receipt.
+        secret_key_shares_transport: Vec<Array2<u64>>,
+        smudging_shares_transport: Vec<Array2<u64>>,
+        secret_key_shares_collected: Vec<SecretKeyShare>,
+        smudging_shares_collected: Vec<SmudgingShare>,
+        secret_key_aggregate: Option<AggregatedSecretKeyShare>,
+        smudging_aggregate: Option<AggregatedSmudgingShare>,
+        decryption_share: Poly<PowerBasis>,
     }
 
     // Generate a common reference poly for public key generation.
@@ -159,46 +160,47 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // Each thread gets its own RNG to avoid contention
                 let mut rng = rand::rng();
 
-                let sk_share = SecretKey::random(&params, &mut rng);
-                let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
+                let secret_key = SecretKey::random(&params, &mut rng);
+                let pk_share = PublicKeyShare::new(&secret_key, crp.clone(), &mut rng).unwrap();
 
                 let share_manager =
                     ShareManager::new(num_parties, threshold, params.clone()).unwrap();
-                let sk_poly = share_manager
-                    .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
+                let secret_key_poly = share_manager
+                    .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
                     .unwrap();
 
-                let sk_sss = share_manager
-                    .generate_secret_shares_from_poly(sk_poly, &mut rng)
-                    .unwrap();
+                let secret_key_shares_transport = share_manager
+                    .generate_secret_key_shares(secret_key_poly, &mut rng)
+                    .unwrap()
+                    .into_transport();
 
                 // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
-                let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-                let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
+                let secret_key_shares_collected: Vec<SecretKeyShare> =
+                    Vec::with_capacity(num_parties);
+                let smudging_shares_collected: Vec<SmudgingShare> = Vec::with_capacity(num_parties);
                 let ctx = params.context_at_level(0).unwrap();
-                let sk_poly_sum = Poly::<PowerBasis>::zero(ctx);
-                let d_share_poly = Poly::<PowerBasis>::zero(ctx);
+                let decryption_share = Poly::<PowerBasis>::zero(ctx);
 
                 // Smudging noise shares: compute the bound with the smudging
                 // machinery, sample the noise, and deal it immediately.
                 let config =
                     SmudgingConfig::new(params.clone(), num_parties, num_summed, lambda).unwrap();
                 let generator = SmudgingNoiseGenerator::new(config).unwrap();
-                let esi_noise = generator.generate(&mut rng).unwrap();
-                let esi_sss = share_manager
-                    .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
+                let smudging_noise = generator.generate(&mut rng).unwrap();
+                let smudging_shares_transport = share_manager
+                    .generate_smudging_shares(smudging_noise, &mut rng)
                     .unwrap()
                     .into_transport();
 
                 Party {
                     pk_share,
-                    sk_sss,
-                    esi_sss,
-                    sk_sss_collected,
-                    es_sss_collected,
-                    sk_poly_sum,
-                    es_poly_sum: None,
-                    d_share_poly,
+                    secret_key_shares_transport,
+                    smudging_shares_transport,
+                    secret_key_shares_collected,
+                    smudging_shares_collected,
+                    secret_key_aggregate: None,
+                    smudging_aggregate: None,
+                    decryption_share,
                 }
             })
             .collect()
@@ -211,18 +213,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         num_parties as u32,
         {
             for j in 0..num_parties {
-                let mut node_share_m = Array::zeros((0, degree));
-                let mut es_node_share_m = Array::zeros((0, degree));
+                let mut secret_key_rows = Array::zeros((0, degree));
+                let mut smudging_rows = Array::zeros((0, degree));
                 for m in 0..params.moduli().len() {
-                    node_share_m
-                        .push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).clone()))
+                    secret_key_rows
+                        .push_row(ArrayView::from(
+                            &parties[j].secret_key_shares_transport[m].row(i).clone(),
+                        ))
                         .unwrap();
-                    es_node_share_m
-                        .push_row(ArrayView::from(&parties[j].esi_sss[m].row(i).clone()))
+                    smudging_rows
+                        .push_row(ArrayView::from(
+                            &parties[j].smudging_shares_transport[m].row(i).clone(),
+                        ))
                         .unwrap();
                 }
-                parties[i].sk_sss_collected.push(node_share_m);
-                parties[i].es_sss_collected.push(es_node_share_m);
+                parties[i]
+                    .secret_key_shares_collected
+                    .push(SecretKeyShare::from_transport(secret_key_rows));
+                parties[i]
+                    .smudging_shares_collected
+                    .push(SmudgingShare::from_transport(smudging_rows));
             }
             i += 1;
         }
@@ -230,18 +240,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
-            party.sk_poly_sum = share_manager
-                .aggregate_collected_shares(&party.sk_sss_collected)
-                .unwrap();
-            party.es_poly_sum = Some(
+            party.secret_key_aggregate = Some(
                 share_manager
-                    .aggregate_smudging_shares(
-                        party
-                            .es_sss_collected
-                            .drain(..)
-                            .map(SmudgingShare::from_transport)
-                            .collect(),
-                    )
+                    .aggregate_secret_key_shares(std::mem::take(
+                        &mut party.secret_key_shares_collected,
+                    ))
+                    .unwrap(),
+            );
+            party.smudging_aggregate = Some(
+                share_manager
+                    .aggregate_smudging_shares(std::mem::take(&mut party.smudging_shares_collected))
                     .unwrap(),
             );
         });
@@ -281,11 +289,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let share_generation_start = Instant::now();
 
     parties.par_iter_mut().for_each(|party| {
-        party.d_share_poly = share_manager
+        party.decryption_share = share_manager
             .decryption_share(
                 tally.clone(),
-                party.sk_poly_sum.clone().into_ntt(),
-                party.es_poly_sum.take().unwrap(),
+                party.secret_key_aggregate.as_ref().unwrap(),
+                party.smudging_aggregate.take().unwrap(),
             )
             .unwrap();
     });
@@ -301,10 +309,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  Average time per party: {:.2} ms", avg_time_per_party);
 
     // Gather decryption shares from threshold+1 parties
-    let d_share_polys: Vec<Poly<PowerBasis>> = parties
+    let decryption_shares: Vec<Poly<PowerBasis>> = parties
         .iter()
         .take(threshold + 1)
-        .map(|party| party.d_share_poly.clone())
+        .map(|party| party.decryption_share.clone())
         .collect();
 
     // decrypt result
@@ -312,7 +320,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Parties are 1-based for Shamir x-coordinates; we used the first (threshold+1) parties
         let reconstructing_parties: Vec<usize> = (1..=threshold + 1).collect();
         let open_results = share_manager
-            .decrypt_from_shares(d_share_polys, reconstructing_parties, tally.clone())
+            .decrypt_from_shares(decryption_shares, reconstructing_parties, tally.clone())
             .unwrap();
         let result_vec = Vec::<u64>::try_decode(&open_results, Encoding::poly())?;
         Ok::<u64, Box<dyn Error>>(result_vec[0])

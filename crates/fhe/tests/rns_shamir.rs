@@ -27,8 +27,9 @@ fn share_manager_generation_is_deterministic_across_thread_counts() {
                     .unwrap();
                 let mut rng = support::rng(99);
                 manager
-                    .generate_secret_shares_from_poly(secret, &mut rng)
+                    .generate_secret_key_shares(secret, &mut rng)
                     .unwrap()
+                    .into_transport()
             })
     };
 

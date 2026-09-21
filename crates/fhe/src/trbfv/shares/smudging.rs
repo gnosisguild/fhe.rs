@@ -10,7 +10,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 /// The result of dealing one smudging polynomial.
 ///
-/// Each entry is a modulus-plane with shape `[n, degree]`. It is deliberately
+/// Each entry is a per-`q_i` share matrix with shape `[n, degree]`. It is deliberately
 /// distinct from [`SmudgingShare`], whose transport shape is
 /// `[moduli, degree]` for one recipient. The two layouts must be transposed by
 /// the protocol layer before aggregation.
@@ -46,7 +46,7 @@ impl std::fmt::Debug for DealtSmudgingShares {
     }
 }
 
-/// One recipient's smudging share after the dealt modulus planes have been
+/// One recipient's smudging share after the dealt per-`q_i` matrices have been
 /// transposed into the `[moduli, degree]` transport layout.
 ///
 /// This type deliberately does not implement `Clone` or `Copy`. A share is
@@ -115,16 +115,15 @@ impl std::fmt::Debug for SmudgingShare {
 /// ```compile_fail
 /// # use std::sync::Arc;
 /// # use fhe::bfv::Ciphertext;
-/// # use fhe::trbfv::{AggregatedSmudgingShare, ShareManager};
-/// # use fhe_math::rq::{Ntt, Poly};
+/// # use fhe::trbfv::{AggregatedSecretKeyShare, AggregatedSmudgingShare, ShareManager};
 /// fn reuse(
 ///     manager: &ShareManager,
 ///     ciphertext: Arc<Ciphertext>,
-///     secret_share: Poly<Ntt>,
+///     secret_key: &AggregatedSecretKeyShare,
 ///     noise: AggregatedSmudgingShare,
 /// ) {
-///     let _ = manager.decryption_share(ciphertext.clone(), secret_share.clone(), noise);
-///     let _ = manager.decryption_share(ciphertext, secret_share, noise);
+///     let _ = manager.decryption_share(ciphertext.clone(), secret_key, noise);
+///     let _ = manager.decryption_share(ciphertext, secret_key, noise);
 /// }
 /// ```
 pub struct AggregatedSmudgingShare {
