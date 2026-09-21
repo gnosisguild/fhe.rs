@@ -134,8 +134,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // public key.
     struct Party {
         pk_share: PublicKeyShare,
-        secret_key_shares_dealt: Vec<Array2<u64>>,
-        smudging_shares_dealt: Vec<Array2<u64>>,
+        // Explicit transport buffers; recipients rehydrate typed owners after receipt.
+        secret_key_shares_transport: Vec<Array2<u64>>,
+        smudging_shares_transport: Vec<Array2<u64>>,
         secret_key_shares_collected: Vec<SecretKeyShare>,
         smudging_shares_collected: Vec<SmudgingShare>,
         secret_key_aggregate: Option<AggregatedSecretKeyShare>,
@@ -168,7 +169,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
                     .unwrap();
 
-                let secret_key_shares_dealt = share_manager
+                let secret_key_shares_transport = share_manager
                     .generate_secret_key_shares(secret_key_poly, &mut rng)
                     .unwrap()
                     .into_transport();
@@ -186,15 +187,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     SmudgingConfig::new(params.clone(), num_parties, num_summed, lambda).unwrap();
                 let generator = SmudgingNoiseGenerator::new(config).unwrap();
                 let smudging_noise = generator.generate(&mut rng).unwrap();
-                let smudging_shares_dealt = share_manager
+                let smudging_shares_transport = share_manager
                     .generate_smudging_shares(smudging_noise, &mut rng)
                     .unwrap()
                     .into_transport();
 
                 Party {
                     pk_share,
-                    secret_key_shares_dealt,
-                    smudging_shares_dealt,
+                    secret_key_shares_transport,
+                    smudging_shares_transport,
                     secret_key_shares_collected,
                     smudging_shares_collected,
                     secret_key_aggregate: None,
@@ -217,12 +218,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 for m in 0..params.moduli().len() {
                     secret_key_rows
                         .push_row(ArrayView::from(
-                            &parties[j].secret_key_shares_dealt[m].row(i).clone(),
+                            &parties[j].secret_key_shares_transport[m].row(i).clone(),
                         ))
                         .unwrap();
                     smudging_rows
                         .push_row(ArrayView::from(
-                            &parties[j].smudging_shares_dealt[m].row(i).clone(),
+                            &parties[j].smudging_shares_transport[m].row(i).clone(),
                         ))
                         .unwrap();
                 }

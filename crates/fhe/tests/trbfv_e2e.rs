@@ -37,12 +37,12 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     let secret_key_poly = manager
         .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
         .expect("secret key to polynomial");
-    let secret_key_shares_dealt = manager
+    let secret_key_shares_transport = manager
         .generate_secret_key_shares(secret_key_poly, &mut rng)
         .expect("secret key share generation")
         .into_transport();
 
-    let smudging_shares_dealt: Vec<Vec<Array2<u64>>> = (0..N)
+    let smudging_shares_transport: Vec<Vec<Array2<u64>>> = (0..N)
         .map(|_| {
             // The evaluated ciphertext below is the sum of two fresh encryptions.
             let config =
@@ -64,7 +64,10 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
         (0..N).map(|_| Vec::new()).collect();
     for receiver_idx in 0..N {
         let mut secret_key_rows = Array2::zeros((0, params.degree()));
-        for shares_for_modulus in secret_key_shares_dealt.iter().take(params.moduli().len()) {
+        for shares_for_modulus in secret_key_shares_transport
+            .iter()
+            .take(params.moduli().len())
+        {
             secret_key_rows
                 .push_row(ndarray::ArrayView::from(
                     shares_for_modulus.row(receiver_idx),
@@ -74,7 +77,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
         secret_key_shares_collected[receiver_idx]
             .push(SecretKeyShare::from_transport(secret_key_rows));
 
-        for noise_shares in &smudging_shares_dealt {
+        for noise_shares in &smudging_shares_transport {
             let mut smudging_rows = Array2::zeros((0, params.degree()));
             for shares_for_modulus in noise_shares.iter().take(params.moduli().len()) {
                 smudging_rows
