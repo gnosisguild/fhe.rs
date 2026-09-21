@@ -34,12 +34,12 @@ use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
-    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare},
+    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use ndarray::{Array, Array2, ArrayView};
+use ndarray::{Array, ArrayView};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Uniform};
@@ -252,6 +252,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let enc_sk: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
                                     let row = party
+                                        .shares
                                         .secret_key_shares_transport
                                         .get(m)
                                         .unwrap()
@@ -270,6 +271,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let enc_es: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
                                     let row = party
+                                        .shares
                                         .smudging_shares_transport
                                         .get(m)
                                         .unwrap()
