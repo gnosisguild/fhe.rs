@@ -52,8 +52,8 @@ fn bench_data_sizes(c: &mut Criterion) {
     // Generate parties with threshold BFV keys and BFV encryption keys
     println!("\n📊 Generating party keys...");
     let mut parties = Vec::new();
-    let mut all_secret_key_dealt = Vec::new();
-    let mut all_smudging_dealt = Vec::new();
+    let mut all_secret_key_shares_dealt = Vec::new();
+    let mut all_smudging_shares_dealt = Vec::new();
 
     for _party_id in 0..num_parties {
         let mut rng = make_rng();
@@ -69,7 +69,7 @@ fn bench_data_sizes(c: &mut Criterion) {
             .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let secret_key_dealt = share_manager
+        let secret_key_shares_dealt = share_manager
             .generate_secret_key_shares(secret_key_poly, &mut rng)
             .unwrap()
             .into_transport();
@@ -80,7 +80,7 @@ fn bench_data_sizes(c: &mut Criterion) {
             SmudgingConfig::new(params_trbfv.clone(), num_parties, 100, preset.lambda).unwrap();
         let generator = SmudgingNoiseGenerator::new(config).unwrap();
         let smudging_noise = generator.generate(&mut rng).unwrap();
-        let smudging_dealt = share_manager
+        let smudging_shares_dealt = share_manager
             .generate_smudging_shares(smudging_noise, &mut rng)
             .unwrap()
             .into_transport();
@@ -89,15 +89,15 @@ fn bench_data_sizes(c: &mut Criterion) {
         let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
         let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
 
-        all_secret_key_dealt.push(secret_key_dealt.clone());
-        all_smudging_dealt.push(smudging_dealt.clone());
+        all_secret_key_shares_dealt.push(secret_key_shares_dealt.clone());
+        all_smudging_shares_dealt.push(smudging_shares_dealt.clone());
         parties.push((
             secret_key,
             pk_share,
             sk_bfv,
             pk_bfv,
-            secret_key_dealt,
-            smudging_dealt,
+            secret_key_shares_dealt,
+            smudging_shares_dealt,
         ));
     }
 
@@ -131,13 +131,13 @@ fn bench_data_sizes(c: &mut Criterion) {
     let mut encrypted_shares_count = 0;
     let mut total_encrypted_size = 0;
 
-    for (_, _, _, _, secret_key_dealt, smudging_dealt) in parties.iter() {
+    for (_, _, _, _, secret_key_shares_dealt, smudging_shares_dealt) in parties.iter() {
         for (receiver_idx, receiver_party) in parties.iter().enumerate().take(num_parties) {
             let receiver_pk = &receiver_party.3;
             let mut rng = make_rng();
 
             // Encrypt sk shares
-            for secret_key_qi_matrix in secret_key_dealt.iter().take(num_moduli) {
+            for secret_key_qi_matrix in secret_key_shares_dealt.iter().take(num_moduli) {
                 let share_row = secret_key_qi_matrix.row(receiver_idx);
                 let share_vec: Vec<u64> = share_row.to_vec();
 
@@ -151,7 +151,7 @@ fn bench_data_sizes(c: &mut Criterion) {
             }
 
             // Encrypt esi shares
-            for smudging_qi_matrix in smudging_dealt.iter().take(num_moduli) {
+            for smudging_qi_matrix in smudging_shares_dealt.iter().take(num_moduli) {
                 let share_row = smudging_qi_matrix.row(receiver_idx);
                 let share_vec: Vec<u64> = share_row.to_vec();
 

@@ -157,8 +157,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     struct Party {
         pk_share: MBFVPublicKeyShare,
-        secret_key_dealt: Vec<Array2<u64>>, // secret_key_dealt[m]: shape (num_parties, degree)
-        smudging_dealt: Vec<Array2<u64>>,   // smudging error Shamir shares, same shape
+        secret_key_shares_dealt: Vec<Array2<u64>>, // secret_key_shares_dealt[m]: shape (num_parties, degree)
+        smudging_shares_dealt: Vec<Array2<u64>>,   // smudging error Shamir shares, same shape
         secret_key_collected: Vec<Array2<u64>>, // collected from all senders; each (num_moduli, degree)
         smudging_collected: Vec<Array2<u64>>,
         secret_key_aggregate: Option<AggregatedSecretKeyShare>,
@@ -192,7 +192,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
                     .unwrap();
 
-                let secret_key_dealt = share_manager
+                let secret_key_shares_dealt = share_manager
                     .generate_secret_key_shares(secret_key_poly, &mut rng)
                     .unwrap()
                     .into_transport();
@@ -204,7 +204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 config.mult_depth = preset.multiplicative_depth.unwrap();
                 let generator = SmudgingNoiseGenerator::new(config).unwrap();
                 let smudging_noise = generator.generate(&mut rng).unwrap();
-                let smudging_dealt = share_manager
+                let smudging_shares_dealt = share_manager
                     .generate_smudging_shares(smudging_noise, &mut rng)
                     .unwrap()
                     .into_transport();
@@ -231,8 +231,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let ctx0 = params_trbfv.context_at_level(0).unwrap();
                 Party {
                     pk_share,
-                    secret_key_dealt,
-                    smudging_dealt,
+                    secret_key_shares_dealt,
+                    smudging_shares_dealt,
                     secret_key_collected: Vec::with_capacity(num_parties),
                     smudging_collected: Vec::with_capacity(num_parties),
                     secret_key_aggregate: None,
@@ -282,7 +282,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let enc_sk: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
                                     let row = party
-                                        .secret_key_dealt
+                                        .secret_key_shares_dealt
                                         .get(m)
                                         .unwrap()
                                         .row(receiver_idx)
@@ -300,7 +300,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let enc_es: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
                                     let row = party
-                                        .smudging_dealt
+                                        .smudging_shares_dealt
                                         .get(m)
                                         .unwrap()
                                         .row(receiver_idx)

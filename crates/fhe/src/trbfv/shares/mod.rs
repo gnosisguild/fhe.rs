@@ -914,7 +914,7 @@ mod tests {
             .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let secret_key_dealt = managers[0]
+        let secret_key_shares_dealt = managers[0]
             .generate_secret_key_shares(secret_key_poly, &mut rng)
             .unwrap()
             .into_transport();
@@ -926,7 +926,7 @@ mod tests {
 
         for i in 0..n {
             let mut secret_key_rows = Array2::zeros((0, params.degree()));
-            for secret_key_qi_matrix in secret_key_dealt.iter().take(params.moduli().len()) {
+            for secret_key_qi_matrix in secret_key_shares_dealt.iter().take(params.moduli().len()) {
                 secret_key_rows
                     .push_row(ndarray::ArrayView::from(secret_key_qi_matrix.row(i)))
                     .unwrap();
@@ -1008,7 +1008,7 @@ mod tests {
             .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let secret_key_dealt = managers[0]
+        let secret_key_shares_dealt = managers[0]
             .generate_secret_key_shares(secret_key_poly, &mut rng)
             .unwrap()
             .into_transport();
@@ -1021,7 +1021,7 @@ mod tests {
 
         for i in 0..n {
             let mut secret_key_rows = Array2::zeros((0, params.degree()));
-            for secret_key_qi_matrix in secret_key_dealt.iter().take(params.moduli().len()) {
+            for secret_key_qi_matrix in secret_key_shares_dealt.iter().take(params.moduli().len()) {
                 secret_key_rows
                     .push_row(ndarray::ArrayView::from(secret_key_qi_matrix.row(i)))
                     .unwrap();
@@ -1101,7 +1101,7 @@ mod tests {
             .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let secret_key_dealt = managers[0]
+        let secret_key_shares_dealt = managers[0]
             .generate_secret_key_shares(secret_key_poly, &mut rng)
             .unwrap()
             .into_transport();
@@ -1113,7 +1113,7 @@ mod tests {
 
         for i in 0..n {
             let mut secret_key_rows = Array2::zeros((0, params.degree()));
-            for secret_key_qi_matrix in secret_key_dealt.iter().take(params.moduli().len()) {
+            for secret_key_qi_matrix in secret_key_shares_dealt.iter().take(params.moduli().len()) {
                 secret_key_rows
                     .push_row(ndarray::ArrayView::from(secret_key_qi_matrix.row(i)))
                     .unwrap();
@@ -1196,7 +1196,7 @@ mod tests {
             .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let secret_key_dealt = managers[0]
+        let secret_key_shares_dealt = managers[0]
             .generate_secret_key_shares(secret_key_poly, &mut rng)
             .unwrap()
             .into_transport();
@@ -1208,7 +1208,7 @@ mod tests {
 
         for i in 0..n {
             let mut secret_key_rows = Array2::zeros((0, params.degree()));
-            for secret_key_qi_matrix in secret_key_dealt.iter().take(params.moduli().len()) {
+            for secret_key_qi_matrix in secret_key_shares_dealt.iter().take(params.moduli().len()) {
                 secret_key_rows
                     .push_row(ndarray::ArrayView::from(secret_key_qi_matrix.row(i)))
                     .unwrap();
@@ -1553,7 +1553,7 @@ mod tests {
             .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let secret_key_dealt = managers[0]
+        let secret_key_shares_dealt = managers[0]
             .generate_secret_key_shares(secret_key_poly, &mut rng)
             .unwrap()
             .into_transport();
@@ -1565,7 +1565,7 @@ mod tests {
 
         for i in 0..n {
             let mut secret_key_rows = Array2::zeros((0, params.degree()));
-            for secret_key_qi_matrix in secret_key_dealt.iter().take(params.moduli().len()) {
+            for secret_key_qi_matrix in secret_key_shares_dealt.iter().take(params.moduli().len()) {
                 secret_key_rows
                     .push_row(ndarray::ArrayView::from(secret_key_qi_matrix.row(i)))
                     .unwrap();

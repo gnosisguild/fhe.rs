@@ -96,8 +96,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
 
     // ── Shamir share deal / collect / aggregate (SK + noise) ╌─────────
     struct Party {
-        secret_key_dealt: Vec<Array2<u64>>,
-        smudging_dealt: Vec<Array2<u64>>,
+        secret_key_shares_dealt: Vec<Array2<u64>>,
+        smudging_shares_dealt: Vec<Array2<u64>>,
         secret_key_collected: Vec<Array2<u64>>,
         smudging_collected: Vec<Array2<u64>>,
         secret_key_aggregate: Option<AggregatedSecretKeyShare>,
@@ -113,14 +113,14 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
             let secret_key_poly = share_manager
                 .coeffs_to_poly_level0(sk_shares[i].coeffs.clone().as_ref())
                 .expect("sk to poly");
-            let secret_key_dealt = share_manager
+            let secret_key_shares_dealt = share_manager
                 .generate_secret_key_shares(secret_key_poly, &mut rng)
                 .expect("sk share generation")
                 .into_transport();
 
             // Shamir‑share this party's smudging noise, consuming its
             // one-time owner.
-            let smudging_dealt = share_manager
+            let smudging_shares_dealt = share_manager
                 .generate_smudging_shares(
                     smudging_noises.next().expect("one noise owner per party"),
                     &mut rng,
@@ -129,8 +129,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
                 .into_transport();
 
             Party {
-                secret_key_dealt,
-                smudging_dealt,
+                secret_key_shares_dealt,
+                smudging_shares_dealt,
                 secret_key_collected: Vec::with_capacity(N),
                 smudging_collected: Vec::with_capacity(N),
                 secret_key_aggregate: None,
@@ -154,8 +154,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
                 }
                 rows
             };
-            secret_key_rows.push(collect_row(&sender.secret_key_dealt));
-            smudging_rows.push(collect_row(&sender.smudging_dealt));
+            secret_key_rows.push(collect_row(&sender.secret_key_shares_dealt));
+            smudging_rows.push(collect_row(&sender.smudging_shares_dealt));
         }
         parties[receiver_idx].secret_key_collected = secret_key_rows;
         parties[receiver_idx].smudging_collected = smudging_rows;

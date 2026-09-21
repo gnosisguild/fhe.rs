@@ -147,8 +147,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     struct Party {
         pk_share: PublicKeyShare,
-        secret_key_dealt: Vec<Array2<u64>>,
-        smudging_dealt: Vec<Array2<u64>>,
+        secret_key_shares_dealt: Vec<Array2<u64>>,
+        smudging_shares_dealt: Vec<Array2<u64>>,
         secret_key_collected: Vec<Array2<u64>>,
         smudging_collected: Vec<Array2<u64>>,
         secret_key_aggregate: Option<AggregatedSecretKeyShare>,
@@ -179,7 +179,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
                     .unwrap();
 
-                let secret_key_dealt = share_manager
+                let secret_key_shares_dealt = share_manager
                     .generate_secret_key_shares(secret_key_poly, &mut rng)
                     .unwrap()
                     .into_transport();
@@ -196,7 +196,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .unwrap();
                 let generator = SmudgingNoiseGenerator::new(config).unwrap();
                 let smudging_noise = generator.generate(&mut rng).unwrap();
-                let smudging_dealt = share_manager
+                let smudging_shares_dealt = share_manager
                     .generate_smudging_shares(smudging_noise, &mut rng)
                     .unwrap()
                     .into_transport();
@@ -206,8 +206,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 Party {
                     pk_share,
-                    secret_key_dealt,
-                    smudging_dealt,
+                    secret_key_shares_dealt,
+                    smudging_shares_dealt,
                     secret_key_collected,
                     smudging_collected,
                     secret_key_aggregate: None,
@@ -224,7 +224,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("🔐 Encrypting and transmitting shares...");
 
-    // encrypted_shares[sender][receiver] contains (secret_key_dealt, smudging_dealt)
+    // encrypted_shares[sender][receiver] contains (secret_key_shares_dealt, smudging_shares_dealt)
     let encrypted_shares: Vec<Vec<(Vec<Ciphertext>, Vec<Ciphertext>)>> =
         timeit!("Share encryption (parallel)", {
             parties
@@ -240,7 +240,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                         let mut encrypted_secret_key = Vec::new();
                         for m in 0..params_trbfv.moduli().len() {
-                            let share_row = party.secret_key_dealt[m].row(receiver_idx);
+                            let share_row = party.secret_key_shares_dealt[m].row(receiver_idx);
                             let share_vec: Vec<u64> = share_row.to_vec();
                             let pt =
                                 Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv)
@@ -251,7 +251,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                         let mut encrypted_smudging = Vec::new();
                         for m in 0..params_trbfv.moduli().len() {
-                            let share_row = party.smudging_dealt[m].row(receiver_idx);
+                            let share_row = party.smudging_shares_dealt[m].row(receiver_idx);
                             let share_vec: Vec<u64> = share_row.to_vec();
                             let pt =
                                 Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv)
