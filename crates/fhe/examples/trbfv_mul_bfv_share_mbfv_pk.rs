@@ -264,13 +264,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     //   • k = q[1] ≥ q_i for all i → share values ∈ [0, q_i) ⊆ [0, k)
     //   • k ≈ 2^57 < q₀/2 ≈ 2^59  → BFV decrypt is algebraically exact
     //
-    // encryptedecryption_shares[sender][receiver] = (Vec<Ciphertext>, Vec<Ciphertext>)
+    // encrypted_shares[sender][receiver] = (Vec<Ciphertext>, Vec<Ciphertext>)
     //   first  vec: one ciphertext per modulus for the sk share row
     //   second vec: one ciphertext per modulus for the smudging error share row
     let public_key_enc_list: Vec<PublicKey> =
         parties.iter().map(|p| p.public_key_enc.clone()).collect();
 
-    let encryptedecryption_shares: Vec<Vec<(Vec<Ciphertext>, Vec<Ciphertext>)>> =
+    let encrypted_shares: Vec<Vec<(Vec<Ciphertext>, Vec<Ciphertext>)>> =
         timeit!("Share encryption (parallel)", {
             parties
                 .par_iter()
@@ -329,7 +329,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .par_iter_mut()
             .enumerate()
             .for_each(|(receiver_idx, party)| {
-                for sender_shares in encryptedecryption_shares.iter() {
+                for sender_shares in encrypted_shares.iter() {
                     let (enc_sk, enc_es) = sender_shares.get(receiver_idx).unwrap();
 
                     let mut secret_key_rows = Array::zeros((0, degree));
@@ -360,14 +360,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         parties.par_iter_mut().for_each(|party| {
             party.secret_key_aggregate = Some(
                 share_manager
-                    .aggregate_secret_key_shares(
-                        party.secret_key_shares_collected.drain(..).collect(),
-                    )
+                    .aggregate_secret_key_shares(std::mem::take(
+                        &mut party.secret_key_shares_collected,
+                    ))
                     .unwrap(),
             );
             party.smudging_aggregate = Some(
                 share_manager
-                    .aggregate_smudging_shares(party.smudging_shares_collected.drain(..).collect())
+                    .aggregate_smudging_shares(std::mem::take(&mut party.smudging_shares_collected))
                     .unwrap(),
             );
         });

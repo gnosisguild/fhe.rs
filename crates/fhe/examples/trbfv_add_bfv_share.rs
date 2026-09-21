@@ -317,14 +317,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         parties.par_iter_mut().for_each(|party| {
             party.secret_key_aggregate = Some(
                 share_manager
-                    .aggregate_secret_key_shares(
-                        party.secret_key_shares_collected.drain(..).collect(),
-                    )
+                    .aggregate_secret_key_shares(std::mem::take(
+                        &mut party.secret_key_shares_collected,
+                    ))
                     .unwrap(),
             );
             party.smudging_aggregate = Some(
                 share_manager
-                    .aggregate_smudging_shares(party.smudging_shares_collected.drain(..).collect())
+                    .aggregate_smudging_shares(std::mem::take(&mut party.smudging_shares_collected))
                     .unwrap(),
             );
         });

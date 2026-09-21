@@ -115,16 +115,15 @@ impl std::fmt::Debug for SmudgingShare {
 /// ```compile_fail
 /// # use std::sync::Arc;
 /// # use fhe::bfv::Ciphertext;
-/// # use fhe::trbfv::{AggregatedSmudgingShare, ShareManager};
-/// # use fhe_math::rq::{Ntt, Poly};
+/// # use fhe::trbfv::{AggregatedSecretKeyShare, AggregatedSmudgingShare, ShareManager};
 /// fn reuse(
 ///     manager: &ShareManager,
 ///     ciphertext: Arc<Ciphertext>,
-///     secret_share: Poly<Ntt>,
+///     secret_key: &AggregatedSecretKeyShare,
 ///     noise: AggregatedSmudgingShare,
 /// ) {
-///     let _ = manager.decryption_share(ciphertext.clone(), secret_share.clone(), noise);
-///     let _ = manager.decryption_share(ciphertext, secret_share, noise);
+///     let _ = manager.decryption_share(ciphertext.clone(), secret_key, noise);
+///     let _ = manager.decryption_share(ciphertext, secret_key, noise);
 /// }
 /// ```
 pub struct AggregatedSmudgingShare {
