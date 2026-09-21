@@ -11,22 +11,37 @@ use ndarray::{Array2, ArrayView};
 
 /// Print the common TRBFV example help and terminate the process.
 pub fn print_notice_and_exit(error: Option<String>) -> ! {
+    print_notice(error, true);
+}
+
+/// Print multiplication-example help and terminate the process.
+pub fn print_notice_without_num_summed(error: Option<String>) -> ! {
+    print_notice(error, false);
+}
+
+fn print_notice(error: Option<String>, supports_num_summed: bool) -> ! {
+    let exit_code = i32::from(error.is_some());
     println!(
         "{} Threshold BFV example",
         style("  overview:").magenta().bold()
     );
+    let summation_argument = if supports_num_summed {
+        " [--num_summed=N]"
+    } else {
+        ""
+    };
     println!(
-        "{} [-h] [--num_summed=N] [--num_parties=N] [--threshold=T] [--lambda=L]",
+        "{} [-h|--help]{summation_argument} [--num_parties=N] [--threshold=T] [--lambda=L]",
         style("     usage:").magenta().bold()
     );
     println!(
         "{} N >= 1, T <= (N-1)/2, and L >= 1",
         style("constraints:").magenta().bold()
     );
-    if let Some(error) = error {
+    if let Some(error) = error.as_ref() {
         println!("{} {}", style("     error:").red().bold(), error);
     }
-    std::process::exit(0);
+    std::process::exit(exit_code);
 }
 
 /// Common command-line values shared by all TRBFV examples.
@@ -76,7 +91,7 @@ pub fn parse_cli(
     {
         return Err("Party, ciphertext, and lambda counts must be nonzero".into());
     }
-    if values.threshold > (values.num_parties - 1) / 2 {
+    if values.threshold > values.num_parties.saturating_sub(1) / 2 {
         return Err("Threshold must be at most (num_parties - 1) / 2".into());
     }
     Ok(values)
@@ -101,11 +116,14 @@ impl TrbfvShares {
         secret_key_shares_transport: Vec<Array2<u64>>,
         smudging_shares_transport: Vec<Array2<u64>>,
     ) -> Self {
+        let collection_capacity = secret_key_shares_transport
+            .first()
+            .map_or(0, ndarray::ArrayBase::nrows);
         Self {
             secret_key_shares_transport,
             smudging_shares_transport,
-            secret_key_shares_collected: Vec::new(),
-            smudging_shares_collected: Vec::new(),
+            secret_key_shares_collected: Vec::with_capacity(collection_capacity),
+            smudging_shares_collected: Vec::with_capacity(collection_capacity),
             secret_key_aggregate: None,
             smudging_aggregate: None,
         }
@@ -132,6 +150,8 @@ impl TrbfvShares {
         degree: usize,
         modulus_count: usize,
     ) -> (Array2<u64>, Array2<u64>) {
+        assert!(secret_key_shares.len() >= modulus_count);
+        assert!(smudging_shares.len() >= modulus_count);
         let mut secret_key_rows = Array2::zeros((0, degree));
         let mut smudging_rows = Array2::zeros((0, degree));
         for (secret_key_qi, smudging_qi) in secret_key_shares

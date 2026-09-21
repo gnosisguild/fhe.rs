@@ -143,5 +143,3 @@ pub fn encode_database(
     });
     (preprocessed_database, (dimension_1, dimension_2))
 }
-
-fn main() {}
