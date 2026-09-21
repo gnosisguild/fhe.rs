@@ -9,8 +9,6 @@
 
 #[path = "../support/mod.rs"]
 mod support;
-#[path = "trbfv_example/mod.rs"]
-mod trbfv_example;
 mod util;
 
 use std::{env, error::Error, process::exit, sync::Arc};
@@ -27,7 +25,7 @@ use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use trbfv_example::{TrbfvShares, parse_cli};
+use support::trbfv::{TrbfvShares, parse_cli};
 use util::timeit::{timeit, timeit_n};
 
 fn print_notice_and_exit(error: Option<String>) -> ! {

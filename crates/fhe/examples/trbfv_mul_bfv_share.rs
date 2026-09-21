@@ -29,8 +29,6 @@
 
 #[path = "../support/mod.rs"]
 mod support;
-#[path = "trbfv_example/mod.rs"]
-mod trbfv_example;
 mod util;
 
 use std::{env, error::Error, process::exit, sync::Arc};
@@ -49,7 +47,7 @@ use ndarray::{Array, ArrayView};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use trbfv_example::{TrbfvShares, parse_cli};
+use support::trbfv::{TrbfvShares, parse_cli};
 use util::timeit::timeit;
 
 fn print_notice_and_exit(error: Option<String>) -> ! {

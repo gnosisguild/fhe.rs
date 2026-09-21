@@ -202,3 +202,6 @@ pub fn seed(value: u8) -> [u8; 32] {
 pub fn rng(value: u8) -> ChaCha8Rng {
     ChaCha8Rng::from_seed(seed(value))
 }
+
+/// Shared TRBFV example scaffolding.
+pub mod trbfv;
