@@ -159,7 +159,7 @@ transport and durable replay prevention remain the integrator's responsibility.
 
 Secret-key share material follows a separate reusable-owner path. Dealing
 returns a non-cloneable `DealtSecretKeyShares`; applications explicitly convert
-the modulus-plane output at their transport boundary into `SecretKeyShare`
+the per-`q_i` output at their transport boundary into `SecretKeyShare`
 values. `aggregate_secret_key_shares` consumes those owners and returns a
 non-cloneable `AggregatedSecretKeyShare`, which is borrowed by each decryption
 call and zeroized when the key epoch ends. This allows multiple decryptions with

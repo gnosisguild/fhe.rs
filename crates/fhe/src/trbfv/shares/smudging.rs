@@ -10,7 +10,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 /// The result of dealing one smudging polynomial.
 ///
-/// Each entry is a modulus-plane with shape `[n, degree]`. It is deliberately
+/// Each entry is a per-`q_i` share matrix with shape `[n, degree]`. It is deliberately
 /// distinct from [`SmudgingShare`], whose transport shape is
 /// `[moduli, degree]` for one recipient. The two layouts must be transposed by
 /// the protocol layer before aggregation.
@@ -46,7 +46,7 @@ impl std::fmt::Debug for DealtSmudgingShares {
     }
 }
 
-/// One recipient's smudging share after the dealt modulus planes have been
+/// One recipient's smudging share after the dealt per-`q_i` matrices have been
 /// transposed into the `[moduli, degree]` transport layout.
 ///
 /// This type deliberately does not implement `Clone` or `Copy`. A share is

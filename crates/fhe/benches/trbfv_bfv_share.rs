@@ -137,8 +137,8 @@ fn bench_data_sizes(c: &mut Criterion) {
             let mut rng = make_rng();
 
             // Encrypt sk shares
-            for secret_key_plane in secret_key_dealt.iter().take(num_moduli) {
-                let share_row = secret_key_plane.row(receiver_idx);
+            for secret_key_qi_matrix in secret_key_dealt.iter().take(num_moduli) {
+                let share_row = secret_key_qi_matrix.row(receiver_idx);
                 let share_vec: Vec<u64> = share_row.to_vec();
 
                 let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv).unwrap();
@@ -151,8 +151,8 @@ fn bench_data_sizes(c: &mut Criterion) {
             }
 
             // Encrypt esi shares
-            for smudging_plane in smudging_dealt.iter().take(num_moduli) {
-                let share_row = smudging_plane.row(receiver_idx);
+            for smudging_qi_matrix in smudging_dealt.iter().take(num_moduli) {
+                let share_row = smudging_qi_matrix.row(receiver_idx);
                 let share_vec: Vec<u64> = share_row.to_vec();
 
                 let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv).unwrap();

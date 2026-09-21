@@ -4,7 +4,7 @@ use fhe_math::rq::{Ntt, Poly, PowerBasis};
 use ndarray::Array2;
 use zeroize::{Zeroize, Zeroizing};
 
-/// The modulus-plane output of dealing one secret-key polynomial.
+/// The per-`q_i` output of dealing one secret-key polynomial.
 ///
 /// Each matrix has shape `[n, degree]`. It is distinct from
 /// [`SecretKeyShare`], whose recipient transport shape is `[moduli, degree]`.

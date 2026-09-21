@@ -926,9 +926,9 @@ mod tests {
 
         for i in 0..n {
             let mut secret_key_rows = Array2::zeros((0, params.degree()));
-            for secret_key_plane in secret_key_dealt.iter().take(params.moduli().len()) {
+            for secret_key_qi_matrix in secret_key_dealt.iter().take(params.moduli().len()) {
                 secret_key_rows
-                    .push_row(ndarray::ArrayView::from(secret_key_plane.row(i)))
+                    .push_row(ndarray::ArrayView::from(secret_key_qi_matrix.row(i)))
                     .unwrap();
             }
             secret_key_collected[i].push(secret_key_rows);
@@ -1021,9 +1021,9 @@ mod tests {
 
         for i in 0..n {
             let mut secret_key_rows = Array2::zeros((0, params.degree()));
-            for secret_key_plane in secret_key_dealt.iter().take(params.moduli().len()) {
+            for secret_key_qi_matrix in secret_key_dealt.iter().take(params.moduli().len()) {
                 secret_key_rows
-                    .push_row(ndarray::ArrayView::from(secret_key_plane.row(i)))
+                    .push_row(ndarray::ArrayView::from(secret_key_qi_matrix.row(i)))
                     .unwrap();
             }
             secret_key_collected[i].push(secret_key_rows);
@@ -1113,9 +1113,9 @@ mod tests {
 
         for i in 0..n {
             let mut secret_key_rows = Array2::zeros((0, params.degree()));
-            for secret_key_plane in secret_key_dealt.iter().take(params.moduli().len()) {
+            for secret_key_qi_matrix in secret_key_dealt.iter().take(params.moduli().len()) {
                 secret_key_rows
-                    .push_row(ndarray::ArrayView::from(secret_key_plane.row(i)))
+                    .push_row(ndarray::ArrayView::from(secret_key_qi_matrix.row(i)))
                     .unwrap();
             }
             secret_key_collected[i].push(secret_key_rows);
@@ -1208,9 +1208,9 @@ mod tests {
 
         for i in 0..n {
             let mut secret_key_rows = Array2::zeros((0, params.degree()));
-            for secret_key_plane in secret_key_dealt.iter().take(params.moduli().len()) {
+            for secret_key_qi_matrix in secret_key_dealt.iter().take(params.moduli().len()) {
                 secret_key_rows
-                    .push_row(ndarray::ArrayView::from(secret_key_plane.row(i)))
+                    .push_row(ndarray::ArrayView::from(secret_key_qi_matrix.row(i)))
                     .unwrap();
             }
             secret_key_collected[i].push(secret_key_rows);
@@ -1565,9 +1565,9 @@ mod tests {
 
         for i in 0..n {
             let mut secret_key_rows = Array2::zeros((0, params.degree()));
-            for secret_key_plane in secret_key_dealt.iter().take(params.moduli().len()) {
+            for secret_key_qi_matrix in secret_key_dealt.iter().take(params.moduli().len()) {
                 secret_key_rows
-                    .push_row(ndarray::ArrayView::from(secret_key_plane.row(i)))
+                    .push_row(ndarray::ArrayView::from(secret_key_qi_matrix.row(i)))
                     .unwrap();
             }
             secret_key_collected[i].push(secret_key_rows);
