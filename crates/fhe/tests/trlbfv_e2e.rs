@@ -98,8 +98,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     struct Party {
         secret_key_shares_dealt: Vec<Array2<u64>>,
         smudging_shares_dealt: Vec<Array2<u64>>,
-        secret_key_collected: Vec<Array2<u64>>,
-        smudging_collected: Vec<Array2<u64>>,
+        secret_key_shares_collected: Vec<SecretKeyShare>,
+        smudging_shares_collected: Vec<SmudgingShare>,
         secret_key_aggregate: Option<AggregatedSecretKeyShare>,
         smudging_aggregate: Option<AggregatedSmudgingShare>,
     }
@@ -131,8 +131,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
             Party {
                 secret_key_shares_dealt,
                 smudging_shares_dealt,
-                secret_key_collected: Vec::with_capacity(N),
-                smudging_collected: Vec::with_capacity(N),
+                secret_key_shares_collected: Vec::with_capacity(N),
+                smudging_shares_collected: Vec::with_capacity(N),
                 secret_key_aggregate: None,
                 smudging_aggregate: None,
             }
@@ -157,8 +157,14 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
             secret_key_rows.push(collect_row(&sender.secret_key_shares_dealt));
             smudging_rows.push(collect_row(&sender.smudging_shares_dealt));
         }
-        parties[receiver_idx].secret_key_collected = secret_key_rows;
-        parties[receiver_idx].smudging_collected = smudging_rows;
+        parties[receiver_idx].secret_key_shares_collected = secret_key_rows
+            .into_iter()
+            .map(SecretKeyShare::from_transport)
+            .collect();
+        parties[receiver_idx].smudging_shares_collected = smudging_rows
+            .into_iter()
+            .map(SmudgingShare::from_transport)
+            .collect();
     }
 
     // Aggregate collected secret-key and smudging shares into per-party owners.
@@ -166,9 +172,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
         party.secret_key_aggregate = Some(
             manager
                 .aggregate_secret_key_shares(
-                    std::mem::take(&mut party.secret_key_collected)
+                    std::mem::take(&mut party.secret_key_shares_collected)
                         .into_iter()
-                        .map(SecretKeyShare::from_transport)
                         .collect(),
                 )
                 .expect("aggregate sk shares"),
@@ -176,9 +181,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
         party.smudging_aggregate = Some(
             manager
                 .aggregate_smudging_shares(
-                    std::mem::take(&mut party.smudging_collected)
+                    std::mem::take(&mut party.smudging_shares_collected)
                         .into_iter()
-                        .map(SmudgingShare::from_transport)
                         .collect(),
                 )
                 .expect("aggregate es shares"),

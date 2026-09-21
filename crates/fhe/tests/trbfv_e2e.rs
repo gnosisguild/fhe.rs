@@ -58,8 +58,10 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
         })
         .collect();
 
-    let mut secret_key_collected: Vec<Vec<Array2<u64>>> = (0..N).map(|_| Vec::new()).collect();
-    let mut smudging_collected: Vec<Vec<Array2<u64>>> = (0..N).map(|_| Vec::new()).collect();
+    let mut secret_key_shares_collected: Vec<Vec<SecretKeyShare>> =
+        (0..N).map(|_| Vec::new()).collect();
+    let mut smudging_shares_collected: Vec<Vec<SmudgingShare>> =
+        (0..N).map(|_| Vec::new()).collect();
     for receiver_idx in 0..N {
         let mut secret_key_rows = Array2::zeros((0, params.degree()));
         for shares_for_modulus in secret_key_shares_dealt.iter().take(params.moduli().len()) {
@@ -69,7 +71,8 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
                 ))
                 .expect("append secret key share row");
         }
-        secret_key_collected[receiver_idx].push(secret_key_rows);
+        secret_key_shares_collected[receiver_idx]
+            .push(SecretKeyShare::from_transport(secret_key_rows));
 
         for noise_shares in &smudging_shares_dealt {
             let mut smudging_rows = Array2::zeros((0, params.degree()));
@@ -80,36 +83,27 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
                     ))
                     .expect("append smudging share row");
             }
-            smudging_collected[receiver_idx].push(smudging_rows);
+            smudging_shares_collected[receiver_idx]
+                .push(SmudgingShare::from_transport(smudging_rows));
         }
     }
 
-    let secret_key_aggregates: Vec<Option<AggregatedSecretKeyShare>> = secret_key_collected
+    let secret_key_aggregates: Vec<Option<AggregatedSecretKeyShare>> = secret_key_shares_collected
         .into_iter()
         .map(|collected| {
             Some(
                 manager
-                    .aggregate_secret_key_shares(
-                        collected
-                            .into_iter()
-                            .map(SecretKeyShare::from_transport)
-                            .collect(),
-                    )
+                    .aggregate_secret_key_shares(collected.into_iter().collect())
                     .expect("aggregate secret key shares"),
             )
         })
         .collect();
-    let mut smudging_aggregates: Vec<Option<AggregatedSmudgingShare>> = smudging_collected
+    let mut smudging_aggregates: Vec<Option<AggregatedSmudgingShare>> = smudging_shares_collected
         .into_iter()
         .map(|collected| {
             Some(
                 manager
-                    .aggregate_smudging_shares(
-                        collected
-                            .into_iter()
-                            .map(SmudgingShare::from_transport)
-                            .collect(),
-                    )
+                    .aggregate_smudging_shares(collected.into_iter().collect())
                     .expect("aggregate smudging shares"),
             )
         })

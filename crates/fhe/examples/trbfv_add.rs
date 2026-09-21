@@ -136,8 +136,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         pk_share: PublicKeyShare,
         secret_key_shares_dealt: Vec<Array2<u64>>,
         smudging_shares_dealt: Vec<Array2<u64>>,
-        secret_key_collected: Vec<Array2<u64>>,
-        smudging_collected: Vec<Array2<u64>>,
+        secret_key_shares_collected: Vec<SecretKeyShare>,
+        smudging_shares_collected: Vec<SmudgingShare>,
         secret_key_aggregate: Option<AggregatedSecretKeyShare>,
         smudging_aggregate: Option<AggregatedSmudgingShare>,
         decryption_share: Poly<PowerBasis>,
@@ -174,8 +174,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .into_transport();
 
                 // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
-                let secret_key_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-                let smudging_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
+                let secret_key_shares_collected: Vec<SecretKeyShare> =
+                    Vec::with_capacity(num_parties);
+                let smudging_shares_collected: Vec<SmudgingShare> = Vec::with_capacity(num_parties);
                 let ctx = params.context_at_level(0).unwrap();
                 let decryption_share = Poly::<PowerBasis>::zero(ctx);
 
@@ -194,8 +195,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     pk_share,
                     secret_key_shares_dealt,
                     smudging_shares_dealt,
-                    secret_key_collected,
-                    smudging_collected,
+                    secret_key_shares_collected,
+                    smudging_shares_collected,
                     secret_key_aggregate: None,
                     smudging_aggregate: None,
                     decryption_share,
@@ -225,8 +226,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ))
                         .unwrap();
                 }
-                parties[i].secret_key_collected.push(secret_key_rows);
-                parties[i].smudging_collected.push(smudging_rows);
+                parties[i]
+                    .secret_key_shares_collected
+                    .push(SecretKeyShare::from_transport(secret_key_rows));
+                parties[i]
+                    .smudging_shares_collected
+                    .push(SmudgingShare::from_transport(smudging_rows));
             }
             i += 1;
         }
@@ -237,23 +242,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             party.secret_key_aggregate = Some(
                 share_manager
                     .aggregate_secret_key_shares(
-                        party
-                            .secret_key_collected
-                            .drain(..)
-                            .map(SecretKeyShare::from_transport)
-                            .collect(),
+                        party.secret_key_shares_collected.drain(..).collect(),
                     )
                     .unwrap(),
             );
             party.smudging_aggregate = Some(
                 share_manager
-                    .aggregate_smudging_shares(
-                        party
-                            .smudging_collected
-                            .drain(..)
-                            .map(SmudgingShare::from_transport)
-                            .collect(),
-                    )
+                    .aggregate_smudging_shares(party.smudging_shares_collected.drain(..).collect())
                     .unwrap(),
             );
         });

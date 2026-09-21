@@ -159,8 +159,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         pk_share: MBFVPublicKeyShare,
         secret_key_shares_dealt: Vec<Array2<u64>>, // secret_key_shares_dealt[m]: shape (num_parties, degree)
         smudging_shares_dealt: Vec<Array2<u64>>,   // smudging error Shamir shares, same shape
-        secret_key_collected: Vec<Array2<u64>>, // collected from all senders; each (num_moduli, degree)
-        smudging_collected: Vec<Array2<u64>>,
+        secret_key_shares_collected: Vec<SecretKeyShare>, // collected from all senders; each (num_moduli, degree)
+        smudging_shares_collected: Vec<SmudgingShare>,
         secret_key_aggregate: Option<AggregatedSecretKeyShare>,
         smudging_aggregate: Option<AggregatedSmudgingShare>,
         decryption_share: Poly<PowerBasis>,
@@ -233,8 +233,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     pk_share,
                     secret_key_shares_dealt,
                     smudging_shares_dealt,
-                    secret_key_collected: Vec::with_capacity(num_parties),
-                    smudging_collected: Vec::with_capacity(num_parties),
+                    secret_key_shares_collected: Vec::with_capacity(num_parties),
+                    smudging_shares_collected: Vec::with_capacity(num_parties),
                     secret_key_aggregate: None,
                     smudging_aggregate: None,
                     decryption_share: Poly::<PowerBasis>::zero(ctx0),
@@ -337,7 +337,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         secret_key_rows.push_row(ArrayView::from(&row)).unwrap();
                     }
-                    party.secret_key_collected.push(secret_key_rows);
+                    party
+                        .secret_key_shares_collected
+                        .push(SecretKeyShare::from_transport(secret_key_rows));
 
                     let mut smudging_rows = Array::zeros((0, degree));
                     for ct in enc_es {
@@ -345,7 +347,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         smudging_rows.push_row(ArrayView::from(&row)).unwrap();
                     }
-                    party.smudging_collected.push(smudging_rows);
+                    party
+                        .smudging_shares_collected
+                        .push(SmudgingShare::from_transport(smudging_rows));
                 }
             });
     });
@@ -356,23 +360,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             party.secret_key_aggregate = Some(
                 share_manager
                     .aggregate_secret_key_shares(
-                        party
-                            .secret_key_collected
-                            .drain(..)
-                            .map(SecretKeyShare::from_transport)
-                            .collect(),
+                        party.secret_key_shares_collected.drain(..).collect(),
                     )
                     .unwrap(),
             );
             party.smudging_aggregate = Some(
                 share_manager
-                    .aggregate_smudging_shares(
-                        party
-                            .smudging_collected
-                            .drain(..)
-                            .map(SmudgingShare::from_transport)
-                            .collect(),
-                    )
+                    .aggregate_smudging_shares(party.smudging_shares_collected.drain(..).collect())
                     .unwrap(),
             );
         });
