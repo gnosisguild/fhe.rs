@@ -14,7 +14,8 @@
 // comparison.
 
 mod pir;
-mod util;
+#[path = "../support/mod.rs"]
+mod support;
 
 use clap::Parser;
 use fhe::bfv;
@@ -25,7 +26,7 @@ use fhe_util::{inverse, transcode_to_bytes};
 use indicatif::HumanBytes;
 use rand::{RngCore, rng};
 use std::{error::Error, time::Instant};
-use util::{
+use support::examples::util::{
     encode_database, generate_database, number_elements_per_plaintext,
     timeit::{timeit, timeit_n},
 };

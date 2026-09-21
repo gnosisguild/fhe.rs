@@ -9,11 +9,9 @@
 
 #[path = "../support/mod.rs"]
 mod support;
-mod util;
 
-use std::{env, error::Error, process::exit, sync::Arc};
+use std::{env, error::Error, sync::Arc};
 
-use console::style;
 use fhe::{
     bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
@@ -25,30 +23,8 @@ use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use support::examples::trbfv::{TrbfvShares, parse_cli};
-use util::timeit::{timeit, timeit_n};
-
-fn print_notice_and_exit(error: Option<String>) -> ! {
-    println!(
-        "{} Addition with threshold BFV",
-        style("  overview:").magenta().bold()
-    );
-    println!(
-        "{} add [-h] [--help] [--num_summed=<value>] [--num_parties=<value>] [--threshold=<value>]",
-        style("     usage:").magenta().bold()
-    );
-    println!(
-        "{} {} {} and {} must be at least 1",
-        style("constraints:").magenta().bold(),
-        style("num_summed").blue(),
-        style("num_parties").blue(),
-        style("threshold").blue(),
-    );
-    if let Some(error) = error {
-        println!("{} {}", style("     error:").red().bold(), error);
-    }
-    exit(0);
-}
+use support::examples::trbfv::{TrbfvShares, parse_cli, print_notice_and_exit};
+use support::examples::util::timeit::{timeit, timeit_n};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let preset = support::presets::secure8192()?;

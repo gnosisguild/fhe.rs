@@ -23,11 +23,9 @@
 
 #[path = "../support/mod.rs"]
 mod support;
-mod util;
 
-use std::{env, error::Error, process::exit, sync::Arc};
+use std::{env, error::Error, sync::Arc};
 
-use console::style;
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
@@ -43,27 +41,8 @@ use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use support::examples::trbfv::{TrbfvShares, parse_cli};
-use util::timeit::timeit;
-
-fn print_notice_and_exit(error: Option<String>) -> ! {
-    println!(
-        "{} Threshold BFV multiplication with encrypted share transport",
-        style("  overview:").magenta().bold()
-    );
-    println!(
-        "{} trbfv_mul_bfv_share_mbfv_pk [-h] [--num_parties=N] [--threshold=T] [--lambda=L]",
-        style("     usage:").magenta().bold()
-    );
-    println!(
-        "{} T ≤ (N-1)/2, N ≥ 1, L ≥ 1",
-        style("constraints:").magenta().bold(),
-    );
-    if let Some(error) = error {
-        println!("{} {}", style("     error:").red().bold(), error);
-    }
-    exit(0);
-}
+use support::examples::trbfv::{TrbfvShares, parse_cli, print_notice_and_exit};
+use support::examples::util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let preset = support::presets::secure16384()?;

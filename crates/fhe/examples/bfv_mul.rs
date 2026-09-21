@@ -13,7 +13,6 @@
 
 #[path = "../support/mod.rs"]
 mod support;
-mod util;
 
 use std::{error::Error, sync::Arc};
 
@@ -22,7 +21,7 @@ use fhe::{
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use util::timeit::timeit;
+use support::examples::util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand::rng();

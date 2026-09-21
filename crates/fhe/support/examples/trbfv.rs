@@ -2,11 +2,32 @@
 
 #![allow(dead_code, clippy::expect_used)]
 
+use console::style;
 use fhe::Error;
 use fhe::trbfv::{
     AggregatedSecretKeyShare, AggregatedSmudgingShare, SecretKeyShare, ShareManager, SmudgingShare,
 };
 use ndarray::{Array2, ArrayView};
+
+/// Print the common TRBFV example help and terminate the process.
+pub fn print_notice_and_exit(error: Option<String>) -> ! {
+    println!(
+        "{} Threshold BFV example",
+        style("  overview:").magenta().bold()
+    );
+    println!(
+        "{} [-h] [--num_summed=N] [--num_parties=N] [--threshold=T] [--lambda=L]",
+        style("     usage:").magenta().bold()
+    );
+    println!(
+        "{} N >= 1, T <= (N-1)/2, and L >= 1",
+        style("constraints:").magenta().bold()
+    );
+    if let Some(error) = error {
+        println!("{} {}", style("     error:").red().bold(), error);
+    }
+    std::process::exit(0);
+}
 
 /// Common command-line values shared by all TRBFV examples.
 #[derive(Clone, Copy)]

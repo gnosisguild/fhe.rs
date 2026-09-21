@@ -18,7 +18,7 @@ use std::{cmp::min, fmt, sync::Arc, time::Duration};
 pub mod timeit {
     macro_rules! timeit_n {
         ($name:expr, $loops:expr, $code:expr) => {{
-            use util::DisplayDuration;
+            use support::examples::util::DisplayDuration;
             let start = std::time::Instant::now();
             let r = $code;
             for _ in 1..$loops {
@@ -35,7 +35,7 @@ pub mod timeit {
 
     macro_rules! timeit {
         ($name:expr, $code:expr) => {{
-            use util::DisplayDuration;
+            use support::examples::util::DisplayDuration;
             let start = std::time::Instant::now();
             let r = $code;
             println!("⏱  {}: {}", $name, DisplayDuration(start.elapsed()));

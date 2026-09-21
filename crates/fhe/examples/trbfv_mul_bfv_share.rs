@@ -29,11 +29,9 @@
 
 #[path = "../support/mod.rs"]
 mod support;
-mod util;
 
-use std::{env, error::Error, process::exit, sync::Arc};
+use std::{env, error::Error, sync::Arc};
 
-use console::style;
 use fhe::{
     aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
@@ -47,32 +45,8 @@ use ndarray::{Array, ArrayView};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use support::examples::trbfv::{TrbfvShares, parse_cli};
-use util::timeit::timeit;
-
-fn print_notice_and_exit(error: Option<String>) -> ! {
-    println!(
-        "{} Threshold BFV multiplication with encrypted share transport",
-        style("  overview:").magenta().bold()
-    );
-    println!(
-        "{} trbfv_mul_bfv_share [-h] [--num_parties=N] [--threshold=T] [--lambda=L]",
-        style("     usage:").magenta().bold()
-    );
-    println!(
-        "{} T ≤ (N-1)/2, N ≥ 1, L ≤ {}. Paper-conforming robustness requires odd N (N = 2t + 1);",
-        style("constraints:").magenta().bold(),
-        fhe::trbfv::smudging::MAX_LAMBDA,
-    );
-    println!(
-        "{} even N is accepted for compatibility but lies outside the paper's theorem.",
-        style("           ").magenta().bold(),
-    );
-    if let Some(error) = error {
-        println!("{} {}", style("     error:").red().bold(), error);
-    }
-    exit(0);
-}
+use support::examples::trbfv::{TrbfvShares, parse_cli, print_notice_and_exit};
+use support::examples::util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let preset = support::presets::secure16384()?;
