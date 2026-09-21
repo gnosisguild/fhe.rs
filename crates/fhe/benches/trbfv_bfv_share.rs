@@ -5,7 +5,7 @@ mod support;
 use fhe::bfv::CommonRandomPoly;
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::PublicKeyShare;
-use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare};
+use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
 
