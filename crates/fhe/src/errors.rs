@@ -366,6 +366,14 @@ pub enum MultipartyError {
 #[expect(missing_docs, reason = "error variants are documented inline")]
 #[non_exhaustive]
 pub enum SerializationError {
+    /// A serialized object exceeds the common pre-decode size limit.
+    #[error("Serialized {object:?} payload has {actual} bytes; maximum is {maximum}")]
+    PayloadTooLarge {
+        object: SerializedObject,
+        actual: usize,
+        maximum: usize,
+    },
+
     /// A protobuf payload could not be decoded.
     #[error("Failed to decode {object:?}")]
     Decode { object: SerializedObject },
@@ -442,12 +450,22 @@ impl From<std::io::Error> for SerializationError {
 #[non_exhaustive]
 pub enum SerializedObject {
     Ciphertext,
+    CommonRandomPoly,
+    DecryptionShare,
     EvaluationKey,
+    LbfvPublicKey,
+    LbfvRelinearizationKey,
+    MbfvDecryptionShare,
+    MbfvPublicKeyShare,
+    MbfvSecretKeySwitchShare,
     Parameters,
     PublicKey,
     RelinearizationKey,
+    RelinearizationKeyShare,
     RgswCiphertext,
     SecretKey,
+    SecretKeySwitchShare,
+    TrlbfvPublicKeyShare,
 }
 
 /// Required field in a protobuf object.

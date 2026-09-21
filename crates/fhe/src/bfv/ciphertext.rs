@@ -203,11 +203,7 @@ impl Serialize for Ciphertext {
 
 impl DeserializeParametrized for Ciphertext {
     fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self> {
-        let ctp = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::Decode {
-                object: crate::SerializedObject::Ciphertext,
-            })
-        })?;
+        let ctp = crate::serialization::decode(bytes, crate::SerializedObject::Ciphertext)?;
         Ciphertext::try_convert_from(&ctp, params)
     }
 

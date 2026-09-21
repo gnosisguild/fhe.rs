@@ -618,11 +618,8 @@ impl DeserializeParametrized for LBFVPublicKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: LBFVPublicKeyProto = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::Decode {
-                object: crate::SerializedObject::PublicKey,
-            })
-        })?;
+        let proto: LBFVPublicKeyProto =
+            crate::serialization::decode(bytes, crate::SerializedObject::LbfvPublicKey)?;
 
         if proto.c.is_empty() {
             return Err(SerializationError::MissingField {

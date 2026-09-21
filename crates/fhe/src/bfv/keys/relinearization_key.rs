@@ -212,11 +212,7 @@ impl DeserializeParametrized for RelinearizationKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
-        let rk = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::Decode {
-                object: crate::SerializedObject::RelinearizationKey,
-            })
-        })?;
+        let rk = crate::serialization::decode(bytes, crate::SerializedObject::RelinearizationKey)?;
         RelinearizationKey::try_convert_from(&rk, params)
     }
 }

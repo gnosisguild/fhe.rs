@@ -11,6 +11,7 @@ mod support;
 
 mod errors;
 mod rns_shamir;
+mod serialization;
 
 pub mod aggregate;
 pub mod bfv;

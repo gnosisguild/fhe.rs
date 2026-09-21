@@ -236,11 +236,8 @@ impl DeserializeParametrized for PublicKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: PublicKeyProto = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::Decode {
-                object: crate::SerializedObject::PublicKey,
-            })
-        })?;
+        let proto: PublicKeyProto =
+            crate::serialization::decode(bytes, crate::SerializedObject::PublicKey)?;
         if let Some(proto_c) = &proto.c {
             let mut c = Ciphertext::try_convert_from(proto_c, params)?;
             if c.level != 0 {

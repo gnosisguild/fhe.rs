@@ -7,6 +7,19 @@ use crate::{Error, PolynomialSerializationError, proto::rq::Rq};
 use fhe_traits::{DeserializeWithContext, Serialize};
 use prost::Message;
 
+const MAX_SERIALIZED_BYTES: usize = 256 * 1024 * 1024;
+
+fn check_size(actual: usize) -> Result<(), Error> {
+    if actual > MAX_SERIALIZED_BYTES {
+        return Err(PolynomialSerializationError::PayloadTooLarge {
+            actual,
+            maximum: MAX_SERIALIZED_BYTES,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 impl<R: RepresentationTag> Serialize for Poly<R> {
     fn to_bytes(&self) -> Vec<u8> {
         Rq::from(self).encode_to_vec()
@@ -21,6 +34,7 @@ where
     type Context = Context;
 
     fn from_bytes(bytes: &[u8], ctx: &Arc<Context>) -> Result<Self, Self::Error> {
+        check_size(bytes.len())?;
         let rq: Rq = Message::decode(bytes).map_err(|_| PolynomialSerializationError::Decode)?;
         Poly::try_convert_from(&rq, ctx, false)
     }
@@ -28,6 +42,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::{MAX_SERIALIZED_BYTES, check_size};
     use std::{error::Error as StdError, sync::Arc};
 
     use fhe_traits::{DeserializeWithContext, Serialize};
@@ -190,5 +205,17 @@ mod tests {
         let decoded = Poly::<PowerBasis>::from_bytes(&bytes, &ctx)?;
         assert!(!decoded.allow_variable_time_computations);
         Ok(())
+    }
+
+    #[test]
+    fn oversized_payload_is_rejected_before_decode() {
+        let err = check_size(MAX_SERIALIZED_BYTES + 1).unwrap_err();
+        assert_eq!(
+            err,
+            Error::PolynomialSerialization(PolynomialSerializationError::PayloadTooLarge {
+                actual: MAX_SERIALIZED_BYTES + 1,
+                maximum: MAX_SERIALIZED_BYTES,
+            })
+        );
     }
 }

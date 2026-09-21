@@ -129,6 +129,10 @@ pub enum Error {
 #[expect(missing_docs, reason = "error variants are documented inline")]
 #[non_exhaustive]
 pub enum PolynomialSerializationError {
+    /// The serialized polynomial exceeds the common pre-decode size limit.
+    #[error("Serialized polynomial has {actual} bytes; maximum is {maximum}.")]
+    PayloadTooLarge { actual: usize, maximum: usize },
+
     /// The protobuf payload could not be decoded.
     #[error("Failed to decode polynomial serialization.")]
     Decode,

@@ -457,11 +457,8 @@ impl DeserializeParametrized for RelinKeyShare {
     type Error = crate::Error;
 
     fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self> {
-        let proto: LbfvRelinKeyShare = Message::decode(bytes).map_err(|e| {
-            crate::Error::SerializationError(SerializationError::ProtobufError {
-                message: e.to_string(),
-            })
-        })?;
+        let proto: LbfvRelinKeyShare =
+            crate::serialization::decode(bytes, crate::SerializedObject::RelinearizationKeyShare)?;
 
         let ksk_r_to_s = proto
             .ksk_r_to_s
