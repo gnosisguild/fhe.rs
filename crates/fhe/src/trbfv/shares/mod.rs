@@ -178,11 +178,9 @@ impl ShareManager {
         &self,
         shares: Vec<SmudgingShare>,
     ) -> Result<AggregatedSmudgingShare, Error> {
-        let matrices: Vec<Array2<u64>> = shares
-            .into_iter()
-            .map(SmudgingShare::into_transport)
-            .collect();
-        self.aggregate_collected_matrices(matrices.iter())
+        // Keep the matrices under their zeroizing owners while validating and
+        // aggregating, including when malformed input returns an error.
+        self.aggregate_collected_matrices(shares.iter().map(|share| &share.coefficients))
             .map(AggregatedSmudgingShare::new)
     }
 
