@@ -35,20 +35,29 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
             .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
             .expect("secret-key conversion must succeed");
 
-        let modulus_shares = manager
-            .generate_secret_shares_from_poly(secret_poly.clone(), &mut setup_rng)
-            .expect("benchmark share generation must succeed");
+        let dealer_shares: Vec<_> = (0..party_count)
+            .map(|_| {
+                manager
+                    .generate_secret_shares_from_poly(secret_poly.clone(), &mut setup_rng)
+                    .expect("benchmark share generation must succeed")
+            })
+            .collect();
         let aggregated_shares: Vec<_> = (0..party_count)
             .map(|party_index| {
-                let share = Array2::from_shape_fn(
-                    (modulus_count, degree),
-                    |(modulus_index, coefficient)| {
-                        modulus_shares[modulus_index][[party_index, coefficient]]
-                    },
-                );
+                let collected: Vec<_> = dealer_shares
+                    .iter()
+                    .map(|modulus_shares| {
+                        Array2::from_shape_fn(
+                            (modulus_count, degree),
+                            |(modulus_index, coefficient)| {
+                                modulus_shares[modulus_index][[party_index, coefficient]]
+                            },
+                        )
+                    })
+                    .collect();
                 manager
-                    .aggregate_collected_shares(std::slice::from_ref(&share))
-                    .expect("share aggregation must succeed")
+                    .aggregate_collected_shares(&collected)
+                    .expect("multi-dealer share aggregation must succeed")
             })
             .collect();
 

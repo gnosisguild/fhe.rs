@@ -360,7 +360,10 @@ impl ShareManager {
         }
         let c1sk = (&c1 * &sk_i).into_power_basis();
         // Move the consumed noise into the returned share while leaving a
-        // zero polynomial behind for the zeroizing owner to drop.
+        // zero polynomial behind for the zeroizing owner to drop. The
+        // zeroize crate's `Zeroizing` wrapper intentionally has no
+        // `into_inner`; replacing it avoids an unsafe extraction that would
+        // bypass the wipe-on-drop guarantee.
         let ctx = es_i.ctx().clone();
         let replacement = Poly::zero(&ctx);
         let es_i = std::mem::replace(&mut *es_i, replacement);
