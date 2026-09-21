@@ -3,8 +3,10 @@
 //! This module provides the ShareManager struct that handles aggregation of secret shares
 //! and computation of decryption shares in the threshold BFV scheme.
 
+mod secret_key;
 mod smudging;
 
+pub use secret_key::{AggregatedSecretKeyShare, DealtSecretKeyShares, SecretKeyShare};
 pub use smudging::{AggregatedSmudgingShare, DealtSmudgingShares, SmudgingShare};
 
 use crate::Error;
@@ -16,7 +18,7 @@ use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
 use fhe_math::{
     rns::{RnsContext, ScalingFactor},
-    rq::{Context, Ntt, Poly, PowerBasis, scaler::Scaler},
+    rq::{Context, Poly, PowerBasis, scaler::Scaler},
 };
 use itertools::Itertools;
 use ndarray::Array2;
@@ -157,13 +159,13 @@ impl ShareManager {
     /// This is the supported dealing operation for freshly sampled smudging
     /// noise: it consumes the [`SmudgingNoise`] owner and deals the
     /// underlying polynomial with the same layout as
-    /// [`ShareManager::generate_secret_shares_from_poly`].
-    pub fn generate_secret_shares_from_smudging_noise<R: RngCore + CryptoRng>(
+    /// [`ShareManager::generate_secret_key_shares`].
+    pub fn generate_smudging_shares<R: RngCore + CryptoRng>(
         &self,
         noise: SmudgingNoise,
         rng: &mut R,
     ) -> Result<DealtSmudgingShares, Error> {
-        self.generate_secret_shares_from_poly(noise.into_poly(), rng)
+        self.deal_poly(noise.into_poly(), rng)
             .map(DealtSmudgingShares::new)
     }
 
@@ -180,21 +182,41 @@ impl ShareManager {
             .into_iter()
             .map(SmudgingShare::into_transport)
             .collect();
-        self.aggregate_collected_shares(&matrices)
+        self.aggregate_collected_matrices(matrices.iter())
             .map(AggregatedSmudgingShare::new)
+    }
+
+    /// Aggregate collected secret-key shares into a reusable owner.
+    ///
+    /// The input owners are consumed, while the resulting aggregate may be
+    /// borrowed for any number of decryptions in the same key epoch.
+    pub fn aggregate_secret_key_shares(
+        &self,
+        shares: Vec<SecretKeyShare>,
+    ) -> Result<AggregatedSecretKeyShare, Error> {
+        self.aggregate_collected_matrices(shares.iter().map(|share| &share.coefficients))
+            .map(AggregatedSecretKeyShare::from_power_basis)
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
     ///
     /// # One-time use
     ///
-    /// Unlike [`ShareManager::generate_secret_shares_from_smudging_noise`],
+    /// Unlike [`ShareManager::generate_smudging_shares`],
     /// this method accepts any caller-provided polynomial and therefore
     /// cannot enforce one-time use: nothing here prevents dealing the same
     /// polynomial twice. Callers dealing smudging noise must sample it fresh
     /// for every decryption; reusing noise breaks the statistical hiding
     /// argument.
-    pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
+    pub fn generate_secret_key_shares<R: RngCore + CryptoRng>(
+        &self,
+        poly: Zeroizing<Poly<PowerBasis>>,
+        rng: &mut R,
+    ) -> Result<DealtSecretKeyShares, Error> {
+        self.deal_poly(poly, rng).map(DealtSecretKeyShares::new)
+    }
+
+    fn deal_poly<R: RngCore + CryptoRng>(
         &self,
         poly: Zeroizing<Poly<PowerBasis>>,
         rng: &mut R,
@@ -226,14 +248,14 @@ impl ShareManager {
     ///
     /// Every entry of every contribution matrix must be a canonical residue in
     /// `[0, q_i)`, where `q_i` is the modulus of the entry's row. Shares produced
-    /// by [`ShareManager::generate_secret_shares_from_poly`] already satisfy this
+    /// by [`ShareManager::generate_secret_key_shares`] already satisfy this
     /// invariant, but aggregation re-checks it because it is an input boundary for
     /// externally supplied matrices. Out-of-range entries are treated as malformed
     /// and rejected with `Error::Threshold(ThresholdError::MalformedShares { .. })`;
     /// they are never reduced or otherwise repaired.
     ///
     /// # Arguments
-    /// - `sk_sss_collected`: One share matrix per contributing party (at most `n`;
+    /// - `collected`: One share matrix per contributing party (at most `n`;
     ///   fewer is allowed, e.g. when some parties aborted during dealing).
     ///   Each Array2<u64> has one row per modulus and one column per coefficient.
     ///
@@ -245,18 +267,19 @@ impl ShareManager {
     /// provided, if any matrix does not have shape `[moduli, degree]`, or if any
     /// coefficient is not a canonical residue below its row's modulus (`>= q_i` is
     /// malformed, never reduced).
-    pub fn aggregate_collected_shares(
-        &self,
-        sk_sss_collected: &[Array2<u64>], // collected sk sss shares from other parties
-    ) -> Result<Poly<PowerBasis>, Error> {
-        if sk_sss_collected.is_empty() {
+    fn aggregate_collected_matrices<'a, I>(&self, matrices: I) -> Result<Poly<PowerBasis>, Error>
+    where
+        I: IntoIterator<Item = &'a Array2<u64>>,
+    {
+        let collected: Vec<&Array2<u64>> = matrices.into_iter().collect();
+        if collected.is_empty() {
             return Err(Error::share_count_mismatch(0, 1));
         }
-        if sk_sss_collected.len() > self.n {
-            return Err(Error::share_count_mismatch(sk_sss_collected.len(), self.n));
+        if collected.len() > self.n {
+            return Err(Error::share_count_mismatch(collected.len(), self.n));
         }
         let expected_shape = (self.params.moduli().len(), self.params.degree());
-        for (party_idx, item) in sk_sss_collected.iter().enumerate() {
+        for (party_idx, item) in collected.iter().enumerate() {
             if item.dim() != expected_shape {
                 return Err(Error::malformed_shares(
                     party_idx,
@@ -277,7 +300,7 @@ impl ShareManager {
         // are rejected instead. Shape was validated above, so the fallible
         // `moduli().get(row)` lookup is expected to succeed, but in keeping with
         // the workspace convention it stays fallible rather than indexed.
-        for (party_idx, item) in sk_sss_collected.iter().enumerate() {
+        for (party_idx, item) in collected.iter().enumerate() {
             for (row, item_row) in item.rows().into_iter().enumerate() {
                 let q_i = self.params.moduli().get(row).copied().ok_or_else(|| {
                     Error::malformed_shares(party_idx, "modulus index out of range".to_string())
@@ -308,7 +331,7 @@ impl ShareManager {
             let acc = acc_row
                 .as_slice_mut()
                 .ok_or(fhe_math::Error::NonContiguousCoefficients)?;
-            for item in sk_sss_collected {
+            for item in &collected {
                 let item_row = item.row(row);
                 let share = item_row
                     .as_slice()
@@ -321,6 +344,7 @@ impl ShareManager {
         sum_poly.set_coefficients(sum);
         Ok(sum_poly)
     }
+
     /// Compute decryption share from ciphertext and secret/smudging polynomials.
     ///
     /// This function computes a party's contribution to the threshold decryption process.
@@ -329,7 +353,7 @@ impl ShareManager {
     /// # Arguments
     /// - `ciphertext`: The ciphertext to decrypt (contains c0, c1 polynomials)
     /// - `sk_i`: This party's aggregated share of the joint secret key (output of
-    ///   [`ShareManager::aggregate_collected_shares`]), not a party's own secret key
+    ///   [`ShareManager::aggregate_secret_key_shares`]), not a party's own secret key
     /// - `es_i`: This party's aggregated share of the joint smudging noise,
     ///   aggregated the same way from the dealt noise shares
     ///
@@ -339,7 +363,7 @@ impl ShareManager {
     pub fn decryption_share(
         &self,
         ciphertext: Arc<Ciphertext>,
-        sk_i: Poly<Ntt>,
+        sk_i: &AggregatedSecretKeyShare,
         es_i: AggregatedSmudgingShare,
     ) -> Result<Poly<PowerBasis>, Error> {
         self.validate_ciphertext(&ciphertext)?;
@@ -348,8 +372,7 @@ impl ShareManager {
         let c0 = c0.into_power_basis();
         let mut c1 = ciphertext.c[1].clone();
         c1.disallow_variable_time_computations();
-        let mut sk_i = sk_i;
-        sk_i.disallow_variable_time_computations();
+        let sk_i = sk_i.as_poly();
         let mut es_i = es_i.into_poly();
         es_i.disallow_variable_time_computations();
         if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
@@ -358,7 +381,7 @@ impl ShareManager {
                 right: crate::ParameterSource::Ciphertext,
             });
         }
-        let c1sk = (&c1 * &sk_i).into_power_basis();
+        let c1sk = (&c1 * sk_i).into_power_basis();
         // Move the consumed noise into the returned share while leaving a
         // zero polynomial behind for the zeroizing owner to drop. The
         // zeroize crate's `Zeroizing` wrapper intentionally has no
@@ -367,8 +390,8 @@ impl ShareManager {
         let ctx = es_i.ctx().clone();
         let replacement = Poly::zero(&ctx);
         let es_i = std::mem::replace(&mut *es_i, replacement);
-        let d_share_poly = c0 + c1sk + es_i;
-        Ok(d_share_poly)
+        let decryption_share = c0 + c1sk + es_i;
+        Ok(decryption_share)
     }
 
     /// Decrypt ciphertext from collected decryption shares.
@@ -377,9 +400,9 @@ impl ShareManager {
     /// decryption shares from exactly `threshold + 1` parties to reconstruct the plaintext.
     ///
     /// # Arguments
-    /// - `d_share_polys`: Exactly `threshold + 1` decryption shares
+    /// - `decryption_shares`: Exactly `threshold + 1` decryption shares
     /// - `reconstructing_parties`: The 1-based party indices the shares came from, in
-    ///   the same order as `d_share_polys`; indices must be distinct and in `1..=n`
+    ///   the same order as `decryption_shares`; indices must be distinct and in `1..=n`
     /// - `ciphertext`: The original ciphertext being decrypted
     ///
     /// # Returns
@@ -388,21 +411,21 @@ impl ShareManager {
     #[allow(clippy::indexing_slicing)]
     pub fn decrypt_from_shares(
         &self,
-        d_share_polys: Vec<Poly<PowerBasis>>,
+        decryption_shares: Vec<Poly<PowerBasis>>,
         reconstructing_parties: Vec<usize>,
         ciphertext: Arc<Ciphertext>,
     ) -> Result<Plaintext, Error> {
         self.validate_ciphertext_parameters(&ciphertext)?;
         let ctx = self.params.context_at_level(0)?;
-        for d_share_poly in &d_share_polys {
-            if d_share_poly.ctx().as_ref() != ctx.as_ref() {
+        for decryption_share in &decryption_shares {
+            if decryption_share.ctx().as_ref() != ctx.as_ref() {
                 return Err(Error::ParameterMismatch {
                     left: crate::ParameterSource::Polynomial,
                     right: crate::ParameterSource::Parameters,
                 });
             }
         }
-        let share_views: Vec<_> = d_share_polys
+        let share_views: Vec<_> = decryption_shares
             .iter()
             .map(|share| share.coefficients())
             .collect();
@@ -638,7 +661,7 @@ mod tests {
                 .unwrap();
         let noise = generator.generate(&mut rng).unwrap();
         let shares = manager
-            .generate_secret_shares_from_smudging_noise(noise, &mut rng)
+            .generate_smudging_shares(noise, &mut rng)
             .unwrap()
             .into_transport();
 
@@ -667,7 +690,7 @@ mod tests {
         let generator = SmudgingNoiseGenerator::new(config).unwrap();
         let noise = generator.generate(&mut rng).unwrap();
         let shares = manager
-            .generate_secret_shares_from_smudging_noise(noise, &mut rng)
+            .generate_smudging_shares(noise, &mut rng)
             .unwrap()
             .into_transport();
         assert_eq!(shares.len(), params.moduli().len());
@@ -690,7 +713,7 @@ mod tests {
         let wrong_context = params.context_at_level(1).unwrap();
         let wrong_context_poly = Zeroizing::new(Poly::<PowerBasis>::zero(wrong_context));
         assert!(matches!(
-            manager.generate_secret_shares_from_poly(wrong_context_poly, &mut rng),
+            manager.generate_secret_key_shares(wrong_context_poly, &mut rng),
             Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Polynomial,
                 right: crate::ParameterSource::Parameters,
@@ -703,7 +726,7 @@ mod tests {
         coefficients[[1, 7]] = params.moduli()[1];
         noncanonical.set_coefficients(coefficients);
         let error = manager
-            .generate_secret_shares_from_poly(Zeroizing::new(noncanonical), &mut rng)
+            .generate_secret_key_shares(Zeroizing::new(noncanonical), &mut rng)
             .expect_err("noncanonical secret coefficients must be rejected");
         assert!(matches!(
             error,
@@ -731,28 +754,42 @@ mod tests {
         let ct: Arc<Ciphertext> = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
         // Generate polynomials for decryption share.
-        let mut sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        let mut secret_key_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
         let ctx = params.context_at_level(0).unwrap();
         let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
-        sk_poly.allow_variable_time_computations(variable_time);
-        let mut es_poly = Poly::<PowerBasis>::zero(ctx);
-        es_poly.allow_variable_time_computations(variable_time);
+        secret_key_poly.allow_variable_time_computations(variable_time);
+        let mut smudging_poly = Poly::<PowerBasis>::zero(ctx);
+        smudging_poly.allow_variable_time_computations(variable_time);
         assert!(ct.c[1].allows_variable_time_computations());
+        let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_key_poly).clone());
 
         // Compute decryption share.
         let decryption_share = manager
             .decryption_share(
                 ct.clone(),
-                (*sk_poly).clone().into_ntt(),
-                AggregatedSmudgingShare::new(es_poly),
+                &key_share,
+                AggregatedSmudgingShare::new(smudging_poly),
             )
             .unwrap();
         assert!(!decryption_share.allows_variable_time_computations());
 
+        // The aggregated key owner is reusable; only the smudging owner is
+        // consumed by each decryption-share computation.
+        let second_decryption_share = manager
+            .decryption_share(
+                ct.clone(),
+                &key_share,
+                AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(
+                    params.context_at_level(0).unwrap(),
+                )),
+            )
+            .unwrap();
+        assert!(!second_decryption_share.allows_variable_time_computations());
+
         // This test uses the full secret as the "aggregate" for both parties;
         // two identical values at distinct Shamir x-coordinates reconstruct the
         // same value needed for plaintext recovery.
-        let shares = vec![decryption_share.clone(), decryption_share];
+        let shares = vec![decryption_share, second_decryption_share];
 
         // Parties are 1-based; reconstruction needs threshold + 1 = 2 shares.
         let reconstructing = vec![1, 2];
@@ -780,9 +817,10 @@ mod tests {
             .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
             .unwrap();
         let context = params.context_at_level(0).unwrap();
+        let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_poly).clone());
         let result = manager.decryption_share(
             Arc::new(ciphertext),
-            (*secret_poly).clone().into_ntt(),
+            &key_share,
             AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(context)),
         );
 
@@ -861,8 +899,6 @@ mod tests {
         let n = 3;
         let threshold = 1;
 
-        let ctx = params.context_at_level(0).unwrap();
-
         // Setup multiple share managers (simulating different parties)
         let managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
@@ -871,30 +907,39 @@ mod tests {
         // One party generates the secret key and secret shares it among the other parties
         let secret_key = SecretKey::random(&params, &mut rng);
 
-        let sk_poly = managers[0]
+        let secret_key_poly = managers[0]
             .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
+        let secret_key_dealt = managers[0]
+            .generate_secret_key_shares(secret_key_poly, &mut rng)
+            .unwrap()
+            .into_transport();
 
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = vec![vec![], vec![], vec![]];
+        let mut secret_key_collected: Vec<Vec<Array2<u64>>> = vec![vec![], vec![], vec![]];
 
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let mut secret_key_aggregates: Vec<Option<AggregatedSecretKeyShare>> =
+            (0..n).map(|_| None).collect();
 
         for i in 0..n {
-            let mut node_share_m = Array2::zeros((0, params.degree()));
-            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
+            let mut secret_key_rows = Array2::zeros((0, params.degree()));
+            for secret_key_plane in secret_key_dealt.iter().take(params.moduli().len()) {
+                secret_key_rows
+                    .push_row(ndarray::ArrayView::from(secret_key_plane.row(i)))
                     .unwrap();
             }
-            sk_sss_collected[i].push(node_share_m);
+            secret_key_collected[i].push(secret_key_rows);
 
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
+            secret_key_aggregates[i] = Some(
+                managers[i]
+                    .aggregate_secret_key_shares(
+                        std::mem::take(&mut secret_key_collected[i])
+                            .into_iter()
+                            .map(SecretKeyShare::from_transport)
+                            .collect(),
+                    )
+                    .unwrap(),
+            );
         }
 
         // Create a test ciphertext
@@ -912,13 +957,13 @@ mod tests {
         for i in 0..(threshold + 1) {
             let ctx = params.context_at_level(0).unwrap();
             //Setting smuding noise to be zero in this test
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let smudging_poly = Poly::<PowerBasis>::zero(ctx);
 
             let share = managers[i]
                 .decryption_share(
                     ct.clone(),
-                    sk_poly_sums[i].clone().into_ntt(),
-                    AggregatedSmudgingShare::new(es_poly),
+                    secret_key_aggregates[i].as_ref().unwrap(),
+                    AggregatedSmudgingShare::new(smudging_poly),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -948,8 +993,6 @@ mod tests {
         let n = 5;
         let threshold = 2; // need 3 parties
 
-        let ctx = params.context_at_level(0).unwrap();
-
         // Setup multiple share managers (simulating different parties)
         let managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
@@ -958,31 +1001,40 @@ mod tests {
         // One party generates the secret key and secret shares it among the other parties
         let secret_key = SecretKey::random(&params, &mut rng);
 
-        let sk_poly = managers[0]
+        let secret_key_poly = managers[0]
             .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
+        let secret_key_dealt = managers[0]
+            .generate_secret_key_shares(secret_key_poly, &mut rng)
+            .unwrap()
+            .into_transport();
 
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> =
+        let mut secret_key_collected: Vec<Vec<Array2<u64>>> =
             vec![vec![], vec![], vec![], vec![], vec![]];
 
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let mut secret_key_aggregates: Vec<Option<AggregatedSecretKeyShare>> =
+            (0..n).map(|_| None).collect();
 
         for i in 0..n {
-            let mut node_share_m = Array2::zeros((0, params.degree()));
-            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
+            let mut secret_key_rows = Array2::zeros((0, params.degree()));
+            for secret_key_plane in secret_key_dealt.iter().take(params.moduli().len()) {
+                secret_key_rows
+                    .push_row(ndarray::ArrayView::from(secret_key_plane.row(i)))
                     .unwrap();
             }
-            sk_sss_collected[i].push(node_share_m);
+            secret_key_collected[i].push(secret_key_rows);
 
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
+            secret_key_aggregates[i] = Some(
+                managers[i]
+                    .aggregate_secret_key_shares(
+                        std::mem::take(&mut secret_key_collected[i])
+                            .into_iter()
+                            .map(SecretKeyShare::from_transport)
+                            .collect(),
+                    )
+                    .unwrap(),
+            );
         }
 
         // Create a test ciphertext
@@ -1001,12 +1053,12 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let smudging_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
                 .decryption_share(
                     ct.clone(),
-                    sk_poly_sums[i].clone().into_ntt(),
-                    AggregatedSmudgingShare::new(es_poly),
+                    secret_key_aggregates[i].as_ref().unwrap(),
+                    AggregatedSmudgingShare::new(smudging_poly),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -1034,8 +1086,6 @@ mod tests {
         let n = 20;
         let threshold = 9; // (n - 1) / 2 for n = 20; need 10 parties
 
-        let ctx = params.context_at_level(0).unwrap();
-
         // Setup multiple share managers (simulating different parties)
         let managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
@@ -1044,30 +1094,39 @@ mod tests {
         // One party generates the secret key and secret shares it among the other parties
         let secret_key = SecretKey::random(&params, &mut rng);
 
-        let sk_poly = managers[0]
+        let secret_key_poly = managers[0]
             .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
+        let secret_key_dealt = managers[0]
+            .generate_secret_key_shares(secret_key_poly, &mut rng)
+            .unwrap()
+            .into_transport();
 
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
+        let mut secret_key_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
 
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let mut secret_key_aggregates: Vec<Option<AggregatedSecretKeyShare>> =
+            (0..n).map(|_| None).collect();
 
         for i in 0..n {
-            let mut node_share_m = Array2::zeros((0, params.degree()));
-            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
+            let mut secret_key_rows = Array2::zeros((0, params.degree()));
+            for secret_key_plane in secret_key_dealt.iter().take(params.moduli().len()) {
+                secret_key_rows
+                    .push_row(ndarray::ArrayView::from(secret_key_plane.row(i)))
                     .unwrap();
             }
-            sk_sss_collected[i].push(node_share_m);
+            secret_key_collected[i].push(secret_key_rows);
 
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
+            secret_key_aggregates[i] = Some(
+                managers[i]
+                    .aggregate_secret_key_shares(
+                        std::mem::take(&mut secret_key_collected[i])
+                            .into_iter()
+                            .map(SecretKeyShare::from_transport)
+                            .collect(),
+                    )
+                    .unwrap(),
+            );
         }
 
         // Create a test ciphertext
@@ -1089,12 +1148,12 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let smudging_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
                 .decryption_share(
                     ct.clone(),
-                    sk_poly_sums[i].clone().into_ntt(),
-                    AggregatedSmudgingShare::new(es_poly),
+                    secret_key_aggregates[i].as_ref().unwrap(),
+                    AggregatedSmudgingShare::new(smudging_poly),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -1122,8 +1181,6 @@ mod tests {
         let n = 10;
         let threshold = 4; // need 5 parties
 
-        let ctx = params.context_at_level(0).unwrap();
-
         // Setup multiple share managers (simulating different parties)
         let managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
@@ -1132,30 +1189,39 @@ mod tests {
         // One party generates the secret key and secret shares it among the other parties
         let secret_key = SecretKey::random(&params, &mut rng);
 
-        let sk_poly = managers[0]
+        let secret_key_poly = managers[0]
             .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
+        let secret_key_dealt = managers[0]
+            .generate_secret_key_shares(secret_key_poly, &mut rng)
+            .unwrap()
+            .into_transport();
 
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
+        let mut secret_key_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
 
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let mut secret_key_aggregates: Vec<Option<AggregatedSecretKeyShare>> =
+            (0..n).map(|_| None).collect();
 
         for i in 0..n {
-            let mut node_share_m = Array2::zeros((0, params.degree()));
-            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
+            let mut secret_key_rows = Array2::zeros((0, params.degree()));
+            for secret_key_plane in secret_key_dealt.iter().take(params.moduli().len()) {
+                secret_key_rows
+                    .push_row(ndarray::ArrayView::from(secret_key_plane.row(i)))
                     .unwrap();
             }
-            sk_sss_collected[i].push(node_share_m);
+            secret_key_collected[i].push(secret_key_rows);
 
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
+            secret_key_aggregates[i] = Some(
+                managers[i]
+                    .aggregate_secret_key_shares(
+                        std::mem::take(&mut secret_key_collected[i])
+                            .into_iter()
+                            .map(SecretKeyShare::from_transport)
+                            .collect(),
+                    )
+                    .unwrap(),
+            );
         }
 
         // Create a test ciphertext
@@ -1173,12 +1239,12 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let smudging_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
                 .decryption_share(
                     ct.clone(),
-                    sk_poly_sums[i].clone().into_ntt(),
-                    AggregatedSmudgingShare::new(es_poly),
+                    secret_key_aggregates[i].as_ref().unwrap(),
+                    AggregatedSmudgingShare::new(smudging_poly),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -1225,28 +1291,6 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_collected_shares_rejects_bad_input() {
-        let params = insecure().unwrap().parameters;
-        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
-        let shape = (params.moduli().len(), params.degree());
-
-        // Empty input
-        assert!(manager.aggregate_collected_shares(&[]).is_err());
-
-        // More matrices than parties
-        let matrices: Vec<Array2<u64>> = (0..6).map(|_| Array2::zeros(shape)).collect();
-        assert!(manager.aggregate_collected_shares(&matrices).is_err());
-
-        // Wrong shape (rows and columns swapped)
-        let bad = vec![Array2::zeros((params.degree(), params.moduli().len()))];
-        assert!(manager.aggregate_collected_shares(&bad).is_err());
-
-        // Valid: between 1 and n well-formed matrices
-        let ok: Vec<Array2<u64>> = (0..3).map(|_| Array2::zeros(shape)).collect();
-        assert!(manager.aggregate_collected_shares(&ok).is_ok());
-    }
-
-    #[test]
     fn test_aggregate_smudging_shares_rejects_bad_input() {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
@@ -1280,7 +1324,40 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_collected_shares_rejects_non_canonical_q_at_each_row() {
+    fn test_aggregate_secret_key_shares_rejects_bad_input() {
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let shape = (params.moduli().len(), params.degree());
+        let share = || SecretKeyShare::from_transport(Array2::zeros(shape));
+
+        assert!(manager.aggregate_secret_key_shares(Vec::new()).is_err());
+        assert!(
+            manager
+                .aggregate_secret_key_shares((0..4).map(|_| share()).collect())
+                .is_err()
+        );
+        assert!(
+            manager
+                .aggregate_secret_key_shares(vec![SecretKeyShare::from_transport(Array2::zeros((
+                    params.degree(),
+                    params.moduli().len(),
+                )))])
+                .is_err()
+        );
+
+        let mut noncanonical = Array2::zeros(shape);
+        noncanonical[[0, 0]] = params.moduli()[0];
+        assert!(
+            manager
+                .aggregate_secret_key_shares(vec![SecretKeyShare::from_transport(noncanonical)])
+                .is_err()
+        );
+
+        assert!(manager.aggregate_secret_key_shares(vec![share()]).is_ok());
+    }
+
+    #[test]
+    fn test_aggregate_secret_key_shares_rejects_non_canonical_q_at_each_row() {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
@@ -1290,10 +1367,10 @@ mod tests {
         // residue and must be rejected against that row's own modulus, not a
         // global bound shared across rows.
         for (row, &q_i) in moduli.iter().enumerate() {
-            let mut shares = Array2::zeros(shape);
-            shares[[row, 3]] = q_i;
+            let mut coefficients = Array2::zeros(shape);
+            coefficients[[row, 3]] = q_i;
             let err = manager
-                .aggregate_collected_shares(std::slice::from_ref(&shares))
+                .aggregate_secret_key_shares(vec![SecretKeyShare::from_transport(coefficients)])
                 .expect_err("coefficient equal to the row modulus must be rejected");
             let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err
             else {
@@ -1316,7 +1393,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_collected_shares_rejects_u64_max() {
+    fn test_aggregate_secret_key_shares_rejects_u64_max() {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
@@ -1326,10 +1403,10 @@ mod tests {
         // rejected as malformed instead of being reduced. The error reports
         // party, row, column, and modulus only: secret share values must not
         // appear in error strings.
-        let mut shares = Array2::zeros(shape);
-        shares[[0, 0]] = u64::MAX;
+        let mut coefficients = Array2::zeros(shape);
+        coefficients[[0, 0]] = u64::MAX;
         let err = manager
-            .aggregate_collected_shares(std::slice::from_ref(&shares))
+            .aggregate_secret_key_shares(vec![SecretKeyShare::from_transport(coefficients)])
             .expect_err("u64::MAX share entry must be rejected");
         let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err else {
             panic!("expected MalformedShares, got: {err}");
@@ -1350,7 +1427,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_collected_shares_accepts_q_minus_one_boundary() {
+    fn test_aggregate_secret_key_shares_accepts_q_minus_one_boundary() {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
@@ -1358,22 +1435,17 @@ mod tests {
 
         // q_i - 1 is the largest valid canonical residue for each row; all
         // rows must be accepted against their own distinct moduli.
-        let mut shares = Array2::zeros(shape);
+        let mut coefficients = Array2::zeros(shape);
         for (row, &q_i) in moduli.iter().enumerate() {
-            shares.row_mut(row).fill(q_i - 1);
+            coefficients.row_mut(row).fill(q_i - 1);
         }
-        let result = manager
-            .aggregate_collected_shares(std::slice::from_ref(&shares))
+        manager
+            .aggregate_secret_key_shares(vec![SecretKeyShare::from_transport(coefficients)])
             .expect("maximal canonical residues must be accepted");
-
-        // A single aggregate preserves the input values exactly (the sum of a
-        // single matrix is the matrix itself) and the accumulator does not
-        // reduce them beyond the canonical residues supplied.
-        assert_eq!(result.coefficients().into_owned(), shares);
     }
 
     #[test]
-    fn test_aggregate_collected_shares_rejects_invalid_after_valid() {
+    fn test_aggregate_secret_key_shares_rejects_invalid_after_valid() {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let moduli = params.moduli().to_vec();
@@ -1383,11 +1455,12 @@ mod tests {
         // A valid first contribution followed by a malformed later one must
         // still surface the later contribution's error rather than reaching
         // Modulus::add_vec with the bad entry.
-        let valid = Array2::zeros(shape);
-        let mut invalid = Array2::zeros(shape);
-        invalid[[1, 5]] = q1;
+        let valid = SecretKeyShare::from_transport(Array2::zeros(shape));
+        let mut invalid_coefficients = Array2::zeros(shape);
+        invalid_coefficients[[1, 5]] = q1;
+        let invalid = SecretKeyShare::from_transport(invalid_coefficients);
         let err = manager
-            .aggregate_collected_shares(&[valid, invalid])
+            .aggregate_secret_key_shares(vec![valid, invalid])
             .expect_err("out-of-range entry in a later contribution must be rejected");
         let Error::Threshold(ThresholdError::MalformedShares { party_id, reason }) = &err else {
             panic!("expected MalformedShares, got: {err}");
@@ -1465,8 +1538,6 @@ mod tests {
         let n = 15;
         let threshold = 7; // need 8 parties
 
-        let ctx = params.context_at_level(0).unwrap();
-
         // Setup multiple share managers (simulating different parties)
         let managers: Vec<ShareManager> = (0..n)
             .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
@@ -1475,30 +1546,39 @@ mod tests {
         // One party generates the secret key and secret shares it among the other parties
         let secret_key = SecretKey::random(&params, &mut rng);
 
-        let sk_poly = managers[0]
+        let secret_key_poly = managers[0]
             .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
+        let secret_key_dealt = managers[0]
+            .generate_secret_key_shares(secret_key_poly, &mut rng)
+            .unwrap()
+            .into_transport();
 
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
+        let mut secret_key_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
 
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let mut secret_key_aggregates: Vec<Option<AggregatedSecretKeyShare>> =
+            (0..n).map(|_| None).collect();
 
         for i in 0..n {
-            let mut node_share_m = Array2::zeros((0, params.degree()));
-            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
+            let mut secret_key_rows = Array2::zeros((0, params.degree()));
+            for secret_key_plane in secret_key_dealt.iter().take(params.moduli().len()) {
+                secret_key_rows
+                    .push_row(ndarray::ArrayView::from(secret_key_plane.row(i)))
                     .unwrap();
             }
-            sk_sss_collected[i].push(node_share_m);
+            secret_key_collected[i].push(secret_key_rows);
 
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
+            secret_key_aggregates[i] = Some(
+                managers[i]
+                    .aggregate_secret_key_shares(
+                        std::mem::take(&mut secret_key_collected[i])
+                            .into_iter()
+                            .map(SecretKeyShare::from_transport)
+                            .collect(),
+                    )
+                    .unwrap(),
+            );
         }
 
         // Create a test ciphertext
@@ -1519,12 +1599,12 @@ mod tests {
         let mut decryption_shares = Vec::new();
         for &i in &chosen_indices {
             let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
+            let smudging_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
                 .decryption_share(
                     ct.clone(),
-                    sk_poly_sums[i].clone().into_ntt(),
-                    AggregatedSmudgingShare::new(es_poly),
+                    secret_key_aggregates[i].as_ref().unwrap(),
+                    AggregatedSmudgingShare::new(smudging_poly),
                 )
                 .unwrap();
             decryption_shares.push(share);

@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare};
+use fhe::trbfv::{
+    SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
+};
 use fhe_traits::{FheEncoder, FheEncrypter};
 use ndarray::Array2;
 use rand::SeedableRng;
@@ -31,15 +33,16 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
             ShareManager::new(party_count, threshold, params.clone()).expect("valid committee");
         let mut setup_rng = ChaCha8Rng::seed_from_u64(1);
         let secret_key = SecretKey::random(&params, &mut setup_rng);
-        let secret_poly = manager
+        let secret_key_poly = manager
             .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
             .expect("secret-key conversion must succeed");
 
         let dealer_shares: Vec<_> = (0..party_count)
             .map(|_| {
                 manager
-                    .generate_secret_shares_from_poly(secret_poly.clone(), &mut setup_rng)
+                    .generate_secret_key_shares(secret_key_poly.clone(), &mut setup_rng)
                     .expect("benchmark share generation must succeed")
+                    .into_transport()
             })
             .collect();
         let aggregated_shares: Vec<_> = (0..party_count)
@@ -56,7 +59,12 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
                     })
                     .collect();
                 manager
-                    .aggregate_collected_shares(&collected)
+                    .aggregate_secret_key_shares(
+                        collected
+                            .into_iter()
+                            .map(SecretKeyShare::from_transport)
+                            .collect(),
+                    )
                     .expect("multi-dealer share aggregation must succeed")
             })
             .collect();
@@ -68,7 +76,7 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
             .generate(&mut setup_rng)
             .expect("smudging noise generation must succeed");
         let smudging_shares = manager
-            .generate_secret_shares_from_smudging_noise(smudging_noise, &mut setup_rng)
+            .generate_smudging_shares(smudging_noise, &mut setup_rng)
             .expect("smudging share generation must succeed")
             .into_transport();
         let smudging_aggregates: Vec<_> = (0..party_count)
@@ -102,7 +110,7 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
                 manager
                     .decryption_share(
                         ciphertext.clone(),
-                        aggregated_shares[party_id - 1].clone().into_ntt(),
+                        &aggregated_shares[party_id - 1],
                         smudging_share,
                     )
                     .expect("decryption-share generation must succeed")
@@ -117,8 +125,9 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
             bencher.iter(|| {
                 black_box(
                     manager
-                        .generate_secret_shares_from_poly(black_box(secret_poly.clone()), &mut rng)
-                        .expect("share generation must succeed"),
+                        .generate_secret_key_shares(black_box(secret_key_poly.clone()), &mut rng)
+                        .expect("share generation must succeed")
+                        .into_transport(),
                 )
             });
         });

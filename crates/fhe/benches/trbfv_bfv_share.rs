@@ -52,35 +52,36 @@ fn bench_data_sizes(c: &mut Criterion) {
     // Generate parties with threshold BFV keys and BFV encryption keys
     println!("\n📊 Generating party keys...");
     let mut parties = Vec::new();
-    let mut all_sk_shares = Vec::new();
-    let mut all_esi_shares = Vec::new();
+    let mut all_secret_key_dealt = Vec::new();
+    let mut all_smudging_dealt = Vec::new();
 
     for _party_id in 0..num_parties {
         let mut rng = make_rng();
 
         // Generate threshold BFV keys
-        let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-        let pk_share = PublicKeyShare::new(&sk_share, crp.clone(), &mut make_rng()).unwrap();
+        let secret_key = SecretKey::random(&params_trbfv, &mut rng);
+        let pk_share = PublicKeyShare::new(&secret_key, crp.clone(), &mut make_rng()).unwrap();
 
         // Generate Shamir shares of the secret key
         let share_manager =
             ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
-        let sk_poly = share_manager
-            .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
+        let secret_key_poly = share_manager
+            .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
-        let sk_sss = share_manager
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
+        let secret_key_dealt = share_manager
+            .generate_secret_key_shares(secret_key_poly, &mut rng)
+            .unwrap()
+            .into_transport();
 
         // Generate smudging noise shares: compute the bound with the
         // smudging machinery, sample the noise, and deal it immediately.
         let config =
             SmudgingConfig::new(params_trbfv.clone(), num_parties, 100, preset.lambda).unwrap();
         let generator = SmudgingNoiseGenerator::new(config).unwrap();
-        let esi_noise = generator.generate(&mut rng).unwrap();
-        let esi_sss = share_manager
-            .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
+        let smudging_noise = generator.generate(&mut rng).unwrap();
+        let smudging_dealt = share_manager
+            .generate_smudging_shares(smudging_noise, &mut rng)
             .unwrap()
             .into_transport();
 
@@ -88,9 +89,16 @@ fn bench_data_sizes(c: &mut Criterion) {
         let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
         let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
 
-        all_sk_shares.push(sk_sss.clone());
-        all_esi_shares.push(esi_sss.clone());
-        parties.push((sk_share, pk_share, sk_bfv, pk_bfv, sk_sss, esi_sss));
+        all_secret_key_dealt.push(secret_key_dealt.clone());
+        all_smudging_dealt.push(smudging_dealt.clone());
+        parties.push((
+            secret_key,
+            pk_share,
+            sk_bfv,
+            pk_bfv,
+            secret_key_dealt,
+            smudging_dealt,
+        ));
     }
 
     // Calculate Shamir share sizes
@@ -123,14 +131,14 @@ fn bench_data_sizes(c: &mut Criterion) {
     let mut encrypted_shares_count = 0;
     let mut total_encrypted_size = 0;
 
-    for (_, _, _, _, sk_sss, esi_sss) in parties.iter() {
+    for (_, _, _, _, secret_key_dealt, smudging_dealt) in parties.iter() {
         for (receiver_idx, receiver_party) in parties.iter().enumerate().take(num_parties) {
             let receiver_pk = &receiver_party.3;
             let mut rng = make_rng();
 
             // Encrypt sk shares
-            for sk_sss_m in sk_sss.iter().take(num_moduli) {
-                let share_row = sk_sss_m.row(receiver_idx);
+            for secret_key_plane in secret_key_dealt.iter().take(num_moduli) {
+                let share_row = secret_key_plane.row(receiver_idx);
                 let share_vec: Vec<u64> = share_row.to_vec();
 
                 let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv).unwrap();
@@ -143,8 +151,8 @@ fn bench_data_sizes(c: &mut Criterion) {
             }
 
             // Encrypt esi shares
-            for esi_sss_m in esi_sss.iter().take(num_moduli) {
-                let share_row = esi_sss_m.row(receiver_idx);
+            for smudging_plane in smudging_dealt.iter().take(num_moduli) {
+                let share_row = smudging_plane.row(receiver_idx);
                 let share_vec: Vec<u64> = share_row.to_vec();
 
                 let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv).unwrap();
@@ -336,19 +344,20 @@ fn bench_timing_operations(c: &mut Criterion) {
 
     // Benchmark: Generate Shamir shares
     let mut rng = make_rng();
-    let sk_share = SecretKey::random(&params_trbfv, &mut rng);
+    let secret_key = SecretKey::random(&params_trbfv, &mut rng);
 
     group.bench_function("generate_shamir_shares", |b| {
         let share_manager =
             ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
-        let sk_poly = share_manager
-            .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
+        let secret_key_poly = share_manager
+            .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
             .unwrap();
 
         b.iter(|| {
             share_manager
-                .generate_secret_shares_from_poly(sk_poly.clone(), &mut rng)
+                .generate_secret_key_shares(secret_key_poly.clone(), &mut rng)
                 .unwrap()
+                .into_transport()
         });
     });
 

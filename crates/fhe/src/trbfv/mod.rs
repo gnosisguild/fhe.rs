@@ -11,5 +11,8 @@ pub mod shares;
 pub mod smudging;
 
 // Re-export main types for convenience
-pub use shares::{AggregatedSmudgingShare, DealtSmudgingShares, ShareManager, SmudgingShare};
+pub use shares::{
+    AggregatedSecretKeyShare, AggregatedSmudgingShare, DealtSecretKeyShares, DealtSmudgingShares,
+    SecretKeyShare, ShareManager, SmudgingShare,
+};
 pub use smudging::{SmudgingConfig, SmudgingNoise, SmudgingNoiseGenerator};

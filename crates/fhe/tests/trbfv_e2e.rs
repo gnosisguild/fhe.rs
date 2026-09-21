@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::trbfv::{
-    AggregatedSmudgingShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
+    AggregatedSecretKeyShare, AggregatedSmudgingShare, SecretKeyShare, ShareManager,
+    SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
@@ -33,14 +34,15 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     let manager = ShareManager::new(N, THRESHOLD, params.clone()).expect("share manager");
 
     let secret_key = SecretKey::random(&params, &mut rng);
-    let sk_poly = manager
+    let secret_key_poly = manager
         .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
         .expect("secret key to polynomial");
-    let sk_sss = manager
-        .generate_secret_shares_from_poly(sk_poly, &mut rng)
-        .expect("secret key share generation");
+    let secret_key_dealt = manager
+        .generate_secret_key_shares(secret_key_poly, &mut rng)
+        .expect("secret key share generation")
+        .into_transport();
 
-    let es_sss: Vec<Vec<Array2<u64>>> = (0..N)
+    let smudging_dealt: Vec<Vec<Array2<u64>>> = (0..N)
         .map(|_| {
             // The evaluated ciphertext below is the sum of two fresh encryptions.
             let config =
@@ -50,47 +52,54 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
                 .generate(&mut rng)
                 .expect("smudging noise generation");
             manager
-                .generate_secret_shares_from_smudging_noise(noise, &mut rng)
+                .generate_smudging_shares(noise, &mut rng)
                 .expect("smudging noise share generation")
                 .into_transport()
         })
         .collect();
 
-    let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..N).map(|_| Vec::new()).collect();
-    let mut es_sss_collected: Vec<Vec<Array2<u64>>> = (0..N).map(|_| Vec::new()).collect();
+    let mut secret_key_collected: Vec<Vec<Array2<u64>>> = (0..N).map(|_| Vec::new()).collect();
+    let mut smudging_collected: Vec<Vec<Array2<u64>>> = (0..N).map(|_| Vec::new()).collect();
     for receiver_idx in 0..N {
-        let mut sk_rows = Array2::zeros((0, params.degree()));
-        for shares_for_modulus in sk_sss.iter().take(params.moduli().len()) {
-            sk_rows
+        let mut secret_key_rows = Array2::zeros((0, params.degree()));
+        for shares_for_modulus in secret_key_dealt.iter().take(params.moduli().len()) {
+            secret_key_rows
                 .push_row(ndarray::ArrayView::from(
                     shares_for_modulus.row(receiver_idx),
                 ))
                 .expect("append secret key share row");
         }
-        sk_sss_collected[receiver_idx].push(sk_rows);
+        secret_key_collected[receiver_idx].push(secret_key_rows);
 
-        for noise_shares in &es_sss {
-            let mut es_rows = Array2::zeros((0, params.degree()));
+        for noise_shares in &smudging_dealt {
+            let mut smudging_rows = Array2::zeros((0, params.degree()));
             for shares_for_modulus in noise_shares.iter().take(params.moduli().len()) {
-                es_rows
+                smudging_rows
                     .push_row(ndarray::ArrayView::from(
                         shares_for_modulus.row(receiver_idx),
                     ))
                     .expect("append smudging share row");
             }
-            es_sss_collected[receiver_idx].push(es_rows);
+            smudging_collected[receiver_idx].push(smudging_rows);
         }
     }
 
-    let sk_poly_sums: Vec<Poly<PowerBasis>> = sk_sss_collected
-        .iter()
+    let secret_key_aggregates: Vec<Option<AggregatedSecretKeyShare>> = secret_key_collected
+        .into_iter()
         .map(|collected| {
-            manager
-                .aggregate_collected_shares(collected)
-                .expect("aggregate secret key shares")
+            Some(
+                manager
+                    .aggregate_secret_key_shares(
+                        collected
+                            .into_iter()
+                            .map(SecretKeyShare::from_transport)
+                            .collect(),
+                    )
+                    .expect("aggregate secret key shares"),
+            )
         })
         .collect();
-    let mut es_poly_sums: Vec<Option<AggregatedSmudgingShare>> = es_sss_collected
+    let mut smudging_aggregates: Vec<Option<AggregatedSmudgingShare>> = smudging_collected
         .into_iter()
         .map(|collected| {
             Some(
@@ -125,8 +134,10 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
             manager
                 .decryption_share(
                     ciphertext.clone(),
-                    sk_poly_sums[index].clone().into_ntt(),
-                    es_poly_sums[index]
+                    secret_key_aggregates[index]
+                        .as_ref()
+                        .expect("one key owner per party"),
+                    smudging_aggregates[index]
                         .take()
                         .expect("one noise owner per party"),
                 )

@@ -71,7 +71,7 @@ layout.
 > `SmudgingConfig::new` (set `config.mult_depth` when needed) →
 > `SmudgingNoiseGenerator::new` → `generate`. Sampled noise remains a non-cloneable
 > `SmudgingNoise` owner that must be dealt with
-> `ShareManager::generate_secret_shares_from_smudging_noise`, which consumes
+> `ShareManager::generate_smudging_shares`, which consumes
 > it, and `ShareManager::bigints_to_poly` has been removed. Downstream code
 > doing generate-then-convert must migrate to the generate-then-deal flow
 > shown under [Usage](#usage); the old symbols fail to compile by design,
@@ -157,6 +157,14 @@ decryption calls. The guarantee ends at the explicit transport boundary:
 serialized or copied share matrices can be replayed, so authenticated
 transport and durable replay prevention remain the integrator's responsibility.
 
+Secret-key share material follows a separate reusable-owner path. Dealing
+returns a non-cloneable `DealtSecretKeyShares`; applications explicitly convert
+the modulus-plane output at their transport boundary into `SecretKeyShare`
+values. `aggregate_secret_key_shares` consumes those owners and returns a
+non-cloneable `AggregatedSecretKeyShare`, which is borrowed by each decryption
+call and zeroized when the key epoch ends. This allows multiple decryptions with
+one aggregated key while keeping the in-memory owner protected.
+
 ### Even-`n` party counts
 
 Party counts where `n` is even are accepted for compatibility, but
@@ -201,14 +209,16 @@ Basic usage pattern:
 
 ```rust
 use fhe::trbfv::{
-    ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
+    SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
 };
 
 // Setup threshold scheme; each party holds its own manager instance
 let mut share_manager = ShareManager::new(n_parties, threshold, params.clone())?;
 
 // Each party: deal secret shares of its key contribution.
-let sk_shares = share_manager.generate_secret_shares_from_poly(sk_poly, &mut rng)?;
+let secret_key_dealt = share_manager.generate_secret_key_shares(secret_key_poly, &mut rng)?;
+// Explicit application transport boundary; the dealt owner is consumed here.
+let secret_key_dealt = secret_key_dealt.into_transport();
 
 // Each party: sample smudging noise with the smudging machinery, then deal
 // it immediately; the noise owner is one-time material consumed by the
@@ -218,20 +228,32 @@ let mut config = SmudgingConfig::new(
 )?;
 config.mult_depth = mult_depth;
 let generator = SmudgingNoiseGenerator::new(config)?;
-let es_noise = generator.generate(&mut rng)?;
-let es_shares = share_manager.generate_secret_shares_from_smudging_noise(es_noise, &mut rng)?;
+let smudging_noise = generator.generate(&mut rng)?;
+let smudging_dealt = share_manager.generate_smudging_shares(smudging_noise, &mut rng)?;
 
 // Each party: aggregate the share matrices received from the other parties
 // into its share of the joint secret key (and likewise for the noise)
-let sk_poly_sum = share_manager.aggregate_collected_shares(&collected_sk_shares)?;
-let es_poly_sum = share_manager.aggregate_collected_shares(&collected_es_shares)?;
+let secret_key_aggregate = share_manager.aggregate_secret_key_shares(
+    collected_secret_key
+        .into_iter()
+        .map(SecretKeyShare::from_transport)
+        .collect(),
+)?;
+let smudging_aggregate = share_manager.aggregate_smudging_shares(
+    collected_smudging
+        .into_iter()
+        .map(SmudgingShare::from_transport)
+        .collect(),
+)?;
 
 // Each decrypting party: compute a decryption share from its aggregated shares
-let d_share = share_manager.decryption_share(ciphertext.clone(), sk_poly_sum.into_ntt(), es_poly_sum)?;
+let decryption_share =
+    share_manager.decryption_share(ciphertext.clone(), &secret_key_aggregate, smudging_aggregate)?;
 
 // Combine exactly threshold + 1 decryption shares; reconstructing_parties
 // holds the 1-based indices of the parties the shares came from
-let plaintext = share_manager.decrypt_from_shares(d_share_polys, reconstructing_parties, ciphertext)?;
+let plaintext =
+    share_manager.decrypt_from_shares(decryption_shares, reconstructing_parties, ciphertext)?;
 ```
 
 ## Security Considerations

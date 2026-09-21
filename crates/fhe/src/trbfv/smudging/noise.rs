@@ -209,7 +209,7 @@ fn limbs_mod(limbs: &[u64], qi: &Modulus) -> u64 {
 /// Freshly sampled smudging noise with private wipe-on-drop storage.
 ///
 /// The underlying polynomial is private and the owner is consumed by the
-/// smudging dealing operation ([`ShareManager::generate_secret_shares_from_smudging_noise`]).
+/// smudging dealing operation ([`ShareManager::generate_smudging_shares`]).
 /// There is intentionally no `Clone`, `Copy`, coefficient accessor, or
 /// generic serialization: duplicating one-time noise across decryptions
 /// breaks the statistical hiding argument.
