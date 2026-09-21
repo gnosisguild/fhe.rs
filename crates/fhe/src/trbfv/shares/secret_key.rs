@@ -118,7 +118,7 @@ impl AggregatedSecretKeyShare {
         }
     }
 
-    pub(crate) fn as_poly(&self) -> &Poly<Ntt> {
+    pub(crate) fn as_ntt(&self) -> &Poly<Ntt> {
         &self.poly
     }
 }

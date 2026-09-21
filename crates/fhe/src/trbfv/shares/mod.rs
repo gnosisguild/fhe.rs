@@ -194,6 +194,10 @@ impl ShareManager {
         &self,
         shares: Vec<SecretKeyShare>,
     ) -> Result<AggregatedSecretKeyShare, Error> {
+        // Borrow the matrices while aggregating so malformed-input errors still
+        // drop the owning SecretKeyShare values through their zeroizing Drop
+        // implementation. The owners are consumed by this method regardless
+        // of whether aggregation succeeds.
         self.aggregate_collected_matrices(shares.iter().map(|share| &share.coefficients))
             .map(AggregatedSecretKeyShare::from_power_basis)
     }
@@ -345,16 +349,17 @@ impl ShareManager {
         Ok(sum_poly)
     }
 
-    /// Compute decryption share from ciphertext and secret/smudging polynomials.
+    /// Compute a decryption share from ciphertext and owned secret-key/smudging
+    /// shares.
     ///
     /// This function computes a party's contribution to the threshold decryption process.
     /// Each party uses their aggregated key and noise shares to compute a decryption share.
     ///
     /// # Arguments
     /// - `ciphertext`: The ciphertext to decrypt (contains c0, c1 polynomials)
-    /// - `sk_i`: This party's aggregated share of the joint secret key (output of
+    /// - `secret_key`: This party's aggregated share of the joint secret key (output of
     ///   [`ShareManager::aggregate_secret_key_shares`]), not a party's own secret key
-    /// - `es_i`: This party's aggregated share of the joint smudging noise,
+    /// - `smudging`: This party's aggregated share of the joint smudging noise,
     ///   aggregated the same way from the dealt noise shares
     ///
     /// # Returns
@@ -363,8 +368,8 @@ impl ShareManager {
     pub fn decryption_share(
         &self,
         ciphertext: Arc<Ciphertext>,
-        sk_i: &AggregatedSecretKeyShare,
-        es_i: AggregatedSmudgingShare,
+        secret_key: &AggregatedSecretKeyShare,
+        smudging: AggregatedSmudgingShare,
     ) -> Result<Poly<PowerBasis>, Error> {
         self.validate_ciphertext(&ciphertext)?;
         let mut c0 = ciphertext.c[0].clone();
@@ -372,25 +377,25 @@ impl ShareManager {
         let c0 = c0.into_power_basis();
         let mut c1 = ciphertext.c[1].clone();
         c1.disallow_variable_time_computations();
-        let sk_i = sk_i.as_poly();
-        let mut es_i = es_i.into_poly();
-        es_i.disallow_variable_time_computations();
-        if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
+        let secret_key = secret_key.as_ntt();
+        let mut smudging = smudging.into_poly();
+        smudging.disallow_variable_time_computations();
+        if secret_key.ctx() != c1.ctx() || smudging.ctx() != c0.ctx() {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Polynomial,
                 right: crate::ParameterSource::Ciphertext,
             });
         }
-        let c1sk = (&c1 * sk_i).into_power_basis();
+        let ciphertext_times_secret_key = (&c1 * secret_key).into_power_basis();
         // Move the consumed noise into the returned share while leaving a
         // zero polynomial behind for the zeroizing owner to drop. The
         // zeroize crate's `Zeroizing` wrapper intentionally has no
         // `into_inner`; replacing it avoids an unsafe extraction that would
         // bypass the wipe-on-drop guarantee.
-        let ctx = es_i.ctx().clone();
+        let ctx = smudging.ctx().clone();
         let replacement = Poly::zero(&ctx);
-        let es_i = std::mem::replace(&mut *es_i, replacement);
-        let decryption_share = c0 + c1sk + es_i;
+        let smudging = std::mem::replace(&mut *smudging, replacement);
+        let decryption_share = c0 + ciphertext_times_secret_key + smudging;
         Ok(decryption_share)
     }
 
