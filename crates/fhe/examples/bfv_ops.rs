@@ -5,7 +5,8 @@
     reason = "performance or example code relies on validated indices"
 )]
 
-mod util;
+#[path = "../support/mod.rs"]
+mod support;
 
 use std::error::Error;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use fhe::bfv::{
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng;
-use util::timeit::timeit;
+use support::examples::util::timeit::timeit;
 
 fn weighted_sum_plain(
     cts: &[Ciphertext],

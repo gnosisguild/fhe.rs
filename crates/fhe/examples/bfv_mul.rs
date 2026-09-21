@@ -13,7 +13,6 @@
 
 #[path = "../support/mod.rs"]
 mod support;
-mod util;
 
 use std::{error::Error, sync::Arc};
 
@@ -22,11 +21,11 @@ use fhe::{
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use util::timeit::timeit;
+use support::examples::util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand::rng();
-    let preset = support::secure16384()?;
+    let preset = support::presets::secure16384()?;
 
     println!("=== BFV Homomorphic Multiplication ===");
     println!("n=20 ciphernodes, k=1000, d=16384, 5×51-bit moduli, λ=31\n");

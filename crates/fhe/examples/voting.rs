@@ -7,7 +7,8 @@
 
 // Implementation of multiparty voting using the `fhe` crate.
 
-mod util;
+#[path = "../support/mod.rs"]
+mod support;
 
 use std::{env, error::Error, process::exit, sync::Arc};
 
@@ -21,7 +22,7 @@ use rand::{
     distr::{Distribution, Uniform},
     rng,
 };
-use util::timeit::{timeit, timeit_n};
+use support::examples::util::timeit::{timeit, timeit_n};
 
 fn print_notice_and_exit(error: Option<String>) {
     println!(

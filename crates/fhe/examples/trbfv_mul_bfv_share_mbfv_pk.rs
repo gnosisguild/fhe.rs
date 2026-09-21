@@ -23,52 +23,29 @@
 
 #[path = "../support/mod.rs"]
 mod support;
-mod util;
 
-use std::{env, error::Error, process::exit, sync::Arc};
+use std::{env, error::Error, sync::Arc};
 
-use console::style;
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
-    trbfv::{
-        AggregatedSecretKeyShare, AggregatedSmudgingShare, SecretKeyShare, ShareManager,
-        SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
-    },
+    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
-use ndarray::{Array, Array2, ArrayView};
+use ndarray::{Array, ArrayView};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use util::timeit::timeit;
-
-fn print_notice_and_exit(error: Option<String>) {
-    println!(
-        "{} Threshold BFV multiplication with encrypted share transport",
-        style("  overview:").magenta().bold()
-    );
-    println!(
-        "{} trbfv_mul_bfv_share_mbfv_pk [-h] [--num_parties=N] [--threshold=T] [--lambda=L]",
-        style("     usage:").magenta().bold()
-    );
-    println!(
-        "{} T ≤ (N-1)/2, N ≥ 1, L ≥ 1",
-        style("constraints:").magenta().bold(),
-    );
-    if let Some(error) = error {
-        println!("{} {}", style("     error:").red().bold(), error);
-    }
-    exit(0);
-}
+use support::examples::trbfv::{TrbfvShares, parse_cli, print_notice_and_exit};
+use support::examples::util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let preset = support::secure16384()?;
+    let preset = support::presets::secure16384()?;
     println!("Building trBFV parameters (first set)...");
     let params_trbfv: Arc<bfv::BfvParameters> =
         timeit!("Parameters generation (trBFV)", preset.parameters.clone());
@@ -109,36 +86,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_parties = 3;
-    let mut threshold = 1;
-    let mut lambda = preset.lambda;
-
-    fn parse_opt(arg: &str, prefix: &str) -> Option<usize> {
-        arg.strip_prefix(prefix)
-            .and_then(|v| v.strip_prefix('='))
-            .and_then(|v| v.parse::<usize>().ok())
-    }
-
-    for arg in &args {
-        if let Some(n) = parse_opt(arg, "--num_parties") {
-            num_parties = n;
-        } else if let Some(t) = parse_opt(arg, "--threshold") {
-            threshold = t;
-        } else if let Some(l) = parse_opt(arg, "--lambda") {
-            lambda = l;
-        } else {
-            print_notice_and_exit(Some(format!("Unrecognized argument: {arg}")))
-        }
-    }
-
-    if num_parties == 0 || lambda == 0 {
-        print_notice_and_exit(Some("Party count and lambda must be nonzero".to_string()))
-    }
-    if threshold > (num_parties - 1) / 2 {
-        print_notice_and_exit(Some(
-            "Threshold must be at most (num_parties - 1) / 2".to_string(),
-        ))
-    }
+    let cli = match parse_cli(&args, 3, 1, preset.lambda, None) {
+        Ok(cli) => cli,
+        Err(error) => print_notice_and_exit(Some(error)),
+    };
+    let num_parties = cli.num_parties;
+    let threshold = cli.threshold;
+    let lambda = cli.lambda;
 
     let mut rng = rand::rng();
 
@@ -157,13 +111,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     struct Party {
         pk_share: MBFVPublicKeyShare,
-        // Explicit transport buffers; recipients rehydrate typed owners after receipt.
-        secret_key_shares_transport: Vec<Array2<u64>>, // secret_key_shares_transport[m]: shape (num_parties, degree)
-        smudging_shares_transport: Vec<Array2<u64>>,   // smudging error Shamir shares, same shape
-        secret_key_shares_collected: Vec<SecretKeyShare>, // collected from all senders; each (num_moduli, degree)
-        smudging_shares_collected: Vec<SmudgingShare>,
-        secret_key_aggregate: Option<AggregatedSecretKeyShare>,
-        smudging_aggregate: Option<AggregatedSmudgingShare>,
+        shares: TrbfvShares,
         decryption_share: Poly<PowerBasis>,
         pk_lbfv_share: PublicKeyShare, // l-BFV PK contribution (CRS = pk_seed)
         rlk_share: RelinKeyShare,
@@ -232,12 +180,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let ctx0 = params_trbfv.context_at_level(0).unwrap();
                 Party {
                     pk_share,
-                    secret_key_shares_transport,
-                    smudging_shares_transport,
-                    secret_key_shares_collected: Vec::with_capacity(num_parties),
-                    smudging_shares_collected: Vec::with_capacity(num_parties),
-                    secret_key_aggregate: None,
-                    smudging_aggregate: None,
+                    shares: TrbfvShares::new(
+                        secret_key_shares_transport,
+                        smudging_shares_transport,
+                    ),
                     decryption_share: Poly::<PowerBasis>::zero(ctx0),
                     pk_lbfv_share,
                     rlk_share,
@@ -283,6 +229,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let enc_sk: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
                                     let row = party
+                                        .shares
                                         .secret_key_shares_transport
                                         .get(m)
                                         .unwrap()
@@ -301,6 +248,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let enc_es: Vec<Ciphertext> = (0..num_moduli)
                                 .map(|m| {
                                     let row = party
+                                        .shares
                                         .smudging_shares_transport
                                         .get(m)
                                         .unwrap()
@@ -338,10 +286,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         secret_key_rows.push_row(ArrayView::from(&row)).unwrap();
                     }
-                    party
-                        .secret_key_shares_collected
-                        .push(SecretKeyShare::from_transport(secret_key_rows));
-
                     let mut smudging_rows = Array::zeros((0, degree));
                     for ct in enc_es {
                         let pt = party.secret_key_enc.try_decrypt(ct).unwrap();
@@ -349,8 +293,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         smudging_rows.push_row(ArrayView::from(&row)).unwrap();
                     }
                     party
-                        .smudging_shares_collected
-                        .push(SmudgingShare::from_transport(smudging_rows));
+                        .shares
+                        .collect_transport(secret_key_rows, smudging_rows);
                 }
             });
     });
@@ -358,18 +302,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Lagrange share aggregation ────────────────────────────────────────────
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
-            party.secret_key_aggregate = Some(
-                share_manager
-                    .aggregate_secret_key_shares(std::mem::take(
-                        &mut party.secret_key_shares_collected,
-                    ))
-                    .unwrap(),
-            );
-            party.smudging_aggregate = Some(
-                share_manager
-                    .aggregate_smudging_shares(std::mem::take(&mut party.smudging_shares_collected))
-                    .unwrap(),
-            );
+            party.shares.aggregate(&share_manager).unwrap();
         });
     });
 
@@ -420,12 +353,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Threshold decryption ──────────────────────────────────────────────────
     let t_start = Instant::now();
     parties.par_iter_mut().for_each(|party| {
+        let smudging = party.shares.take_smudging().unwrap();
+        let secret_key = party.shares.secret_key().unwrap();
         party.decryption_share = share_manager
-            .decryption_share(
-                product.clone(),
-                party.secret_key_aggregate.as_ref().unwrap(),
-                party.smudging_aggregate.take().unwrap(),
-            )
+            .decryption_share(product.clone(), secret_key, smudging)
             .unwrap();
     });
     println!(

@@ -9,52 +9,25 @@
 
 #[path = "../support/mod.rs"]
 mod support;
-mod util;
 
-use std::{env, error::Error, process::exit, sync::Arc};
+use std::{env, error::Error, sync::Arc};
 
-use console::style;
 use fhe::{
     bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{
-        AggregatedSecretKeyShare, AggregatedSmudgingShare, SecretKeyShare, ShareManager,
-        SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
-    },
+    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
-use ndarray::{Array, Array2, ArrayView};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use util::timeit::{timeit, timeit_n};
-
-fn print_notice_and_exit(error: Option<String>) {
-    println!(
-        "{} Addition with threshold BFV",
-        style("  overview:").magenta().bold()
-    );
-    println!(
-        "{} add [-h] [--help] [--num_summed=<value>] [--num_parties=<value>] [--threshold=<value>]",
-        style("     usage:").magenta().bold()
-    );
-    println!(
-        "{} {} {} and {} must be at least 1",
-        style("constraints:").magenta().bold(),
-        style("num_summed").blue(),
-        style("num_parties").blue(),
-        style("threshold").blue(),
-    );
-    if let Some(error) = error {
-        println!("{} {}", style("     error:").red().bold(), error);
-    }
-    exit(0);
-}
+use support::examples::trbfv::{TrbfvShares, parse_cli, print_notice_and_exit};
+use support::examples::util::timeit::{timeit, timeit_n};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let preset = support::secure8192()?;
+    let preset = support::presets::secure8192()?;
     let params = timeit!("Parameters generation", preset.parameters.clone());
     let degree = params.degree();
 
@@ -67,52 +40,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_notice_and_exit(None)
     }
 
-    let mut num_summed = 50;
-    let mut num_parties = preset.num_parties;
-    let mut threshold = preset.threshold;
-    let mut lambda = preset.lambda;
+    let cli = match parse_cli(
+        &args,
+        preset.num_parties,
+        preset.threshold,
+        preset.lambda,
+        Some(50),
+    ) {
+        Ok(cli) => cli,
+        Err(error) => print_notice_and_exit(Some(error)),
+    };
+    let num_summed = cli
+        .num_summed
+        .expect("addition examples provide num_summed");
+    let num_parties = cli.num_parties;
+    let threshold = cli.threshold;
+    let lambda = cli.lambda;
 
-    // Update the number of users and/or number of parties / threshold depending on the
-    // arguments provided.
-    for arg in &args {
-        if arg.starts_with("--num_summed") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--num_summed` argument".to_string()))
-            } else {
-                num_summed = a[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--num_parties") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--num_parties` argument".to_string()))
-            } else {
-                num_parties = a[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--threshold") {
-            let parts: Vec<&str> = arg.rsplit('=').collect();
-            if parts.len() != 2 || parts[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--threshold` argument".to_string()))
-            } else {
-                threshold = parts[0].parse::<usize>()?
-            }
-        } else if arg.starts_with("--lambda") {
-            let a: Vec<&str> = arg.rsplit('=').collect();
-            if a.len() != 2 || a[0].parse::<usize>().is_err() {
-                print_notice_and_exit(Some("Invalid `--lambda` argument".to_string()))
-            } else {
-                lambda = a[0].parse::<usize>()?
-            }
-        } else {
-            print_notice_and_exit(Some(format!("Unrecognized argument: {arg}")))
-        }
-    }
-
-    if num_summed == 0 || num_parties == 0 || lambda == 0 {
-        print_notice_and_exit(Some(
-            "Users, threshold, party sizes, and lambda must be nonzero".to_string(),
-        ))
-    }
     if threshold != (num_parties - 1) / 2 {
         print_notice_and_exit(Some(
             "Threshold must be exactly (num_parties - 1) / 2: maximal corruption tolerance with honest-majority reconstruction".to_string(),
@@ -134,13 +78,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // public key.
     struct Party {
         pk_share: PublicKeyShare,
-        // Explicit transport buffers; recipients rehydrate typed owners after receipt.
-        secret_key_shares_transport: Vec<Array2<u64>>,
-        smudging_shares_transport: Vec<Array2<u64>>,
-        secret_key_shares_collected: Vec<SecretKeyShare>,
-        smudging_shares_collected: Vec<SmudgingShare>,
-        secret_key_aggregate: Option<AggregatedSecretKeyShare>,
-        smudging_aggregate: Option<AggregatedSmudgingShare>,
+        shares: TrbfvShares,
         decryption_share: Poly<PowerBasis>,
     }
 
@@ -175,9 +113,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .into_transport();
 
                 // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
-                let secret_key_shares_collected: Vec<SecretKeyShare> =
-                    Vec::with_capacity(num_parties);
-                let smudging_shares_collected: Vec<SmudgingShare> = Vec::with_capacity(num_parties);
                 let ctx = params.context_at_level(0).unwrap();
                 let decryption_share = Poly::<PowerBasis>::zero(ctx);
 
@@ -194,12 +129,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 Party {
                     pk_share,
-                    secret_key_shares_transport,
-                    smudging_shares_transport,
-                    secret_key_shares_collected,
-                    smudging_shares_collected,
-                    secret_key_aggregate: None,
-                    smudging_aggregate: None,
+                    shares: TrbfvShares::new(
+                        secret_key_shares_transport,
+                        smudging_shares_transport,
+                    ),
                     decryption_share,
                 }
             })
@@ -213,26 +146,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         num_parties as u32,
         {
             for j in 0..num_parties {
-                let mut secret_key_rows = Array::zeros((0, degree));
-                let mut smudging_rows = Array::zeros((0, degree));
-                for m in 0..params.moduli().len() {
-                    secret_key_rows
-                        .push_row(ArrayView::from(
-                            &parties[j].secret_key_shares_transport[m].row(i).clone(),
-                        ))
-                        .unwrap();
-                    smudging_rows
-                        .push_row(ArrayView::from(
-                            &parties[j].smudging_shares_transport[m].row(i).clone(),
-                        ))
-                        .unwrap();
-                }
+                let (secret_key_rows, smudging_rows) = TrbfvShares::recipient_rows(
+                    &parties[j].shares.secret_key_shares_transport,
+                    &parties[j].shares.smudging_shares_transport,
+                    i,
+                    degree,
+                    params.moduli().len(),
+                );
                 parties[i]
-                    .secret_key_shares_collected
-                    .push(SecretKeyShare::from_transport(secret_key_rows));
-                parties[i]
-                    .smudging_shares_collected
-                    .push(SmudgingShare::from_transport(smudging_rows));
+                    .shares
+                    .collect_transport(secret_key_rows, smudging_rows);
             }
             i += 1;
         }
@@ -240,18 +163,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
-            party.secret_key_aggregate = Some(
-                share_manager
-                    .aggregate_secret_key_shares(std::mem::take(
-                        &mut party.secret_key_shares_collected,
-                    ))
-                    .unwrap(),
-            );
-            party.smudging_aggregate = Some(
-                share_manager
-                    .aggregate_smudging_shares(std::mem::take(&mut party.smudging_shares_collected))
-                    .unwrap(),
-            );
+            party.shares.aggregate(&share_manager).unwrap();
         });
     });
 
@@ -289,12 +201,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let share_generation_start = Instant::now();
 
     parties.par_iter_mut().for_each(|party| {
+        let smudging = party.shares.take_smudging().unwrap();
+        let secret_key = party.shares.secret_key().unwrap();
         party.decryption_share = share_manager
-            .decryption_share(
-                tally.clone(),
-                party.secret_key_aggregate.as_ref().unwrap(),
-                party.smudging_aggregate.take().unwrap(),
-            )
+            .decryption_share(tally.clone(), secret_key, smudging)
             .unwrap();
     });
 

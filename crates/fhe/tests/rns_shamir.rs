@@ -10,9 +10,9 @@ mod support;
 
 #[test]
 fn share_manager_generation_is_deterministic_across_thread_counts() {
-    let preset = support::insecure().expect("insecure test parameters must be valid");
+    let preset = support::presets::insecure().expect("insecure test parameters must be valid");
     let params = preset.parameters;
-    let mut secret_rng = support::rng(7);
+    let mut secret_rng = support::presets::rng(7);
     let secret_key = SecretKey::random(&params, &mut secret_rng);
 
     let generate = |thread_count| {
@@ -25,7 +25,7 @@ fn share_manager_generation_is_deterministic_across_thread_counts() {
                 let secret = manager
                     .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
                     .unwrap();
-                let mut rng = support::rng(99);
+                let mut rng = support::presets::rng(99);
                 manager
                     .generate_secret_key_shares(secret, &mut rng)
                     .unwrap()

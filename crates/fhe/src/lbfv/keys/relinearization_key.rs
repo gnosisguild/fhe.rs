@@ -901,7 +901,7 @@ impl DeserializeParametrized for LBFVRelinearizationKey {
 mod tests {
     use super::*;
     use crate::bfv::{Encoding, Plaintext};
-    use crate::support::insecure;
+    use crate::support::presets::insecure;
     use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
     use rand::rng;
     use std::error::Error;

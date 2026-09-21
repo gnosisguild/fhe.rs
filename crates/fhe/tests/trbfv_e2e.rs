@@ -27,9 +27,9 @@ const LAMBDA_VALUE: usize = 31;
 
 #[test]
 fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
-    let preset = support::secure8192().expect("secure8192 profile must be valid");
+    let preset = support::presets::secure8192().expect("secure8192 profile must be valid");
     let params = preset.parameters;
-    let mut rng = support::rng(91);
+    let mut rng = support::presets::rng(91);
 
     let manager = ShareManager::new(N, THRESHOLD, params.clone()).expect("share manager");
 

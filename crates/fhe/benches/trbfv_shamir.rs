@@ -23,7 +23,7 @@ use rand_chacha::ChaCha8Rng;
 mod support;
 
 fn bench_rns_shamir(criterion: &mut Criterion) {
-    let preset = support::insecure().expect("benchmark parameters must be valid");
+    let preset = support::presets::insecure().expect("benchmark parameters must be valid");
     let params = preset.parameters;
     let degree = params.degree();
     let modulus_count = params.moduli().len();

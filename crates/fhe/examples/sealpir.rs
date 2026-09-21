@@ -14,7 +14,8 @@
 // <https://github.com/microsoft/SealPIR> to enable an apple-to-apple comparison.
 
 mod pir;
-mod util;
+#[path = "../support/mod.rs"]
+mod support;
 
 use clap::Parser;
 use fhe::bfv;
@@ -28,7 +29,7 @@ use indicatif::HumanBytes;
 use itertools::Itertools;
 use rand::{RngCore, rng};
 use std::error::Error;
-use util::{
+use support::examples::util::{
     encode_database, generate_database, number_elements_per_plaintext,
     timeit::{timeit, timeit_n},
 };

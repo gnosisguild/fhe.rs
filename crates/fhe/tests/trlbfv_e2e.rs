@@ -35,7 +35,7 @@ const LAMBDA_VALUE: usize = 31;
 /// multiplication, threshold decryption.
 #[test]
 fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
-    let preset = support::secure16384().expect("secure16384 profile must be valid");
+    let preset = support::presets::secure16384().expect("secure16384 profile must be valid");
     let params = preset.parameters;
     let share_params = preset.share_parameters.unwrap();
     assert_eq!(share_params.degree(), params.degree());
@@ -43,9 +43,9 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     let manager = ShareManager::new(N, THRESHOLD, params.clone()).expect("n=3, t=1 must validate");
 
     // ── Common CRS / URS seeds ╌───────────────────────────────────────
-    let mut rng = support::rng(81);
-    let crs_seed = support::seed(82);
-    let urs_seed = support::seed(83);
+    let mut rng = support::presets::rng(81);
+    let crs_seed = support::presets::seed(82);
+    let urs_seed = support::presets::seed(83);
 
     // ── Per-party secret-key contributions ╌───────────────────────────
     let sk_shares: Vec<SecretKey> = (0..N)

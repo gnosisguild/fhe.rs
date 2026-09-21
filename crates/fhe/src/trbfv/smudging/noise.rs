@@ -353,7 +353,7 @@ impl SmudgingNoiseGenerator {
 mod tests {
     use super::*;
     use crate::bfv::BfvParametersBuilder;
-    use crate::support::secure8192;
+    use crate::support::presets::secure8192;
     use num_bigint::BigInt;
     use num_traits::{ToPrimitive, Zero};
     use rand::{RngCore, SeedableRng, rng};
