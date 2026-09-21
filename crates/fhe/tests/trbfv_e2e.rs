@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
+use fhe::trbfv::{
+    AggregatedSmudgingShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
+};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::Array2;
@@ -50,6 +52,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
             manager
                 .generate_secret_shares_from_smudging_noise(noise, &mut rng)
                 .expect("smudging noise share generation")
+                .into_transport()
         })
         .collect();
 
@@ -87,12 +90,19 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
                 .expect("aggregate secret key shares")
         })
         .collect();
-    let es_poly_sums: Vec<Poly<PowerBasis>> = es_sss_collected
-        .iter()
+    let mut es_poly_sums: Vec<Option<AggregatedSmudgingShare>> = es_sss_collected
+        .into_iter()
         .map(|collected| {
-            manager
-                .aggregate_collected_shares(collected)
-                .expect("aggregate smudging shares")
+            Some(
+                manager
+                    .aggregate_smudging_shares(
+                        collected
+                            .into_iter()
+                            .map(SmudgingShare::from_transport)
+                            .collect(),
+                    )
+                    .expect("aggregate smudging shares"),
+            )
         })
         .collect();
 
@@ -116,7 +126,9 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
                 .decryption_share(
                     ciphertext.clone(),
                     sk_poly_sums[index].clone().into_ntt(),
-                    es_poly_sums[index].clone(),
+                    es_poly_sums[index]
+                        .take()
+                        .expect("one noise owner per party"),
                 )
                 .expect("decryption share")
         })

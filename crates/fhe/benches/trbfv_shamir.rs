@@ -11,8 +11,7 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::ShareManager;
-use fhe_math::rq::{Poly, PowerBasis};
+use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare};
 use fhe_traits::{FheEncoder, FheEncrypter};
 use ndarray::Array2;
 use rand::SeedableRng;
@@ -36,20 +35,53 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
             .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
             .expect("secret-key conversion must succeed");
 
-        let modulus_shares = manager
-            .generate_secret_shares_from_poly(secret_poly.clone(), &mut setup_rng)
-            .expect("benchmark share generation must succeed");
+        let dealer_shares: Vec<_> = (0..party_count)
+            .map(|_| {
+                manager
+                    .generate_secret_shares_from_poly(secret_poly.clone(), &mut setup_rng)
+                    .expect("benchmark share generation must succeed")
+            })
+            .collect();
         let aggregated_shares: Vec<_> = (0..party_count)
+            .map(|party_index| {
+                let collected: Vec<_> = dealer_shares
+                    .iter()
+                    .map(|modulus_shares| {
+                        Array2::from_shape_fn(
+                            (modulus_count, degree),
+                            |(modulus_index, coefficient)| {
+                                modulus_shares[modulus_index][[party_index, coefficient]]
+                            },
+                        )
+                    })
+                    .collect();
+                manager
+                    .aggregate_collected_shares(&collected)
+                    .expect("multi-dealer share aggregation must succeed")
+            })
+            .collect();
+
+        let smudging_config = SmudgingConfig::new(params.clone(), party_count, 1, 0)
+            .expect("zero-security smudging configuration must be valid");
+        let smudging_noise = SmudgingNoiseGenerator::new(smudging_config)
+            .expect("smudging generator must be valid")
+            .generate(&mut setup_rng)
+            .expect("smudging noise generation must succeed");
+        let smudging_shares = manager
+            .generate_secret_shares_from_smudging_noise(smudging_noise, &mut setup_rng)
+            .expect("smudging share generation must succeed")
+            .into_transport();
+        let smudging_aggregates: Vec<_> = (0..party_count)
             .map(|party_index| {
                 let share = Array2::from_shape_fn(
                     (modulus_count, degree),
                     |(modulus_index, coefficient)| {
-                        modulus_shares[modulus_index][[party_index, coefficient]]
+                        smudging_shares[modulus_index][[party_index, coefficient]]
                     },
                 );
                 manager
-                    .aggregate_collected_shares(std::slice::from_ref(&share))
-                    .expect("share aggregation must succeed")
+                    .aggregate_smudging_shares(vec![SmudgingShare::from_transport(share)])
+                    .expect("smudging share aggregation must succeed")
             })
             .collect();
 
@@ -61,18 +93,17 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
                 .try_encrypt(&plaintext, &mut setup_rng)
                 .expect("encryption must succeed"),
         );
-        let context = params
-            .context_at_level(0)
-            .expect("level-zero context must exist");
         let party_ids: Vec<_> = (1..=threshold + 1).collect();
         let decryption_shares: Vec<_> = party_ids
             .iter()
-            .map(|&party_id| {
+            .copied()
+            .zip(smudging_aggregates)
+            .map(|(party_id, smudging_share)| {
                 manager
                     .decryption_share(
                         ciphertext.clone(),
                         aggregated_shares[party_id - 1].clone().into_ntt(),
-                        Poly::<PowerBasis>::zero(context),
+                        smudging_share,
                     )
                     .expect("decryption-share generation must succeed")
             })
