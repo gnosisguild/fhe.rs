@@ -5,7 +5,7 @@ mod support;
 use fhe::bfv::CommonRandomPoly;
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::PublicKeyShare;
-use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
+use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
 
@@ -81,7 +81,10 @@ fn bench_data_sizes(c: &mut Criterion) {
         let esi_noise = generator.generate(&mut rng).unwrap();
         let esi_sss = share_manager
             .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .map(SmudgingShare::into_transport)
+            .collect();
 
         // Generate BFV keys for share encryption
         let sk_bfv = SecretKey::random(&params_bfv, &mut rng);

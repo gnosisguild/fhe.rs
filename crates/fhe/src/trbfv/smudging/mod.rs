@@ -5,6 +5,8 @@
 
 mod bound;
 mod noise;
+mod owners;
 
 pub use bound::{MAX_LAMBDA, SmudgingConfig};
 pub use noise::{SmudgingNoise, SmudgingNoiseGenerator};
+pub use owners::{AggregatedSmudgingShare, SmudgingShare};

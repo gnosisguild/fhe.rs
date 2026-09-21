@@ -17,7 +17,10 @@ use console::style;
 use fhe::{
     bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{
+        AggregatedSmudgingShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
+        SmudgingShare,
+    },
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -136,7 +139,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sk_sss_collected: Vec<Array2<u64>>,
         es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
+        es_poly_sum: Option<AggregatedSmudgingShare>,
         d_share_poly: Poly<PowerBasis>,
     }
 
@@ -174,7 +177,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
                 let ctx = params.context_at_level(0).unwrap();
                 let sk_poly_sum = Poly::<PowerBasis>::zero(ctx);
-                let es_poly_sum = Poly::<PowerBasis>::zero(ctx);
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
 
                 // Smudging noise shares: compute the bound with the smudging
@@ -185,7 +187,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let esi_noise = generator.generate(&mut rng).unwrap();
                 let esi_sss = share_manager
                     .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
-                    .unwrap();
+                    .unwrap()
+                    .into_iter()
+                    .map(SmudgingShare::into_transport)
+                    .collect();
 
                 Party {
                     pk_share,
@@ -194,7 +199,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     sk_sss_collected,
                     es_sss_collected,
                     sk_poly_sum,
-                    es_poly_sum,
+                    es_poly_sum: None,
                     d_share_poly,
                 }
             })
@@ -230,9 +235,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             party.sk_poly_sum = share_manager
                 .aggregate_collected_shares(&party.sk_sss_collected)
                 .unwrap();
-            party.es_poly_sum = share_manager
-                .aggregate_collected_shares(&party.es_sss_collected)
-                .unwrap();
+            party.es_poly_sum = Some(
+                share_manager
+                    .aggregate_smudging_shares(
+                        party
+                            .es_sss_collected
+                            .drain(..)
+                            .map(SmudgingShare::from_transport)
+                            .collect(),
+                    )
+                    .unwrap(),
+            );
         });
     });
 
@@ -274,7 +287,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .decryption_share(
                 tally.clone(),
                 party.sk_poly_sum.clone().into_ntt(),
-                party.es_poly_sum.clone(),
+                party.es_poly_sum.take().unwrap(),
             )
             .unwrap();
     });

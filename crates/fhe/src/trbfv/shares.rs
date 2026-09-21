@@ -7,7 +7,7 @@ use crate::Error;
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::rns_shamir::RnsShamir;
 use crate::trbfv::config::validate_threshold_config;
-use crate::trbfv::smudging::SmudgingNoise;
+use crate::trbfv::smudging::{AggregatedSmudgingShare, SmudgingNoise, SmudgingShare};
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::zq::Modulus;
 use fhe_math::{
@@ -158,8 +158,26 @@ impl ShareManager {
         &self,
         noise: SmudgingNoise,
         rng: &mut R,
-    ) -> Result<Vec<Array2<u64>>, Error> {
+    ) -> Result<Vec<SmudgingShare>, Error> {
         self.generate_secret_shares_from_poly(noise.into_poly(), rng)
+            .map(|shares| shares.into_iter().map(SmudgingShare::new).collect())
+    }
+
+    /// Aggregate dealt smudging shares into one single-use decryption owner.
+    ///
+    /// The input shares are consumed.  This operation is intentionally
+    /// separate from ordinary secret-key aggregation so smudging material
+    /// cannot silently flow through a generic polynomial API.
+    pub fn aggregate_smudging_shares(
+        &self,
+        shares: Vec<SmudgingShare>,
+    ) -> Result<AggregatedSmudgingShare, Error> {
+        let matrices: Vec<Array2<u64>> = shares
+            .into_iter()
+            .map(SmudgingShare::into_transport)
+            .collect();
+        self.aggregate_collected_shares(&matrices)
+            .map(AggregatedSmudgingShare::new)
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
@@ -318,7 +336,7 @@ impl ShareManager {
         &self,
         ciphertext: Arc<Ciphertext>,
         sk_i: Poly<Ntt>,
-        es_i: Poly<PowerBasis>,
+        es_i: AggregatedSmudgingShare,
     ) -> Result<Poly<PowerBasis>, Error> {
         self.validate_ciphertext(&ciphertext)?;
         let mut c0 = ciphertext.c[0].clone();
@@ -328,7 +346,7 @@ impl ShareManager {
         c1.disallow_variable_time_computations();
         let mut sk_i = sk_i;
         sk_i.disallow_variable_time_computations();
-        let mut es_i = es_i;
+        let mut es_i = es_i.into_poly();
         es_i.disallow_variable_time_computations();
         if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
             return Err(Error::ParameterMismatch {
@@ -337,6 +355,11 @@ impl ShareManager {
             });
         }
         let c1sk = (&c1 * &sk_i).into_power_basis();
+        // Move the consumed noise into the returned share while leaving a
+        // zero polynomial behind for the zeroizing owner to drop.
+        let ctx = es_i.ctx().clone();
+        let replacement = Poly::zero(&ctx);
+        let es_i = std::mem::replace(&mut *es_i, replacement);
         let d_share_poly = c0 + c1sk + es_i;
         Ok(d_share_poly)
     }
@@ -613,7 +636,11 @@ mod tests {
 
         // Same layout as secret-key dealing: one [n, degree] matrix per modulus.
         assert_eq!(shares.len(), params.moduli().len());
-        for (share_matrix, &qi) in shares.iter().zip(params.moduli().iter()) {
+        for (share_matrix, &qi) in shares
+            .into_iter()
+            .zip(params.moduli().iter())
+            .map(|(share, qi)| (share.into_transport(), qi))
+        {
             assert_eq!(share_matrix.dim(), (n, params.degree()));
             for &value in share_matrix.iter() {
                 assert!(value < qi);
@@ -639,6 +666,10 @@ mod tests {
             .generate_secret_shares_from_smudging_noise(noise, &mut rng)
             .unwrap();
         assert_eq!(shares.len(), params.moduli().len());
+        let shares: Vec<_> = shares
+            .into_iter()
+            .map(SmudgingShare::into_transport)
+            .collect();
         for share_matrix in &shares {
             assert_eq!(share_matrix.dim(), (n, params.degree()));
         }
@@ -709,7 +740,11 @@ mod tests {
 
         // Compute decryption share.
         let decryption_share = manager
-            .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
+            .decryption_share(
+                ct.clone(),
+                (*sk_poly).clone().into_ntt(),
+                AggregatedSmudgingShare::new(es_poly),
+            )
             .unwrap();
         assert!(!decryption_share.allows_variable_time_computations());
 
@@ -747,7 +782,7 @@ mod tests {
         let result = manager.decryption_share(
             Arc::new(ciphertext),
             (*secret_poly).clone().into_ntt(),
-            Poly::<PowerBasis>::zero(context),
+            AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(context)),
         );
 
         assert_eq!(
@@ -879,7 +914,11 @@ mod tests {
             let es_poly = Poly::<PowerBasis>::zero(ctx);
 
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt(),
+                    AggregatedSmudgingShare::new(es_poly),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -963,7 +1002,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt(),
+                    AggregatedSmudgingShare::new(es_poly),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1047,7 +1090,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt(),
+                    AggregatedSmudgingShare::new(es_poly),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1127,7 +1174,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt(),
+                    AggregatedSmudgingShare::new(es_poly),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
@@ -1436,7 +1487,11 @@ mod tests {
             let ctx = params.context_at_level(0).unwrap();
             let es_poly = Poly::<PowerBasis>::zero(ctx);
             let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
+                .decryption_share(
+                    ct.clone(),
+                    sk_poly_sums[i].clone().into_ntt(),
+                    AggregatedSmudgingShare::new(es_poly),
+                )
                 .unwrap();
             decryption_shares.push(share);
         }
