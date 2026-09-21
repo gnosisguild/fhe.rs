@@ -1,12 +1,16 @@
-//! Opaque, single-use owners for smudging shares.
+//! Single-use owners for smudging shares.
+//!
+//! Noise generation lives in [`super::super::smudging`]. This module owns the
+//! share-layer material created from that noise and consumed by threshold
+//! decryption.
 
 use fhe_math::rq::{Poly, PowerBasis};
 use ndarray::Array2;
 use zeroize::{Zeroize, Zeroizing};
 
-/// One recipient's dealt share of a smudging polynomial.
+/// One dealt share of a smudging polynomial.
 ///
-/// This type deliberately does not implement `Clone` or `Copy`.  A share is
+/// This type deliberately does not implement `Clone` or `Copy`. A share is
 /// consumed when it is aggregated, so the supported API cannot accidentally
 /// put the same live share into two aggregates.
 ///
@@ -52,11 +56,11 @@ impl std::fmt::Debug for SmudgingShare {
     }
 }
 
-/// One recipient's aggregate smudging share for one decryption.
+/// One aggregate smudging share for one decryption.
 ///
-/// The owner is consumed by `ShareManager::decryption_share`.  It is not
-/// serializable by this type: applications that need transport must use an
-/// explicit consuming adapter at their protocol boundary.
+/// The owner is consumed by [`super::ShareManager::decryption_share`]. It is
+/// not serializable by this type: applications that need transport must use
+/// an explicit consuming adapter at their protocol boundary.
 ///
 /// ```compile_fail
 /// # use fhe::trbfv::AggregatedSmudgingShare;
@@ -78,11 +82,7 @@ impl std::fmt::Debug for SmudgingShare {
 ///     secret_share: Poly<Ntt>,
 ///     noise: AggregatedSmudgingShare,
 /// ) {
-///     let _ = manager.decryption_share(
-///         ciphertext.clone(),
-///         secret_share.clone(),
-///         noise,
-///     );
+///     let _ = manager.decryption_share(ciphertext.clone(), secret_share.clone(), noise);
 ///     let _ = manager.decryption_share(ciphertext, secret_share, noise);
 /// }
 /// ```
