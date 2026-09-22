@@ -2,7 +2,7 @@
 
 use crate::bfv::{BfvParameters, Ciphertext, SecretKey, keys::GaloisKey, traits::TryConvertFrom};
 use crate::proto::bfv::{EvaluationKey as EvaluationKeyProto, GaloisKey as GaloisKeyProto};
-use crate::{Error, Result, SerializationError};
+use crate::{Error, Result};
 use fhe_math::rq::{NttShoup, Poly, PowerBasis};
 use fhe_math::zq::Modulus;
 use fhe_traits::{DeserializeParametrized, FheParametrized, Serialize};
@@ -300,11 +300,7 @@ impl DeserializeParametrized for EvaluationKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
-        let gkp = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::Decode {
-                object: crate::SerializedObject::EvaluationKey,
-            })
-        })?;
+        let gkp = crate::serialization::decode(bytes, crate::SerializedObject::EvaluationKey)?;
         EvaluationKey::try_convert_from(&gkp, params)
     }
 }

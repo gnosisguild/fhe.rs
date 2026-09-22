@@ -58,6 +58,44 @@ pub struct LBFVRelinearizationKey {
 }
 
 impl LBFVRelinearizationKey {
+    /// Return the secret-dependent `d0` components in gadget-row order.
+    #[must_use]
+    pub fn d0_components(&self) -> &[Poly<NttShoup>] {
+        &self.ksk_r_to_s.c0
+    }
+
+    /// Return the shared `d1` (URS) components in gadget-row order.
+    #[must_use]
+    pub fn d1_components(&self) -> &[Poly<NttShoup>] {
+        &self.ksk_r_to_s.c1
+    }
+
+    /// Return the secret-dependent `d2` components in gadget-row order.
+    #[must_use]
+    pub fn d2_components(&self) -> &[Poly<NttShoup>] {
+        &self.ksk_s_to_r.c0
+    }
+
+    /// Return the shared `a` (CRS) components in gadget-row order.
+    #[must_use]
+    pub fn a_components(&self) -> &[Poly<NttShoup>] {
+        &self.ksk_s_to_r.c1
+    }
+
+    /// Return the public-key `b` components used during relinearization.
+    #[must_use]
+    pub fn b_components(&self) -> &[Poly<NttShoup>] {
+        &self.b_vec
+    }
+
+    /// Return the key-switching decomposition base logarithm.
+    ///
+    /// A value of zero denotes the RNS decomposition used by l-BFV.
+    #[must_use]
+    pub const fn decomposition_log_base(&self) -> usize {
+        self.ksk_r_to_s.log_base
+    }
+
     /// Generate the two key-switching-key components from a secret key using
     /// provided seeds for `d1` (URS) and `a` (CRS).
     ///
@@ -888,11 +926,8 @@ impl DeserializeParametrized for LBFVRelinearizationKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
-        let rk = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(crate::SerializationError::Decode {
-                object: crate::SerializedObject::RelinearizationKey,
-            })
-        })?;
+        let rk =
+            crate::serialization::decode(bytes, crate::SerializedObject::LbfvRelinearizationKey)?;
         LBFVRelinearizationKey::try_convert_from(&rk, params)
     }
 }
@@ -922,6 +957,16 @@ mod tests {
         // Serialize and deserialize
         let bytes = relin_key.to_bytes();
         let deserialized_key = LBFVRelinearizationKey::from_bytes(&bytes, &params)?;
+
+        assert_eq!(pk.parameters(), params.as_ref());
+        assert!(pk.seed().is_some());
+        assert_eq!(pk.rows().len(), pk.row_count());
+        assert_eq!(deserialized_key.d0_components().len(), pk.row_count());
+        assert_eq!(deserialized_key.d1_components().len(), pk.row_count());
+        assert_eq!(deserialized_key.d2_components().len(), pk.row_count());
+        assert_eq!(deserialized_key.a_components().len(), pk.row_count());
+        assert_eq!(deserialized_key.b_components().len(), pk.row_count());
+        assert_eq!(deserialized_key.decomposition_log_base(), 0);
 
         // Test that the deserialized key works correctly
         let pt = Plaintext::try_encode(&[2u64], Encoding::poly(), &params)?;

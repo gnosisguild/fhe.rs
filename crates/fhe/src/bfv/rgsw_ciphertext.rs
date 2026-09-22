@@ -74,11 +74,7 @@ impl DeserializeParametrized for RGSWCiphertext {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], params: &std::sync::Arc<Self::Parameters>) -> Result<Self> {
-        let proto = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::Decode {
-                object: crate::SerializedObject::RgswCiphertext,
-            })
-        })?;
+        let proto = crate::serialization::decode(bytes, crate::SerializedObject::RgswCiphertext)?;
         RGSWCiphertext::try_convert_from(&proto, params)
     }
 }

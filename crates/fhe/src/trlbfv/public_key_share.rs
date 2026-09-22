@@ -7,7 +7,9 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::bfv::{BfvParameters, CommonRandomPolyVec, SecretKey};
 use crate::lbfv::LBFVPublicKey;
-use crate::{Error, Result};
+use crate::proto::lbfv::{LbfvPublicKey as LBFVPublicKeyProto, LbfvPublicKeyShare};
+use crate::{Error, Result, SerializationError, SerializedField, SerializedObject};
+use prost::Message;
 
 /// A party's additive contribution to threshold l-BFV public-key generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +106,10 @@ impl fhe_traits::FheParametrized for PublicKeyShare {
 
 impl Serialize for PublicKeyShare {
     fn to_bytes(&self) -> Vec<u8> {
-        self.key.to_bytes()
+        LbfvPublicKeyShare {
+            key: Some(LBFVPublicKeyProto::from(&self.key)),
+        }
+        .encode_to_vec()
     }
 }
 
@@ -112,8 +117,15 @@ impl DeserializeParametrized for PublicKeyShare {
     type Error = crate::Error;
 
     fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self> {
+        let envelope: LbfvPublicKeyShare =
+            crate::serialization::decode(bytes, SerializedObject::TrlbfvPublicKeyShare)?;
+        let key = envelope.key.ok_or(Error::SerializationError(
+            SerializationError::MissingField {
+                field: SerializedField::PublicKeyShareKey,
+            },
+        ))?;
         Ok(Self {
-            key: LBFVPublicKey::from_bytes(bytes, params)?,
+            key: LBFVPublicKey::from_proto(key, params)?,
         })
     }
 }
@@ -127,6 +139,22 @@ mod tests {
     use crate::support::presets::insecure;
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{SeedableRng, rng};
+
+    #[test]
+    fn public_key_share_envelope_has_stable_wire_fixture() {
+        const FIXTURE: &[u8] = &[0x0a, 0x06, 0x10, 0x02, 0x1a, 0x02, 0xaa, 0xbb];
+
+        let envelope = LbfvPublicKeyShare {
+            key: Some(LBFVPublicKeyProto {
+                c: Vec::new(),
+                l: 2,
+                seed: vec![0xaa, 0xbb],
+            }),
+        };
+
+        assert_eq!(envelope.encode_to_vec(), FIXTURE);
+        assert_eq!(LbfvPublicKeyShare::decode(FIXTURE).unwrap(), envelope);
+    }
 
     #[test]
     fn contributions_aggregate_into_operational_key() -> Result<()> {
@@ -187,6 +215,23 @@ mod tests {
             PublicKeyShare::from_bytes(&share.to_bytes(), &params)?,
             share
         );
+        Ok(())
+    }
+
+    #[test]
+    fn contribution_and_operational_key_wire_types_are_not_interchangeable() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let share = PublicKeyShare::new_with_seed(
+            &sk,
+            <ChaCha8Rng as SeedableRng>::Seed::default(),
+            &mut rng,
+        )?;
+        let operational = share.key.clone();
+
+        assert!(LBFVPublicKey::from_bytes(&share.to_bytes(), &params).is_err());
+        assert!(PublicKeyShare::from_bytes(&operational.to_bytes(), &params).is_err());
         Ok(())
     }
 

@@ -9,9 +9,9 @@ mod smudging;
 pub use secret_key::{AggregatedSecretKeyShare, DealtSecretKeyShares, SecretKeyShare};
 pub use smudging::{AggregatedSmudgingShare, DealtSmudgingShares, SmudgingShare};
 
+use super::rns_shamir::RnsShamir;
 use crate::Error;
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
-use crate::rns_shamir::RnsShamir;
 use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::smudging::SmudgingNoise;
 use fhe_math::rq::traits::TryConvertFrom;

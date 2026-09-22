@@ -248,11 +248,8 @@ impl DeserializeParametrized for SecretKey {
     type Error = Error;
 
     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: SecretKeyProto = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::Decode {
-                object: crate::SerializedObject::SecretKey,
-            })
-        })?;
+        let proto: SecretKeyProto =
+            crate::serialization::decode(bytes, crate::SerializedObject::SecretKey)?;
 
         if proto.coeffs.len() != params.degree() {
             return Err(Error::SerializationError(

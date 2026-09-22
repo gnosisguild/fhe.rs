@@ -4,8 +4,19 @@ use std::sync::Arc;
 
 use super::{Context, Poly, RepresentationTag, traits::TryConvertFrom};
 use crate::{Error, PolynomialSerializationError, proto::rq::Rq};
-use fhe_traits::{DeserializeWithContext, Serialize};
+use fhe_traits::{DeserializeWithContext, MAX_SERIALIZED_BYTES, Serialize};
 use prost::Message;
+
+fn check_size(actual: usize) -> Result<(), Error> {
+    if actual > MAX_SERIALIZED_BYTES {
+        return Err(PolynomialSerializationError::PayloadTooLarge {
+            actual,
+            maximum: MAX_SERIALIZED_BYTES,
+        }
+        .into());
+    }
+    Ok(())
+}
 
 impl<R: RepresentationTag> Serialize for Poly<R> {
     fn to_bytes(&self) -> Vec<u8> {
@@ -21,13 +32,18 @@ where
     type Context = Context;
 
     fn from_bytes(bytes: &[u8], ctx: &Arc<Context>) -> Result<Self, Self::Error> {
-        let rq: Rq = Message::decode(bytes).map_err(|_| PolynomialSerializationError::Decode)?;
+        check_size(bytes.len())?;
+        let rq: Rq =
+            Message::decode(bytes).map_err(|error| PolynomialSerializationError::Decode {
+                message: error.to_string(),
+            })?;
         Poly::try_convert_from(&rq, ctx, false)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{MAX_SERIALIZED_BYTES, check_size};
     use std::{error::Error as StdError, sync::Arc};
 
     use fhe_traits::{DeserializeWithContext, Serialize};
@@ -85,6 +101,25 @@ mod tests {
             err,
             Error::PolynomialSerialization(PolynomialSerializationError::UnknownRepresentation)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn decode_errors_preserve_the_prost_message() -> Result<(), Box<dyn StdError>> {
+        let ctx = Arc::new(Context::new(Q, 16)?);
+        let error = Poly::<PowerBasis>::from_bytes(&[0x0a], &ctx).unwrap_err();
+        let decoded_message =
+            if let Error::PolynomialSerialization(PolynomialSerializationError::Decode {
+                message,
+            }) = error
+            {
+                Some(message)
+            } else {
+                None
+            };
+        assert!(decoded_message.is_some());
+        let message = decoded_message.unwrap_or_default();
+        assert!(!message.is_empty());
         Ok(())
     }
 
@@ -190,5 +225,17 @@ mod tests {
         let decoded = Poly::<PowerBasis>::from_bytes(&bytes, &ctx)?;
         assert!(!decoded.allow_variable_time_computations);
         Ok(())
+    }
+
+    #[test]
+    fn oversized_payload_is_rejected_before_decode() {
+        let err = check_size(MAX_SERIALIZED_BYTES + 1).unwrap_err();
+        assert_eq!(
+            err,
+            Error::PolynomialSerialization(PolynomialSerializationError::PayloadTooLarge {
+                actual: MAX_SERIALIZED_BYTES + 1,
+                maximum: MAX_SERIALIZED_BYTES,
+            })
+        );
     }
 }

@@ -49,9 +49,6 @@ log.workspace = true
 ndarray.workspace = true
 rand.workspace = true
 
-[build-dependencies]
-prost-build.workspace = true
-
 [[bench]]
 name = "bfv"
 harness = false

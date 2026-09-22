@@ -366,9 +366,20 @@ pub enum MultipartyError {
 #[expect(missing_docs, reason = "error variants are documented inline")]
 #[non_exhaustive]
 pub enum SerializationError {
+    /// A serialized object exceeds the common pre-decode size limit.
+    #[error("Serialized {object:?} payload has {actual} bytes; maximum is {maximum}")]
+    PayloadTooLarge {
+        object: SerializedObject,
+        actual: usize,
+        maximum: usize,
+    },
+
     /// A protobuf payload could not be decoded.
-    #[error("Failed to decode {object:?}")]
-    Decode { object: SerializedObject },
+    #[error("Failed to decode {object:?}: {message}")]
+    Decode {
+        object: SerializedObject,
+        message: String,
+    },
 
     /// A required protobuf field is absent.
     #[error("Missing required field {field:?}")]
@@ -425,10 +436,6 @@ pub enum SerializationError {
     /// Indicates invalid serialized data format
     #[error("Invalid serialized format: {reason}")]
     InvalidFormat { reason: String },
-
-    /// Indicates protobuf encoding/decoding error
-    #[error("Protobuf error: {message}")]
-    ProtobufError { message: String },
 }
 
 impl From<std::io::Error> for SerializationError {
@@ -443,11 +450,15 @@ impl From<std::io::Error> for SerializationError {
 pub enum SerializedObject {
     Ciphertext,
     EvaluationKey,
+    LbfvPublicKey,
+    LbfvRelinearizationKey,
     Parameters,
     PublicKey,
     RelinearizationKey,
+    RelinearizationKeyShare,
     RgswCiphertext,
     SecretKey,
+    TrlbfvPublicKeyShare,
 }
 
 /// Required field in a protobuf object.
@@ -457,6 +468,8 @@ pub enum SerializedField {
     GaloisKeySwitchingKey,
     ParametersPlaintextModulus,
     PublicKeyCiphertext,
+    PublicKeyShareKey,
+    RelinearizationKeyShareContribution,
     RelinearizationKeySwitchingKey,
     RgswKeySwitchingKey0,
     RgswKeySwitchingKey1,
@@ -662,13 +675,14 @@ mod tests {
             .to_string(),
             "Parameter mismatch between Ciphertext and Parameters"
         );
-        assert_eq!(
-            Error::SerializationError(SerializationError::Decode {
-                object: SerializedObject::Ciphertext,
-            })
-            .to_string(),
-            "Serialization error: Failed to decode Ciphertext"
-        );
+        let decode_message = "test decode failure".to_string();
+        assert!(!decode_message.is_empty());
+        let rendered = Error::SerializationError(SerializationError::Decode {
+            object: SerializedObject::Ciphertext,
+            message: decode_message,
+        })
+        .to_string();
+        assert!(rendered.starts_with("Serialization error: Failed to decode Ciphertext: "));
         assert_eq!(
             Error::ParametersError(ParametersError::invalid_degree_with_bounds(10)).to_string(),
             "Parameters error: Invalid polynomial degree 10: must be a power of 2 between 8 and 65536"

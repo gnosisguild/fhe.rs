@@ -9,6 +9,12 @@ pub struct LbfvPublicKey {
     #[prost(bytes = "vec", tag = "3")]
     pub seed: ::prost::alloc::vec::Vec<u8>,
 }
+/// Contribution shares use a distinct envelope from operational public keys.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LbfvPublicKeyShare {
+    #[prost(message, optional, tag = "1")]
+    pub key: ::core::option::Option<LbfvPublicKey>,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LbfvRelinearizationKey {
     #[prost(message, optional, tag = "1")]
@@ -18,8 +24,14 @@ pub struct LbfvRelinearizationKey {
     #[prost(bytes = "vec", repeated, tag = "3")]
     pub b_vec: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
+/// Contribution shares use a distinct envelope from operational relinearization keys.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LbfvRelinKeyShare {
+    #[prost(message, optional, tag = "1")]
+    pub contribution: ::core::option::Option<LbfvRelinKeyContribution>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LbfvRelinKeyContribution {
     #[prost(message, optional, tag = "1")]
     pub ksk_r_to_s: ::core::option::Option<crate::proto::bfv::KeySwitchingKey>,
     #[prost(message, optional, tag = "2")]

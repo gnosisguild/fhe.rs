@@ -5,6 +5,8 @@
 mod config;
 /// Error types for threshold operations
 pub mod errors;
+/// Internal RNS Shamir arithmetic for threshold BFV.
+mod rns_shamir;
 /// Share collection and management
 pub mod shares;
 /// Smudging abstractions and implementations

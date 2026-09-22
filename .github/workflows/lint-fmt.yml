@@ -39,8 +39,6 @@ jobs:
       matrix:
         features: [default, all]
     steps:
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal

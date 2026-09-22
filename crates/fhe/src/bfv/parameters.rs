@@ -840,11 +840,8 @@ impl Serialize for BfvParameters {
 
 impl Deserialize for BfvParameters {
     fn try_deserialize(bytes: &[u8]) -> Result<Self> {
-        let params: Parameters = Message::decode(bytes).map_err(|_| {
-            Error::SerializationError(SerializationError::Decode {
-                object: crate::SerializedObject::Parameters,
-            })
-        })?;
+        let params: Parameters =
+            crate::serialization::decode(bytes, crate::SerializedObject::Parameters)?;
 
         let plaintext_modulus = match params.plaintext_modulus {
             Some(PlaintextModulusProto::Plaintext(value)) => BigUint::from(value),

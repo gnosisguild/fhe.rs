@@ -41,9 +41,6 @@ serde.workspace = true
 criterion.workspace = true
 proptest.workspace = true
 
-[build-dependencies]
-prost-build.workspace = true
-
 [[bench]]
 name = "zq"
 harness = false

@@ -7,6 +7,12 @@ use std::sync::Arc;
 
 use rand::{CryptoRng, Rng as RngCore};
 
+/// Maximum encoded size accepted by Protobuf-backed deserializers.
+///
+/// This outer limit bounds total decoder work and memory use. Semantic
+/// validation must still bound the decoded object structure.
+pub const MAX_SERIALIZED_BYTES: usize = 256 * 1024 * 1024;
+
 /// Evidence that the caller has classified data as public.
 ///
 /// Constructing this value is an explicit assertion: using it for secret data
