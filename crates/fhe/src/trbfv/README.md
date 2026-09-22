@@ -1,14 +1,22 @@
 # Threshold BFV (TRBFV)
 
-A pure-Rust implementation of threshold BFV homomorphic encryption based on the work of Antoine Urban and Matthieu Rambaud in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf) (Urban–Rambaud 2024).
+A pure-Rust implementation of threshold BFV homomorphic encryption. Shamir
+sharing of the secret key follows Antoine Urban and Matthieu Rambaud in
+[Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf)
+(Urban–Rambaud 2024). Partial decryption follows Colin de Verdière, Alain
+Passelègue, and Damien Stehlé in
+[On Threshold Fully Homomorphic Encryption with Synchronized Decryptors](https://eprint.iacr.org/2026/031.pdf)
+(eprint 2026/031): the designated decryptor set `S` is known up front, each
+party applies its Lagrange coefficient locally, adds fresh smudging noise, and
+masks the share with committee PRF keys.
 
-The current implementation covers Shamir sharing, smudging noise, and
-threshold decryption with additive and limited multiplicative support via
-distributed *l*-BFV relinearization keys. It is **not** the complete robust
-protocol from the paper: there is no distributed key generation, no broadcast
-channel, no FLSS (function-linear secret sharing), and no GURS (guaranteed
-uniform random string) generation. The smudging exchange is assumed to have
-already happened out of band.
+The current implementation covers Shamir sharing, local smudging noise, PRF
+masks, and threshold decryption with additive and limited multiplicative
+support via distributed *l*-BFV relinearization keys. It is **not** the
+complete robust protocol from Urban–Rambaud 2024: there is no distributed key
+generation, no broadcast channel, no FLSS, and no GURS generation. Committee
+PRF keys are sampled locally as uniformly random 256-bit strings; Poseidon
+(SAFE API) will replace the ChaCha expander later.
 
 This module enables distributed decryption between `n` parties without necessarily involving all of them: any `threshold + 1` of the `n` parties can decrypt a ciphertext, while any coalition of at most `threshold` parties learns nothing. The threshold must be exactly `(n-1)/2` (integer division), the maximal corruption tolerance under an honest majority — see `config.rs` for the derivation.
 
@@ -21,7 +29,7 @@ the paper. The following table is the boundary for callers and integrators:
 | Paper or application component | Responsibility |
 | ------------------------------ | -------------- |
 | BFV and l-BFV operations (Sections 4 and 6) | Implemented by `fhe.rs`. |
-| Shamir sharing, share aggregation, smudging bounds, and threshold decryption | Implemented by `fhe.rs`. |
+| Shamir sharing, share aggregation, smudging bounds, PRF masks, and threshold decryption | Implemented by `fhe.rs`. |
 | DKG, PVSS, FLSS, and GURS | Must be supplied externally. |
 | Authenticated transport, broadcast, retries, and identifiable aborts | Must be supplied externally. |
 | Committee membership, accepted-party policy, and application lifecycle | Must be supplied externally. |
@@ -31,10 +39,13 @@ The public `ShareManager` flow is:
 
 1. Create a `ShareManager` instance with BFV parameters.
 2. Generate and distribute Shamir shares for each party's secret contribution.
-3. Aggregate the received contributions for the same externally agreed party
-   set.
-4. Compute one decryption share per decrypting party.
-5. Reconstruct with exactly `threshold + 1` distinct 1-based party IDs.
+3. Sample committee PRF keys (`ShareManager::generate_prf_keys`) and give each
+   party its `2n` keys.
+4. Aggregate the received secret-key contributions for the same externally
+   agreed party set.
+5. For a designated decryptor set `S` of size `threshold + 1`, each party in
+   `S` samples local smudging noise and computes a partial decryption.
+6. Sum the `|S|` partial decryptions (FinDec) to recover the plaintext.
 
 The examples in `crates/fhe/examples/` simulate the external setup and share
 transport locally. They demonstrate the supported component flow, but they do
@@ -53,6 +64,7 @@ identity/session binding at their protocol boundary.
 The module follows a modular design with clear separation of concerns:
 
 - `../rns_shamir.rs` - crate-private direct RNS Shamir arithmetic shared by threshold schemes
+- `prf.rs` - committee PRF keys and partial-decryption masks
 - `smudging.rs` - Smudging noise generation with optimal variance calculation using arbitrary precision arithmetic  
 - `shares.rs` - Share aggregation and decryption operations management
 - `config.rs` - Parameter validation
@@ -64,18 +76,12 @@ arithmetic. Callers should use `ShareManager`; its high-level share
 generation, aggregation, and reconstruction APIs retain the same logical share
 layout.
 
-> **Breaking change:** the `TRBFV` orchestrator struct has been removed;
-> `ShareManager` is the single public trBFV type (`ShareManager::
-> decrypt_from_shares` is the former `TRBFV::decrypt`). Smudging noise is
-> generated directly with the smudging module's public machinery:
-> `SmudgingConfig::new` (set `config.mult_depth` when needed) →
-> `SmudgingNoiseGenerator::new` → `generate`. Sampled noise remains a non-cloneable
-> `SmudgingNoise` owner that must be dealt with
-> `ShareManager::generate_secret_shares_from_smudging_noise`, which consumes
-> it, and `ShareManager::bigints_to_poly` has been removed. Downstream code
-> doing generate-then-convert must migrate to the generate-then-deal flow
-> shown under [Usage](#usage); the old symbols fail to compile by design,
-> since a cloneable noise representation cannot enforce one-time use.
+> **Breaking change:** partial decryption no longer consumes Shamir-shared
+> smudging noise. `ShareManager::generate_secret_shares_from_smudging_noise`
+> has been removed. Callers sample local noise at decryption time and pass
+> committee PRF keys into `decryption_share` together with the designated
+> set `S`. FinDec sums the partial decryptions instead of Lagrange-
+> reconstructing them.
 
 ## Noise and Correctness Formulas (Urban–Rambaud 2024)
 
@@ -147,11 +153,12 @@ public configuration fields before computing the bound.
 
 ## Known Limitations
 
-### One-time pre-shared noise
+### One-time local noise
 
 Smudging noise generated by [`SmudgingNoiseGenerator`] is **one-time
 material** that must never be reused across decryptions.  The current API does
 **not** track or enforce consumption — callers are responsible for freshness.
+Noise is sampled inside PartDec; it is not Shamir-shared at setup.
 
 ### Even-`n` party counts
 
@@ -162,12 +169,14 @@ paper's theorem and have not been independently analyzed.
 
 ### Incomplete protocol orchestration
 
-This module implements sharing, smudging, and decryption — it does **not**
-include the complete robust protocol stack from Urban–Rambaud&nbsp;2024:
+This module implements sharing, local smudging, PRF masks, and decryption —
+it does **not** include the complete robust protocol stack from
+Urban–Rambaud&nbsp;2024:
 - No distributed key generation (DKG).
 - No authenticated broadcast channel.
 - No FLSS pre-processing or GURS generation.
 - No proactive refresh or identifiable-abort mechanisms.
+- The PRF is a ChaCha expander until Poseidon is wired in.
 
 Callers who need full end-to-end robust threshold FHE must provide these
 components externally.
@@ -206,24 +215,29 @@ let mut share_manager = ShareManager::new(n_parties, threshold, params.clone())?
 // Each party: deal secret shares of its key contribution.
 let sk_shares = share_manager.generate_secret_shares_from_poly(sk_poly, &mut rng)?;
 
-// Each party: sample smudging noise with the smudging machinery, then deal
-// it immediately; the noise owner is one-time material consumed by the
-// dealing operation and the intermediate noise polynomial is never exposed.
+// Committee: sample PRF keys once and give party i its 2n keys.
+let prf_keys = share_manager.generate_prf_keys(&mut rng)?;
+
+// Each party: aggregate the share matrices received from the other parties
+// into its share of the joint secret key
+let sk_poly_sum = share_manager.aggregate_collected_shares(&collected_sk_shares)?;
+
+// Designated set S. Each decrypting party samples local smudging and
+// computes PartDec.
 let mut config = SmudgingConfig::new(
     params.clone(), n_parties, num_ciphertexts, lambda,
 )?;
 config.mult_depth = mult_depth;
 let generator = SmudgingNoiseGenerator::new(config)?;
 let es_noise = generator.generate(&mut rng)?;
-let es_shares = share_manager.generate_secret_shares_from_smudging_noise(es_noise, &mut rng)?;
-
-// Each party: aggregate the share matrices received from the other parties
-// into its share of the joint secret key (and likewise for the noise)
-let sk_poly_sum = share_manager.aggregate_collected_shares(&collected_sk_shares)?;
-let es_poly_sum = share_manager.aggregate_collected_shares(&collected_es_shares)?;
-
-// Each decrypting party: compute a decryption share from its aggregated shares
-let d_share = share_manager.decryption_share(ciphertext.clone(), sk_poly_sum.into_ntt(), es_poly_sum)?;
+let d_share = share_manager.decryption_share(
+    ciphertext.clone(),
+    sk_poly_sum.into_ntt(),
+    party_id,
+    &reconstructing_parties,
+    es_noise,
+    &prf_keys[party_index],
+)?;
 
 // Combine exactly threshold + 1 decryption shares; reconstructing_parties
 // holds the 1-based indices of the parties the shares came from
@@ -237,8 +251,8 @@ This implementation has not been independently audited. Use with appropriate cau
 The security of the threshold scheme relies on:
 - Proper parameter selection for the underlying BFV scheme
 - Secure distribution of shares among parties
-- Protection of individual secret key shares
-- Appropriate smudging noise generation
+- Protection of individual secret key shares and committee PRF keys
+- Fresh local smudging noise at each partial decryption
 
 Shamir secret sharing operates directly on canonical RNS residues. Operations
 on secret coefficients use the constant-time `Modulus` arithmetic; Lagrange

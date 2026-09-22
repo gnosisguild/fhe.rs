@@ -11,8 +11,8 @@
 //              BFV decrypt is correct because k ≈ 2^50 < q₀/2 ≈ 2^52.0000  ✓
 //
 // Protocol:
-//  1. Each party generates: trBFV key share, Shamir shares of sk and smudging error,
-//     an l-BFV RLK share, and a share-encryption BFV key pair (second set).
+//  1. Each party generates: trBFV key share, Shamir shares of sk, committee PRF
+//     keys, an l-BFV RLK share, and a share-encryption BFV key pair (second set).
 //  2. Share-encryption public keys are published. Each party BFV-encrypts its Shamir
 //     shares for every receiver under the receiver's share-encryption key.
 //  3. Each receiver decrypts and aggregates the collected shares to reconstruct
@@ -32,7 +32,7 @@ use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
-    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{PartyPrfKeys, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
@@ -154,13 +154,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     struct Party {
         pk_share: MBFVPublicKeyShare,
-        sk_sss: Vec<Array2<u64>>,  // sk_sss[m]: shape (num_parties, degree)
-        esi_sss: Vec<Array2<u64>>, // smudging error Shamir shares, same shape
+        sk_sss: Vec<Array2<u64>>, // sk_sss[m]: shape (num_parties, degree)
         sk_sss_collected: Vec<Array2<u64>>, // collected from all senders; each (num_moduli, degree)
-        es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
         d_share_poly: Poly<PowerBasis>,
+        prf_keys: PartyPrfKeys,
         pk_lbfv_share: PublicKeyShare, // l-BFV PK contribution (CRS = pk_seed)
         rlk_share: RelinKeyShare,
         // Share-encryption key pair (second BFV parameter set).
@@ -170,13 +168,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let crp = CommonRandomPoly::new(&params_trbfv, &mut rng)?;
     let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
+    let committee_prf_keys = Arc::new(share_manager.generate_prf_keys(&mut rng).unwrap());
+    let mut smudging_config =
+        SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda).unwrap();
+    smudging_config.mult_depth = preset.multiplicative_depth.unwrap();
+    let smudging_generator = Arc::new(SmudgingNoiseGenerator::new(smudging_config).unwrap());
     let num_moduli = params_trbfv.moduli().len();
 
     println!("\n💻 Available CPU cores: {}", rayon::current_num_threads());
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
         (0..num_parties)
             .into_par_iter()
-            .map(|_| {
+            .enumerate()
+            .map(|(party_index, _)| {
                 let mut rng = rand::rng();
 
                 // trBFV keys and Shamir shares.
@@ -191,17 +195,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 let sk_sss = share_manager
                     .generate_secret_shares_from_poly(sk_poly, &mut rng)
-                    .unwrap();
-
-                // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications).
-                // The default accepted set is all n parties.
-                let mut config =
-                    SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda).unwrap();
-                config.mult_depth = preset.multiplicative_depth.unwrap();
-                let generator = SmudgingNoiseGenerator::new(config).unwrap();
-                let esi_noise = generator.generate(&mut rng).unwrap();
-                let esi_sss = share_manager
-                    .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
                     .unwrap();
 
                 // l-BFV PK contribution (CRS seed = pk_seed, shared by all parties).
@@ -223,12 +216,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Party {
                     pk_share,
                     sk_sss,
-                    esi_sss,
                     sk_sss_collected: Vec::with_capacity(num_parties),
-                    es_sss_collected: Vec::with_capacity(num_parties),
                     sk_poly_sum: Poly::<PowerBasis>::zero(ctx0),
-                    es_poly_sum: Poly::<PowerBasis>::zero(ctx0),
                     d_share_poly: Poly::<PowerBasis>::zero(ctx0),
+                    prf_keys: committee_prf_keys[party_index].clone(),
                     pk_lbfv_share,
                     rlk_share,
                     sk_share_enc,
@@ -254,56 +245,37 @@ fn main() -> Result<(), Box<dyn Error>> {
     //   • k = q[1] ≥ q_i for all i → share values ∈ [0, q_i) ⊆ [0, k)
     //   • k ≈ 2^57 < q₀/2 ≈ 2^59  → BFV decrypt is algebraically exact
     //
-    // encrypted_shares[sender][receiver] = (Vec<Ciphertext>, Vec<Ciphertext>)
-    //   first  vec: one ciphertext per modulus for the sk share row
-    //   second vec: one ciphertext per modulus for the smudging error share row
+    // encrypted_shares[sender][receiver] = one ciphertext per modulus for the sk share row
     let pk_share_enc_list: Vec<PublicKey> =
         parties.iter().map(|p| p.pk_share_enc.clone()).collect();
 
-    let encrypted_shares: Vec<Vec<(Vec<Ciphertext>, Vec<Ciphertext>)>> =
-        timeit!("Share encryption (parallel)", {
-            parties
-                .par_iter()
-                .map(|party| {
-                    (0..num_parties)
-                        .map(|receiver_idx| {
-                            let mut rng = rand::rng();
-                            let rpk = pk_share_enc_list.get(receiver_idx).unwrap();
+    let encrypted_shares: Vec<Vec<Vec<Ciphertext>>> = timeit!("Share encryption (parallel)", {
+        parties
+            .par_iter()
+            .map(|party| {
+                (0..num_parties)
+                    .map(|receiver_idx| {
+                        let mut rng = rand::rng();
+                        let rpk = pk_share_enc_list.get(receiver_idx).unwrap();
 
-                            let enc_sk: Vec<Ciphertext> = (0..num_moduli)
-                                .map(|m| {
-                                    let row =
-                                        party.sk_sss.get(m).unwrap().row(receiver_idx).to_vec();
-                                    let pt = Plaintext::try_encode(
-                                        &row,
-                                        Encoding::poly(),
-                                        &params_share_enc,
-                                    )
-                                    .unwrap();
-                                    rpk.try_encrypt(&pt, &mut rng).unwrap()
-                                })
-                                .collect();
-
-                            let enc_es: Vec<Ciphertext> = (0..num_moduli)
-                                .map(|m| {
-                                    let row =
-                                        party.esi_sss.get(m).unwrap().row(receiver_idx).to_vec();
-                                    let pt = Plaintext::try_encode(
-                                        &row,
-                                        Encoding::poly(),
-                                        &params_share_enc,
-                                    )
-                                    .unwrap();
-                                    rpk.try_encrypt(&pt, &mut rng).unwrap()
-                                })
-                                .collect();
-
-                            (enc_sk, enc_es)
-                        })
-                        .collect()
-                })
-                .collect()
-        });
+                        (0..num_moduli)
+                            .map(|m| {
+                                let row =
+                                    party.sk_sss.get(m).unwrap().row(receiver_idx).to_vec();
+                                let pt = Plaintext::try_encode(
+                                    &row,
+                                    Encoding::poly(),
+                                    &params_share_enc,
+                                )
+                                .unwrap();
+                                rpk.try_encrypt(&pt, &mut rng).unwrap()
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect()
+    });
 
     // ── Share decryption and collection ───────────────────────────────────────
     timeit!("Share decryption and collection (parallel)", {
@@ -312,7 +284,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .enumerate()
             .for_each(|(receiver_idx, party)| {
                 for sender_shares in encrypted_shares.iter() {
-                    let (enc_sk, enc_es) = sender_shares.get(receiver_idx).unwrap();
+                    let enc_sk = sender_shares.get(receiver_idx).unwrap();
 
                     let mut node_sk = Array::zeros((0, degree));
                     for ct in enc_sk {
@@ -321,26 +293,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         node_sk.push_row(ArrayView::from(&row)).unwrap();
                     }
                     party.sk_sss_collected.push(node_sk);
-
-                    let mut node_es = Array::zeros((0, degree));
-                    for ct in enc_es {
-                        let pt = party.sk_share_enc.try_decrypt(ct).unwrap();
-                        let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
-                        node_es.push_row(ArrayView::from(&row)).unwrap();
-                    }
-                    party.es_sss_collected.push(node_es);
                 }
             });
     });
 
-    // ── Lagrange share aggregation ────────────────────────────────────────────
+    // ── Share aggregation ─────────────────────────────────────────────────────
     timeit!("Sum collected shares (parallel)", {
         parties.par_iter_mut().for_each(|party| {
             party.sk_poly_sum = share_manager
                 .aggregate_collected_shares(&party.sk_sss_collected)
-                .unwrap();
-            party.es_poly_sum = share_manager
-                .aggregate_collected_shares(&party.es_sss_collected)
                 .unwrap();
         });
     });
@@ -390,16 +351,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  Product ciphertext level: {}", product.level);
 
     // ── Threshold decryption ──────────────────────────────────────────────────
+    let reconstructing_parties: Vec<usize> = (1..=threshold + 1).collect();
     let t_start = Instant::now();
-    parties.par_iter_mut().for_each(|party| {
-        party.d_share_poly = share_manager
-            .decryption_share(
-                product.clone(),
-                party.sk_poly_sum.clone().into_ntt(),
-                party.es_poly_sum.clone(),
-            )
-            .unwrap();
-    });
+    parties
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(party_index, party)| {
+            if party_index >= threshold + 1 {
+                return;
+            }
+            let mut rng = rand::rng();
+            party.d_share_poly = share_manager
+                .decryption_share(
+                    product.clone(),
+                    party.sk_poly_sum.clone().into_ntt(),
+                    party_index + 1,
+                    &reconstructing_parties,
+                    smudging_generator.generate(&mut rng).unwrap(),
+                    &party.prf_keys,
+                )
+                .unwrap();
+        });
     println!(
         "Decryption share generation: {:.2?} ({:.2} ms/party)",
         t_start.elapsed(),

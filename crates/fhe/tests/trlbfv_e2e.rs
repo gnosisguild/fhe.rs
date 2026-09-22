@@ -1,8 +1,8 @@
 //! End-to-end threshold l-BFV multiplication test.
 //!
 //! Verifies that a depth-1 homomorphic multiplication under distributed
-//! l-BFV public/relin keys, Shamir secret sharing, contributor-count-aware
-//! smudging, and threshold decryption:
+//! l-BFV public/relin keys, Shamir secret sharing, local smudging, PRF
+//! masking, and threshold decryption:
 //!
 //! * exactly `threshold + 1` shares decrypt the product correctly,
 //! * a single share is insufficient.
@@ -28,7 +28,7 @@ const THRESHOLD: usize = 1; // (n - 1) / 2
 const MULT_DEPTH: u32 = 1;
 const LAMBDA_VALUE: usize = 31;
 
-/// Distributed l-BFV PK + RLK contributions, Shamir-shared key/noise, depth-1
+/// Distributed l-BFV PK + RLK contributions, Shamir-shared key, depth-1
 /// multiplication, threshold decryption.
 #[test]
 fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
@@ -74,34 +74,17 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
         .expect("RLK share generation");
     let aggregated_rlk = aggregate_relinearization_key(&rlk_shares, &pk).expect("RLK aggregation");
 
-    // ── Smudging noise (pre-shared, one‑time per party) ╌─────────────
-    // Each party samples one noise owner; dealing below consumes it
-    // straight into Shamir shares without exposing the polynomial.
-    let mut smudging_noises = (0..N)
-        .map(|_| {
-            let mut config =
-                SmudgingConfig::new(params.clone(), N, 1, LAMBDA_VALUE).expect("smudging config");
-            config.mult_depth = MULT_DEPTH;
-            // Use n as the conservative aggregate RLK contribution count.
-            SmudgingNoiseGenerator::new(config)
-                .expect("smudging generator")
-                .generate(&mut rng)
-                .expect("smudging noise generation")
-        })
-        .collect::<Vec<_>>()
-        .into_iter();
-
-    // ── Shamir share deal / collect / aggregate (SK + noise) ╌─────────
+    // ── Shamir share deal / collect / aggregate (SK) ╌─────────────────
     struct Party {
         sk_sss: Vec<Array2<u64>>,
-        esi_sss: Vec<Array2<u64>>,
         sk_sss_collected: Vec<Array2<u64>>,
-        es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
     }
 
     let ctx_level0 = params.context_at_level(0).expect("level-0 context");
+    let prf_keys = manager
+        .generate_prf_keys(&mut rng)
+        .expect("committee PRF keys");
     let mut parties: Vec<Party> = (0..N)
         .map(|i| {
             let share_manager =
@@ -115,22 +98,10 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
                 .generate_secret_shares_from_poly(sk_poly, &mut rng)
                 .expect("sk share generation");
 
-            // Shamir‑share this party's smudging noise, consuming its
-            // one-time owner.
-            let esi_sss = share_manager
-                .generate_secret_shares_from_smudging_noise(
-                    smudging_noises.next().expect("one noise owner per party"),
-                    &mut rng,
-                )
-                .expect("esi share generation");
-
             Party {
                 sk_sss,
-                esi_sss,
                 sk_sss_collected: Vec::with_capacity(N),
-                es_sss_collected: Vec::with_capacity(N),
                 sk_poly_sum: Poly::<PowerBasis>::zero(ctx_level0),
-                es_poly_sum: Poly::<PowerBasis>::zero(ctx_level0),
             }
         })
         .collect();
@@ -140,7 +111,6 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     // Collect all rows before pushing to avoid double borrows.
     for receiver_idx in 0..N {
         let mut sk_rows: Vec<Array2<u64>> = Vec::with_capacity(N);
-        let mut es_rows: Vec<Array2<u64>> = Vec::with_capacity(N);
         for sender in parties.iter() {
             let collect_row = |sss: &[Array2<u64>]| -> Array2<u64> {
                 let mut rows = Array::zeros((0, params.degree()));
@@ -151,20 +121,15 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
                 rows
             };
             sk_rows.push(collect_row(&sender.sk_sss));
-            es_rows.push(collect_row(&sender.esi_sss));
         }
         parties[receiver_idx].sk_sss_collected = sk_rows;
-        parties[receiver_idx].es_sss_collected = es_rows;
     }
 
-    // Aggregate collected SK and noise shares into per-party polynomials.
+    // Aggregate collected SK shares into per-party polynomials.
     for party in parties.iter_mut() {
         party.sk_poly_sum = manager
             .aggregate_collected_shares(&party.sk_sss_collected)
             .expect("aggregate sk shares");
-        party.es_poly_sum = manager
-            .aggregate_collected_shares(&party.es_sss_collected)
-            .expect("aggregate es shares");
     }
 
     // ── Encrypt, multiply, relinearize ╌───────────────────────────────
@@ -193,6 +158,11 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     let reconstructing: Vec<usize> = vec![1, 2]; // threshold + 1 = 2
     assert_eq!(reconstructing.len(), THRESHOLD + 1);
 
+    let mut config =
+        SmudgingConfig::new(params.clone(), N, 1, LAMBDA_VALUE).expect("smudging config");
+    config.mult_depth = MULT_DEPTH;
+    let generator = SmudgingNoiseGenerator::new(config).expect("smudging generator");
+
     let d_share_polys: Vec<Poly<PowerBasis>> = reconstructing
         .iter()
         .map(|&party_id| {
@@ -201,7 +171,10 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
                 .decryption_share(
                     tally.clone(),
                     party.sk_poly_sum.clone().into_ntt(),
-                    party.es_poly_sum.clone(),
+                    party_id,
+                    &reconstructing,
+                    generator.generate(&mut rng).expect("local smudging"),
+                    &prf_keys[party_id - 1],
                 )
                 .expect("decryption share")
         })

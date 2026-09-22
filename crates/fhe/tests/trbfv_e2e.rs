@@ -1,8 +1,8 @@
 //! End-to-end threshold BFV addition test.
 //!
-//! Verifies standard BFV encryption, Shamir secret sharing, smudging, and
-//! threshold decryption without the distributed l-BFV key or relinearization
-//! layer.
+//! Verifies standard BFV encryption, Shamir secret sharing, local smudging,
+//! PRF masking, and threshold decryption without the distributed l-BFV key
+//! or relinearization layer.
 
 #![allow(clippy::expect_used, clippy::indexing_slicing, clippy::unwrap_used)]
 
@@ -37,24 +37,11 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     let sk_sss = manager
         .generate_secret_shares_from_poly(sk_poly, &mut rng)
         .expect("secret key share generation");
-
-    let es_sss: Vec<Vec<Array2<u64>>> = (0..N)
-        .map(|_| {
-            // The evaluated ciphertext below is the sum of two fresh encryptions.
-            let config =
-                SmudgingConfig::new(params.clone(), N, 2, LAMBDA_VALUE).expect("smudging config");
-            let generator = SmudgingNoiseGenerator::new(config).expect("smudging generator");
-            let noise = generator
-                .generate(&mut rng)
-                .expect("smudging noise generation");
-            manager
-                .generate_secret_shares_from_smudging_noise(noise, &mut rng)
-                .expect("smudging noise share generation")
-        })
-        .collect();
+    let prf_keys = manager
+        .generate_prf_keys(&mut rng)
+        .expect("committee PRF keys");
 
     let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..N).map(|_| Vec::new()).collect();
-    let mut es_sss_collected: Vec<Vec<Array2<u64>>> = (0..N).map(|_| Vec::new()).collect();
     for receiver_idx in 0..N {
         let mut sk_rows = Array2::zeros((0, params.degree()));
         for shares_for_modulus in sk_sss.iter().take(params.moduli().len()) {
@@ -65,18 +52,6 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
                 .expect("append secret key share row");
         }
         sk_sss_collected[receiver_idx].push(sk_rows);
-
-        for noise_shares in &es_sss {
-            let mut es_rows = Array2::zeros((0, params.degree()));
-            for shares_for_modulus in noise_shares.iter().take(params.moduli().len()) {
-                es_rows
-                    .push_row(ndarray::ArrayView::from(
-                        shares_for_modulus.row(receiver_idx),
-                    ))
-                    .expect("append smudging share row");
-            }
-            es_sss_collected[receiver_idx].push(es_rows);
-        }
     }
 
     let sk_poly_sums: Vec<Poly<PowerBasis>> = sk_sss_collected
@@ -85,14 +60,6 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
             manager
                 .aggregate_collected_shares(collected)
                 .expect("aggregate secret key shares")
-        })
-        .collect();
-    let es_poly_sums: Vec<Poly<PowerBasis>> = es_sss_collected
-        .iter()
-        .map(|collected| {
-            manager
-                .aggregate_collected_shares(collected)
-                .expect("aggregate smudging shares")
         })
         .collect();
 
@@ -107,6 +74,11 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     let ct_b = encrypt(3);
     let ciphertext = Arc::new(&ct_a + &ct_b);
 
+    // The evaluated ciphertext is the sum of two fresh encryptions.
+    let config =
+        SmudgingConfig::new(params.clone(), N, 2, LAMBDA_VALUE).expect("smudging config");
+    let generator = SmudgingNoiseGenerator::new(config).expect("smudging generator");
+
     let reconstructing = vec![1, 2];
     let decryption_shares: Vec<Poly<PowerBasis>> = reconstructing
         .iter()
@@ -116,7 +88,10 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
                 .decryption_share(
                     ciphertext.clone(),
                     sk_poly_sums[index].clone().into_ntt(),
-                    es_poly_sums[index].clone(),
+                    party_id,
+                    &reconstructing,
+                    generator.generate(&mut rng).expect("local smudging"),
+                    &prf_keys[index],
                 )
                 .expect("decryption share")
         })

@@ -15,9 +15,11 @@ use zeroize::{Zeroize, Zeroizing};
 /// Smudging noise generator using exact centered uniform sampling.
 ///
 /// Each coefficient is sampled uniformly from `[-B_sm, B_sm]` directly into
-/// RNS representation, as specified for the smudging noise in the trBFV
-/// paper. The secret sampling path uses constant-time `u64`/`u128` limb
-/// arithmetic only.
+/// RNS representation. `B_sm = 2^(lambda + 1) * d * B_C` instantiates
+/// `B_SM = Ω(2^λ · B_Dec)` from the 2026 synchronized-decryptor paper
+/// (`B_Dec` is this crate's `B_C` after circuit evaluation). Sampling is
+/// local to partial decryption. The secret sampling path uses constant-time
+/// `u64`/`u128` limb arithmetic only.
 #[derive(Debug)]
 pub struct SmudgingNoiseGenerator {
     params: Arc<BfvParameters>,
@@ -208,11 +210,10 @@ fn limbs_mod(limbs: &[u64], qi: &Modulus) -> u64 {
 
 /// Freshly sampled smudging noise with private wipe-on-drop storage.
 ///
-/// The underlying polynomial is private and the owner is consumed by the
-/// smudging dealing operation ([`ShareManager::generate_secret_shares_from_smudging_noise`]).
-/// There is intentionally no `Clone`, `Copy`, coefficient accessor, or
-/// generic serialization: duplicating one-time noise across decryptions
-/// breaks the statistical hiding argument.
+/// The underlying polynomial is private and the owner is consumed by
+/// [`ShareManager::decryption_share`]. There is intentionally no `Clone`,
+/// `Copy`, coefficient accessor, or generic serialization: duplicating
+/// one-time noise across decryptions breaks the statistical hiding argument.
 ///
 /// ```compile_fail
 /// # use fhe::trbfv::{ShareManager, SmudgingNoise};
@@ -227,10 +228,17 @@ pub struct SmudgingNoise {
 impl SmudgingNoise {
     /// Consume the owner and release the noise polynomial.
     ///
-    /// Crate-private so the supported dealing operation is the only consumer;
-    /// external code cannot extract a reusable raw polynomial.
+    /// Crate-private so partial decryption is the only consumer; external
+    /// code cannot extract a reusable raw polynomial.
     pub(crate) fn into_poly(self) -> Zeroizing<Poly<PowerBasis>> {
         self.poly
+    }
+
+    /// Wrap an already-constructed polynomial. Used by tests that exercise
+    /// the algebraic path with zero noise.
+    #[cfg(test)]
+    pub(crate) fn from_poly(poly: Zeroizing<Poly<PowerBasis>>) -> Self {
+        Self { poly }
     }
 }
 

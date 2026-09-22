@@ -11,8 +11,7 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::ShareManager;
-use fhe_math::rq::{Poly, PowerBasis};
+use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe_traits::{FheEncoder, FheEncrypter};
 use ndarray::Array2;
 use rand::SeedableRng;
@@ -61,9 +60,9 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
                 .try_encrypt(&plaintext, &mut setup_rng)
                 .expect("encryption must succeed"),
         );
-        let context = params
-            .context_at_level(0)
-            .expect("level-zero context must exist");
+        let prf_keys = manager
+            .generate_prf_keys(&mut setup_rng)
+            .expect("PRF keys must be generated");
         let party_ids: Vec<_> = (1..=threshold + 1).collect();
         let decryption_shares: Vec<_> = party_ids
             .iter()
@@ -72,7 +71,15 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
                     .decryption_share(
                         ciphertext.clone(),
                         aggregated_shares[party_id - 1].clone().into_ntt(),
-                        Poly::<PowerBasis>::zero(context),
+                        party_id,
+                        &party_ids,
+                        SmudgingNoiseGenerator::new(
+                            SmudgingConfig::new(params.clone(), party_count, 1, 0).unwrap(),
+                        )
+                        .unwrap()
+                        .generate(&mut setup_rng)
+                        .unwrap(),
+                        &prf_keys[party_id - 1],
                     )
                     .expect("decryption-share generation must succeed")
             })

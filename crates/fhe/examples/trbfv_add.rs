@@ -17,7 +17,7 @@ use console::style;
 use fhe::{
     bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{PartyPrfKeys, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -132,12 +132,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     struct Party {
         pk_share: PublicKeyShare,
         sk_sss: Vec<Array2<u64>>,
-        esi_sss: Vec<Array2<u64>>,
         sk_sss_collected: Vec<Array2<u64>>,
-        es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
         d_share_poly: Poly<PowerBasis>,
+        prf_keys: PartyPrfKeys,
     }
 
     // Generate a common reference poly for public key generation.
@@ -146,13 +144,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Setup trBFV module
     let share_manager = ShareManager::new(num_parties, threshold, params.clone()).unwrap();
+    let committee_prf_keys = Arc::new(share_manager.generate_prf_keys(&mut rng).unwrap());
+    let smudging_config =
+        SmudgingConfig::new(params.clone(), num_parties, num_summed, lambda).unwrap();
+    let smudging_generator = Arc::new(SmudgingNoiseGenerator::new(smudging_config).unwrap());
 
     // Set up shares for each party in parallel
     println!("💻 Available CPU cores: {}", rayon::current_num_threads());
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
         (0..num_parties)
             .into_par_iter()
-            .map(|_| {
+            .enumerate()
+            .map(|(party_index, _)| {
                 // Each thread gets its own RNG to avoid contention
                 let mut rng = rand::rng();
 
@@ -169,33 +172,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .generate_secret_shares_from_poly(sk_poly, &mut rng)
                     .unwrap();
 
-                // vec of 3 moduli and array2 for num_parties rows of coeffs and degree columns
                 let sk_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
-                let es_sss_collected: Vec<Array2<u64>> = Vec::with_capacity(num_parties);
                 let ctx = params.context_at_level(0).unwrap();
                 let sk_poly_sum = Poly::<PowerBasis>::zero(ctx);
-                let es_poly_sum = Poly::<PowerBasis>::zero(ctx);
                 let d_share_poly = Poly::<PowerBasis>::zero(ctx);
-
-                // Smudging noise shares: compute the bound with the smudging
-                // machinery, sample the noise, and deal it immediately.
-                let config =
-                    SmudgingConfig::new(params.clone(), num_parties, num_summed, lambda).unwrap();
-                let generator = SmudgingNoiseGenerator::new(config).unwrap();
-                let esi_noise = generator.generate(&mut rng).unwrap();
-                let esi_sss = share_manager
-                    .generate_secret_shares_from_smudging_noise(esi_noise, &mut rng)
-                    .unwrap();
 
                 Party {
                     pk_share,
                     sk_sss,
-                    esi_sss,
                     sk_sss_collected,
-                    es_sss_collected,
                     sk_poly_sum,
-                    es_poly_sum,
                     d_share_poly,
+                    prf_keys: committee_prf_keys[party_index].clone(),
                 }
             })
             .collect()
@@ -209,17 +197,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         {
             for j in 0..num_parties {
                 let mut node_share_m = Array::zeros((0, degree));
-                let mut es_node_share_m = Array::zeros((0, degree));
                 for m in 0..params.moduli().len() {
                     node_share_m
                         .push_row(ArrayView::from(&parties[j].sk_sss[m].row(i).clone()))
                         .unwrap();
-                    es_node_share_m
-                        .push_row(ArrayView::from(&parties[j].esi_sss[m].row(i).clone()))
-                        .unwrap();
                 }
                 parties[i].sk_sss_collected.push(node_share_m);
-                parties[i].es_sss_collected.push(es_node_share_m);
             }
             i += 1;
         }
@@ -229,9 +212,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         parties.par_iter_mut().for_each(|party| {
             party.sk_poly_sum = share_manager
                 .aggregate_collected_shares(&party.sk_sss_collected)
-                .unwrap();
-            party.es_poly_sum = share_manager
-                .aggregate_collected_shares(&party.es_sss_collected)
                 .unwrap();
         });
     });
@@ -267,17 +247,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
 
     // Measure decryption share generation (average per party)
+    let reconstructing_parties: Vec<usize> = (1..=threshold + 1).collect();
     let share_generation_start = Instant::now();
 
-    parties.par_iter_mut().for_each(|party| {
-        party.d_share_poly = share_manager
-            .decryption_share(
-                tally.clone(),
-                party.sk_poly_sum.clone().into_ntt(),
-                party.es_poly_sum.clone(),
-            )
-            .unwrap();
-    });
+    parties
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(party_index, party)| {
+            if party_index >= threshold + 1 {
+                return;
+            }
+            let mut rng = rand::rng();
+            party.d_share_poly = share_manager
+                .decryption_share(
+                    tally.clone(),
+                    party.sk_poly_sum.clone().into_ntt(),
+                    party_index + 1,
+                    &reconstructing_parties,
+                    smudging_generator.generate(&mut rng).unwrap(),
+                    &party.prf_keys,
+                )
+                .unwrap();
+        });
 
     let total_share_generation_time = share_generation_start.elapsed();
     let avg_time_per_party = total_share_generation_time.as_millis() as f64 / num_parties as f64;
@@ -298,7 +289,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // decrypt result
     let result = timeit!("Threshold decrypt (combine shares)", {
-        // Parties are 1-based for Shamir x-coordinates; we used the first (threshold+1) parties
         let reconstructing_parties: Vec<usize> = (1..=threshold + 1).collect();
         let open_results = share_manager
             .decrypt_from_shares(d_share_polys, reconstructing_parties, tally.clone())
