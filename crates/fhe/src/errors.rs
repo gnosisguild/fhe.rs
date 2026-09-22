@@ -475,6 +475,7 @@ pub enum SerializedField {
     GaloisKeySwitchingKey,
     ParametersPlaintextModulus,
     PublicKeyCiphertext,
+    PublicKeyShareKey,
     RelinearizationKeySwitchingKey,
     RgswKeySwitchingKey0,
     RgswKeySwitchingKey1,

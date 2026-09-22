@@ -10,6 +10,11 @@ message LBFVPublicKey {
   bytes seed = 3;
 }
 
+// Contribution shares use a distinct envelope from operational public keys.
+message LBFVPublicKeyShare {
+  LBFVPublicKey key = 1;
+}
+
 message LBFVRelinearizationKey {
   bfv.KeySwitchingKey ksk_r_to_s = 1;
   bfv.KeySwitchingKey ksk_s_to_r = 2;

@@ -9,6 +9,12 @@ pub struct LbfvPublicKey {
     #[prost(bytes = "vec", tag = "3")]
     pub seed: ::prost::alloc::vec::Vec<u8>,
 }
+/// Contribution shares use a distinct envelope from operational public keys.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LbfvPublicKeyShare {
+    #[prost(message, optional, tag = "1")]
+    pub key: ::core::option::Option<LbfvPublicKey>,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LbfvRelinearizationKey {
     #[prost(message, optional, tag = "1")]
