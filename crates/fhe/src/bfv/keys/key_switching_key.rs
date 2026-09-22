@@ -798,6 +798,16 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
             ));
         }
 
+        if !value.seed.is_empty() && !value.c1.is_empty() {
+            return Err(Error::SerializationError(
+                SerializationError::InvalidFormat {
+                    reason:
+                        "Key-switching key cannot contain both a seed and explicit c1 polynomials"
+                            .to_string(),
+                },
+            ));
+        }
+
         let seed = if value.seed.is_empty() {
             if value.c1.len() != c0_size {
                 return Err(Error::SerializationError(
@@ -869,6 +879,7 @@ mod tests {
         rns::RnsContext,
         rq::{Ntt, NttShoup, Poly, PowerBasis, traits::TryConvertFrom as TryConvertFromPoly},
     };
+    use fhe_traits::Serialize;
     use num_bigint::BigUint;
     use rand::rng;
     use std::error::Error;
@@ -1026,6 +1037,22 @@ mod tests {
                     .all(Poly::allows_variable_time_computations)
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn proto_conversion_rejects_seed_with_explicit_c1() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(3, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        let p = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+        let ksk = KeySwitchingKey::new(&sk, &p, 0, 0, &mut rng)?;
+        let mut proto = KeySwitchingKeyProto::from(&ksk);
+
+        proto.c1.push(ksk.c1[0].to_bytes());
+
+        assert!(KeySwitchingKey::try_convert_from(&proto, &params).is_err());
         Ok(())
     }
 

@@ -39,23 +39,45 @@ use fhe_traits::{FheEncrypter, FheParametrized};
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct LBFVPublicKey {
     /// The BFV parameters
-    pub params: Arc<BfvParameters>,
+    pub(crate) params: Arc<BfvParameters>,
     /// The public key ciphertexts, one for each RNS modulus
-    pub c: Vec<Ciphertext>,
+    pub(crate) c: Vec<Ciphertext>,
     /// The decomposition size which is the number of RNS moduli (the l in lBFV).
     /// Note while l in https://eprint.iacr.org/2024/1285.pdf is equal to the size
     /// chosen of the Gadget vector, here it is equal the number of RNS moduli
     /// as the library uses the optimization of https://eprint.iacr.org/2018/117.pdf
-    pub l: usize,
+    pub(crate) l: usize,
     /// Optional compression metadata: the seed that generates the same
     /// concrete `a_j` CRS polynomials as those stored in `c`. When absent
     /// (e.g. seedless deserialized or contributed keys), polynomial-level
     /// comparison is the sole consistency mechanism. When present, it is
     /// verified against the concrete polynomials at construction time.
-    pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
+    pub(crate) seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
 }
 
 impl LBFVPublicKey {
+    /// Return the validated public-key rows in gadget-row order.
+    ///
+    /// Each row is a two-component ciphertext `(b, a)`. Constructors and
+    /// deserialization validate that the row count and ciphertext structure
+    /// match the key parameters.
+    #[must_use]
+    pub fn rows(&self) -> &[Ciphertext] {
+        &self.c
+    }
+
+    /// Return the number of gadget rows in this public key.
+    #[must_use]
+    pub const fn row_count(&self) -> usize {
+        self.l
+    }
+
+    /// Return the BFV parameters for this public key.
+    #[must_use]
+    pub fn parameters(&self) -> Arc<BfvParameters> {
+        self.params.clone()
+    }
+
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a provided
     /// seed. The seed is used to generate l seeds for the ciphertexts which are
     /// used to generate the random polynomials aᵢ for each ciphertext
