@@ -134,8 +134,8 @@ pub enum PolynomialSerializationError {
     PayloadTooLarge { actual: usize, maximum: usize },
 
     /// The protobuf payload could not be decoded.
-    #[error("Failed to decode polynomial serialization.")]
-    Decode,
+    #[error("Failed to decode polynomial serialization: {message}")]
+    Decode { message: String },
 
     /// The protobuf representation discriminant is invalid.
     #[error("Invalid polynomial representation value {value}.")]
@@ -172,8 +172,11 @@ mod tests {
             "Invalid modulus: modulus 0 should be between 2 and (1 << 62) - 1."
         );
         assert_eq!(
-            Error::PolynomialSerialization(PolynomialSerializationError::Decode).to_string(),
-            "Polynomial serialization error: Failed to decode polynomial serialization."
+            Error::PolynomialSerialization(PolynomialSerializationError::Decode {
+                message: "invalid wire type".to_string(),
+            })
+            .to_string(),
+            "Polynomial serialization error: Failed to decode polynomial serialization: invalid wire type"
         );
         assert_eq!(
             Error::NoMoreContext.to_string(),

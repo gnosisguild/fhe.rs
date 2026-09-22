@@ -29,7 +29,13 @@ pub(crate) fn decode<T: Message + Default>(
     object: SerializedObject,
 ) -> Result<T, Error> {
     check_size(bytes.len(), object)?;
-    T::decode(bytes).map_err(|_| SerializationError::Decode { object }.into())
+    T::decode(bytes).map_err(|error| {
+        SerializationError::Decode {
+            object,
+            message: error.to_string(),
+        }
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -51,6 +57,25 @@ mod tests {
         .encode_to_vec();
         let decoded = decode::<Probe>(&bytes, SerializedObject::Ciphertext).unwrap();
         assert_eq!(decoded.value, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn decode_errors_preserve_the_prost_message() {
+        let error = decode::<Probe>(&[0x0a], SerializedObject::Ciphertext).unwrap_err();
+        let decoded_error = if let Error::SerializationError(SerializationError::Decode {
+            object,
+            message,
+        }) = error
+        {
+            Some((object, message))
+        } else {
+            None
+        };
+        assert!(decoded_error.is_some());
+        let (object, message) =
+            decoded_error.unwrap_or_else(|| (SerializedObject::Ciphertext, String::new()));
+        assert_eq!(object, SerializedObject::Ciphertext);
+        assert!(!message.is_empty());
     }
 
     #[test]

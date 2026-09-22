@@ -74,7 +74,7 @@ impl LBFVPublicKey {
 
     /// Return the BFV parameters for this public key.
     #[must_use]
-    pub const fn parameters(&self) -> &Arc<BfvParameters> {
+    pub fn parameters(&self) -> &BfvParameters {
         &self.params
     }
 

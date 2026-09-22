@@ -958,7 +958,7 @@ mod tests {
         let bytes = relin_key.to_bytes();
         let deserialized_key = LBFVRelinearizationKey::from_bytes(&bytes, &params)?;
 
-        assert_eq!(pk.parameters(), &params);
+        assert_eq!(pk.parameters(), params.as_ref());
         assert!(pk.seed().is_some());
         assert_eq!(pk.rows().len(), pk.row_count());
         assert_eq!(deserialized_key.d0_components().len(), pk.row_count());

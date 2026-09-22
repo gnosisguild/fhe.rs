@@ -21,7 +21,12 @@ message LBFVRelinearizationKey {
   repeated bytes b_vec = 3;
 }
 
+// Contribution shares use a distinct envelope from operational relinearization keys.
 message LBFVRelinKeyShare {
+  LBFVRelinKeyContribution contribution = 1;
+}
+
+message LBFVRelinKeyContribution {
   bfv.KeySwitchingKey ksk_r_to_s = 1;
   bfv.KeySwitchingKey ksk_s_to_r = 2;
 }

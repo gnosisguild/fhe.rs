@@ -11,7 +11,7 @@ use fhe_traits::FheParametrized;
 use crate::SerializationError;
 use crate::bfv::traits::TryConvertFrom;
 use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
-use crate::proto::lbfv::LbfvRelinKeyShare;
+use crate::proto::lbfv::{LbfvRelinKeyContribution, LbfvRelinKeyShare};
 use fhe_traits::{DeserializeParametrized, Serialize};
 use prost::Message;
 use std::sync::Arc;
@@ -446,8 +446,10 @@ mod tests {
 impl Serialize for RelinKeyShare {
     fn to_bytes(&self) -> Vec<u8> {
         LbfvRelinKeyShare {
-            ksk_r_to_s: Some(KeySwitchingKeyProto::from(&self.ksk_r_to_s)),
-            ksk_s_to_r: Some(KeySwitchingKeyProto::from(&self.ksk_s_to_r)),
+            contribution: Some(LbfvRelinKeyContribution {
+                ksk_r_to_s: Some(KeySwitchingKeyProto::from(&self.ksk_r_to_s)),
+                ksk_s_to_r: Some(KeySwitchingKeyProto::from(&self.ksk_s_to_r)),
+            }),
         }
         .encode_to_vec()
     }
@@ -459,8 +461,13 @@ impl DeserializeParametrized for RelinKeyShare {
     fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self> {
         let proto: LbfvRelinKeyShare =
             crate::serialization::decode(bytes, crate::SerializedObject::RelinearizationKeyShare)?;
+        let contribution = proto.contribution.ok_or(crate::Error::SerializationError(
+            SerializationError::MissingField {
+                field: crate::SerializedField::RelinearizationKeyShareContribution,
+            },
+        ))?;
 
-        let ksk_r_to_s = proto
+        let ksk_r_to_s = contribution
             .ksk_r_to_s
             .as_ref()
             .ok_or_else(|| {
@@ -469,7 +476,7 @@ impl DeserializeParametrized for RelinKeyShare {
                 })
             })
             .and_then(|ksk| KeySwitchingKey::try_convert_from(ksk, params))?;
-        let ksk_s_to_r = proto
+        let ksk_s_to_r = contribution
             .ksk_s_to_r
             .as_ref()
             .ok_or_else(|| {
@@ -492,11 +499,23 @@ mod proto_tests {
     use super::*;
 
     use crate::bfv::SecretKey;
+    use crate::lbfv::LBFVPublicKey;
     use crate::support::presets::insecure;
     use fhe_traits::{DeserializeParametrized, Serialize};
     use rand::SeedableRng;
     use rand::rng;
     use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn relin_key_share_envelope_has_stable_wire_fixture() {
+        const FIXTURE: &[u8] = &[0x0a, 0x00];
+        let envelope = LbfvRelinKeyShare {
+            contribution: Some(LbfvRelinKeyContribution::default()),
+        };
+
+        assert_eq!(envelope.encode_to_vec(), FIXTURE);
+        assert_eq!(LbfvRelinKeyShare::decode(FIXTURE).unwrap(), envelope);
+    }
 
     #[test]
     fn rlk_share_roundtrip() -> Result<()> {
@@ -510,6 +529,22 @@ mod proto_tests {
         let restored = RelinKeyShare::from_bytes(&bytes, &params)?;
         assert_eq!(restored.ksk_r_to_s, share.ksk_r_to_s);
         assert_eq!(restored.ksk_s_to_r, share.ksk_s_to_r);
+        Ok(())
+    }
+
+    #[test]
+    fn contribution_and_operational_relin_key_wire_types_are_not_interchangeable() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        let d1_seed = <ChaCha8Rng as SeedableRng>::Seed::from([2u8; 32]);
+        let public_key = LBFVPublicKey::new_with_seed(&sk, a_seed, &mut rng)?;
+        let share = RelinKeyShare::contribution(&sk, d1_seed, a_seed, 0, 0, &mut rng)?;
+        let operational = LBFVRelinearizationKey::new(&sk, &public_key, Some(d1_seed), &mut rng)?;
+
+        assert!(RelinKeyShare::from_bytes(&operational.to_bytes(), &params).is_err());
+        assert!(LBFVRelinearizationKey::from_bytes(&share.to_bytes(), &params).is_err());
         Ok(())
     }
 }

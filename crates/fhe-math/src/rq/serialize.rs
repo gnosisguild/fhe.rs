@@ -33,7 +33,10 @@ where
 
     fn from_bytes(bytes: &[u8], ctx: &Arc<Context>) -> Result<Self, Self::Error> {
         check_size(bytes.len())?;
-        let rq: Rq = Message::decode(bytes).map_err(|_| PolynomialSerializationError::Decode)?;
+        let rq: Rq =
+            Message::decode(bytes).map_err(|error| PolynomialSerializationError::Decode {
+                message: error.to_string(),
+            })?;
         Poly::try_convert_from(&rq, ctx, false)
     }
 }
@@ -98,6 +101,25 @@ mod tests {
             err,
             Error::PolynomialSerialization(PolynomialSerializationError::UnknownRepresentation)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn decode_errors_preserve_the_prost_message() -> Result<(), Box<dyn StdError>> {
+        let ctx = Arc::new(Context::new(Q, 16)?);
+        let error = Poly::<PowerBasis>::from_bytes(&[0x0a], &ctx).unwrap_err();
+        let decoded_message =
+            if let Error::PolynomialSerialization(PolynomialSerializationError::Decode {
+                message,
+            }) = error
+            {
+                Some(message)
+            } else {
+                None
+            };
+        assert!(decoded_message.is_some());
+        let message = decoded_message.unwrap_or_default();
+        assert!(!message.is_empty());
         Ok(())
     }
 

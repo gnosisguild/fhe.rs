@@ -375,8 +375,11 @@ pub enum SerializationError {
     },
 
     /// A protobuf payload could not be decoded.
-    #[error("Failed to decode {object:?}")]
-    Decode { object: SerializedObject },
+    #[error("Failed to decode {object:?}: {message}")]
+    Decode {
+        object: SerializedObject,
+        message: String,
+    },
 
     /// A required protobuf field is absent.
     #[error("Missing required field {field:?}")]
@@ -466,6 +469,7 @@ pub enum SerializedField {
     ParametersPlaintextModulus,
     PublicKeyCiphertext,
     PublicKeyShareKey,
+    RelinearizationKeyShareContribution,
     RelinearizationKeySwitchingKey,
     RgswKeySwitchingKey0,
     RgswKeySwitchingKey1,
@@ -674,9 +678,10 @@ mod tests {
         assert_eq!(
             Error::SerializationError(SerializationError::Decode {
                 object: SerializedObject::Ciphertext,
+                message: "invalid wire type".to_string(),
             })
             .to_string(),
-            "Serialization error: Failed to decode Ciphertext"
+            "Serialization error: Failed to decode Ciphertext: invalid wire type"
         );
         assert_eq!(
             Error::ParametersError(ParametersError::invalid_degree_with_bounds(10)).to_string(),
