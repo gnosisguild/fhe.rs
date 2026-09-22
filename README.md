@@ -54,6 +54,10 @@ cargo +nightly fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
+Protobuf schemas and their generated Rust sources are checked in. Normal builds
+compile the checked-in Rust sources and do not require `protoc`. A schema change
+must update its generated Rust source in the same change.
+
 The test parameter profiles are named `insecure`, `secure8192`, and
 `secure16384`. The `insecure` profile provides fast breadth and negative
 coverage only: it uses the supplied degree-512 threshold parameters, degree-512
