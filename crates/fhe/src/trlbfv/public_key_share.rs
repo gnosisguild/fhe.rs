@@ -136,19 +136,25 @@ mod tests {
     use super::*;
     use crate::aggregate::{Aggregate, AggregateIter};
     use crate::bfv::{Encoding, Plaintext, SecretKey};
+    use crate::proto::lbfv::LbfvPublicKeySeeded;
     use crate::support::presets::insecure;
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{SeedableRng, rng};
 
     #[test]
     fn public_key_share_envelope_has_stable_wire_fixture() {
-        const FIXTURE: &[u8] = &[0x0a, 0x06, 0x10, 0x02, 0x1a, 0x02, 0xaa, 0xbb];
+        const FIXTURE: &[u8] = &[
+            0x0a, 0x0b, 0x10, 0x02, 0x2a, 0x07, 0x0a, 0x01, 0xaa, 0x12, 0x02, 0xbb, 0xcc,
+        ];
 
         let envelope = LbfvPublicKeyShare {
             key: Some(LBFVPublicKeyProto {
-                c: Vec::new(),
                 l: 2,
-                seed: vec![0xaa, 0xbb],
+                explicit: None,
+                seeded: Some(LbfvPublicKeySeeded {
+                    b: vec![vec![0xaa]],
+                    seed: vec![0xbb, 0xcc],
+                }),
             }),
         };
 
@@ -205,16 +211,31 @@ mod tests {
         let mut rng = rng();
         let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
-        let crp = CommonRandomPolyVec::new(&params, &mut rng)?;
+        let crp = CommonRandomPolyVec::from_seed(&params, [7u8; 32])?;
         let share = PublicKeyShare::contribute_with_crp(&sk, &crp, &mut rng)?;
 
         assert_eq!(share.key.seed, crp.seed());
         assert_eq!(share.a_components()?, crp.to_polys());
         assert_eq!(share.b_components()?.len(), params.moduli().len());
+        let seeded_bytes = share.to_bytes();
+        let envelope = LbfvPublicKeyShare::decode(seeded_bytes.as_slice()).unwrap();
+        let key = envelope.key.unwrap();
+        assert!(key.explicit.is_none());
+        assert!(key.seeded.is_some());
+        assert_eq!(PublicKeyShare::from_bytes(&seeded_bytes, &params)?, share);
+
+        let explicit = PublicKeyShare::from_parts(
+            share.b_components()?,
+            share.a_components()?,
+            params.clone(),
+            None,
+        )?;
+        let explicit_bytes = explicit.to_bytes();
         assert_eq!(
-            PublicKeyShare::from_bytes(&share.to_bytes(), &params)?,
-            share
+            PublicKeyShare::from_bytes(&explicit_bytes, &params)?,
+            explicit
         );
+        assert!(seeded_bytes.len() < explicit_bytes.len());
         Ok(())
     }
 
