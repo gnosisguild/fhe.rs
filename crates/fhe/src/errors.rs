@@ -468,6 +468,7 @@ pub enum SerializedField {
     GaloisKeySwitchingKey,
     ParametersPlaintextModulus,
     PublicKeyCiphertext,
+    LbfvPublicKeyRepresentation,
     PublicKeyShareKey,
     RelinearizationKeyShareContribution,
     RelinearizationKeySwitchingKey,

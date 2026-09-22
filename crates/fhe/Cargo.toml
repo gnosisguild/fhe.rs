@@ -70,6 +70,10 @@ required-features = ["experimental-mbfv"]
 name = "trbfv_shamir"
 harness = false
 
+[[bench]]
+name = "lbfv_serialization"
+harness = false
+
 [[example]]
 name = "bfv_basic"
 

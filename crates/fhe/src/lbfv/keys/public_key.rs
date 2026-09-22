@@ -14,6 +14,18 @@
  * deserialization time (see [`from_parts`](LBFVPublicKey::from_parts)).
  * A seed that contradicts the concrete polynomials is rejected.
  *
+ * # Wire representations
+ *
+ * Seeded keys serialize only the secret-dependent `b_j` rows and one CRS seed;
+ * deserialization regenerates every concrete `a_j`. Seedless keys serialize
+ * every explicit `(b_j, a_j)` row. The decoder requires exactly one of these
+ * representation fields, so mixed or missing encodings are not accepted.
+ * Payloads produced by the older flat `c`/`l`/`seed` schema are intentionally
+ * rejected.
+ *
+ * The seed is compression metadata, not protocol authentication. Applications
+ * must bind the expected CRS seed to their authenticated protocol context.
+ *
  * # Single-party operational key
  *
  * This module provides a strictly single-party operational public key.
@@ -116,14 +128,12 @@ impl LBFVPublicKey {
         }
 
         let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
-        let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.params.moduli().len());
-        let mut seed_rng = ChaCha8Rng::from_seed(seed);
+        let row_seeds = Self::derive_crs_row_seeds(&sk.params, seed);
+        let mut c: Vec<Ciphertext> = Vec::with_capacity(row_seeds.len());
 
         // Create a vector of ciphertexts, each encrypting zero, for each RNS modulus
         // [(b₁, a₁), ..., (bₗ, aₗ)].
-        for _ in 0..sk.params.moduli().len() {
-            let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
-            seed_rng.fill(&mut seed_i);
+        for seed_i in row_seeds {
             let mut ct = sk.try_encrypt_with_seed(&zero, seed_i, rng)?;
             // The polynomials of a public key should not allow for variable time
             // computation.
@@ -274,16 +284,11 @@ impl LBFVPublicKey {
         }
 
         // When a seed is provided, verify that the supplied a polynomials
-        // match the concrete polynomials the seed would produce. A seed that
-        // is inconsistent with the actual a polynomials would break CRS
-        // consistency downstream (the b_vec and d2 cancellation in the
-        // relinearization key relies on the same CRS a being used).
-        if let Some(ref seed) = seed {
-            let mut seed_rng = ChaCha8Rng::from_seed(*seed);
-            for (j, ct) in c.iter().enumerate() {
-                let mut seed_j = <ChaCha8Rng as SeedableRng>::Seed::default();
-                seed_rng.fill(&mut seed_j);
-                let expected_a = Poly::<Ntt>::random_from_seed(ctx0, seed_j);
+        // match the concrete polynomials the seed would produce. Preserve each
+        // derived row seed as compression metadata on its ciphertext.
+        if let Some(seed) = seed {
+            let derived_crs = Self::derive_crs_rows(&params, seed)?;
+            for (j, (ct, (seed_j, expected_a))) in c.iter_mut().zip(derived_crs).enumerate() {
                 let actual_a = ct.c.get(1).ok_or_else(|| {
                     Error::DefaultError("Ciphertext is missing a component".to_string())
                 })?;
@@ -292,10 +297,36 @@ impl LBFVPublicKey {
                         "Supplied seed does not match the concrete a polynomial at index {j}"
                     )));
                 }
+                ct.seed = Some(seed_j);
             }
         }
 
         Ok(Self { params, c, l, seed })
+    }
+
+    fn derive_crs_rows(
+        params: &Arc<BfvParameters>,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+    ) -> Result<Vec<(<ChaCha8Rng as SeedableRng>::Seed, Poly<Ntt>)>> {
+        let ctx0 = params.context_at_level(0)?;
+        Ok(Self::derive_crs_row_seeds(params, seed)
+            .into_iter()
+            .map(|row_seed| (row_seed, Poly::<Ntt>::random_from_seed(ctx0, row_seed)))
+            .collect())
+    }
+
+    fn derive_crs_row_seeds(
+        params: &BfvParameters,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+    ) -> Vec<<ChaCha8Rng as SeedableRng>::Seed> {
+        let mut seed_rng = ChaCha8Rng::from_seed(seed);
+        (0..params.moduli().len())
+            .map(|_| {
+                let mut row_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+                seed_rng.fill(&mut row_seed);
+                row_seed
+            })
+            .collect()
     }
 
     // ---------------------------------------------------------------------------
@@ -622,16 +653,46 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
 use crate::SerializationError;
 use crate::bfv::traits::TryConvertFrom as BfvTryConvertFrom;
 use crate::proto::bfv::Ciphertext as CiphertextProto;
-use crate::proto::lbfv::LbfvPublicKey as LBFVPublicKeyProto;
-use fhe_traits::{DeserializeParametrized, Serialize};
+use crate::proto::lbfv::{
+    LbfvPublicKey as LBFVPublicKeyProto, LbfvPublicKeyExplicit, LbfvPublicKeySeeded,
+};
+use fhe_traits::{DeserializeParametrized, DeserializeWithContext, Serialize};
 use prost::Message;
 
 impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
     fn from(pk: &LBFVPublicKey) -> Self {
+        debug_assert!(
+            pk.validate_structure().is_ok(),
+            "LBFV public keys must be structurally valid before serialization"
+        );
+        let (explicit, seeded) = match pk.seed {
+            Some(seed) => (
+                None,
+                Some(LbfvPublicKeySeeded {
+                    b: pk
+                        .c
+                        .iter()
+                        .map(|ciphertext| {
+                            ciphertext
+                                .c
+                                .first()
+                                .map_or_else(Vec::new, fhe_traits::Serialize::to_bytes)
+                        })
+                        .collect(),
+                    seed: seed.to_vec(),
+                }),
+            ),
+            None => (
+                Some(LbfvPublicKeyExplicit {
+                    c: pk.c.iter().map(CiphertextProto::from).collect(),
+                }),
+                None,
+            ),
+        };
         LBFVPublicKeyProto {
-            c: pk.c.iter().map(CiphertextProto::from).collect(),
             l: pk.l as u32,
-            seed: pk.seed.map_or_else(Vec::new, |s| s.to_vec()),
+            explicit,
+            seeded,
         }
     }
 }
@@ -647,13 +708,6 @@ impl LBFVPublicKey {
         proto: LBFVPublicKeyProto,
         params: &Arc<BfvParameters>,
     ) -> Result<Self> {
-        if proto.c.is_empty() {
-            return Err(SerializationError::MissingField {
-                field: crate::SerializedField::PublicKeyCiphertext,
-            }
-            .into());
-        }
-
         let proto_l = proto.l as usize;
         let expected_l = params.moduli().len();
 
@@ -668,86 +722,112 @@ impl LBFVPublicKey {
             ));
         }
 
-        // Validate that l matches the number of ciphertexts
-        if proto.c.len() != proto_l {
-            return Err(Error::SerializationError(
-                SerializationError::InvalidFormat {
-                    reason: format!(
-                        "LBFV public-key l={proto_l} does not match the ciphertext count={}",
-                        proto.c.len()
-                    ),
-                },
-            ));
+        match (proto.explicit, proto.seeded) {
+            (Some(explicit), None) => Self::from_explicit_proto(explicit, proto_l, params),
+            (None, Some(seeded)) => Self::from_seeded_proto(seeded, proto_l, params),
+            (None, None) => Err(SerializationError::MissingField {
+                field: crate::SerializedField::LbfvPublicKeyRepresentation,
+            }
+            .into()),
+            (Some(_), Some(_)) => Err(SerializationError::InvalidFormat {
+                reason: "LBFV public key contains both explicit and seeded representations"
+                    .to_string(),
+            }
+            .into()),
+        }
+    }
+
+    fn from_explicit_proto(
+        explicit: LbfvPublicKeyExplicit,
+        expected_l: usize,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
+        if explicit.c.is_empty() {
+            return Err(SerializationError::MissingField {
+                field: crate::SerializedField::PublicKeyCiphertext,
+            }
+            .into());
+        }
+        if explicit.c.len() != expected_l {
+            return Err(SerializationError::InvalidFormat {
+                reason: format!(
+                    "LBFV public-key l={expected_l} does not match the explicit ciphertext count={}",
+                    explicit.c.len()
+                ),
+            }
+            .into());
         }
 
-        let mut c: Vec<Ciphertext> = Vec::with_capacity(proto.c.len());
-        for ct_proto in proto.c {
-            let mut ct = Ciphertext::try_convert_from(&ct_proto, params)?;
-            if ct.level != 0 {
+        let mut ciphertexts = Vec::with_capacity(explicit.c.len());
+        for ciphertext_proto in explicit.c {
+            if !ciphertext_proto.seed.is_empty() {
+                return Err(SerializationError::InvalidFormat {
+                    reason: "Explicit LBFV public-key rows must contain concrete a polynomials"
+                        .to_string(),
+                }
+                .into());
+            }
+            let mut ciphertext = Ciphertext::try_convert_from(&ciphertext_proto, params)?;
+            if ciphertext.level != 0 {
                 return Err(SerializationError::InvalidPublicKeyLevel {
-                    actual: ct.level,
+                    actual: ciphertext.level,
                     expected: 0,
                 }
                 .into());
             }
-            // The polynomials of a public key should not allow for variable time
-            // computation.
-            ct.c.iter_mut()
-                .for_each(|p| p.disallow_variable_time_computations());
-            c.push(ct);
+            ciphertext
+                .c
+                .iter_mut()
+                .for_each(|polynomial| polynomial.disallow_variable_time_computations());
+            ciphertexts.push(ciphertext);
         }
-
-        // Import the seed if it exists
-        let seed = if !proto.seed.is_empty() {
-            let mut seed_array = <ChaCha8Rng as SeedableRng>::Seed::default();
-            if proto.seed.len() != seed_array.len() {
-                return Err(SerializationError::InvalidPublicKeySeedLength {
-                    actual: proto.seed.len(),
-                    expected: seed_array.len(),
-                }
-                .into());
-            }
-            seed_array.copy_from_slice(&proto.seed);
-            Some(seed_array)
-        } else {
-            None
-        };
 
         let key = Self {
             params: params.clone(),
-            c,
-            l: proto.l as usize,
-            seed,
+            c: ciphertexts,
+            l: expected_l,
+            seed: None,
         };
+        key.validate_structure()?;
+        Ok(key)
+    }
 
-        // Validate that the seed, when present, reproduces the concrete a
-        // polynomials. A mismatched seed breaks CRS consistency downstream.
-        if let Some(ref seed) = key.seed {
-            let ctx0 = key.params.context_at_level(0)?;
-            let mut seed_rng = ChaCha8Rng::from_seed(*seed);
-            for (j, ct) in key.c.iter().enumerate() {
-                let mut seed_j = <ChaCha8Rng as SeedableRng>::Seed::default();
-                seed_rng.fill(&mut seed_j);
-                let expected_a = Poly::<Ntt>::random_from_seed(ctx0, seed_j);
-                let actual_a = ct.c.get(1).ok_or_else(|| {
-                    Error::DefaultError("Ciphertext is missing a component".to_string())
-                })?;
-                if expected_a != *actual_a {
-                    return Err(Error::SerializationError(
-                        crate::SerializationError::InvalidFormat {
-                            reason: format!(
-                                "Tampered seed: derived a_j does not match serialized a_j at index {j}"
-                            ),
-                        },
-                    ));
-                }
+    fn from_seeded_proto(
+        seeded: LbfvPublicKeySeeded,
+        expected_l: usize,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
+        if seeded.b.len() != expected_l {
+            return Err(SerializationError::InvalidFormat {
+                reason: format!(
+                    "LBFV public-key l={expected_l} does not match the seeded b-row count={}",
+                    seeded.b.len()
+                ),
             }
+            .into());
         }
 
-        // Structural validation before returning
-        key.validate_structure()?;
+        let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
+        if seeded.seed.len() != seed.len() {
+            return Err(SerializationError::InvalidPublicKeySeedLength {
+                actual: seeded.seed.len(),
+                expected: seed.len(),
+            }
+            .into());
+        }
+        seed.copy_from_slice(&seeded.seed);
 
-        Ok(key)
+        let ctx0 = params.context_at_level(0)?;
+        let b_polynomials = seeded
+            .b
+            .iter()
+            .map(|bytes| Poly::<Ntt>::from_bytes(bytes, ctx0).map_err(Error::from))
+            .collect::<Result<Vec<_>>>()?;
+        let a_polynomials = Self::derive_crs_rows(params, seed)?
+            .into_iter()
+            .map(|(_, polynomial)| polynomial)
+            .collect();
+        Self::from_parts(b_polynomials, a_polynomials, params.clone(), Some(seed))
     }
 }
 
@@ -820,9 +900,19 @@ mod tests {
         Ok(())
     }
 
-    use crate::proto::lbfv::LbfvPublicKey as LBFVPublicKeyProto;
+    use crate::proto::lbfv::{LbfvPublicKey as LBFVPublicKeyProto, LbfvPublicKeyExplicit};
     use fhe_traits::{DeserializeParametrized, Serialize};
     use prost::Message;
+
+    #[derive(Clone, PartialEq, Message)]
+    struct LegacyLbfvPublicKey {
+        #[prost(message, repeated, tag = "1")]
+        c: Vec<crate::proto::bfv::Ciphertext>,
+        #[prost(uint32, tag = "2")]
+        l: u32,
+        #[prost(bytes = "vec", tag = "3")]
+        seed: Vec<u8>,
+    }
 
     /// `try_encrypt` and `try_encrypt_extended` must sample `e1` from the
     /// configured `error1_variance`, independently of `variance` (used for
@@ -924,42 +1014,116 @@ mod tests {
         let bytes = proto.encode_to_vec();
         assert!(LBFVPublicKey::from_bytes(&bytes, &params).is_err());
 
-        // Also test: l doesn't match ciphertext count
+        // Also test: l doesn't match the seeded b-row count.
         let mut proto2: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
-        proto2.c.pop(); // Remove one ciphertext but leave l unchanged
+        let Some(seeded) = proto2.seeded.as_mut() else {
+            return Err("expected seeded public-key representation".into());
+        };
+        seeded.b.pop();
         let bytes2 = proto2.encode_to_vec();
         assert!(LBFVPublicKey::from_bytes(&bytes2, &params).is_err());
 
         Ok(())
     }
 
-    /// A serialized public key with a tampered seed that does not match the
-    /// concrete `a` polynomials must be rejected during deserialization.
+    /// Seeded and explicit representations must both round-trip. The seeded
+    /// representation must omit the concrete `a` rows and therefore be smaller.
     #[test]
-    fn test_tampered_seed_rejected() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn seeded_and_explicit_serialization_roundtrip() -> std::result::Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let seeded = LBFVPublicKey::new(&sk, &mut rng)?;
+        let seeded_bytes = seeded.to_bytes();
+        assert_eq!(LBFVPublicKey::from_bytes(&seeded_bytes, &params)?, seeded);
+
+        let b_polynomials = seeded.c.iter().map(|ct| ct.c[0].clone()).collect();
+        let a_polynomials = seeded.c.iter().map(|ct| ct.c[1].clone()).collect();
+        let explicit =
+            LBFVPublicKey::from_parts(b_polynomials, a_polynomials, params.clone(), None)?;
+        let explicit_bytes = explicit.to_bytes();
+        assert_eq!(
+            LBFVPublicKey::from_bytes(&explicit_bytes, &params)?,
+            explicit
+        );
+        assert!(seeded_bytes.len() < explicit_bytes.len());
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_seeded_representation_is_rejected() -> std::result::Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
         let pk = LBFVPublicKey::new(&sk, &mut rng)?;
-
-        // Serialize the valid PK to proto, then replace the seed with a
-        // different one that does not reproduce the concrete a_j.
-        let mut proto: LBFVPublicKeyProto = LBFVPublicKeyProto::from(&pk);
-        proto.seed = vec![0u8; 32]; // A seed that does not match the a_j
+        let mut proto = LBFVPublicKeyProto::from(&pk);
+        let Some(seeded) = proto.seeded.as_mut() else {
+            return Err("expected seeded public-key representation".into());
+        };
+        seeded.seed.pop();
 
         let bytes = proto.encode_to_vec();
-        assert!(
-            LBFVPublicKey::from_bytes(&bytes, &params).is_err(),
-            "PK deserialization must reject a tampered seed"
-        );
+        assert!(LBFVPublicKey::from_bytes(&bytes, &params).is_err());
+        Ok(())
+    }
 
-        // A seedless PK with no seed must still be accepted.
-        let mut seedless_proto = LBFVPublicKeyProto::from(&pk);
-        seedless_proto.seed.clear();
-        let seedless_bytes = seedless_proto.encode_to_vec();
-        let seedless_pk = LBFVPublicKey::from_bytes(&seedless_bytes, &params)?;
-        assert!(seedless_pk.seed.is_none(), "Seedless PK must carry no seed");
+    #[test]
+    fn ambiguous_public_key_representation_is_rejected() -> std::result::Result<(), Box<dyn Error>>
+    {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let mut proto = LBFVPublicKeyProto::from(&LBFVPublicKey::new(&sk, &mut rng)?);
+        proto.explicit = Some(LbfvPublicKeyExplicit::default());
 
+        assert!(LBFVPublicKey::from_bytes(&proto.encode_to_vec(), &params).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_representation_rejects_seeded_rows() -> std::result::Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let seeded = LBFVPublicKey::new(&sk, &mut rng)?;
+        let explicit = LBFVPublicKey::from_parts(
+            seeded.c.iter().map(|ct| ct.c[0].clone()).collect(),
+            seeded.c.iter().map(|ct| ct.c[1].clone()).collect(),
+            params.clone(),
+            None,
+        )?;
+        let mut proto = LBFVPublicKeyProto::from(&explicit);
+        let Some(first_row) = proto
+            .explicit
+            .as_mut()
+            .and_then(|representation| representation.c.first_mut())
+        else {
+            return Err("expected explicit public-key row".into());
+        };
+        first_row.c.pop();
+        first_row.seed = vec![0x55; 32];
+
+        assert!(LBFVPublicKey::from_bytes(&proto.encode_to_vec(), &params).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_flat_public_key_payload_is_rejected() -> std::result::Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+        let legacy = LegacyLbfvPublicKey {
+            c: pk
+                .c
+                .iter()
+                .map(crate::proto::bfv::Ciphertext::from)
+                .collect(),
+            l: pk.l as u32,
+            seed: pk.seed.map_or_else(Vec::new, |seed| seed.to_vec()),
+        };
+
+        assert!(LBFVPublicKey::from_bytes(&legacy.encode_to_vec(), &params).is_err());
         Ok(())
     }
 

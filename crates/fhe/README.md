@@ -83,6 +83,22 @@ cargo run --release --example mulpir
 
 Micro benchmarks can be obtained by running `cargo bench`. This crate uses [criterion.rs](https://criterion.rs) for benchmarks.
 
+The l-BFV serialization benchmark compares seeded and explicit public-key
+representations:
+
+```bash
+cargo bench -p fhe --bench lbfv_serialization
+```
+
+For the repository's degree-16384, five-modulus profile, an operational public
+key is 2,611,311 bytes in seeded form and 5,222,567 bytes in explicit form.
+The corresponding contribution envelopes are 2,611,316 and 5,222,572 bytes.
+The seed is compression metadata; protocol implementations must authenticate
+the expected CRS independently. Seeded operational keys and public-key
+contributions use the compact form canonically. Payloads from the former flat
+`c`/`l`/`seed` schema are rejected; applications own persistence and protocol
+version migration.
+
 ## Unit tests
 
 Run tests with `cargo test`.
