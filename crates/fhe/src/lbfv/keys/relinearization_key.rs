@@ -58,6 +58,45 @@ pub struct LBFVRelinearizationKey {
 }
 
 impl LBFVRelinearizationKey {
+    /// Reconstruct the level-0 public key embedded in this relinearization key.
+    ///
+    /// The relinearization key carries the public key's secret-dependent `b`
+    /// rows in `b_vec` and the same CRS `a` rows in its `s -> r` key-switching
+    /// key. This operation is intentionally restricted to level 0 because a
+    /// leveled relinearization key does not retain enough information to recover
+    /// the original full-level public key. The reconstructed key retains the
+    /// CRS seed when the relinearization key carries it; otherwise it uses the
+    /// explicit, seedless representation of the same concrete polynomials.
+    pub fn reconstruct_public_key(&self) -> Result<LBFVPublicKey> {
+        if self.ciphertext_level() != 0 || self.key_level() != 0 {
+            return Err(Error::DefaultError(
+                "Reconstructing an LBFV public key requires a level-0 relinearization key"
+                    .to_string(),
+            ));
+        }
+
+        let b_polynomials = self
+            .b_vec
+            .iter()
+            .cloned()
+            .map(Poly::<NttShoup>::into_ntt)
+            .collect();
+        let a_polynomials = self
+            .ksk_s_to_r
+            .c1
+            .iter()
+            .cloned()
+            .map(Poly::<NttShoup>::into_ntt)
+            .collect();
+
+        LBFVPublicKey::from_parts(
+            b_polynomials,
+            a_polynomials,
+            self.parameters(),
+            self.ksk_s_to_r.seed,
+        )
+    }
+
     /// Return the secret-dependent `d0` components in gadget-row order.
     #[must_use]
     pub fn d0_components(&self) -> &[Poly<NttShoup>] {
@@ -944,6 +983,16 @@ mod tests {
 
     use fhe_traits::{DeserializeParametrized, Serialize};
 
+    fn assert_same_key_material(left: &LBFVPublicKey, right: &LBFVPublicKey) {
+        assert_eq!(left.parameters(), right.parameters());
+        assert_eq!(left.row_count(), right.row_count());
+        assert_eq!(left.rows().len(), right.rows().len());
+        for (left_row, right_row) in left.rows().iter().zip(right.rows()) {
+            assert_eq!(left_row.level, right_row.level);
+            assert!(left_row.iter().eq(right_row.iter()));
+        }
+    }
+
     #[test]
     fn test_serialize_deserialize() -> Result<(), Box<dyn std::error::Error>> {
         let mut rng = rng();
@@ -967,6 +1016,9 @@ mod tests {
         assert_eq!(deserialized_key.a_components().len(), pk.row_count());
         assert_eq!(deserialized_key.b_components().len(), pk.row_count());
         assert_eq!(deserialized_key.decomposition_log_base(), 0);
+        let reconstructed_pk = deserialized_key.reconstruct_public_key()?;
+        assert_same_key_material(&pk, &reconstructed_pk);
+        assert_eq!(reconstructed_pk, pk);
 
         // Test that the deserialized key works correctly
         let pt = Plaintext::try_encode(&[2u64], Encoding::poly(), &params)?;
@@ -1057,6 +1109,12 @@ mod tests {
         let explicit_d1_key = LBFVRelinearizationKey::new_leveled_with_polys(
             &sk, &seedless, d1_polys, 0, 0, &mut rng,
         )?;
+        let generated_reconstruction = generated_d1_key.reconstruct_public_key()?;
+        let explicit_reconstruction = explicit_d1_key.reconstruct_public_key()?;
+        assert_same_key_material(&seedless, &generated_reconstruction);
+        assert_same_key_material(&seedless, &explicit_reconstruction);
+        assert_eq!(generated_reconstruction, seedless);
+        assert_eq!(explicit_reconstruction, seedless);
 
         let plaintext = Plaintext::try_encode(&[3u64], Encoding::poly(), &params)?;
         let ciphertext = seedless.try_encrypt(&plaintext, &mut rng)?;
@@ -1074,6 +1132,59 @@ mod tests {
             9
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn public_key_reconstruction_rejects_leveled_keys() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new_with_seed(&sk, [71u8; 32], &mut rng)?;
+        let leveled =
+            LBFVRelinearizationKey::new_leveled(&sk, &pk, Some([72u8; 32]), 1, 0, &mut rng)?;
+
+        assert!(leveled.reconstruct_public_key().is_err());
+
+        let (ksk_r_to_s, ksk_s_to_r) = LBFVRelinearizationKey::generate_components_with_seed(
+            &sk, [73u8; 32], [74u8; 32], 1, 1, &mut rng,
+        )?;
+        let b_vec = ksk_r_to_s.c0.to_vec();
+        let fully_leveled = LBFVRelinearizationKey::from_components(ksk_r_to_s, ksk_s_to_r, b_vec)?;
+        assert!(fully_leveled.reconstruct_public_key().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn public_key_reconstruction_preserves_rows_across_seed_representations()
+    -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let seeded_pk = LBFVPublicKey::new_with_seed(&sk, [76u8; 32], &mut rng)?;
+        let seedless_pk = LBFVPublicKey::from_parts(
+            seeded_pk
+                .rows()
+                .iter()
+                .map(|row| row.first().cloned())
+                .collect::<Option<_>>()
+                .ok_or("missing public-key b polynomial")?,
+            seeded_pk
+                .rows()
+                .iter()
+                .map(|row| row.get(1).cloned())
+                .collect::<Option<_>>()
+                .ok_or("missing public-key a polynomial")?,
+            params.clone(),
+            None,
+        )?;
+
+        let seeded_rlk = LBFVRelinearizationKey::new(&sk, &seeded_pk, Some([77u8; 32]), &mut rng)?;
+        let seedless_rlk =
+            LBFVRelinearizationKey::new(&sk, &seedless_pk, Some([78u8; 32]), &mut rng)?;
+
+        assert_same_key_material(&seedless_pk, &seeded_rlk.reconstruct_public_key()?);
+        assert_same_key_material(&seeded_pk, &seedless_rlk.reconstruct_public_key()?);
         Ok(())
     }
 

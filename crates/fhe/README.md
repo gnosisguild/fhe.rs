@@ -99,6 +99,13 @@ contributions use the compact form canonically. Payloads from the former flat
 `c`/`l`/`seed` schema are rejected; applications own persistence and protocol
 version migration.
 
+A level-0 `LBFVRelinearizationKey` already contains the public key's `b` rows
+and CRS `a` rows. `LBFVRelinearizationKey::reconstruct_public_key` rebuilds the
+typed public key from that material. This allows application protocols to
+transport the relinearization key once rather than duplicate the public-key
+rows. Comparison against existing commitments, combined envelopes, availability
+references, and protocol versioning remain application responsibilities.
+
 ## Unit tests
 
 Run tests with `cargo test`.
