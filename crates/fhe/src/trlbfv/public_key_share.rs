@@ -119,13 +119,13 @@ impl DeserializeParametrized for PublicKeyShare {
     fn from_bytes(bytes: &[u8], params: &Arc<BfvParameters>) -> Result<Self> {
         let envelope: LbfvPublicKeyShare =
             crate::serialization::decode(bytes, SerializedObject::TrlbfvPublicKeyShare)?;
-        let key = envelope.key.ok_or({
-            Error::SerializationError(SerializationError::MissingField {
+        let key = envelope.key.ok_or(Error::SerializationError(
+            SerializationError::MissingField {
                 field: SerializedField::PublicKeyShareKey,
-            })
-        })?;
+            },
+        ))?;
         Ok(Self {
-            key: LBFVPublicKey::from_bytes(&key.encode_to_vec(), params)?,
+            key: LBFVPublicKey::from_proto(key, params)?,
         })
     }
 }
@@ -139,6 +139,22 @@ mod tests {
     use crate::support::presets::insecure;
     use fhe_traits::{FheDecrypter, FheEncoder, FheEncrypter};
     use rand::{SeedableRng, rng};
+
+    #[test]
+    fn public_key_share_envelope_has_stable_wire_fixture() {
+        const FIXTURE: &[u8] = &[0x0a, 0x06, 0x10, 0x02, 0x1a, 0x02, 0xaa, 0xbb];
+
+        let envelope = LbfvPublicKeyShare {
+            key: Some(LBFVPublicKeyProto {
+                c: Vec::new(),
+                l: 2,
+                seed: vec![0xaa, 0xbb],
+            }),
+        };
+
+        assert_eq!(envelope.encode_to_vec(), FIXTURE);
+        assert_eq!(LbfvPublicKeyShare::decode(FIXTURE).unwrap(), envelope);
+    }
 
     #[test]
     fn contributions_aggregate_into_operational_key() -> Result<()> {

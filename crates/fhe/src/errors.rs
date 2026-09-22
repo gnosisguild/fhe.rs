@@ -433,10 +433,6 @@ pub enum SerializationError {
     /// Indicates invalid serialized data format
     #[error("Invalid serialized format: {reason}")]
     InvalidFormat { reason: String },
-
-    /// Indicates protobuf encoding/decoding error
-    #[error("Protobuf error: {message}")]
-    ProtobufError { message: String },
 }
 
 impl From<std::io::Error> for SerializationError {
@@ -450,21 +446,15 @@ impl From<std::io::Error> for SerializationError {
 #[non_exhaustive]
 pub enum SerializedObject {
     Ciphertext,
-    CommonRandomPoly,
-    DecryptionShare,
     EvaluationKey,
     LbfvPublicKey,
     LbfvRelinearizationKey,
-    MbfvDecryptionShare,
-    MbfvPublicKeyShare,
-    MbfvSecretKeySwitchShare,
     Parameters,
     PublicKey,
     RelinearizationKey,
     RelinearizationKeyShare,
     RgswCiphertext,
     SecretKey,
-    SecretKeySwitchShare,
     TrlbfvPublicKeyShare,
 }
 

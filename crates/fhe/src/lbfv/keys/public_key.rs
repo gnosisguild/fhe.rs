@@ -7,7 +7,7 @@
  * `a_j` polynomials are the authoritative shared reference string (CRS):
  * equality checks compare the actual polynomial coefficients, never seeds alone.
  *
- * The [`seed`](LBFVPublicKey::seed) field is optional compression
+ * The value returned by [`seed`](LBFVPublicKey::seed) is optional compression
  * metadata: it records the seed that *would* regenerate the same `a_j`
  * polynomials, making serialization smaller.  When present, it is
  * verified against the concrete polynomials at construction and
@@ -74,8 +74,14 @@ impl LBFVPublicKey {
 
     /// Return the BFV parameters for this public key.
     #[must_use]
-    pub fn parameters(&self) -> Arc<BfvParameters> {
-        self.params.clone()
+    pub const fn parameters(&self) -> &Arc<BfvParameters> {
+        &self.params
+    }
+
+    /// Return the seed that reproduces the concrete CRS polynomials, if stored.
+    #[must_use]
+    pub const fn seed(&self) -> Option<<ChaCha8Rng as SeedableRng>::Seed> {
+        self.seed
     }
 
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a provided
@@ -636,13 +642,11 @@ impl Serialize for LBFVPublicKey {
     }
 }
 
-impl DeserializeParametrized for LBFVPublicKey {
-    type Error = Error;
-
-    fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
-        let proto: LBFVPublicKeyProto =
-            crate::serialization::decode(bytes, crate::SerializedObject::LbfvPublicKey)?;
-
+impl LBFVPublicKey {
+    pub(crate) fn from_proto(
+        proto: LBFVPublicKeyProto,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
         if proto.c.is_empty() {
             return Err(SerializationError::MissingField {
                 field: crate::SerializedField::PublicKeyCiphertext,
@@ -744,6 +748,15 @@ impl DeserializeParametrized for LBFVPublicKey {
         key.validate_structure()?;
 
         Ok(key)
+    }
+}
+
+impl DeserializeParametrized for LBFVPublicKey {
+    type Error = Error;
+
+    fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
+        let proto = crate::serialization::decode(bytes, crate::SerializedObject::LbfvPublicKey)?;
+        Self::from_proto(proto, params)
     }
 }
 #[cfg(test)]

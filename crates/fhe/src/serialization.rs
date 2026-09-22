@@ -3,22 +3,19 @@
 use prost::Message;
 
 use crate::{Error, SerializationError, SerializedObject};
+use fhe_traits::MAX_SERIALIZED_BYTES;
 
-/// Maximum size accepted for one serialized FHE object before Protobuf
-/// decoding allocates nested fields.
+/// Reject an oversized payload before Protobuf decoding.
 ///
-/// This is a coarse outer bound. Individual deserializers must still validate
-/// context-derived dimensions, row counts, seed lengths, and semantic
-/// invariants after decoding.
-pub(crate) const MAX_SERIALIZED_BYTES: usize = 256 * 1024 * 1024;
-
-/// Reject an oversized payload before the Protobuf decoder allocates from its
-/// length-delimited fields.
-pub(crate) fn check_size(bytes: &[u8], object: SerializedObject) -> Result<(), Error> {
-    if bytes.len() > MAX_SERIALIZED_BYTES {
+/// Prost checks each length-delimited field against the remaining input. This
+/// outer bound instead limits total decoder work and memory use. Decoded
+/// repeated fields can use substantially more memory than their encoded bytes,
+/// so individual deserializers must still validate object structure.
+pub(crate) fn check_size(actual: usize, object: SerializedObject) -> Result<(), Error> {
+    if actual > MAX_SERIALIZED_BYTES {
         return Err(SerializationError::PayloadTooLarge {
             object,
-            actual: bytes.len(),
+            actual,
             maximum: MAX_SERIALIZED_BYTES,
         }
         .into());
@@ -31,7 +28,7 @@ pub(crate) fn decode<T: Message + Default>(
     bytes: &[u8],
     object: SerializedObject,
 ) -> Result<T, Error> {
-    check_size(bytes, object)?;
+    check_size(bytes.len(), object)?;
     T::decode(bytes).map_err(|_| SerializationError::Decode { object }.into())
 }
 
@@ -58,8 +55,7 @@ mod tests {
 
     #[test]
     fn rejects_payloads_over_the_common_limit() {
-        let bytes = vec![0; MAX_SERIALIZED_BYTES + 1];
-        let error = check_size(&bytes, SerializedObject::Ciphertext).unwrap_err();
+        let error = check_size(MAX_SERIALIZED_BYTES + 1, SerializedObject::Ciphertext).unwrap_err();
         assert_eq!(
             error,
             Error::SerializationError(SerializationError::PayloadTooLarge {

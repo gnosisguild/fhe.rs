@@ -4,10 +4,8 @@ use std::sync::Arc;
 
 use super::{Context, Poly, RepresentationTag, traits::TryConvertFrom};
 use crate::{Error, PolynomialSerializationError, proto::rq::Rq};
-use fhe_traits::{DeserializeWithContext, Serialize};
+use fhe_traits::{DeserializeWithContext, MAX_SERIALIZED_BYTES, Serialize};
 use prost::Message;
-
-const MAX_SERIALIZED_BYTES: usize = 256 * 1024 * 1024;
 
 fn check_size(actual: usize) -> Result<(), Error> {
     if actual > MAX_SERIALIZED_BYTES {
