@@ -508,9 +508,29 @@ mod proto_tests {
 
     #[test]
     fn relin_key_share_envelope_has_stable_wire_fixture() {
-        const FIXTURE: &[u8] = &[0x0a, 0x00];
+        const FIXTURE: &[u8] = &[
+            0x0a, 0x19, 0x0a, 0x0c, 0x0a, 0x01, 0xaa, 0x1a, 0x01, 0xcc, 0x20, 0x01, 0x28, 0x02,
+            0x30, 0x03, 0x12, 0x09, 0x12, 0x01, 0xbb, 0x20, 0x04, 0x28, 0x05, 0x30, 0x06,
+        ];
         let envelope = LbfvRelinKeyShare {
-            contribution: Some(LbfvRelinKeyContribution::default()),
+            contribution: Some(LbfvRelinKeyContribution {
+                ksk_r_to_s: Some(KeySwitchingKeyProto {
+                    c0: vec![vec![0xaa]],
+                    c1: Vec::new(),
+                    seed: vec![0xcc],
+                    ciphertext_level: 1,
+                    ksk_level: 2,
+                    log_base: 3,
+                }),
+                ksk_s_to_r: Some(KeySwitchingKeyProto {
+                    c0: Vec::new(),
+                    c1: vec![vec![0xbb]],
+                    seed: Vec::new(),
+                    ciphertext_level: 4,
+                    ksk_level: 5,
+                    log_base: 6,
+                }),
+            }),
         };
 
         assert_eq!(envelope.encode_to_vec(), FIXTURE);

@@ -1,0 +1,12 @@
+[workspace]
+
+[package]
+name = "fhe-proto-gen"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.91.1"
+publish = false
+
+[dependencies]
+prost-build = "=0.14.4"
+protoc-bin-vendored = "=3.2.0"

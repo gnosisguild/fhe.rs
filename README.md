@@ -56,7 +56,13 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 Protobuf schemas and their generated Rust sources are checked in. Normal builds
 compile the checked-in Rust sources and do not require `protoc`. A schema change
-must update its generated Rust source in the same change.
+must update its generated Rust source in the same change. Regenerate all sources
+with the pinned `prost-build` 0.14.4 and vendored `protoc` 31.1 toolchain by
+running:
+
+```bash
+./scripts/regenerate-protos.sh
+```
 
 The test parameter profiles are named `insecure`, `secure8192`, and
 `secure16384`. The `insecure` profile provides fast breadth and negative

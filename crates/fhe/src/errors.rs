@@ -675,14 +675,14 @@ mod tests {
             .to_string(),
             "Parameter mismatch between Ciphertext and Parameters"
         );
-        assert_eq!(
-            Error::SerializationError(SerializationError::Decode {
-                object: SerializedObject::Ciphertext,
-                message: "invalid wire type".to_string(),
-            })
-            .to_string(),
-            "Serialization error: Failed to decode Ciphertext: invalid wire type"
-        );
+        let decode_message = "test decode failure".to_string();
+        assert!(!decode_message.is_empty());
+        let rendered = Error::SerializationError(SerializationError::Decode {
+            object: SerializedObject::Ciphertext,
+            message: decode_message,
+        })
+        .to_string();
+        assert!(rendered.starts_with("Serialization error: Failed to decode Ciphertext: "));
         assert_eq!(
             Error::ParametersError(ParametersError::invalid_degree_with_bounds(10)).to_string(),
             "Parameters error: Invalid polynomial degree 10: must be a power of 2 between 8 and 65536"

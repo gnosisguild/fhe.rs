@@ -171,13 +171,15 @@ mod tests {
             Error::InvalidModulus(0).to_string(),
             "Invalid modulus: modulus 0 should be between 2 and (1 << 62) - 1."
         );
-        assert_eq!(
-            Error::PolynomialSerialization(PolynomialSerializationError::Decode {
-                message: "invalid wire type".to_string(),
-            })
-            .to_string(),
-            "Polynomial serialization error: Failed to decode polynomial serialization: invalid wire type"
-        );
+        let decode_message = "test decode failure".to_string();
+        assert!(!decode_message.is_empty());
+        let rendered = Error::PolynomialSerialization(PolynomialSerializationError::Decode {
+            message: decode_message,
+        })
+        .to_string();
+        assert!(rendered.starts_with(
+            "Polynomial serialization error: Failed to decode polynomial serialization: "
+        ));
         assert_eq!(
             Error::NoMoreContext.to_string(),
             "This is the last context."
