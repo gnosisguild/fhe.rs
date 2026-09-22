@@ -101,12 +101,10 @@ version migration.
 
 A level-0 `LBFVRelinearizationKey` already contains the public key's `b` rows
 and CRS `a` rows. `LBFVRelinearizationKey::reconstruct_public_key` rebuilds the
-typed public key from that material, while `validate_public_key` checks an
-existing key against the authoritative polynomial rows without treating its
-optional compression seed as authentication. This allows application protocols
-to transport the relinearization key once rather than duplicate the public-key
-rows. Combined envelopes, commitments, availability references, and protocol
-versioning remain application responsibilities.
+typed public key from that material. This allows application protocols to
+transport the relinearization key once rather than duplicate the public-key
+rows. Comparison against existing commitments, combined envelopes, availability
+references, and protocol versioning remain application responsibilities.
 
 ## Unit tests
 

@@ -97,34 +97,6 @@ impl LBFVRelinearizationKey {
         )
     }
 
-    /// Validate that a level-0 public key contains the same parameters and
-    /// concrete `(b, a)` rows embedded in this relinearization key.
-    ///
-    /// Compression seeds are metadata and are deliberately not compared. A
-    /// seeded key and a seedless key are consistent when their authoritative
-    /// polynomial rows are identical.
-    pub fn validate_public_key(&self, public_key: &LBFVPublicKey) -> Result<()> {
-        public_key.validate_structure()?;
-        let reconstructed = self.reconstruct_public_key()?;
-        let rows_match = reconstructed
-            .c
-            .iter()
-            .zip(&public_key.c)
-            .all(|(left, right)| left.level == right.level && left.c == right.c);
-
-        if reconstructed.params != public_key.params
-            || reconstructed.l != public_key.l
-            || reconstructed.c.len() != public_key.c.len()
-            || !rows_match
-        {
-            return Err(Error::DefaultError(
-                "LBFV public and relinearization keys contain inconsistent public-key material"
-                    .to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     /// Return the secret-dependent `d0` components in gadget-row order.
     #[must_use]
     pub fn d0_components(&self) -> &[Poly<NttShoup>] {
@@ -1011,6 +983,16 @@ mod tests {
 
     use fhe_traits::{DeserializeParametrized, Serialize};
 
+    fn assert_same_key_material(left: &LBFVPublicKey, right: &LBFVPublicKey) {
+        assert_eq!(left.parameters(), right.parameters());
+        assert_eq!(left.row_count(), right.row_count());
+        assert_eq!(left.rows().len(), right.rows().len());
+        for (left_row, right_row) in left.rows().iter().zip(right.rows()) {
+            assert_eq!(left_row.level, right_row.level);
+            assert!(left_row.iter().eq(right_row.iter()));
+        }
+    }
+
     #[test]
     fn test_serialize_deserialize() -> Result<(), Box<dyn std::error::Error>> {
         let mut rng = rng();
@@ -1034,8 +1016,9 @@ mod tests {
         assert_eq!(deserialized_key.a_components().len(), pk.row_count());
         assert_eq!(deserialized_key.b_components().len(), pk.row_count());
         assert_eq!(deserialized_key.decomposition_log_base(), 0);
-        deserialized_key.validate_public_key(&pk)?;
-        assert_eq!(deserialized_key.reconstruct_public_key()?, pk);
+        let reconstructed_pk = deserialized_key.reconstruct_public_key()?;
+        assert_same_key_material(&pk, &reconstructed_pk);
+        assert_eq!(reconstructed_pk, pk);
 
         // Test that the deserialized key works correctly
         let pt = Plaintext::try_encode(&[2u64], Encoding::poly(), &params)?;
@@ -1126,10 +1109,12 @@ mod tests {
         let explicit_d1_key = LBFVRelinearizationKey::new_leveled_with_polys(
             &sk, &seedless, d1_polys, 0, 0, &mut rng,
         )?;
-        assert_eq!(generated_d1_key.reconstruct_public_key()?, seedless);
-        assert_eq!(explicit_d1_key.reconstruct_public_key()?, seedless);
-        generated_d1_key.validate_public_key(&seedless)?;
-        explicit_d1_key.validate_public_key(&seedless)?;
+        let generated_reconstruction = generated_d1_key.reconstruct_public_key()?;
+        let explicit_reconstruction = explicit_d1_key.reconstruct_public_key()?;
+        assert_same_key_material(&seedless, &generated_reconstruction);
+        assert_same_key_material(&seedless, &explicit_reconstruction);
+        assert_eq!(generated_reconstruction, seedless);
+        assert_eq!(explicit_reconstruction, seedless);
 
         let plaintext = Plaintext::try_encode(&[3u64], Encoding::poly(), &params)?;
         let ciphertext = seedless.try_encrypt(&plaintext, &mut rng)?;
@@ -1160,19 +1145,46 @@ mod tests {
             LBFVRelinearizationKey::new_leveled(&sk, &pk, Some([72u8; 32]), 1, 0, &mut rng)?;
 
         assert!(leveled.reconstruct_public_key().is_err());
+
+        let (ksk_r_to_s, ksk_s_to_r) = LBFVRelinearizationKey::generate_components_with_seed(
+            &sk, [73u8; 32], [74u8; 32], 1, 1, &mut rng,
+        )?;
+        let b_vec = ksk_r_to_s.c0.to_vec();
+        let fully_leveled = LBFVRelinearizationKey::from_components(ksk_r_to_s, ksk_s_to_r, b_vec)?;
+        assert!(fully_leveled.reconstruct_public_key().is_err());
         Ok(())
     }
 
     #[test]
-    fn public_key_validation_rejects_different_b_rows() -> Result<(), Box<dyn Error>> {
+    fn public_key_reconstruction_preserves_rows_across_seed_representations()
+    -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = LBFVPublicKey::new_with_seed(&sk, [81u8; 32], &mut rng)?;
-        let relin_key = LBFVRelinearizationKey::new(&sk, &pk, Some([82u8; 32]), &mut rng)?;
-        let different_pk = LBFVPublicKey::new_with_seed(&sk, [81u8; 32], &mut rng)?;
+        let seeded_pk = LBFVPublicKey::new_with_seed(&sk, [76u8; 32], &mut rng)?;
+        let seedless_pk = LBFVPublicKey::from_parts(
+            seeded_pk
+                .rows()
+                .iter()
+                .map(|row| row.first().cloned())
+                .collect::<Option<_>>()
+                .ok_or("missing public-key b polynomial")?,
+            seeded_pk
+                .rows()
+                .iter()
+                .map(|row| row.get(1).cloned())
+                .collect::<Option<_>>()
+                .ok_or("missing public-key a polynomial")?,
+            params.clone(),
+            None,
+        )?;
 
-        assert!(relin_key.validate_public_key(&different_pk).is_err());
+        let seeded_rlk = LBFVRelinearizationKey::new(&sk, &seeded_pk, Some([77u8; 32]), &mut rng)?;
+        let seedless_rlk =
+            LBFVRelinearizationKey::new(&sk, &seedless_pk, Some([78u8; 32]), &mut rng)?;
+
+        assert_same_key_material(&seedless_pk, &seeded_rlk.reconstruct_public_key()?);
+        assert_same_key_material(&seeded_pk, &seedless_rlk.reconstruct_public_key()?);
         Ok(())
     }
 

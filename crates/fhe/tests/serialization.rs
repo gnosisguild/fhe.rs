@@ -85,11 +85,15 @@ fn lbfv_keys_round_trip_and_reject_malformed_or_mismatched_inputs() {
         LBFVRelinearizationKey::from_bytes(&rlk.to_bytes(), &params).unwrap(),
         rlk
     );
-    rlk.validate_public_key(&pk).unwrap();
     let reconstructed_pk = rlk.reconstruct_public_key().unwrap();
     assert_eq!(reconstructed_pk.parameters(), pk.parameters());
     assert_eq!(reconstructed_pk.row_count(), pk.row_count());
-    rlk.validate_public_key(&reconstructed_pk).unwrap();
+    assert!(
+        pk.rows()
+            .iter()
+            .zip(reconstructed_pk.rows())
+            .all(|(left, right)| left.level == right.level && left.iter().eq(right.iter()))
+    );
 
     let public_key_share = PublicKeyShare::contribute_with_crp(&sk, &crp_a, &mut rng).unwrap();
     let relin_key_share =
