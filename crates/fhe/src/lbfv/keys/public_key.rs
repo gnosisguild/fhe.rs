@@ -128,14 +128,12 @@ impl LBFVPublicKey {
         }
 
         let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
-        let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.params.moduli().len());
-        let mut seed_rng = ChaCha8Rng::from_seed(seed);
+        let row_seeds = Self::derive_crs_row_seeds(&sk.params, seed);
+        let mut c: Vec<Ciphertext> = Vec::with_capacity(row_seeds.len());
 
         // Create a vector of ciphertexts, each encrypting zero, for each RNS modulus
         // [(b₁, a₁), ..., (bₗ, aₗ)].
-        for _ in 0..sk.params.moduli().len() {
-            let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
-            seed_rng.fill(&mut seed_i);
+        for seed_i in row_seeds {
             let mut ct = sk.try_encrypt_with_seed(&zero, seed_i, rng)?;
             // The polynomials of a public key should not allow for variable time
             // computation.
@@ -311,12 +309,22 @@ impl LBFVPublicKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
     ) -> Result<Vec<(<ChaCha8Rng as SeedableRng>::Seed, Poly<Ntt>)>> {
         let ctx0 = params.context_at_level(0)?;
+        Ok(Self::derive_crs_row_seeds(params, seed)
+            .into_iter()
+            .map(|row_seed| (row_seed, Poly::<Ntt>::random_from_seed(ctx0, row_seed)))
+            .collect())
+    }
+
+    fn derive_crs_row_seeds(
+        params: &BfvParameters,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+    ) -> Vec<<ChaCha8Rng as SeedableRng>::Seed> {
         let mut seed_rng = ChaCha8Rng::from_seed(seed);
         (0..params.moduli().len())
             .map(|_| {
                 let mut row_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
                 seed_rng.fill(&mut row_seed);
-                Ok((row_seed, Poly::<Ntt>::random_from_seed(ctx0, row_seed)))
+                row_seed
             })
             .collect()
     }
@@ -653,6 +661,10 @@ use prost::Message;
 
 impl From<&LBFVPublicKey> for LBFVPublicKeyProto {
     fn from(pk: &LBFVPublicKey) -> Self {
+        debug_assert!(
+            pk.validate_structure().is_ok(),
+            "LBFV public keys must be structurally valid before serialization"
+        );
         let (explicit, seeded) = match pk.seed {
             Some(seed) => (
                 None,
@@ -1063,6 +1075,33 @@ mod tests {
         let sk = SecretKey::random(&params, &mut rng);
         let mut proto = LBFVPublicKeyProto::from(&LBFVPublicKey::new(&sk, &mut rng)?);
         proto.explicit = Some(LbfvPublicKeyExplicit::default());
+
+        assert!(LBFVPublicKey::from_bytes(&proto.encode_to_vec(), &params).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_representation_rejects_seeded_rows() -> std::result::Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let seeded = LBFVPublicKey::new(&sk, &mut rng)?;
+        let explicit = LBFVPublicKey::from_parts(
+            seeded.c.iter().map(|ct| ct.c[0].clone()).collect(),
+            seeded.c.iter().map(|ct| ct.c[1].clone()).collect(),
+            params.clone(),
+            None,
+        )?;
+        let mut proto = LBFVPublicKeyProto::from(&explicit);
+        let Some(first_row) = proto
+            .explicit
+            .as_mut()
+            .and_then(|representation| representation.c.first_mut())
+        else {
+            return Err("expected explicit public-key row".into());
+        };
+        first_row.c.pop();
+        first_row.seed = vec![0x55; 32];
 
         assert!(LBFVPublicKey::from_bytes(&proto.encode_to_vec(), &params).is_err());
         Ok(())
