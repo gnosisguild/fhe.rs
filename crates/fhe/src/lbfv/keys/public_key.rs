@@ -88,25 +88,7 @@ impl LBFVPublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<(Ciphertext, EncryptionIntermediates)> {
-        pt.validate_for(&self.par)?;
-        if self.c.is_empty() {
-            return Err(crate::EvaluationKeyError::EmptyPublicKey.into());
-        }
-
-        // Use only the first ciphertext from the array
-        let mut ct = self.c[0].clone();
-        ct.validate_for(&self.par)?;
-        let plaintext_level = pt.level();
-        if plaintext_level < ct.level {
-            return Err(Error::InvalidLevel {
-                level: plaintext_level,
-                min_level: ct.level,
-                max_level: self.par.max_level(),
-            });
-        }
-        while ct.level != plaintext_level {
-            ct.switch_down()?;
-        }
+        let ct = self.encryption_key_at_level(pt)?;
 
         let ctx = self.par.context_at_level(ct.level)?;
         let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
@@ -138,6 +120,30 @@ impl LBFVPublicKey {
         };
 
         Ok((ciphertext, EncryptionIntermediates::new(u, e1, e2)))
+    }
+
+    fn encryption_key_at_level(&self, pt: &Plaintext) -> Result<Ciphertext> {
+        let key = self
+            .c
+            .first()
+            .ok_or(crate::EvaluationKeyError::EmptyPublicKey)?;
+        pt.validate_for(&self.par)?;
+        key.validate_for(&self.par)?;
+
+        let plaintext_level = pt.level();
+        if plaintext_level < key.level {
+            return Err(Error::InvalidLevel {
+                level: plaintext_level,
+                min_level: key.level,
+                max_level: self.par.max_level(),
+            });
+        }
+
+        let mut ct = key.clone();
+        while ct.level != plaintext_level {
+            ct.switch_down()?;
+        }
+        Ok(ct)
     }
 
     /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
@@ -237,15 +243,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        if self.c.is_empty() {
-            return Err(crate::EvaluationKeyError::EmptyPublicKey.into());
-        }
-
-        // Use only the first ciphertext from the array
-        let mut ct = self.c[0].clone();
-        while ct.level != pt.level() {
-            ct.switch_down()?;
-        }
+        let ct = self.encryption_key_at_level(pt)?;
 
         let ctx = self.par.context_at_level(ct.level)?;
         let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
@@ -414,8 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypt_with_intermediates_rejects_mismatched_parameters_and_invalid_level()
-    -> Result<(), Box<dyn Error>> {
+    fn encryption_rejects_mismatched_parameters_and_invalid_level() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(2, 16);
         let other_params = BfvParameters::default_arc(2, 16);
@@ -426,11 +423,25 @@ mod tests {
             pk.try_encrypt_with_intermediates(&mismatched_pt, &mut rng)
                 .is_err()
         );
+        assert!(pk.try_encrypt(&mismatched_pt, &mut rng).is_err());
 
         let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params)?;
+        pk.c[0].params = other_params;
+        assert!(pk.try_encrypt_with_intermediates(&pt, &mut rng).is_err());
+        assert!(pk.try_encrypt(&pt, &mut rng).is_err());
+        pk.c[0].params = params.clone();
+
         pk.c[0].switch_down()?;
         assert!(matches!(
             pk.try_encrypt_with_intermediates(&pt, &mut rng),
+            Err(crate::Error::InvalidLevel {
+                level: 0,
+                min_level: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            pk.try_encrypt(&pt, &mut rng),
             Err(crate::Error::InvalidLevel {
                 level: 0,
                 min_level: 1,

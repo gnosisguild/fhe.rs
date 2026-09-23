@@ -5,7 +5,7 @@ use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
 use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, Rng as RngCore};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 //use serde::{Serialize, Deserialize};
 
 use crate::bfv::CommonRandomPoly;
@@ -33,6 +33,7 @@ pub struct PublicKeyShare {
 /// produces a separate `Poly` that this type cannot zeroize. Wrap caller-owned copies in
 /// `Zeroizing` and remove serialized or converted copies when they are no longer needed.
 /// This type deliberately does not implement `Debug`.
+#[derive(zeroize_derive::Zeroize)]
 pub struct PublicKeyShareIntermediates {
     secret_key: Zeroizing<Poly<Ntt>>,
     error: Zeroizing<Poly<Ntt>>,
@@ -49,13 +50,6 @@ impl PublicKeyShareIntermediates {
     #[must_use]
     pub fn error(&self) -> &Poly<Ntt> {
         &self.error
-    }
-}
-
-impl Zeroize for PublicKeyShareIntermediates {
-    fn zeroize(&mut self) {
-        self.secret_key.zeroize();
-        self.error.zeroize();
     }
 }
 

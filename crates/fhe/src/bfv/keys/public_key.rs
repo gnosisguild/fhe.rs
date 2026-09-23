@@ -13,7 +13,7 @@ use prost::Message;
 use rand::{CryptoRng, Rng as RngCore};
 use std::borrow::Cow;
 use std::sync::Arc;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use super::SecretKey;
 
@@ -37,6 +37,7 @@ pub struct PublicKey {
 /// `Poly` that this type cannot zeroize. Wrap caller-owned copies in `Zeroizing` and remove
 /// serialized or converted copies when they are no longer needed. This type deliberately
 /// does not implement `Debug`.
+#[derive(zeroize_derive::Zeroize)]
 pub struct PublicKeyGenerationIntermediates {
     a: Zeroizing<Poly<Ntt>>,
     secret_key: Zeroizing<Poly<Ntt>>,
@@ -63,14 +64,6 @@ impl PublicKeyGenerationIntermediates {
     }
 }
 
-impl Zeroize for PublicKeyGenerationIntermediates {
-    fn zeroize(&mut self) {
-        self.a.zeroize();
-        self.secret_key.zeroize();
-        self.error.zeroize();
-    }
-}
-
 /// Intermediates from BFV encryption, including encryption with an l-BFV public key.
 ///
 /// These intermediates zeroize their polynomials when dropped. Retain them only while the
@@ -83,6 +76,7 @@ impl Zeroize for PublicKeyGenerationIntermediates {
 /// cloning a polynomial produces a separate `Poly` that this type cannot zeroize. Wrap
 /// caller-owned copies in `Zeroizing` and remove serialized or converted copies when they
 /// are no longer needed. This type deliberately does not implement `Debug`.
+#[derive(zeroize_derive::Zeroize)]
 pub struct EncryptionIntermediates {
     randomness: Zeroizing<Poly<Ntt>>,
     error_0: Zeroizing<Poly<Ntt>>,
@@ -90,6 +84,7 @@ pub struct EncryptionIntermediates {
 }
 
 impl EncryptionIntermediates {
+    /// The arguments are `(u, e1, e2)`: `e1` contributes to `c0`, and `e2` to `c1`.
     pub(crate) fn new(
         randomness: Zeroizing<Poly<Ntt>>,
         error_0: Zeroizing<Poly<Ntt>>,
@@ -118,14 +113,6 @@ impl EncryptionIntermediates {
     #[must_use]
     pub fn error_1(&self) -> &Poly<Ntt> {
         &self.error_1
-    }
-}
-
-impl Zeroize for EncryptionIntermediates {
-    fn zeroize(&mut self) {
-        self.randomness.zeroize();
-        self.error_0.zeroize();
-        self.error_1.zeroize();
     }
 }
 
@@ -186,16 +173,7 @@ impl PublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<(Ciphertext, EncryptionIntermediates)> {
-        pt.validate_for(&self.params)?;
-        self.c.validate_for(&self.params)?;
-        let plaintext_level = pt.level();
-        if plaintext_level < self.c.level {
-            return Err(Error::InvalidLevel {
-                level: plaintext_level,
-                min_level: self.c.level,
-                max_level: self.params.max_level(),
-            });
-        }
+        let plaintext_level = self.validate_encryption_inputs(pt)?;
 
         let mut ct = self.c.clone();
         while ct.level != plaintext_level {
@@ -245,6 +223,20 @@ impl PublicKey {
 
         Ok((ciphertext, EncryptionIntermediates::new(u, e1, e2)))
     }
+
+    fn validate_encryption_inputs(&self, pt: &Plaintext) -> Result<usize> {
+        pt.validate_for(&self.params)?;
+        self.c.validate_for(&self.params)?;
+        let plaintext_level = pt.level();
+        if plaintext_level < self.c.level {
+            return Err(Error::InvalidLevel {
+                level: plaintext_level,
+                min_level: self.c.level,
+                max_level: self.params.max_level(),
+            });
+        }
+        Ok(plaintext_level)
+    }
 }
 
 impl FheParametrized for PublicKey {
@@ -264,16 +256,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        pt.validate_for(&self.params)?;
-        self.c.validate_for(&self.params)?;
-        let plaintext_level = pt.level();
-        if plaintext_level < self.c.level {
-            return Err(Error::InvalidLevel {
-                level: plaintext_level,
-                min_level: self.c.level,
-                max_level: self.params.max_level(),
-            });
-        }
+        let plaintext_level = self.validate_encryption_inputs(pt)?;
 
         let needs_switch = self.c.level != plaintext_level;
         let ct: Cow<'_, Ciphertext> = if needs_switch {
