@@ -13,14 +13,16 @@ fn test_ntt_shoup_add_sub_neg() {
     let p_ntt = Poly::<Ntt>::random(&ctx, &mut rng);
     let p_shoup = Poly::<NttShoup>::random(&ctx, &mut rng);
     let p_shoup_as_ntt = p_shoup.clone().into_ntt();
+    let p_ntt_power = p_ntt.clone().into_power_basis();
+    let p_shoup_power = p_shoup.clone().into_power_basis();
 
     // Add/Sub/Neg on Ntt after explicit conversion.
     let sum = &p_ntt + &p_shoup_as_ntt;
-    assert_eq!(sum, &p_ntt + &p_shoup_as_ntt);
+    assert_eq!(sum.into_power_basis(), &p_ntt_power + &p_shoup_power);
 
     let diff = &p_ntt - &p_shoup_as_ntt;
-    assert_eq!(diff, &p_ntt - &p_shoup_as_ntt);
+    assert_eq!(diff.into_power_basis(), &p_ntt_power - &p_shoup_power);
 
     let neg = -&p_shoup_as_ntt;
-    assert_eq!(neg, -&p_shoup_as_ntt);
+    assert_eq!(neg.into_power_basis(), -&p_shoup_power);
 }
