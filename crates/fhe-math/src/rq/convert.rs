@@ -66,6 +66,12 @@ fn parse_proto(
     if !degree.is_multiple_of(8) || degree < 8 {
         return Err(PolynomialSerializationError::InvalidDegree { degree }.into());
     }
+    if degree != ctx.degree {
+        return Err(Error::DegreeMismatch {
+            found: degree,
+            expected: ctx.degree,
+        });
+    }
 
     let mut expected_nbytes = 0;
     ctx.q
@@ -585,6 +591,25 @@ mod tests {
         let p = Poly::<NttShoup>::random(&ctx, &mut rng);
         let proto = Rq::from(&p);
         assert_eq!(Poly::<NttShoup>::try_convert_from(&proto, &ctx, false)?, p);
+
+        Ok(())
+    }
+
+    #[test]
+    fn proto_rejects_degree_mismatch() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let serialized_ctx = Arc::new(Context::new(&[MODULI[0]], 8)?);
+        let target_ctx = Arc::new(Context::new(&[MODULI[0]], 16)?);
+        let poly = Poly::<PowerBasis>::random(&serialized_ctx, &mut rng);
+        let proto = Rq::from(&poly);
+
+        assert_eq!(
+            Poly::<PowerBasis>::try_convert_from(&proto, &target_ctx, false).unwrap_err(),
+            CrateError::DegreeMismatch {
+                found: 8,
+                expected: 16,
+            }
+        );
 
         Ok(())
     }
