@@ -1045,6 +1045,20 @@ mod tests {
     }
 
     #[test]
+    fn from_bytes_preserves_protobuf_decode_error() {
+        let params = insecure().unwrap().parameters;
+        let error = LBFVRelinearizationKey::from_bytes(&[0x0a], &params).unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::Error::SerializationError(SerializationError::Decode {
+                object: crate::SerializedObject::LbfvRelinearizationKey,
+                message,
+            }) if !message.is_empty()
+        ));
+    }
+
+    #[test]
     fn test_multiplication() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         // Keep the small local profile here because this test intentionally

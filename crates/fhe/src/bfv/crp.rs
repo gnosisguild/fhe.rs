@@ -19,6 +19,21 @@ use rand_chacha::ChaCha8Rng;
 /// generation: all parties use the *same* polynomial to ensure that additive
 /// contributions can later be summed.
 ///
+/// # Protocol coordination
+///
+/// All participants in one protocol execution must use the identical concrete
+/// CRP (and, for [`CommonRandomPolyVec`], the identical ordered polynomial
+/// vector). This type carries no session identifier and does not bind a CRP to
+/// a protocol transcript; callers must coordinate and validate that association
+/// themselves. The protocol must define its CRP reuse policy. This library does
+/// not establish that reuse across executions is safe; absent a protocol-specific
+/// justification, generate independent CRPs for separate executions.
+///
+/// [`CommonRandomPoly::new`] samples using the caller-provided `CryptoRng`.
+/// [`CommonRandomPoly::new_deterministic`] trusts the supplied seed and adds no
+/// session or protocol domain separation, so callers are responsible for seed
+/// generation, distribution, and separation.
+///
 /// # Serialization
 ///
 /// When the `protobuf` feature is enabled, a [`CommonRandomPoly`] can be
@@ -102,6 +117,11 @@ impl CommonRandomPoly {
 /// compact broadcast/reconstruction, but the authoritative values are the
 /// concrete polynomials; equality comparisons and aggregation checks always use
 /// the polynomials, never the seed.
+///
+/// All parties in one protocol execution must use the same ordered vector. The
+/// vector itself does not identify a session or prevent cross-session reuse;
+/// those requirements and the protocol-specific reuse policy belong to the
+/// surrounding protocol.
 ///
 /// # Construction
 ///
