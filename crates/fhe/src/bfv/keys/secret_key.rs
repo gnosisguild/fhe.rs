@@ -158,7 +158,7 @@ impl SecretKey {
         p: &Poly<Ntt>,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
-    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>)> {
+    ) -> Result<(Ciphertext, Poly<Ntt>, Zeroizing<Poly<Ntt>>)> {
         let level = self.params.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
@@ -168,12 +168,13 @@ impl SecretKey {
         let mut a = Poly::<Ntt>::random_from_seed(p.ctx(), seed);
         let a_s = Zeroizing::new(&a * s.as_ref());
 
-        let e = Poly::<Ntt>::small(p.ctx(), self.params.variance, rng).map_err(Error::MathError)?;
+        let e = Zeroizing::new(
+            Poly::<Ntt>::small(p.ctx(), self.params.variance, rng).map_err(Error::MathError)?,
+        );
 
         let a_copy = a.clone();
-        let e_copy = e.clone();
 
-        let mut b = e.clone();
+        let mut b = e.as_ref().clone();
         b -= &a_s;
         b += p;
 
@@ -188,7 +189,7 @@ impl SecretKey {
             level,
         };
 
-        Ok((ct, a_copy, e_copy))
+        Ok((ct, a_copy, e))
     }
 
     /// Encrypt a plaintext using a random seed for deterministic generation
@@ -209,7 +210,7 @@ impl SecretKey {
         &self,
         p: &Poly<Ntt>,
         rng: &mut R,
-    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>)> {
+    ) -> Result<(Ciphertext, Poly<Ntt>, Zeroizing<Poly<Ntt>>)> {
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
 

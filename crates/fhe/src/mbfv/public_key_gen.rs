@@ -26,9 +26,16 @@ pub struct PublicKeyShare {
 ///
 /// These intermediates zeroize their polynomials when dropped. Retain them only while the
 /// calling protocol needs these values.
+///
+/// # Security
+/// The secret-key share polynomial is equivalent to the secret-key share. The error
+/// polynomial is also sensitive. Accessors return `&Poly<Ntt>`; cloning either polynomial
+/// produces a separate `Poly` that this type cannot zeroize. Wrap caller-owned copies in
+/// `Zeroizing` and remove serialized or converted copies when they are no longer needed.
+/// This type deliberately does not implement `Debug`.
 pub struct PublicKeyShareIntermediates {
-    secret_key: Poly<Ntt>,
-    error: Poly<Ntt>,
+    secret_key: Zeroizing<Poly<Ntt>>,
+    error: Zeroizing<Poly<Ntt>>,
 }
 
 impl PublicKeyShareIntermediates {
@@ -52,12 +59,6 @@ impl Zeroize for PublicKeyShareIntermediates {
     }
 }
 
-impl Drop for PublicKeyShareIntermediates {
-    fn drop(&mut self) {
-        self.zeroize();
-    }
-}
-
 impl PublicKeyShare {
     /// Participate in a new EncKeyGen protocol.
     ///
@@ -74,30 +75,7 @@ impl PublicKeyShare {
         crp: CommonRandomPoly,
         rng: &mut R,
     ) -> Result<Self> {
-        let params = sk_share.params.clone();
-        let ctx = params.context_at_level(0)?;
-
-        // Convert secret key to usable polynomial
-        let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
-        );
-
-        // Sample error
-        let e = Zeroizing::new(Poly::<Ntt>::small(ctx, params.variance, rng)?);
-        // Create p0_i share
-        let mut p0_share = -crp.poly.clone();
-        p0_share.disallow_variable_time_computations();
-        p0_share *= s.as_ref();
-        p0_share += e.as_ref();
-        p0_share.allow_variable_time_computations(fhe_traits::VariableTime::new(
-            fhe_traits::PublicData::assert_public(),
-        ));
-
-        Ok(Self {
-            params,
-            crp,
-            p0_share,
-        })
+        Ok(Self::new_with_intermediates(sk_share, crp, rng)?.0)
     }
 
     /// Generate a public-key share and return the secret-key polynomial and sampled error.
@@ -131,8 +109,8 @@ impl PublicKeyShare {
                 p0_share,
             },
             PublicKeyShareIntermediates {
-                secret_key: (*s).clone(),
-                error: (*e).clone(),
+                secret_key: s,
+                error: e,
             },
         ))
     }

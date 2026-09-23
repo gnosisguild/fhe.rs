@@ -30,10 +30,17 @@ pub struct PublicKey {
 ///
 /// These intermediates zeroize their polynomials when dropped. Retain them only while the
 /// calling protocol needs these values.
+///
+/// # Security
+/// The secret-key polynomial is equivalent to the secret key. The error polynomial is also
+/// sensitive. Accessors return `&Poly<Ntt>`; cloning either polynomial produces a separate
+/// `Poly` that this type cannot zeroize. Wrap caller-owned copies in `Zeroizing` and remove
+/// serialized or converted copies when they are no longer needed. This type deliberately
+/// does not implement `Debug`.
 pub struct PublicKeyGenerationIntermediates {
-    a: Poly<Ntt>,
-    secret_key: Poly<Ntt>,
-    error: Poly<Ntt>,
+    a: Zeroizing<Poly<Ntt>>,
+    secret_key: Zeroizing<Poly<Ntt>>,
+    error: Zeroizing<Poly<Ntt>>,
 }
 
 impl PublicKeyGenerationIntermediates {
@@ -64,23 +71,37 @@ impl Zeroize for PublicKeyGenerationIntermediates {
     }
 }
 
-impl Drop for PublicKeyGenerationIntermediates {
-    fn drop(&mut self) {
-        self.zeroize();
-    }
-}
-
 /// Intermediates from BFV encryption, including encryption with an l-BFV public key.
 ///
 /// These intermediates zeroize their polynomials when dropped. Retain them only while the
 /// calling protocol needs these values.
+/// BFV samples the randomness from a centered binomial distribution with
+/// [`SecretKey::SK_VARIANCE`]. l-BFV samples it with the key's configured variance.
+///
+/// # Security
+/// The randomness and error polynomials are sensitive. Accessors return `&Poly<Ntt>`;
+/// cloning a polynomial produces a separate `Poly` that this type cannot zeroize. Wrap
+/// caller-owned copies in `Zeroizing` and remove serialized or converted copies when they
+/// are no longer needed. This type deliberately does not implement `Debug`.
 pub struct EncryptionIntermediates {
-    pub(crate) randomness: Poly<Ntt>,
-    pub(crate) error_0: Poly<Ntt>,
-    pub(crate) error_1: Poly<Ntt>,
+    randomness: Zeroizing<Poly<Ntt>>,
+    error_0: Zeroizing<Poly<Ntt>>,
+    error_1: Zeroizing<Poly<Ntt>>,
 }
 
 impl EncryptionIntermediates {
+    pub(crate) fn new(
+        randomness: Zeroizing<Poly<Ntt>>,
+        error_0: Zeroizing<Poly<Ntt>>,
+        error_1: Zeroizing<Poly<Ntt>>,
+    ) -> Self {
+        Self {
+            randomness,
+            error_0,
+            error_1,
+        }
+    }
+
     /// Returns the encryption randomness polynomial.
     #[must_use]
     pub fn randomness(&self) -> &Poly<Ntt> {
@@ -105,12 +126,6 @@ impl Zeroize for EncryptionIntermediates {
         self.randomness.zeroize();
         self.error_0.zeroize();
         self.error_1.zeroize();
-    }
-}
-
-impl Drop for EncryptionIntermediates {
-    fn drop(&mut self) {
-        self.zeroize();
     }
 }
 
@@ -140,8 +155,10 @@ impl PublicKey {
         let zero_poly = Zeroizing::new(zero.to_poly());
 
         let (mut c, a, e) = sk.encrypt_poly_extended(zero_poly.as_ref(), rng)?;
-        let s =
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c[0].ctx(), false)?.into_ntt();
+        let a = Zeroizing::new(a);
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c[0].ctx(), false)?.into_ntt(),
+        );
 
         c.iter_mut()
             .for_each(|p| p.disallow_variable_time_computations());
@@ -169,8 +186,19 @@ impl PublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<(Ciphertext, EncryptionIntermediates)> {
+        pt.validate_for(&self.params)?;
+        self.c.validate_for(&self.params)?;
+        let plaintext_level = pt.level();
+        if plaintext_level < self.c.level {
+            return Err(Error::InvalidLevel {
+                level: plaintext_level,
+                min_level: self.c.level,
+                max_level: self.params.max_level(),
+            });
+        }
+
         let mut ct = self.c.clone();
-        while ct.level != pt.level() {
+        while ct.level != plaintext_level {
             ct.switch_down()?;
         }
 
@@ -198,10 +226,6 @@ impl PublicKey {
 
         let m = Zeroizing::new(pt.to_poly());
 
-        let u_copy = u.as_ref().clone();
-        let e1_copy = e1.as_ref().clone();
-        let e2_copy = e2.as_ref().clone();
-
         let mut c0 = u.as_ref() * &ct[0];
         c0 += e1.as_ref();
         c0 += &m;
@@ -219,14 +243,7 @@ impl PublicKey {
             level: ct.level,
         };
 
-        Ok((
-            ciphertext,
-            EncryptionIntermediates {
-                randomness: u_copy,
-                error_0: e1_copy,
-                error_1: e2_copy,
-            },
-        ))
+        Ok((ciphertext, EncryptionIntermediates::new(u, e1, e2)))
     }
 }
 
@@ -431,6 +448,33 @@ mod tests {
         let pt = Plaintext::try_encode(&[1u64][..], Encoding::poly(), &other_params)?;
 
         assert!(pk.try_encrypt(&pt, &mut rng).is_err());
+        assert!(pk.try_encrypt_with_intermediates(&pt, &mut rng).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn encrypt_with_intermediates_rejects_malformed_key_and_invalid_level()
+    -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(2, 16);
+        let other_params = BfvParameters::default_arc(2, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let mut pk = PublicKey::new(&sk, &mut rng);
+        let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params)?;
+
+        pk.c.params = other_params;
+        assert!(pk.try_encrypt_with_intermediates(&pt, &mut rng).is_err());
+        pk.c.params = params.clone();
+
+        pk.c.switch_down()?;
+        assert!(matches!(
+            pk.try_encrypt_with_intermediates(&pt, &mut rng),
+            Err(crate::Error::InvalidLevel {
+                level: 0,
+                min_level: 1,
+                ..
+            })
+        ));
         Ok(())
     }
 

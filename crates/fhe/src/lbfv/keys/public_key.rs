@@ -88,27 +88,42 @@ impl LBFVPublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<(Ciphertext, EncryptionIntermediates)> {
+        pt.validate_for(&self.par)?;
         if self.c.is_empty() {
             return Err(crate::EvaluationKeyError::EmptyPublicKey.into());
         }
 
         // Use only the first ciphertext from the array
         let mut ct = self.c[0].clone();
-        while ct.level != pt.level() {
+        ct.validate_for(&self.par)?;
+        let plaintext_level = pt.level();
+        if plaintext_level < ct.level {
+            return Err(Error::InvalidLevel {
+                level: plaintext_level,
+                min_level: ct.level,
+                max_level: self.par.max_level(),
+            });
+        }
+        while ct.level != plaintext_level {
             ct.switch_down()?;
         }
 
         let ctx = self.par.context_at_level(ct.level)?;
-        let u = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
-        let e1 = Poly::<Ntt>::error_1(ctx, Representation::Ntt, &self.par.error1_variance, rng)?;
-        let e2 = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
+        let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
+        let e1 = Zeroizing::new(Poly::<Ntt>::error_1(
+            ctx,
+            Representation::Ntt,
+            &self.par.error1_variance,
+            rng,
+        )?);
+        let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
 
         let m = Zeroizing::new(pt.to_poly());
         let mut c0 = u.as_ref() * &ct.c[0];
-        c0 += &e1;
+        c0 += e1.as_ref();
         c0 += &m;
         let mut c1 = u.as_ref() * &ct.c[1];
-        c1 += &e2;
+        c1 += e2.as_ref();
 
         // It is now safe to enable variable time computations.
         let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
@@ -122,14 +137,7 @@ impl LBFVPublicKey {
             level: ct.level,
         };
 
-        Ok((
-            ciphertext,
-            EncryptionIntermediates {
-                randomness: u,
-                error_0: e1,
-                error_1: e2,
-            },
-        ))
+        Ok((ciphertext, EncryptionIntermediates::new(u, e1, e2)))
     }
 
     /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
@@ -405,6 +413,33 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn encrypt_with_intermediates_rejects_mismatched_parameters_and_invalid_level()
+    -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(2, 16);
+        let other_params = BfvParameters::default_arc(2, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let mut pk = LBFVPublicKey::new(&sk, &mut rng)?;
+        let mismatched_pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &other_params)?;
+        assert!(
+            pk.try_encrypt_with_intermediates(&mismatched_pt, &mut rng)
+                .is_err()
+        );
+
+        let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params)?;
+        pk.c[0].switch_down()?;
+        assert!(matches!(
+            pk.try_encrypt_with_intermediates(&pt, &mut rng),
+            Err(crate::Error::InvalidLevel {
+                level: 0,
+                min_level: 1,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
     /// `try_encrypt` and `try_encrypt_with_intermediates` must sample `e1` from the
     /// configured `error1_variance`, independently of `variance` (used for
     /// `u` and `e2`), mirroring `bfv::PublicKey`.
@@ -446,7 +481,7 @@ mod tests {
     }
 
     /// `try_encrypt_with_intermediates` equations: `c0 = u·b + e1 + m` and
-    /// `c1 = u·a + e2`, per `.rules/witness.md`.
+    /// `c1 = u·a + e2`.
     #[test]
     fn extended_encrypt_intermediates_equations() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
