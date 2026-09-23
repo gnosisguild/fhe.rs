@@ -71,6 +71,7 @@ impl PublicKeyShare {
     /// - sk_poly: the secret key polynomial in NTT form
     /// - e: the error polynomial
     #[allow(clippy::type_complexity)]
+    #[cfg(test)]
     pub fn new_extended<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
         crp: CommonRandomPoly,

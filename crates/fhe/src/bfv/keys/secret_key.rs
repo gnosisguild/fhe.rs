@@ -153,6 +153,7 @@ impl SecretKey {
     }
 
     /// Encrypt a plaintext using a provided seed and return the error polynomial.
+    #[cfg(test)]
     pub(crate) fn encrypt_poly_with_seed_extended<R: RngCore + CryptoRng>(
         &self,
         p: &Poly<Ntt>,
@@ -205,6 +206,7 @@ impl SecretKey {
     }
 
     /// Encrypt a plaintext using a random seed and return the error polynomial.
+    #[cfg(test)]
     pub(crate) fn encrypt_poly_extended<R: RngCore + CryptoRng>(
         &self,
         p: &Poly<Ntt>,

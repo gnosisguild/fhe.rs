@@ -49,6 +49,7 @@ impl PublicKey {
     /// - `s` is the secret key as a polynomial in NTT representation
     /// - `e` is the error polynomial
     #[allow(clippy::type_complexity)]
+    #[cfg(test)]
     pub fn new_extended<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         rng: &mut R,
@@ -77,6 +78,7 @@ impl PublicKey {
     /// This extended version returns the noise polynomials (u, e1, e2) used during encryption,
     /// which can be useful for debugging or verification purposes.
     #[allow(clippy::type_complexity)]
+    #[cfg(test)]
     pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,

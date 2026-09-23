@@ -429,6 +429,7 @@ impl LBFVPublicKey {
     /// The encryption is done in the same level as the plaintext.
     /// Returns the ciphertext and the noise polynomials.
     #[allow(clippy::type_complexity)]
+    #[cfg(test)]
     pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
