@@ -139,6 +139,40 @@ pub struct Poly<R: RepresentationTag> {
     _repr: PhantomData<R>,
 }
 
+fn validate_and_normalize_coefficients(
+    mut coefficients: Array2<u64>,
+    ctx: &Context,
+) -> Result<Array2<u64>> {
+    let (expected_rows, expected_columns) = (ctx.q.len(), ctx.degree);
+    if coefficients.dim() != (expected_rows, expected_columns) {
+        let (actual_rows, actual_columns) = coefficients.dim();
+        coefficients.iter_mut().for_each(|coeff| coeff.zeroize());
+        return Err(Error::InvalidCoefficientShape {
+            actual_rows,
+            actual_columns,
+            expected_rows,
+            expected_columns,
+        });
+    }
+
+    for (row, modulus) in coefficients.outer_iter().zip(ctx.q.iter()) {
+        if let Some(&value) = row.iter().find(|&&coefficient| coefficient >= **modulus) {
+            coefficients.iter_mut().for_each(|coeff| coeff.zeroize());
+            return Err(Error::NonCanonicalValue {
+                value,
+                modulus: **modulus,
+            });
+        }
+    }
+
+    if !coefficients.is_standard_layout() {
+        let standard_coefficients = coefficients.as_standard_layout().into_owned();
+        coefficients.iter_mut().for_each(|coeff| coeff.zeroize());
+        coefficients = standard_coefficients;
+    }
+    Ok(coefficients)
+}
+
 /// Serializable representation of [`Poly`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolyRaw {
@@ -173,10 +207,8 @@ impl<R: RepresentationTag> Eq for Poly<R> {}
 
 // Implements zeroization of polynomials.
 //
-// Uses element-wise erasure so non-standard ndarray layouts (e.g.
-// Fortran-order or transposed storage installed via `set_coefficients`)
-// are wiped instead of being silently skipped when a contiguous slice
-// is unavailable.
+// Uses element-wise erasure so non-standard ndarray layouts are wiped instead
+// of being silently skipped when a contiguous slice is unavailable.
 impl<R: RepresentationTag> Zeroize for Poly<R> {
     fn zeroize(&mut self) {
         self.coefficients
@@ -199,6 +231,26 @@ impl<R: RepresentationTag> AsMut<Poly<R>> for Poly<R> {
 }
 
 impl<R: RepresentationTag> Poly<R> {
+    pub(super) fn try_from_coefficients(
+        coefficients: Array2<u64>,
+        ctx: &Arc<Context>,
+        variable_time: bool,
+    ) -> Result<Self> {
+        let coefficients = validate_and_normalize_coefficients(coefficients, ctx)?;
+        let mut poly = Self {
+            ctx: ctx.clone(),
+            has_lazy_coefficients: false,
+            allow_variable_time_computations: variable_time,
+            coefficients,
+            coefficients_shoup: None,
+            _repr: PhantomData,
+        };
+        if R::REPRESENTATION == Representation::NttShoup {
+            poly.compute_coefficients_shoup();
+        }
+        Ok(poly)
+    }
+
     /// Convert explicitly public values into a polynomial using variable-time
     /// reduction when available.
     ///
@@ -273,8 +325,7 @@ impl<R: RepresentationTag> Poly<R> {
     /// Compute the Shoup representation of the coefficients.
     ///
     /// Uses the contiguous fast path when a coefficient row exposes a slice
-    /// and falls back to element-wise evaluation otherwise, so non-standard
-    /// layouts installed via [`Self::set_coefficients`] cannot panic here.
+    /// and falls back to element-wise evaluation for non-standard layouts.
     fn compute_coefficients_shoup(&mut self) {
         let mut coefficients_shoup = Array2::zeros((self.ctx.q.len(), self.ctx.degree));
         izip!(
@@ -497,8 +548,7 @@ impl<R: RepresentationTag> Poly<R> {
         coeff_matrix: Array2<u64>,
         ctx: &Arc<Context>,
     ) -> Result<Zeroizing<Self>> {
-        let mut poly = Poly::<PowerBasis>::zero(ctx);
-        poly.set_coefficients(coeff_matrix);
+        let poly = Poly::<PowerBasis>::try_from_coefficients(coeff_matrix, ctx, false)?;
         Ok(Zeroizing::new(Self::from_power_basis(poly)))
     }
 
@@ -518,28 +568,32 @@ impl<R: RepresentationTag> Poly<R> {
         self.coefficients.view()
     }
 
-    /// Replace the coefficient matrix.
+    /// Replace the coefficient matrix with canonical residues for this context.
     ///
     /// The previous coefficient and Shoup allocations are wiped before they
     /// are released so replaced secret material is not left in freed memory.
     /// Any Shoup representation is invalidated by the replacement: it is
-    /// recomputed for `NttShoup` polynomials and cleared otherwise.
-    pub fn set_coefficients(&mut self, new_coeffs: Array2<u64>) {
-        debug_assert_eq!(
-            new_coeffs.dim(),
-            (self.ctx.q.len(), self.ctx.degree),
-            "coefficient matrix shape must match the polynomial context"
-        );
+    /// recomputed for `NttShoup` polynomials and cleared otherwise. Replacing
+    /// coefficients also clears the lazy-coefficient state. Non-standard input
+    /// layouts are copied into standard row-major storage before installation.
+    ///
+    /// Returns an error if the matrix shape differs from the context or any
+    /// coefficient is not in the canonical range for its row's modulus.
+    pub fn set_coefficients(&mut self, new_coeffs: Array2<u64>) -> Result<()> {
+        let new_coeffs = validate_and_normalize_coefficients(new_coeffs, &self.ctx)?;
+
         self.coefficients
             .iter_mut()
             .for_each(|coeff| coeff.zeroize());
         self.zeroize_shoup();
         self.coefficients = new_coeffs;
+        self.has_lazy_coefficients = false;
         if R::REPRESENTATION == Representation::NttShoup {
             self.compute_coefficients_shoup();
         } else {
             self.coefficients_shoup = None;
         }
+        Ok(())
     }
 
     /// Computes the forward Ntt on the coefficients
@@ -1453,10 +1507,10 @@ mod tests {
         let ctx = Arc::new(Context::new(MODULI, 16)?);
         let mut poly = Poly::<PowerBasis>::zero(&ctx);
         let mut secrets = ndarray::Array2::zeros((MODULI.len(), 16));
-        secrets
-            .iter_mut()
-            .for_each(|coeff| *coeff = 0xA5A5_A5A5_A5A5_A5A5);
-        poly.set_coefficients(secrets);
+        for (row, &modulus) in MODULI.iter().enumerate() {
+            secrets.row_mut(row).fill(modulus - 1);
+        }
+        poly.set_coefficients(secrets)?;
         assert!(poly.coefficients().iter().any(|&coeff| coeff != 0));
 
         poly.zeroize();
@@ -1465,7 +1519,8 @@ mod tests {
     }
 
     #[test]
-    fn poly_zeroize_wipes_noncontiguous_storage() -> Result<(), Box<dyn Error>> {
+    fn set_coefficients_normalizes_noncontiguous_storage_before_zeroize()
+    -> Result<(), Box<dyn Error>> {
         use zeroize::Zeroize;
         let ctx = Arc::new(Context::new(MODULI, 16)?);
         let mut poly = Poly::<PowerBasis>::zero(&ctx);
@@ -1473,14 +1528,15 @@ mod tests {
         // strides, so no contiguous slice exists for this layout.
         let mut secrets = ndarray::Array2::zeros((16, MODULI.len())).reversed_axes();
         assert_eq!(secrets.dim(), (MODULI.len(), 16));
-        secrets
-            .iter_mut()
-            .for_each(|coeff| *coeff = 0x5A5A_5A5A_5A5A_5A5A);
+        for (row, &modulus) in MODULI.iter().enumerate() {
+            secrets.row_mut(row).fill(modulus - 1);
+        }
         assert!(
             secrets.as_slice_mut().is_none(),
             "test requires a non-standard layout without a contiguous slice"
         );
-        poly.set_coefficients(secrets);
+        poly.set_coefficients(secrets)?;
+        assert!(poly.coefficients().is_standard_layout());
         assert!(poly.coefficients().iter().any(|&coeff| coeff != 0));
 
         poly.zeroize();
@@ -1506,14 +1562,89 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "coefficient matrix shape")]
     fn set_coefficients_rejects_mismatched_shape() {
         let ctx = Arc::new(Context::new(MODULI, 16).unwrap());
         let mut poly = Poly::<PowerBasis>::zero(&ctx);
         // Wrong row count: silently installing this would corrupt every
         // later operation that assumes one row per modulus.
-        poly.set_coefficients(ndarray::Array2::zeros((MODULI.len() - 1, 16)));
+        assert_eq!(
+            poly.set_coefficients(ndarray::Array2::zeros((MODULI.len() - 1, 16))),
+            Err(crate::Error::InvalidCoefficientShape {
+                actual_rows: MODULI.len() - 1,
+                actual_columns: 16,
+                expected_rows: MODULI.len(),
+                expected_columns: 16,
+            })
+        );
+        assert_eq!(poly.coefficients().dim(), (MODULI.len(), 16));
+    }
+
+    #[test]
+    fn set_coefficients_rejects_noncanonical_values() {
+        let ctx = Arc::new(Context::new(MODULI, 16).unwrap());
+        let mut poly = Poly::<PowerBasis>::zero(&ctx);
+        let mut coefficients = ndarray::Array2::zeros((MODULI.len(), 16));
+        coefficients[[1, 7]] = MODULI[1];
+
+        assert_eq!(
+            poly.set_coefficients(coefficients),
+            Err(crate::Error::NonCanonicalValue {
+                value: MODULI[1],
+                modulus: MODULI[1],
+            })
+        );
+        assert!(
+            poly.coefficients()
+                .iter()
+                .all(|&coefficient| coefficient == 0)
+        );
+    }
+
+    #[test]
+    fn set_coefficients_clears_lazy_state() {
+        let ctx = Arc::new(Context::new(MODULI, 16).unwrap());
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+        let mut poly =
+            Poly::<Ntt>::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(
+                &[1; 16],
+                &ctx,
+                variable_time,
+            );
+        assert!(poly.has_lazy_coefficients);
+
+        poly.set_coefficients(ndarray::Array2::zeros((MODULI.len(), 16)))
+            .unwrap();
+
+        assert!(!poly.has_lazy_coefficients);
+    }
+
+    #[test]
+    fn from_coeffs_matrix_rejects_invalid_input() {
+        let ctx = Arc::new(Context::new(MODULI, 16).unwrap());
+        let shape_error = Poly::<PowerBasis>::from_coeffs_matrix(
+            ndarray::Array2::zeros((MODULI.len() - 1, 16)),
+            &ctx,
+        )
+        .unwrap_err();
+        assert_eq!(
+            shape_error,
+            crate::Error::InvalidCoefficientShape {
+                actual_rows: MODULI.len() - 1,
+                actual_columns: 16,
+                expected_rows: MODULI.len(),
+                expected_columns: 16,
+            }
+        );
+
+        let mut coefficients = ndarray::Array2::zeros((MODULI.len(), 16));
+        coefficients[[0, 0]] = MODULI[0];
+        assert_eq!(
+            Poly::<PowerBasis>::from_coeffs_matrix(coefficients, &ctx).unwrap_err(),
+            crate::Error::NonCanonicalValue {
+                value: MODULI[0],
+                modulus: MODULI[0],
+            }
+        );
     }
 
     #[test]
@@ -1522,12 +1653,12 @@ mod tests {
         let mut poly = Poly::<PowerBasis>::zero(&ctx);
         let mut first = ndarray::Array2::zeros((MODULI.len(), 16));
         first.iter_mut().for_each(|coeff| *coeff = 7);
-        poly.set_coefficients(first);
+        poly.set_coefficients(first)?;
         assert!(poly.coefficients().iter().all(|&coeff| coeff == 7));
 
         let mut second = ndarray::Array2::zeros((MODULI.len(), 16));
         second.iter_mut().for_each(|coeff| *coeff = 42);
-        poly.set_coefficients(second);
+        poly.set_coefficients(second)?;
         assert!(poly.coefficients().iter().all(|&coeff| coeff == 42));
         assert!(!poly.coefficients().iter().any(|&coeff| coeff == 7));
         Ok(())
@@ -1554,16 +1685,22 @@ mod tests {
         );
         // Installing this layout in an NttShoup polynomial panicked before
         // layout-independent Shoup recomputation.
-        poly.set_coefficients(secrets);
+        poly.set_coefficients(secrets)?;
 
+        assert!(poly.coefficients().is_standard_layout());
         assert!(poly.coefficients().iter().all(|&coeff| coeff < 1000));
         let shoup = poly.coefficients_shoup.as_ref().unwrap();
         assert_eq!(shoup.dim(), (MODULI.len(), 16));
+        assert!(shoup.is_standard_layout());
         for (row, qi) in ctx.q.iter().enumerate() {
             for col in 0..16 {
                 assert_eq!(shoup[[row, col]], qi.shoup(poly.coefficients()[[row, col]]));
             }
         }
+        assert_eq!(
+            poly.clone().into_power_basis().coefficients().dim(),
+            (MODULI.len(), 16)
+        );
         Ok(())
     }
 }

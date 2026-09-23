@@ -332,7 +332,7 @@ impl SmudgingNoiseGenerator {
         // Build the noise polynomial directly rather than through
         // `from_coeffs_matrix`.
         let mut poly = Poly::<PowerBasis>::zero(ctx);
-        poly.set_coefficients(matrix);
+        poly.set_coefficients(matrix)?;
         Ok(SmudgingNoise {
             poly: Zeroizing::new(poly),
         })
