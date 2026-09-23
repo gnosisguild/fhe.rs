@@ -11,7 +11,8 @@ use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
 use crate::bfv::{
-    BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
+    BfvParameters, Ciphertext, Encoding, EncryptionIntermediates, Plaintext, SecretKey,
+    traits::TryConvertFrom,
 };
 use crate::proto::bfv::Ciphertext as CiphertextProto;
 use crate::proto::lbfv::LbfvPublicKey as LBFVPublicKeyProto;
@@ -78,36 +79,33 @@ impl LBFVPublicKey {
         Ok(Self::new_with_seed(sk, seed, rng))
     }
 
-    /// Encrypt a plaintext with the public key.
-    /// The encryption is done in the same level as the plaintext.
-    /// Returns the ciphertext and the noise polynomials.
-    #[allow(clippy::indexing_slicing, clippy::type_complexity)] // ct.c always has exactly 2 components (BFV invariant)
-    pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
+    /// Encrypt a plaintext and return the randomness and errors used to construct it.
+    ///
+    /// The intermediates zeroize their polynomials when dropped.
+    #[allow(clippy::indexing_slicing)] // ct.c always has exactly 2 components (BFV invariant)
+    pub fn try_encrypt_with_intermediates<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
         rng: &mut R,
-    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
-        if self.c.is_empty() {
-            return Err(crate::EvaluationKeyError::EmptyPublicKey.into());
-        }
-
-        // Use only the first ciphertext from the array
-        let mut ct = self.c[0].clone();
-        while ct.level != pt.level() {
-            ct.switch_down()?;
-        }
+    ) -> Result<(Ciphertext, EncryptionIntermediates)> {
+        let ct = self.encryption_key_at_level(pt)?;
 
         let ctx = self.par.context_at_level(ct.level)?;
-        let u = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
-        let e1 = Poly::<Ntt>::error_1(ctx, Representation::Ntt, &self.par.error1_variance, rng)?;
-        let e2 = Poly::<Ntt>::small(ctx, self.par.variance, rng)?;
+        let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
+        let e1 = Zeroizing::new(Poly::<Ntt>::error_1(
+            ctx,
+            Representation::Ntt,
+            &self.par.error1_variance,
+            rng,
+        )?);
+        let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
 
         let m = Zeroizing::new(pt.to_poly());
         let mut c0 = u.as_ref() * &ct.c[0];
-        c0 += &e1;
+        c0 += e1.as_ref();
         c0 += &m;
         let mut c1 = u.as_ref() * &ct.c[1];
-        c1 += &e2;
+        c1 += e2.as_ref();
 
         // It is now safe to enable variable time computations.
         let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
@@ -121,7 +119,31 @@ impl LBFVPublicKey {
             level: ct.level,
         };
 
-        Ok((ciphertext, u, e1, e2))
+        Ok((ciphertext, EncryptionIntermediates::new(u, e1, e2)))
+    }
+
+    fn encryption_key_at_level(&self, pt: &Plaintext) -> Result<Ciphertext> {
+        let key = self
+            .c
+            .first()
+            .ok_or(crate::EvaluationKeyError::EmptyPublicKey)?;
+        pt.validate_for(&self.par)?;
+        key.validate_for(&self.par)?;
+
+        let plaintext_level = pt.level();
+        if plaintext_level < key.level {
+            return Err(Error::InvalidLevel {
+                level: plaintext_level,
+                min_level: key.level,
+                max_level: self.par.max_level(),
+            });
+        }
+
+        let mut ct = key.clone();
+        while ct.level != plaintext_level {
+            ct.switch_down()?;
+        }
+        Ok(ct)
     }
 
     /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
@@ -221,15 +243,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        if self.c.is_empty() {
-            return Err(crate::EvaluationKeyError::EmptyPublicKey.into());
-        }
-
-        // Use only the first ciphertext from the array
-        let mut ct = self.c[0].clone();
-        while ct.level != pt.level() {
-            ct.switch_down()?;
-        }
+        let ct = self.encryption_key_at_level(pt)?;
 
         let ctx = self.par.context_at_level(ct.level)?;
         let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.par.variance, rng)?);
@@ -397,7 +411,47 @@ mod tests {
         Ok(())
     }
 
-    /// `try_encrypt` and `try_encrypt_extended` must sample `e1` from the
+    #[test]
+    fn encryption_rejects_mismatched_parameters_and_invalid_level() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(2, 16);
+        let other_params = BfvParameters::default_arc(2, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let mut pk = LBFVPublicKey::new(&sk, &mut rng)?;
+        let mismatched_pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &other_params)?;
+        assert!(
+            pk.try_encrypt_with_intermediates(&mismatched_pt, &mut rng)
+                .is_err()
+        );
+        assert!(pk.try_encrypt(&mismatched_pt, &mut rng).is_err());
+
+        let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params)?;
+        pk.c[0].params = other_params;
+        assert!(pk.try_encrypt_with_intermediates(&pt, &mut rng).is_err());
+        assert!(pk.try_encrypt(&pt, &mut rng).is_err());
+        pk.c[0].params = params.clone();
+
+        pk.c[0].switch_down()?;
+        assert!(matches!(
+            pk.try_encrypt_with_intermediates(&pt, &mut rng),
+            Err(crate::Error::InvalidLevel {
+                level: 0,
+                min_level: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            pk.try_encrypt(&pt, &mut rng),
+            Err(crate::Error::InvalidLevel {
+                level: 0,
+                min_level: 1,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    /// `try_encrypt` and `try_encrypt_with_intermediates` must sample `e1` from the
     /// configured `error1_variance`, independently of `variance` (used for
     /// `u` and `e2`), mirroring `bfv::PublicKey`.
     #[test]
@@ -430,17 +484,17 @@ mod tests {
         assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
         assert_eq!(params.variance(), 10);
 
-        let (ct_ext, _u, _e1, _e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let (ct_ext, _intermediates) = pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
         let pt2_ext = sk.try_decrypt(&ct_ext)?;
         assert_eq!(pt2_ext, pt);
 
         Ok(())
     }
 
-    /// `try_encrypt_extended` witness equations: `c0 = u·b + e1 + m` and
-    /// `c1 = u·a + e2`, per `.rules/witness.md`.
+    /// `try_encrypt_with_intermediates` equations: `c0 = u·b + e1 + m` and
+    /// `c1 = u·a + e2`.
     #[test]
-    fn extended_encrypt_witness_equations() -> Result<(), Box<dyn Error>> {
+    fn extended_encrypt_intermediates_equations() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(6, 8);
         let sk = SecretKey::random(&params, &mut rng);
@@ -452,17 +506,17 @@ mod tests {
             &params,
         )?;
 
-        let (ct, u, e1, e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let (ct, intermediates) = pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
 
         let b = pk.c[0].c[0].clone();
         let a = pk.c[0].c[1].clone();
         let m = pt.to_poly();
 
-        let mut expected_c0 = &u * &b;
-        expected_c0 += &e1;
+        let mut expected_c0 = intermediates.randomness() * &b;
+        expected_c0 += intermediates.error_0();
         expected_c0 += &m;
-        let mut expected_c1 = &u * &a;
-        expected_c1 += &e2;
+        let mut expected_c1 = intermediates.randomness() * &a;
+        expected_c1 += intermediates.error_1();
 
         assert_eq!(ct.c[0].coefficients(), expected_c0.coefficients());
         assert_eq!(ct.c[1].coefficients(), expected_c1.coefficients());

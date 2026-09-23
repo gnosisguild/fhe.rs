@@ -22,6 +22,37 @@ pub struct PublicKeyShare {
     pub(crate) p0_share: Poly<Ntt>,
 }
 
+/// Intermediates from multiparty BFV public-key share generation.
+///
+/// These intermediates zeroize their polynomials when dropped. Retain them only while the
+/// calling protocol needs these values.
+///
+/// # Security
+/// The secret-key share polynomial is equivalent to the secret-key share. The error
+/// polynomial is also sensitive. Accessors return `&Poly<Ntt>`; cloning either polynomial
+/// produces a separate `Poly` that this type cannot zeroize. Wrap caller-owned copies in
+/// `Zeroizing` and remove serialized or converted copies when they are no longer needed.
+/// This type deliberately does not implement `Debug`.
+#[derive(zeroize_derive::Zeroize)]
+pub struct PublicKeyShareIntermediates {
+    secret_key: Zeroizing<Poly<Ntt>>,
+    error: Zeroizing<Poly<Ntt>>,
+}
+
+impl PublicKeyShareIntermediates {
+    /// Returns the secret-key share polynomial in NTT form.
+    #[must_use]
+    pub fn secret_key(&self) -> &Poly<Ntt> {
+        &self.secret_key
+    }
+
+    /// Returns the public-key share error polynomial.
+    #[must_use]
+    pub fn error(&self) -> &Poly<Ntt> {
+        &self.error
+    }
+}
+
 impl PublicKeyShare {
     /// Participate in a new EncKeyGen protocol.
     ///
@@ -38,17 +69,25 @@ impl PublicKeyShare {
         crp: CommonRandomPoly,
         rng: &mut R,
     ) -> Result<Self> {
+        Ok(Self::new_with_intermediates(sk_share, crp, rng)?.0)
+    }
+
+    /// Generate a public-key share and return the secret-key polynomial and sampled error.
+    ///
+    /// The intermediates zeroize their polynomials when dropped.
+    pub fn new_with_intermediates<R: RngCore + CryptoRng>(
+        sk_share: &SecretKey,
+        crp: CommonRandomPoly,
+        rng: &mut R,
+    ) -> Result<(Self, PublicKeyShareIntermediates)> {
         let params = sk_share.params.clone();
         let ctx = params.context_at_level(0)?;
 
-        // Convert secret key to usable polynomial
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
         );
-
-        // Sample error
         let e = Zeroizing::new(Poly::<Ntt>::small(ctx, params.variance, rng)?);
-        // Create p0_i share
+
         let mut p0_share = -crp.poly.clone();
         p0_share.disallow_variable_time_computations();
         p0_share *= s.as_ref();
@@ -57,45 +96,17 @@ impl PublicKeyShare {
             fhe_traits::PublicData::assert_public(),
         ));
 
-        Ok(Self {
-            params,
-            crp,
-            p0_share,
-        })
-    }
-
-    /// Extended version of `new` that returns intermediate values for debugging/testing.
-    ///
-    /// Returns: (pk_0, pk_1, sk_poly, e)
-    /// - pk_0: the p0_share (public key part 0 share) = -a*s + e
-    /// - pk_1: the crp_poly (common random polynomial `a`, public key part 1)
-    /// - sk_poly: the secret key polynomial in NTT form
-    /// - e: the error polynomial
-    #[allow(clippy::type_complexity)]
-    pub fn new_extended<R: RngCore + CryptoRng>(
-        sk_share: &SecretKey,
-        crp: CommonRandomPoly,
-        rng: &mut R,
-    ) -> Result<(Poly<Ntt>, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
-        let params = sk_share.params.clone();
-        let ctx = params.context_at_level(0)?;
-
-        let s = Zeroizing::new(
-            Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
-        );
-        let e = Zeroizing::new(Poly::<Ntt>::small(ctx, params.variance, rng)?);
-
-        let mut pk_0 = -crp.poly.clone();
-        pk_0.disallow_variable_time_computations();
-        pk_0 *= s.as_ref();
-        pk_0 += e.as_ref();
-        pk_0.allow_variable_time_computations(fhe_traits::VariableTime::new(
-            fhe_traits::PublicData::assert_public(),
-        ));
-
-        let pk_1 = crp.poly.clone();
-
-        Ok((pk_0, pk_1, (*s).clone(), (*e).clone()))
+        Ok((
+            Self {
+                params,
+                crp,
+                p0_share,
+            },
+            PublicKeyShareIntermediates {
+                secret_key: s,
+                error: e,
+            },
+        ))
     }
 
     /// Deserialize a PublicKeyShare from bytes with the given parameters and
@@ -260,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_extended() {
+    fn test_new_with_intermediates() {
         let mut rng = rng();
 
         // Test with different parameter configurations
@@ -271,24 +282,27 @@ mod tests {
             let sk_share = SecretKey::random(&params, &mut rng);
             let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
 
-            // Call new_extended
-            let (pk_0, pk_1, s, e) =
-                PublicKeyShare::new_extended(&sk_share, crp.clone(), &mut rng).unwrap();
+            let (share, intermediates) =
+                PublicKeyShare::new_with_intermediates(&sk_share, crp.clone(), &mut rng).unwrap();
+            let pk_0 = &share.p0_share;
+            let pk_1 = &share.crp.poly;
+            let s = intermediates.secret_key();
+            let e = intermediates.error();
 
             // Verify pk_1 is the same as crp polynomial
-            assert_eq!(pk_1, crp.poly, "pk_1 should be the same as crp polynomial");
+            assert_eq!(*pk_1, crp.poly, "pk_1 should be the same as crp polynomial");
 
             // Verify the relationship: pk_0 = -a*s + e
             // Compute -a*s + e and compare with pk_0
             let mut expected = -crp.poly.clone();
             expected.disallow_variable_time_computations();
-            expected *= &s;
-            expected += &e;
+            expected *= s;
+            expected += e;
             expected.allow_variable_time_computations(fhe_traits::VariableTime::new(
                 fhe_traits::PublicData::assert_public(),
             ));
 
-            assert_eq!(pk_0, expected, "pk_0 should equal -a*s + e");
+            assert_eq!(*pk_0, expected, "pk_0 should equal -a*s + e");
 
             assert_eq!(s.representation(), fhe_math::rq::Representation::Ntt);
             assert_eq!(e.representation(), fhe_math::rq::Representation::Ntt);
@@ -297,45 +311,43 @@ mod tests {
     }
 
     #[test]
-    fn test_new_extended_multiple_parties() {
+    fn test_new_with_intermediates_multiple_parties() {
         let mut rng = rng();
         const NUM_PARTIES: usize = 5;
 
         let params = BfvParameters::default_arc(1, 8);
         let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
 
-        // Generate extended data for multiple parties
-        let mut extended_data = vec![];
+        let mut intermediates_data = vec![];
         for _ in 0..NUM_PARTIES {
             let sk_share = SecretKey::random(&params, &mut rng);
-            let (pk_0, pk_1, s, e) =
-                PublicKeyShare::new_extended(&sk_share, crp.clone(), &mut rng).unwrap();
-            extended_data.push((pk_0, pk_1, s, e));
+            let (share, intermediates) =
+                PublicKeyShare::new_with_intermediates(&sk_share, crp.clone(), &mut rng).unwrap();
+            intermediates_data.push((share, intermediates));
         }
 
-        // Verify all parties have the same pk_1 (crp)
-        for (_, pk_1, _, _) in &extended_data {
-            assert_eq!(
-                *pk_1, crp.poly,
-                "All parties should have the same pk_1 (crp)"
-            );
+        for (share, _) in &intermediates_data {
+            assert_eq!(share.crp.poly, crp.poly, "All parties use the same CRP");
         }
 
         // Verify the mathematical relationship holds for each party
-        for (pk_0, pk_1, s, e) in &extended_data {
-            let mut expected = -pk_1.clone();
+        for (share, intermediates) in &intermediates_data {
+            let mut expected = -share.crp.poly.clone();
             expected.disallow_variable_time_computations();
-            expected *= s;
-            expected += e;
+            expected *= intermediates.secret_key();
+            expected += intermediates.error();
             expected.allow_variable_time_computations(fhe_traits::VariableTime::new(
                 fhe_traits::PublicData::assert_public(),
             ));
-            assert_eq!(*pk_0, expected, "pk_0 should equal -a*s + e for each party");
+            assert_eq!(
+                share.p0_share, expected,
+                "pk_0 should equal -a*s + e for each party"
+            );
         }
     }
 
     #[test]
-    fn test_new_extended_consistency_with_new() {
+    fn test_new_with_intermediates_consistency_with_new() {
         let mut rng = rng();
 
         let params = BfvParameters::default_arc(1, 8);
@@ -345,14 +357,37 @@ mod tests {
         // Create PublicKeyShare using original new()
         let pks = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
-        // Verify that new_extended produces pk_1 that matches the crp
-        let (_pk_0, pk_1, _s, _e) =
-            PublicKeyShare::new_extended(&sk_share, crp.clone(), &mut rng).unwrap();
+        let (share, _intermediates) =
+            PublicKeyShare::new_with_intermediates(&sk_share, crp.clone(), &mut rng).unwrap();
 
         assert_eq!(
-            pk_1, pks.crp.poly,
-            "pk_1 from new_extended should match crp from PublicKeyShare"
+            share.crp.poly, pks.crp.poly,
+            "pk_1 from new_with_intermediates should match crp from PublicKeyShare"
         );
-        assert_eq!(pk_1, crp.poly, "pk_1 should be the crp polynomial");
+        assert_eq!(
+            share.crp.poly, crp.poly,
+            "pk_1 should be the crp polynomial"
+        );
+    }
+
+    #[test]
+    fn public_key_share_intermediates_zeroize_their_polynomials() {
+        use zeroize::Zeroize;
+
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk_share = SecretKey::random(&params, &mut rng);
+        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        let (_share, mut intermediates) =
+            PublicKeyShare::new_with_intermediates(&sk_share, crp, &mut rng).unwrap();
+
+        intermediates.zeroize();
+        for poly in [intermediates.secret_key(), intermediates.error()] {
+            assert!(
+                poly.coefficients()
+                    .iter()
+                    .all(|&coefficient| coefficient == 0)
+            );
+        }
     }
 }

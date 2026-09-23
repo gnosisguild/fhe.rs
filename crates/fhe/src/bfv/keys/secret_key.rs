@@ -152,13 +152,14 @@ impl SecretKey {
         })
     }
 
-    /// Encrypt a plaintext using a provided seed and return the error polynomial.
+    /// Encrypt a plaintext using a provided seed and return zeroizing `a` and `e` intermediates.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn encrypt_poly_with_seed_extended<R: RngCore + CryptoRng>(
         &self,
         p: &Poly<Ntt>,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
-    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>)> {
+    ) -> Result<(Ciphertext, Zeroizing<Poly<Ntt>>, Zeroizing<Poly<Ntt>>)> {
         let level = self.params.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
@@ -168,12 +169,13 @@ impl SecretKey {
         let mut a = Poly::<Ntt>::random_from_seed(p.ctx(), seed);
         let a_s = Zeroizing::new(&a * s.as_ref());
 
-        let e = Poly::<Ntt>::small(p.ctx(), self.params.variance, rng).map_err(Error::MathError)?;
+        let e = Zeroizing::new(
+            Poly::<Ntt>::small(p.ctx(), self.params.variance, rng).map_err(Error::MathError)?,
+        );
 
-        let a_copy = a.clone();
-        let e_copy = e.clone();
+        let a_copy = Zeroizing::new(a.clone());
 
-        let mut b = e.clone();
+        let mut b = e.as_ref().clone();
         b -= &a_s;
         b += p;
 
@@ -188,7 +190,7 @@ impl SecretKey {
             level,
         };
 
-        Ok((ct, a_copy, e_copy))
+        Ok((ct, a_copy, e))
     }
 
     /// Encrypt a plaintext using a random seed for deterministic generation
@@ -204,12 +206,13 @@ impl SecretKey {
         self.encrypt_poly_with_seed(p, seed, rng)
     }
 
-    /// Encrypt a plaintext using a random seed and return the error polynomial.
+    /// Encrypt a plaintext using a random seed and return zeroizing `a` and `e` intermediates.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn encrypt_poly_extended<R: RngCore + CryptoRng>(
         &self,
         p: &Poly<Ntt>,
         rng: &mut R,
-    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>)> {
+    ) -> Result<(Ciphertext, Zeroizing<Poly<Ntt>>, Zeroizing<Poly<Ntt>>)> {
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
 
@@ -366,6 +369,23 @@ mod tests {
     use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
     use std::error::Error;
+    use zeroize::Zeroize;
+
+    #[test]
+    fn extended_encryption_returns_zeroizing_intermediates() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let plaintext = Plaintext::zero(Encoding::poly(), &params)?;
+        let (ct, mut a, mut e) = sk.encrypt_poly_extended(&plaintext.to_poly(), &mut rng)?;
+
+        assert_eq!(ct[1].coefficients(), a.coefficients());
+        a.zeroize();
+        e.zeroize();
+        assert!(a.coefficients().iter().all(|&coefficient| coefficient == 0));
+        assert!(e.coefficients().iter().all(|&coefficient| coefficient == 0));
+        Ok(())
+    }
 
     #[test]
     fn keygen() {
