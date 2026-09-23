@@ -142,7 +142,6 @@ impl PublicKey {
         let zero_poly = Zeroizing::new(zero.to_poly());
 
         let (mut c, a, e) = sk.encrypt_poly_extended(zero_poly.as_ref(), rng)?;
-        let a = Zeroizing::new(a);
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c[0].ctx(), false)?.into_ntt(),
         );
