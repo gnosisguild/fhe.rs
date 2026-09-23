@@ -41,7 +41,10 @@ use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
-use crate::bfv::{BfvParameters, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, SecretKey};
+use crate::bfv::{
+    BfvParameters, Ciphertext, CommonRandomPolyVec, Encoding, EncryptionIntermediates, Plaintext,
+    SecretKey,
+};
 use fhe_math::rq::{
     Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher, traits::TryConvertFrom,
 };
@@ -425,30 +428,25 @@ impl LBFVPublicKey {
             .collect()
     }
 
-    /// Encrypt a plaintext with the public key.
-    /// The encryption is done in the same level as the plaintext.
-    /// Returns the ciphertext and the noise polynomials.
-    #[allow(clippy::type_complexity)]
-    pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
+    /// Encrypt a plaintext and return the randomness and errors used to construct it.
+    ///
+    /// The intermediates zeroize their polynomials when dropped.
+    pub fn try_encrypt_with_intermediates<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
         rng: &mut R,
-    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
-        // Validate public-key structure before using it for encryption.
-        self.validate_structure()?;
-
-        // Use only the first ciphertext from the array
-        let mut ct = self.c.first().cloned().ok_or_else(|| {
-            Error::DefaultError("Public key has no ciphertexts available".to_string())
-        })?;
-        while ct.level != pt.level() {
-            ct.switch_down()?;
-        }
+    ) -> Result<(Ciphertext, EncryptionIntermediates)> {
+        let ct = self.encryption_key_at_level(pt)?;
 
         let ctx = self.params.context_at_level(ct.level)?;
-        let u = Poly::<Ntt>::small(ctx, self.params.variance, rng)?;
-        let e1 = Poly::<Ntt>::error_1(ctx, Representation::Ntt, &self.params.error1_variance, rng)?;
-        let e2 = Poly::<Ntt>::small(ctx, self.params.variance, rng)?;
+        let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
+        let e1 = Zeroizing::new(Poly::<Ntt>::error_1(
+            ctx,
+            Representation::Ntt,
+            &self.params.error1_variance,
+            rng,
+        )?);
+        let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
 
         let m = Zeroizing::new(pt.to_poly());
         let b = ct
@@ -460,10 +458,10 @@ impl LBFVPublicKey {
             .get(1)
             .ok_or_else(|| Error::DefaultError("Ciphertext is missing a component".to_string()))?;
         let mut c0 = u.as_ref() * b;
-        c0 += &e1;
+        c0 += e1.as_ref();
         c0 += &m;
         let mut c1 = u.as_ref() * a;
-        c1 += &e2;
+        c1 += e2.as_ref();
 
         // It is now safe to enable variable time computations.
         c0.allow_variable_time_computations(fhe_traits::VariableTime::new(
@@ -480,7 +478,31 @@ impl LBFVPublicKey {
             level: ct.level,
         };
 
-        Ok((ciphertext, u, e1, e2))
+        Ok((ciphertext, EncryptionIntermediates::new(u, e1, e2)))
+    }
+
+    fn encryption_key_at_level(&self, pt: &Plaintext) -> Result<Ciphertext> {
+        self.validate_structure()?;
+        pt.validate_for(&self.params)?;
+        let key = self
+            .c
+            .first()
+            .ok_or(crate::EvaluationKeyError::EmptyPublicKey)?;
+        key.validate_for(&self.params)?;
+
+        let plaintext_level = pt.level();
+        if plaintext_level < key.level {
+            return Err(Error::InvalidLevel {
+                level: plaintext_level,
+                min_level: key.level,
+                max_level: self.params.max_level(),
+            });
+        }
+        let mut ct = key.clone();
+        while ct.level != plaintext_level {
+            ct.switch_down()?;
+        }
+        Ok(ct)
     }
 
     /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
@@ -597,16 +619,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        // Validate public-key structure before using it for encryption.
-        self.validate_structure()?;
-
-        // Use only the first ciphertext from the array
-        let mut ct = self.c.first().cloned().ok_or_else(|| {
-            Error::DefaultError("Public key has no ciphertexts available".to_string())
-        })?;
-        while ct.level != pt.level() {
-            ct.switch_down()?;
-        }
+        let ct = self.encryption_key_at_level(pt)?;
 
         let ctx = self.params.context_at_level(ct.level)?;
         let u = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
@@ -914,7 +927,7 @@ mod tests {
         seed: Vec<u8>,
     }
 
-    /// `try_encrypt` and `try_encrypt_extended` must sample `e1` from the
+    /// `try_encrypt` and `try_encrypt_with_intermediates` must sample `e1` from the
     /// configured `error1_variance`, independently of `variance` (used for
     /// `u` and `e2`), mirroring `bfv::PublicKey`.
     #[test]
@@ -947,14 +960,14 @@ mod tests {
         assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
         assert_eq!(params.variance(), 10);
 
-        let (ct_ext, _u, _e1, _e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let (ct_ext, _intermediates) = pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
         let pt2_ext = sk.try_decrypt(&ct_ext)?;
         assert_eq!(pt2_ext, pt);
 
         Ok(())
     }
 
-    /// `try_encrypt_extended` witness equations: `c0 = u*b + e1 + m` and
+    /// `try_encrypt_with_intermediates` equations: `c0 = u*b + e1 + m` and
     /// `c1 = u*a + e2`.
     #[test]
     fn extended_encrypt_witness_equations() -> Result<(), Box<dyn Error>> {
@@ -969,21 +982,37 @@ mod tests {
             &params,
         )?;
 
-        let (ct, u, e1, e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let (ct, intermediates) = pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
+        let u = intermediates.randomness();
+        let e1 = intermediates.error_0();
+        let e2 = intermediates.error_1();
 
         let b = pk.c[0].c[0].clone();
         let a = pk.c[0].c[1].clone();
         let m = pt.to_poly();
 
-        let mut expected_c0 = &u * &b;
-        expected_c0 += &e1;
+        let mut expected_c0 = u * &b;
+        expected_c0 += e1;
         expected_c0 += &m;
-        let mut expected_c1 = &u * &a;
-        expected_c1 += &e2;
+        let mut expected_c1 = u * &a;
+        expected_c1 += e2;
 
         assert_eq!(ct.c[0].coefficients(), expected_c0.coefficients());
         assert_eq!(ct.c[1].coefficients(), expected_c1.coefficients());
 
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_rejects_mismatched_plaintext_on_both_paths() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(2, 16);
+        let other_params = BfvParameters::default_arc(2, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+        let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &other_params)?;
+        assert!(pk.try_encrypt(&pt, &mut rng).is_err());
+        assert!(pk.try_encrypt_with_intermediates(&pt, &mut rng).is_err());
         Ok(())
     }
 
@@ -1229,7 +1258,7 @@ mod tests {
     }
 
     /// Malformed in-memory public keys must be rejected by `try_encrypt`,
-    /// `try_encrypt_extended`, and `extract_b_polynomials`.
+    /// `try_encrypt_with_intermediates`, and `extract_b_polynomials`.
     #[test]
     fn malformed_pk_rejected_by_encryption_and_extraction()
     -> std::result::Result<(), Box<dyn Error>> {
@@ -1242,7 +1271,7 @@ mod tests {
 
         // Normal operations succeed.
         let _ct = pk.try_encrypt(&pt, &mut rng)?;
-        let (_ct, _u, _e1, _e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let (_ct, _intermediates) = pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
         let _b = pk.extract_b_polynomials(0, 0, Representation::NttShoup)?;
 
         // Malformed PK: wrong l value.
@@ -1253,8 +1282,10 @@ mod tests {
             "try_encrypt must reject a malformed PK (wrong l)"
         );
         assert!(
-            bad_pk.try_encrypt_extended(&pt, &mut rng).is_err(),
-            "try_encrypt_extended must reject a malformed PK (wrong l)"
+            bad_pk
+                .try_encrypt_with_intermediates(&pt, &mut rng)
+                .is_err(),
+            "try_encrypt_with_intermediates must reject a malformed PK (wrong l)"
         );
         assert!(
             bad_pk
@@ -1271,8 +1302,10 @@ mod tests {
             "try_encrypt must reject a PK with truncated ciphertexts"
         );
         assert!(
-            truncated_pk.try_encrypt_extended(&pt, &mut rng).is_err(),
-            "try_encrypt_extended must reject a PK with truncated ciphertexts"
+            truncated_pk
+                .try_encrypt_with_intermediates(&pt, &mut rng)
+                .is_err(),
+            "try_encrypt_with_intermediates must reject a PK with truncated ciphertexts"
         );
         assert!(
             truncated_pk
