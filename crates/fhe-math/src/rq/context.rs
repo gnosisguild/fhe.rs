@@ -5,39 +5,53 @@ use std::{fmt::Debug, sync::Arc};
 use crate::{Error, Result, ntt::NttOperator, rns::RnsContext, zq::Modulus};
 
 /// Struct that holds the context associated with elements in rq.
-#[derive(Default, Clone, PartialEq, Eq)]
+///
+/// Contexts can only be created with [`Context::new`] or [`Context::new_arc`],
+/// which establish the relationships between moduli, polynomial degree, and
+/// precomputed arithmetic data.
+///
+/// Its invariant-bearing fields are only visible within [`crate::rq`], so
+/// callers cannot construct or mutate a context directly.
+///
+/// ```compile_fail,E0616
+/// use fhe_math::rq::Context;
+///
+/// fn mutate_context(context: &mut Context) {
+///     context.degree = 0;
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use fhe_math::rq::Context;
+///
+/// let _ = Context::default();
+/// ```
+#[derive(Clone, PartialEq, Eq)]
 pub struct Context {
     /// List of prime moduli
-    pub moduli: Box<[u64]>,
+    pub(super) moduli: Box<[u64]>,
     /// Modulus operators for each prime
-    pub q: Box<[Modulus]>,
+    pub(super) q: Box<[Modulus]>,
     /// RNS context for CRT operations
-    pub rns: Arc<RnsContext>,
+    pub(super) rns: Arc<RnsContext>,
     /// NTT operators for each prime
-    pub ops: Box<[NttOperator]>,
+    pub(super) ops: Box<[NttOperator]>,
     /// Polynomial degree (must be power of 2)
-    pub degree: usize,
+    pub(super) degree: usize,
     /// Bit-reversed indices for NTT operations
-    pub bitrev: Box<[usize]>,
+    pub(super) bitrev: Box<[usize]>,
     /// Inverse of last qi modulo qj for modulus switching
-    pub inv_last_qi_mod_qj: Box<[u64]>,
+    pub(super) inv_last_qi_mod_qj: Box<[u64]>,
     /// Shoup representation of inv_last_qi_mod_qj
-    pub inv_last_qi_mod_qj_shoup: Box<[u64]>,
+    pub(super) inv_last_qi_mod_qj_shoup: Box<[u64]>,
     /// Link to context with one less modulus (for level management)
-    pub next_context: Option<Arc<Context>>,
+    pub(super) next_context: Option<Arc<Context>>,
 }
 
 impl Debug for Context {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Context")
             .field("moduli", &self.moduli)
-            // .field("q", &self.q)
-            // .field("rns", &self.rns)
-            // .field("ops", &self.ops)
-            // .field("degree", &self.degree)
-            // .field("bitrev", &self.bitrev)
-            // .field("inv_last_qi_mod_qj", &self.inv_last_qi_mod_qj)
-            // .field("inv_last_qi_mod_qj_shoup", &self.inv_last_qi_mod_qj_shoup)
             .field("next_context", &self.next_context)
             .finish()
     }
@@ -117,6 +131,12 @@ impl Context {
         &self.moduli
     }
 
+    /// Returns the polynomial degree associated with this context.
+    #[must_use]
+    pub const fn degree(&self) -> usize {
+        self.degree
+    }
+
     /// Returns a reference to the moduli as Modulus in this context.
     #[must_use]
     pub fn moduli_operators(&self) -> &[Modulus] {
@@ -167,8 +187,9 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, sync::Arc};
+    use std::{error::Error as StdError, sync::Arc};
 
+    use crate::Error;
     use crate::ntt::supports_ntt;
     use crate::rq::Context;
 
@@ -196,12 +217,22 @@ mod tests {
         // All moduli in MODULI are = 1 modulo 2 * 8
         assert!(Context::new(MODULI, 16).is_ok());
 
+        assert!(matches!(
+            Context::new(MODULI, 24),
+            Err(Error::InvalidPolynomialDegree { degree: 24, .. })
+        ));
+        assert!(Context::new(MODULI, 4).is_err());
+
+        let context = Context::new(MODULI, 16).unwrap();
+        assert_eq!(context.moduli(), MODULI);
+        assert_eq!(context.degree(), 16);
+
         // This should fail since 1153 != 1 moduli 2 * 128
         assert!(Context::new(MODULI, 128).is_err());
     }
 
     #[test]
-    fn next_context() -> Result<(), Box<dyn Error>> {
+    fn next_context() -> Result<(), Box<dyn StdError>> {
         // A context should have a children pointing to a context with one less modulus.
         let context = Arc::new(Context::new(MODULI, 16)?);
         assert_eq!(
@@ -222,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn niterations_to() -> Result<(), Box<dyn Error>> {
+    fn niterations_to() -> Result<(), Box<dyn StdError>> {
         // A context should have a children pointing to a context with one less modulus.
         let context = Arc::new(Context::new(MODULI, 16)?);
 

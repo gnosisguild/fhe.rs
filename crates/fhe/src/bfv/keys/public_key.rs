@@ -90,7 +90,7 @@ impl PublicKey {
         let ctx = self.params.context_at_level(ct.level)?.clone();
 
         let u_coefficients = Zeroizing::new(
-            sample_vec_cbd_f32(ctx.degree, SecretKey::SK_VARIANCE, rng).map_err(|e| {
+            sample_vec_cbd_f32(ctx.degree(), SecretKey::SK_VARIANCE, rng).map_err(|e| {
                 Error::ParametersError(ParametersError::InvalidSamplingVariance {
                     reason: e.to_string(),
                 })
@@ -178,7 +178,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
         let ctx = self.params.context_at_level(ct.level)?.clone();
 
         let u_coefficients = Zeroizing::new(
-            sample_vec_cbd_f32(ctx.degree, SecretKey::SK_VARIANCE, rng).map_err(|e| {
+            sample_vec_cbd_f32(ctx.degree(), SecretKey::SK_VARIANCE, rng).map_err(|e| {
                 Error::ParametersError(ParametersError::InvalidSamplingVariance {
                     reason: e.to_string(),
                 })

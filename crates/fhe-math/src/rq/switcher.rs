@@ -7,7 +7,7 @@ use crate::{Result, rns::ScalingFactor};
 use std::sync::Arc;
 
 /// Context switcher.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Switcher {
     pub(crate) scaler: Scaler,
 }

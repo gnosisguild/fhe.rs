@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Context extender.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scaler {
     from: Arc<Context>,
     to: Arc<Context>,

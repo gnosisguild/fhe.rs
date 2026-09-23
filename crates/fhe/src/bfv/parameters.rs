@@ -870,7 +870,7 @@ impl Deserialize for BfvParameters {
 }
 
 /// Multiplication parameters
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MultiplicationParameters {
     pub(crate) extender: Scaler,
     pub(crate) down_scaler: Scaler,
