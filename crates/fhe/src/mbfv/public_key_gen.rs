@@ -101,23 +101,6 @@ impl PublicKeyShare {
         ))
     }
 
-    /// Return raw key-share intermediates for unit tests.
-    #[allow(clippy::type_complexity)]
-    #[cfg(test)]
-    pub fn new_extended<R: RngCore + CryptoRng>(
-        sk_share: &SecretKey,
-        crp: CommonRandomPoly,
-        rng: &mut R,
-    ) -> Result<(Poly<Ntt>, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
-        let (share, witness) = Self::new_with_witness(sk_share, crp.clone(), rng)?;
-        Ok((
-            share.p0_share.clone(),
-            crp.poly,
-            witness.secret_key().clone(),
-            witness.error().clone(),
-        ))
-    }
-
     /// Deserialize a PublicKeyShare from bytes with the given parameters and
     /// CRP
     pub fn deserialize(
@@ -280,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_extended() {
+    fn test_new_with_witness() {
         let mut rng = rng();
 
         // Test with different parameter configurations
@@ -291,24 +274,27 @@ mod tests {
             let sk_share = SecretKey::random(&params, &mut rng);
             let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
 
-            // Call new_extended
-            let (pk_0, pk_1, s, e) =
-                PublicKeyShare::new_extended(&sk_share, crp.clone(), &mut rng).unwrap();
+            let (share, witness) =
+                PublicKeyShare::new_with_witness(&sk_share, crp.clone(), &mut rng).unwrap();
+            let pk_0 = &share.p0_share;
+            let pk_1 = &share.crp.poly;
+            let s = witness.secret_key();
+            let e = witness.error();
 
             // Verify pk_1 is the same as crp polynomial
-            assert_eq!(pk_1, crp.poly, "pk_1 should be the same as crp polynomial");
+            assert_eq!(*pk_1, crp.poly, "pk_1 should be the same as crp polynomial");
 
             // Verify the relationship: pk_0 = -a*s + e
             // Compute -a*s + e and compare with pk_0
             let mut expected = -crp.poly.clone();
             expected.disallow_variable_time_computations();
-            expected *= &s;
-            expected += &e;
+            expected *= s;
+            expected += e;
             expected.allow_variable_time_computations(fhe_traits::VariableTime::new(
                 fhe_traits::PublicData::assert_public(),
             ));
 
-            assert_eq!(pk_0, expected, "pk_0 should equal -a*s + e");
+            assert_eq!(*pk_0, expected, "pk_0 should equal -a*s + e");
 
             assert_eq!(s.representation(), fhe_math::rq::Representation::Ntt);
             assert_eq!(e.representation(), fhe_math::rq::Representation::Ntt);
@@ -317,45 +303,43 @@ mod tests {
     }
 
     #[test]
-    fn test_new_extended_multiple_parties() {
+    fn test_new_with_witness_multiple_parties() {
         let mut rng = rng();
         const NUM_PARTIES: usize = 5;
 
         let params = BfvParameters::default_arc(1, 8);
         let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
 
-        // Generate extended data for multiple parties
-        let mut extended_data = vec![];
+        let mut witness_data = vec![];
         for _ in 0..NUM_PARTIES {
             let sk_share = SecretKey::random(&params, &mut rng);
-            let (pk_0, pk_1, s, e) =
-                PublicKeyShare::new_extended(&sk_share, crp.clone(), &mut rng).unwrap();
-            extended_data.push((pk_0, pk_1, s, e));
+            let (share, witness) =
+                PublicKeyShare::new_with_witness(&sk_share, crp.clone(), &mut rng).unwrap();
+            witness_data.push((share, witness));
         }
 
-        // Verify all parties have the same pk_1 (crp)
-        for (_, pk_1, _, _) in &extended_data {
-            assert_eq!(
-                *pk_1, crp.poly,
-                "All parties should have the same pk_1 (crp)"
-            );
+        for (share, _) in &witness_data {
+            assert_eq!(share.crp.poly, crp.poly, "All parties use the same CRP");
         }
 
         // Verify the mathematical relationship holds for each party
-        for (pk_0, pk_1, s, e) in &extended_data {
-            let mut expected = -pk_1.clone();
+        for (share, witness) in &witness_data {
+            let mut expected = -share.crp.poly.clone();
             expected.disallow_variable_time_computations();
-            expected *= s;
-            expected += e;
+            expected *= witness.secret_key();
+            expected += witness.error();
             expected.allow_variable_time_computations(fhe_traits::VariableTime::new(
                 fhe_traits::PublicData::assert_public(),
             ));
-            assert_eq!(*pk_0, expected, "pk_0 should equal -a*s + e for each party");
+            assert_eq!(
+                share.p0_share, expected,
+                "pk_0 should equal -a*s + e for each party"
+            );
         }
     }
 
     #[test]
-    fn test_new_extended_consistency_with_new() {
+    fn test_new_with_witness_consistency_with_new() {
         let mut rng = rng();
 
         let params = BfvParameters::default_arc(1, 8);
@@ -365,14 +349,16 @@ mod tests {
         // Create PublicKeyShare using original new()
         let pks = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
-        // Verify that new_extended produces pk_1 that matches the crp
-        let (_pk_0, pk_1, _s, _e) =
-            PublicKeyShare::new_extended(&sk_share, crp.clone(), &mut rng).unwrap();
+        let (share, _witness) =
+            PublicKeyShare::new_with_witness(&sk_share, crp.clone(), &mut rng).unwrap();
 
         assert_eq!(
-            pk_1, pks.crp.poly,
-            "pk_1 from new_extended should match crp from PublicKeyShare"
+            share.crp.poly, pks.crp.poly,
+            "pk_1 from new_with_witness should match crp from PublicKeyShare"
         );
-        assert_eq!(pk_1, crp.poly, "pk_1 should be the crp polynomial");
+        assert_eq!(
+            share.crp.poly, crp.poly,
+            "pk_1 should be the crp polynomial"
+        );
     }
 }

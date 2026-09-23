@@ -73,22 +73,6 @@ impl PublicKey {
         ))
     }
 
-    /// Return raw key-generation intermediates for unit tests.
-    #[allow(clippy::type_complexity)]
-    #[cfg(test)]
-    pub fn new_extended<R: RngCore + CryptoRng>(
-        sk: &SecretKey,
-        rng: &mut R,
-    ) -> Result<(Self, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
-        let (pk, witness) = Self::new_with_witness(sk, rng)?;
-        Ok((
-            pk,
-            witness.a().clone(),
-            witness.secret_key().clone(),
-            witness.error().clone(),
-        ))
-    }
-
     /// Encrypt a plaintext and retain the witness needed to prove its encryption.
     ///
     /// The witness zeroizes its polynomials when dropped.
@@ -97,7 +81,8 @@ impl PublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<(Ciphertext, crate::zk_witness::Encryption)> {
-        let (ciphertext, randomness, error_0, error_1) = self.try_encrypt_extended_impl(pt, rng)?;
+        let (ciphertext, randomness, error_0, error_1) =
+            self.try_encrypt_with_witness_parts(pt, rng)?;
         Ok((
             ciphertext,
             crate::zk_witness::Encryption {
@@ -108,19 +93,8 @@ impl PublicKey {
         ))
     }
 
-    /// Return raw encryption intermediates for unit tests.
     #[allow(clippy::type_complexity)]
-    #[cfg(test)]
-    pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
-        &self,
-        pt: &Plaintext,
-        rng: &mut R,
-    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
-        self.try_encrypt_extended_impl(pt, rng)
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn try_encrypt_extended_impl<R: RngCore + CryptoRng>(
+    fn try_encrypt_with_witness_parts<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
         rng: &mut R,
@@ -475,7 +449,7 @@ mod tests {
             &params,
         )?;
 
-        let (ct, _u, _e1, _e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let (ct, _witness) = pk.try_encrypt_with_witness(&pt, &mut rng)?;
         let pt2 = sk.try_decrypt(&ct)?;
 
         println!("Extended encryption - noise polynomials returned successfully");
@@ -573,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_extended() -> Result<(), Box<dyn Error>> {
+    fn test_new_with_witness() -> Result<(), Box<dyn Error>> {
         use fhe_math::rq::Representation;
 
         let mut rng = rng();
@@ -581,7 +555,10 @@ mod tests {
 
         let sk = SecretKey::random(&params, &mut rng);
 
-        let (pk, a, s, e) = PublicKey::new_extended(&sk, &mut rng)?;
+        let (pk, witness) = PublicKey::new_with_witness(&sk, &mut rng)?;
+        let a = witness.a();
+        let s = witness.secret_key();
+        let e = witness.error();
 
         assert_eq!(pk.params, params);
         assert_eq!(pk.c.params, params);
@@ -592,7 +569,7 @@ mod tests {
 
         let b = &pk.c[0];
         let mut a_s = a.clone();
-        a_s *= &s;
+        a_s *= s;
         let mut expected_b = e.clone();
         expected_b -= &a_s;
 
@@ -622,14 +599,14 @@ mod tests {
     }
 
     #[test]
-    fn test_new_vs_new_extended_consistency() -> Result<(), Box<dyn Error>> {
+    fn test_new_vs_new_with_witness_consistency() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
 
         let sk = SecretKey::random(&params, &mut rng);
 
         let pk1 = PublicKey::new(&sk, &mut rng);
-        let (pk2, _, _, _) = PublicKey::new_extended(&sk, &mut rng)?;
+        let (pk2, _witness) = PublicKey::new_with_witness(&sk, &mut rng)?;
 
         assert_eq!(pk1.params, pk2.params);
         assert_eq!(pk1.c.len(), 2);
@@ -650,21 +627,24 @@ mod tests {
     }
 
     #[test]
-    fn test_new_extended_security_properties() -> Result<(), Box<dyn Error>> {
+    fn test_new_with_witness_security_properties() -> Result<(), Box<dyn Error>> {
         use fhe_math::rq::Representation;
 
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
         let sk = SecretKey::random(&params, &mut rng);
 
-        let (_pk, a, s, e) = PublicKey::new_extended(&sk, &mut rng)?;
+        let (_pk, witness) = PublicKey::new_with_witness(&sk, &mut rng)?;
+        let a = witness.a();
+        let s = witness.secret_key();
+        let e = witness.error();
 
         assert_eq!(a.representation(), Representation::Ntt);
         assert_eq!(s.representation(), Representation::Ntt);
         assert_eq!(e.representation(), Representation::Ntt);
 
         let mut s_squared = s.clone();
-        s_squared *= &s;
+        s_squared *= s;
         assert_eq!(s_squared.representation(), Representation::Ntt);
 
         Ok(())

@@ -131,23 +131,6 @@ impl LBFVPublicKey {
         ))
     }
 
-    /// Return raw encryption intermediates for unit tests.
-    #[allow(clippy::indexing_slicing, clippy::type_complexity)] // ct.c always has exactly 2 components (BFV invariant)
-    #[cfg(test)]
-    pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
-        &self,
-        pt: &Plaintext,
-        rng: &mut R,
-    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
-        let (ciphertext, witness) = self.try_encrypt_with_witness(pt, rng)?;
-        Ok((
-            ciphertext,
-            witness.randomness().clone(),
-            witness.error_0().clone(),
-            witness.error_1().clone(),
-        ))
-    }
-
     /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
     ///
     /// This method extracts the first l = # moduli - ciphertext level, c[0] components from each ciphertext in the public key,
@@ -421,7 +404,7 @@ mod tests {
         Ok(())
     }
 
-    /// `try_encrypt` and `try_encrypt_extended` must sample `e1` from the
+    /// `try_encrypt` and `try_encrypt_with_witness` must sample `e1` from the
     /// configured `error1_variance`, independently of `variance` (used for
     /// `u` and `e2`), mirroring `bfv::PublicKey`.
     #[test]
@@ -454,14 +437,14 @@ mod tests {
         assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
         assert_eq!(params.variance(), 10);
 
-        let (ct_ext, _u, _e1, _e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let (ct_ext, _witness) = pk.try_encrypt_with_witness(&pt, &mut rng)?;
         let pt2_ext = sk.try_decrypt(&ct_ext)?;
         assert_eq!(pt2_ext, pt);
 
         Ok(())
     }
 
-    /// `try_encrypt_extended` witness equations: `c0 = u·b + e1 + m` and
+    /// `try_encrypt_with_witness` witness equations: `c0 = u·b + e1 + m` and
     /// `c1 = u·a + e2`, per `.rules/witness.md`.
     #[test]
     fn extended_encrypt_witness_equations() -> Result<(), Box<dyn Error>> {
@@ -476,17 +459,17 @@ mod tests {
             &params,
         )?;
 
-        let (ct, u, e1, e2) = pk.try_encrypt_extended(&pt, &mut rng)?;
+        let (ct, witness) = pk.try_encrypt_with_witness(&pt, &mut rng)?;
 
         let b = pk.c[0].c[0].clone();
         let a = pk.c[0].c[1].clone();
         let m = pt.to_poly();
 
-        let mut expected_c0 = &u * &b;
-        expected_c0 += &e1;
+        let mut expected_c0 = witness.randomness() * &b;
+        expected_c0 += witness.error_0();
         expected_c0 += &m;
-        let mut expected_c1 = &u * &a;
-        expected_c1 += &e2;
+        let mut expected_c1 = witness.randomness() * &a;
+        expected_c1 += witness.error_1();
 
         assert_eq!(ct.c[0].coefficients(), expected_c0.coefficients());
         assert_eq!(ct.c[1].coefficients(), expected_c1.coefficients());
