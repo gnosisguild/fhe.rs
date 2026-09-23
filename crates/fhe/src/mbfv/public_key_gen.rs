@@ -64,19 +64,14 @@ impl PublicKeyShare {
         })
     }
 
-    /// Extended version of `new` that returns intermediate values for debugging/testing.
+    /// Generate a public-key share and retain the witness needed to prove its generation.
     ///
-    /// Returns: (pk_0, pk_1, sk_poly, e)
-    /// - pk_0: the p0_share (public key part 0 share) = -a*s + e
-    /// - pk_1: the crp_poly (common random polynomial `a`, public key part 1)
-    /// - sk_poly: the secret key polynomial in NTT form
-    /// - e: the error polynomial
-    #[allow(clippy::type_complexity)]
-    pub fn new_extended<R: RngCore + CryptoRng>(
+    /// The witness zeroizes its polynomials when dropped.
+    pub fn new_with_witness<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
         crp: CommonRandomPoly,
         rng: &mut R,
-    ) -> Result<(Poly<Ntt>, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
+    ) -> Result<(Self, crate::zk_witness::MbfvPublicKeyShare)> {
         let params = sk_share.params.clone();
         let ctx = params.context_at_level(0)?;
 
@@ -85,17 +80,42 @@ impl PublicKeyShare {
         );
         let e = Zeroizing::new(Poly::<Ntt>::small(ctx, params.variance, rng)?);
 
-        let mut pk_0 = -crp.poly.clone();
-        pk_0.disallow_variable_time_computations();
-        pk_0 *= s.as_ref();
-        pk_0 += e.as_ref();
-        pk_0.allow_variable_time_computations(fhe_traits::VariableTime::new(
+        let mut p0_share = -crp.poly.clone();
+        p0_share.disallow_variable_time_computations();
+        p0_share *= s.as_ref();
+        p0_share += e.as_ref();
+        p0_share.allow_variable_time_computations(fhe_traits::VariableTime::new(
             fhe_traits::PublicData::assert_public(),
         ));
 
-        let pk_1 = crp.poly.clone();
+        Ok((
+            Self {
+                params,
+                crp,
+                p0_share,
+            },
+            crate::zk_witness::MbfvPublicKeyShare {
+                secret_key: (*s).clone(),
+                error: (*e).clone(),
+            },
+        ))
+    }
 
-        Ok((pk_0, pk_1, (*s).clone(), (*e).clone()))
+    /// Return raw key-share intermediates for unit tests.
+    #[allow(clippy::type_complexity)]
+    #[cfg(test)]
+    pub fn new_extended<R: RngCore + CryptoRng>(
+        sk_share: &SecretKey,
+        crp: CommonRandomPoly,
+        rng: &mut R,
+    ) -> Result<(Poly<Ntt>, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
+        let (share, witness) = Self::new_with_witness(sk_share, crp.clone(), rng)?;
+        Ok((
+            share.p0_share.clone(),
+            crp.poly,
+            witness.secret_key().clone(),
+            witness.error().clone(),
+        ))
     }
 
     /// Deserialize a PublicKeyShare from bytes with the given parameters and

@@ -41,23 +41,17 @@ impl PublicKey {
         }
     }
 
-    /// Generate a new [`PublicKey`] and return all components for testing.
+    /// Generate a public key and retain the witness needed to prove its generation.
     ///
-    /// Returns: (public_key, a, s, e)
-    /// where:
-    /// - `a` is the random polynomial
-    /// - `s` is the secret key as a polynomial in NTT representation
-    /// - `e` is the error polynomial
-    #[allow(clippy::type_complexity)]
-    pub fn new_extended<R: RngCore + CryptoRng>(
+    /// The witness zeroizes its polynomials when dropped.
+    pub fn new_with_witness<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         rng: &mut R,
-    ) -> Result<(Self, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
+    ) -> Result<(Self, crate::zk_witness::BfvKeyGeneration)> {
         let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
         let zero_poly = Zeroizing::new(zero.to_poly());
 
         let (mut c, a, e) = sk.encrypt_poly_extended(zero_poly.as_ref(), rng)?;
-
         let s =
             Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), c[0].ctx(), false)?.into_ntt();
 
@@ -69,15 +63,64 @@ impl PublicKey {
             c,
         };
 
-        Ok((pk, a, s, e))
+        Ok((
+            pk,
+            crate::zk_witness::BfvKeyGeneration {
+                a,
+                secret_key: s,
+                error: e,
+            },
+        ))
     }
 
-    /// Encrypt a plaintext with the public key and return the noise polynomials.
-    ///
-    /// This extended version returns the noise polynomials (u, e1, e2) used during encryption,
-    /// which can be useful for debugging or verification purposes.
+    /// Return raw key-generation intermediates for unit tests.
     #[allow(clippy::type_complexity)]
+    #[cfg(test)]
+    pub fn new_extended<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        rng: &mut R,
+    ) -> Result<(Self, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
+        let (pk, witness) = Self::new_with_witness(sk, rng)?;
+        Ok((
+            pk,
+            witness.a().clone(),
+            witness.secret_key().clone(),
+            witness.error().clone(),
+        ))
+    }
+
+    /// Encrypt a plaintext and retain the witness needed to prove its encryption.
+    ///
+    /// The witness zeroizes its polynomials when dropped.
+    pub fn try_encrypt_with_witness<R: RngCore + CryptoRng>(
+        &self,
+        pt: &Plaintext,
+        rng: &mut R,
+    ) -> Result<(Ciphertext, crate::zk_witness::Encryption)> {
+        let (ciphertext, randomness, error_0, error_1) = self.try_encrypt_extended_impl(pt, rng)?;
+        Ok((
+            ciphertext,
+            crate::zk_witness::Encryption {
+                randomness,
+                error_0,
+                error_1,
+            },
+        ))
+    }
+
+    /// Return raw encryption intermediates for unit tests.
+    #[allow(clippy::type_complexity)]
+    #[cfg(test)]
     pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
+        &self,
+        pt: &Plaintext,
+        rng: &mut R,
+    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
+        self.try_encrypt_extended_impl(pt, rng)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn try_encrypt_extended_impl<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
         rng: &mut R,

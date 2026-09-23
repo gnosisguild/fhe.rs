@@ -78,15 +78,15 @@ impl LBFVPublicKey {
         Ok(Self::new_with_seed(sk, seed, rng))
     }
 
-    /// Encrypt a plaintext with the public key.
-    /// The encryption is done in the same level as the plaintext.
-    /// Returns the ciphertext and the noise polynomials.
-    #[allow(clippy::indexing_slicing, clippy::type_complexity)] // ct.c always has exactly 2 components (BFV invariant)
-    pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
+    /// Encrypt a plaintext and retain the witness needed to prove its encryption.
+    ///
+    /// The witness zeroizes its polynomials when dropped.
+    #[allow(clippy::indexing_slicing)] // ct.c always has exactly 2 components (BFV invariant)
+    pub fn try_encrypt_with_witness<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
         rng: &mut R,
-    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
+    ) -> Result<(Ciphertext, crate::zk_witness::Encryption)> {
         if self.c.is_empty() {
             return Err(crate::EvaluationKeyError::EmptyPublicKey.into());
         }
@@ -121,7 +121,31 @@ impl LBFVPublicKey {
             level: ct.level,
         };
 
-        Ok((ciphertext, u, e1, e2))
+        Ok((
+            ciphertext,
+            crate::zk_witness::Encryption {
+                randomness: u,
+                error_0: e1,
+                error_1: e2,
+            },
+        ))
+    }
+
+    /// Return raw encryption intermediates for unit tests.
+    #[allow(clippy::indexing_slicing, clippy::type_complexity)] // ct.c always has exactly 2 components (BFV invariant)
+    #[cfg(test)]
+    pub fn try_encrypt_extended<R: RngCore + CryptoRng>(
+        &self,
+        pt: &Plaintext,
+        rng: &mut R,
+    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
+        let (ciphertext, witness) = self.try_encrypt_with_witness(pt, rng)?;
+        Ok((
+            ciphertext,
+            witness.randomness().clone(),
+            witness.error_0().clone(),
+            witness.error_1().clone(),
+        ))
     }
 
     /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
