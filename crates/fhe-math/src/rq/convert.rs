@@ -151,23 +151,17 @@ impl TryConvertFrom<&Rq> for Poly<NttShoup> {
 impl TryConvertFrom<Vec<u64>> for Poly<PowerBasis> {
     fn try_convert_from(mut v: Vec<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         if v.len() == ctx.q.len() * ctx.degree {
-            for (row, qi) in v.chunks(ctx.degree).zip(ctx.q.iter()) {
-                if let Some(&value) = row.iter().find(|&&x| x >= **qi) {
-                    return Err(Error::NonCanonicalValue {
-                        value,
-                        modulus: **qi,
-                    });
-                }
-            }
-            let coefficients = Array2::from_shape_vec((ctx.q.len(), ctx.degree), v).unwrap();
-            Ok(Self {
-                ctx: ctx.clone(),
-                allow_variable_time_computations: variable_time,
-                coefficients,
-                coefficients_shoup: None,
-                has_lazy_coefficients: false,
-                _repr: std::marker::PhantomData,
-            })
+            let actual = v.len();
+            let coefficients =
+                Array2::from_shape_vec((ctx.q.len(), ctx.degree), v).map_err(|_| {
+                    Error::InvalidCoefficientCount {
+                        representation: Representation::PowerBasis,
+                        actual,
+                        degree: ctx.degree,
+                        moduli: ctx.q.len(),
+                    }
+                })?;
+            Poly::<PowerBasis>::try_from_coefficients(coefficients, ctx, variable_time)
         } else if v.len() <= ctx.degree {
             let mut out = Self::zero(ctx);
             if variable_time {
@@ -193,9 +187,11 @@ impl TryConvertFrom<Vec<u64>> for Poly<PowerBasis> {
             }
             Ok(out)
         } else {
+            let actual = v.len();
+            v.zeroize();
             Err(Error::InvalidCoefficientCount {
                 representation: Representation::PowerBasis,
-                actual: v.len(),
+                actual,
                 degree: ctx.degree,
                 moduli: ctx.q.len(),
             })
@@ -204,118 +200,68 @@ impl TryConvertFrom<Vec<u64>> for Poly<PowerBasis> {
 }
 
 impl TryConvertFrom<Vec<u64>> for Poly<Ntt> {
-    fn try_convert_from(v: Vec<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
+    fn try_convert_from(mut v: Vec<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         let actual = v.len();
-        if let Ok(coefficients) = Array2::from_shape_vec((ctx.q.len(), ctx.degree), v) {
-            Ok(Self {
-                ctx: ctx.clone(),
-                allow_variable_time_computations: variable_time,
-                coefficients,
-                coefficients_shoup: None,
-                has_lazy_coefficients: false,
-                _repr: std::marker::PhantomData,
-            })
-        } else {
-            Err(Error::InvalidCoefficientCount {
+        if actual != ctx.q.len() * ctx.degree {
+            v.zeroize();
+            return Err(Error::InvalidCoefficientCount {
                 representation: Representation::Ntt,
                 actual,
                 degree: ctx.degree,
                 moduli: ctx.q.len(),
-            })
+            });
         }
+        let coefficients = Array2::from_shape_vec((ctx.q.len(), ctx.degree), v).map_err(|_| {
+            Error::InvalidCoefficientCount {
+                representation: Representation::Ntt,
+                actual,
+                degree: ctx.degree,
+                moduli: ctx.q.len(),
+            }
+        })?;
+        Poly::<Ntt>::try_from_coefficients(coefficients, ctx, variable_time)
     }
 }
 
 impl TryConvertFrom<Vec<u64>> for Poly<NttShoup> {
-    fn try_convert_from(v: Vec<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
+    fn try_convert_from(mut v: Vec<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
         let actual = v.len();
-        if let Ok(coefficients) = Array2::from_shape_vec((ctx.q.len(), ctx.degree), v) {
-            let mut p = Self {
-                ctx: ctx.clone(),
-                allow_variable_time_computations: variable_time,
-                coefficients,
-                coefficients_shoup: None,
-                has_lazy_coefficients: false,
-                _repr: std::marker::PhantomData,
-            };
-            p.compute_coefficients_shoup();
-            Ok(p)
-        } else {
-            Err(Error::InvalidCoefficientCount {
+        if actual != ctx.q.len() * ctx.degree {
+            v.zeroize();
+            return Err(Error::InvalidCoefficientCount {
                 representation: Representation::NttShoup,
                 actual,
                 degree: ctx.degree,
                 moduli: ctx.q.len(),
-            })
+            });
         }
+        let coefficients = Array2::from_shape_vec((ctx.q.len(), ctx.degree), v).map_err(|_| {
+            Error::InvalidCoefficientCount {
+                representation: Representation::NttShoup,
+                actual,
+                degree: ctx.degree,
+                moduli: ctx.q.len(),
+            }
+        })?;
+        Poly::<NttShoup>::try_from_coefficients(coefficients, ctx, variable_time)
     }
 }
 
 impl TryConvertFrom<Array2<u64>> for Poly<PowerBasis> {
     fn try_convert_from(a: Array2<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        if a.shape() != [ctx.q.len(), ctx.degree] {
-            Err(Error::InvalidCoefficientShape {
-                actual_rows: a.nrows(),
-                actual_columns: a.ncols(),
-                expected_rows: ctx.q.len(),
-                expected_columns: ctx.degree,
-            })
-        } else {
-            Ok(Self {
-                ctx: ctx.clone(),
-                allow_variable_time_computations: variable_time,
-                coefficients: a,
-                coefficients_shoup: None,
-                has_lazy_coefficients: false,
-                _repr: std::marker::PhantomData,
-            })
-        }
+        Poly::<PowerBasis>::try_from_coefficients(a, ctx, variable_time)
     }
 }
 
 impl TryConvertFrom<Array2<u64>> for Poly<Ntt> {
     fn try_convert_from(a: Array2<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        if a.shape() != [ctx.q.len(), ctx.degree] {
-            Err(Error::InvalidCoefficientShape {
-                actual_rows: a.nrows(),
-                actual_columns: a.ncols(),
-                expected_rows: ctx.q.len(),
-                expected_columns: ctx.degree,
-            })
-        } else {
-            Ok(Self {
-                ctx: ctx.clone(),
-                allow_variable_time_computations: variable_time,
-                coefficients: a,
-                coefficients_shoup: None,
-                has_lazy_coefficients: false,
-                _repr: std::marker::PhantomData,
-            })
-        }
+        Poly::<Ntt>::try_from_coefficients(a, ctx, variable_time)
     }
 }
 
 impl TryConvertFrom<Array2<u64>> for Poly<NttShoup> {
     fn try_convert_from(a: Array2<u64>, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        if a.shape() != [ctx.q.len(), ctx.degree] {
-            Err(Error::InvalidCoefficientShape {
-                actual_rows: a.nrows(),
-                actual_columns: a.ncols(),
-                expected_rows: ctx.q.len(),
-                expected_columns: ctx.degree,
-            })
-        } else {
-            let mut p = Self {
-                ctx: ctx.clone(),
-                allow_variable_time_computations: variable_time,
-                coefficients: a,
-                coefficients_shoup: None,
-                has_lazy_coefficients: false,
-                _repr: std::marker::PhantomData,
-            };
-            p.compute_coefficients_shoup();
-            Ok(p)
-        }
+        Poly::<NttShoup>::try_from_coefficients(a, ctx, variable_time)
     }
 }
 
@@ -701,6 +647,36 @@ mod tests {
                     }
                 );
             }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn matrix_and_ntt_vector_conversions_reject_noncanonical_values() -> Result<(), Box<dyn Error>>
+    {
+        let ctx = Arc::new(Context::new(MODULI, 16)?);
+        let mut coefficients = ndarray::Array2::zeros((MODULI.len(), 16));
+        coefficients[[1, 7]] = MODULI[1];
+        let flat = coefficients
+            .as_slice()
+            .ok_or("expected contiguous coefficients")?;
+
+        for error in [
+            Poly::<PowerBasis>::try_convert_from(coefficients.clone(), &ctx, false).unwrap_err(),
+            Poly::<Ntt>::try_convert_from(coefficients.clone(), &ctx, false).unwrap_err(),
+            Poly::<NttShoup>::try_convert_from(coefficients.clone(), &ctx, false).unwrap_err(),
+            Poly::<PowerBasis>::try_convert_from(flat.to_vec(), &ctx, false).unwrap_err(),
+            Poly::<Ntt>::try_convert_from(flat.to_vec(), &ctx, false).unwrap_err(),
+            Poly::<NttShoup>::try_convert_from(flat.to_vec(), &ctx, false).unwrap_err(),
+        ] {
+            assert_eq!(
+                error,
+                CrateError::NonCanonicalValue {
+                    value: MODULI[1],
+                    modulus: MODULI[1],
+                }
+            );
         }
 
         Ok(())

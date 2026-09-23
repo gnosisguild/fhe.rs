@@ -21,7 +21,7 @@ use fhe_math::{
     rq::{Context, Poly, PowerBasis, scaler::Scaler},
 };
 use itertools::Itertools;
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 use num_bigint::BigUint;
 use rand::{CryptoRng, RngCore};
 use rayon::prelude::*;
@@ -210,6 +210,12 @@ impl ShareManager {
     /// polynomial twice. Callers dealing smudging noise must sample it fresh
     /// for every decryption; reusing noise breaks the statistical hiding
     /// argument.
+    ///
+    /// # Errors
+    /// Returns a parameter error if the polynomial's context differs, or a math
+    /// error if its coefficient matrix violates the context's shape or
+    /// canonical-residue invariants. The coefficient validation is defense in
+    /// depth; safe polynomial construction already enforces these invariants.
     pub fn generate_secret_key_shares<R: RngCore + CryptoRng>(
         &self,
         poly: Zeroizing<Poly<PowerBasis>>,
@@ -230,6 +236,11 @@ impl ShareManager {
                 right: crate::ParameterSource::Parameters,
             });
         }
+        validate_poly_coefficients(
+            poly.coefficients(),
+            self.params.moduli(),
+            self.params.degree(),
+        )?;
 
         RnsShamir::new(
             ctx.moduli_operators(),
@@ -282,7 +293,7 @@ impl ShareManager {
         }
         let expected_shape = (self.params.moduli().len(), self.params.degree());
         for (party_idx, item) in collected.iter().enumerate() {
-            if item.dim() != expected_shape {
+            if coefficient_matrix_shape(item.view(), expected_shape.0, expected_shape.1).is_some() {
                 return Err(Error::malformed_shares(
                     party_idx,
                     format!(
@@ -299,25 +310,18 @@ impl ShareManager {
         // Modulus::add_vec below requires canonical inputs (it aborts or wraps
         // otherwise). Reducing here would silently accept malformed share
         // material and could change the represented share, so values `>= q_i`
-        // are rejected instead. Shape was validated above, so the fallible
-        // `moduli().get(row)` lookup is expected to succeed, but in keeping with
-        // the workspace convention it stays fallible rather than indexed.
+        // are rejected instead. Shape was validated above.
         for (party_idx, item) in collected.iter().enumerate() {
-            for (row, item_row) in item.rows().into_iter().enumerate() {
-                let q_i = self.params.moduli().get(row).copied().ok_or_else(|| {
-                    Error::malformed_shares(party_idx, "modulus index out of range".to_string())
-                })?;
-                for (col, &value) in item_row.iter().enumerate() {
-                    if value >= q_i {
-                        return Err(Error::malformed_shares(
-                            party_idx,
-                            format!(
-                                "share coefficient at row {row} (modulus q_i = {q_i}), column \
-                                 {col} is not a canonical residue in [0, {q_i})"
-                            ),
-                        ));
-                    }
-                }
+            if let Some((row, column, _value, modulus)) =
+                first_noncanonical_coefficient(item.view(), self.params.moduli())
+            {
+                return Err(Error::malformed_shares(
+                    party_idx,
+                    format!(
+                        "share coefficient at row {row} (modulus q_i = {modulus}), column \
+                         {column} is not a canonical residue in [0, {modulus})"
+                    ),
+                ));
             }
         }
 
@@ -343,7 +347,7 @@ impl ShareManager {
         }
 
         let mut sum_poly = Poly::<PowerBasis>::zero(ctx);
-        sum_poly.set_coefficients(sum);
+        sum_poly.set_coefficients(sum)?;
         Ok(sum_poly)
     }
 
@@ -444,7 +448,7 @@ impl ShareManager {
 
         // Scale the reconstructed polynomial into the plaintext space.
         let mut result_poly = Poly::<PowerBasis>::zero(ctx);
-        result_poly.set_coefficients(arr_matrix);
+        result_poly.set_coefficients(arr_matrix)?;
 
         let plaintext_ctx = Context::new_arc(&self.params.moduli()[..1], self.params.degree())
             .map_err(Error::MathError)?;
@@ -545,6 +549,57 @@ impl ShareManager {
     }
 }
 
+fn validate_poly_coefficients(
+    coefficients: ArrayView2<'_, u64>,
+    moduli: &[u64],
+    degree: usize,
+) -> Result<(), Error> {
+    let expected_shape = (moduli.len(), degree);
+    if let Some((actual_rows, actual_columns)) =
+        coefficient_matrix_shape(coefficients, expected_shape.0, expected_shape.1)
+    {
+        return Err(fhe_math::Error::InvalidCoefficientShape {
+            actual_rows,
+            actual_columns,
+            expected_rows: expected_shape.0,
+            expected_columns: expected_shape.1,
+        }
+        .into());
+    }
+
+    if let Some((_, _, value, modulus)) = first_noncanonical_coefficient(coefficients, moduli) {
+        return Err(fhe_math::Error::NonCanonicalValue { value, modulus }.into());
+    }
+    Ok(())
+}
+
+fn coefficient_matrix_shape(
+    coefficients: ArrayView2<'_, u64>,
+    expected_rows: usize,
+    expected_columns: usize,
+) -> Option<(usize, usize)> {
+    let (actual_rows, actual_columns) = coefficients.dim();
+    (actual_rows != expected_rows || actual_columns != expected_columns)
+        .then_some((actual_rows, actual_columns))
+}
+
+fn first_noncanonical_coefficient(
+    coefficients: ArrayView2<'_, u64>,
+    moduli: &[u64],
+) -> Option<(usize, usize, u64, u64)> {
+    coefficients
+        .outer_iter()
+        .zip(moduli)
+        .enumerate()
+        .find_map(|(row, (values, &modulus))| {
+            values
+                .iter()
+                .enumerate()
+                .find(|(_, value)| **value >= modulus)
+                .map(|(column, &value)| (row, column, value, modulus))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -560,6 +615,21 @@ mod tests {
     use crate::trbfv::smudging::{SmudgingConfig, SmudgingNoiseGenerator};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
+
+    #[test]
+    fn poly_coefficient_guard_returns_math_error_for_noncanonical_values() {
+        let params = insecure().unwrap().parameters;
+        let mut coefficients = Array2::zeros((params.moduli().len(), params.degree()));
+        coefficients[[1, 7]] = params.moduli()[1];
+
+        assert_eq!(
+            validate_poly_coefficients(coefficients.view(), params.moduli(), params.degree()),
+            Err(Error::MathError(fhe_math::Error::NonCanonicalValue {
+                value: params.moduli()[1],
+                modulus: params.moduli()[1],
+            }))
+        );
+    }
 
     #[test]
     fn test_share_manager_creation() {
@@ -708,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn test_share_generation_rejects_wrong_context_and_noncanonical_secret() {
+    fn test_share_generation_rejects_wrong_context_and_setter_rejects_noncanonical_secret() {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         let mut rng = rng();
@@ -727,13 +797,9 @@ mod tests {
         let mut noncanonical = Poly::<PowerBasis>::zero(context);
         let mut coefficients = Array2::zeros((params.moduli().len(), params.degree()));
         coefficients[[1, 7]] = params.moduli()[1];
-        noncanonical.set_coefficients(coefficients);
-        let error = manager
-            .generate_secret_key_shares(Zeroizing::new(noncanonical), &mut rng)
-            .expect_err("noncanonical secret coefficients must be rejected");
         assert!(matches!(
-            error,
-            Error::Threshold(ThresholdError::MalformedShares { .. })
+            noncanonical.set_coefficients(coefficients),
+            Err(fhe_math::Error::NonCanonicalValue { .. })
         ));
     }
 
@@ -1515,18 +1581,6 @@ mod tests {
             .collect();
         let result = manager.decrypt_from_shares(wrong_context, vec![1, 2, 3], ct.clone());
         assert!(matches!(result, Err(Error::ParameterMismatch { .. })));
-
-        // Residues equal to a row modulus are malformed, not implicitly reduced.
-        let mut noncanonical: Vec<Poly<PowerBasis>> =
-            (0..3).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
-        let mut coefficients = Array2::zeros((params.moduli().len(), params.degree()));
-        coefficients[[0, 0]] = params.moduli()[0];
-        noncanonical[1].set_coefficients(coefficients);
-        let result = manager.decrypt_from_shares(noncanonical, vec![1, 2, 3], ct.clone());
-        assert!(matches!(
-            result,
-            Err(Error::Threshold(ThresholdError::MalformedShares { .. }))
-        ));
 
         // Fewer than threshold + 1 is rejected
         let two: Vec<Poly<PowerBasis>> = (0..2).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
