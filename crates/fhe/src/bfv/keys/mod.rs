@@ -8,6 +8,6 @@ mod secret_key;
 pub use evaluation_key::{EvaluationKey, EvaluationKeyBuilder};
 pub use galois_key::GaloisKey;
 pub use key_switching_key::KeySwitchingKey;
-pub use public_key::PublicKey;
+pub use public_key::{EncryptionIntermediates, PublicKey, PublicKeyGenerationIntermediates};
 pub use relinearization_key::RelinearizationKey;
 pub use secret_key::SecretKey;

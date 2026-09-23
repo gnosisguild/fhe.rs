@@ -24,7 +24,10 @@ pub use context::{CipherPlainContext, ContextLevel};
 pub use crp::{CommonRandomPoly, CommonRandomPolyVec};
 pub use encoding::Encoding;
 pub(crate) use keys::KeySwitchingKey;
-pub use keys::{EvaluationKey, EvaluationKeyBuilder, PublicKey, RelinearizationKey, SecretKey};
+pub use keys::{
+    EncryptionIntermediates, EvaluationKey, EvaluationKeyBuilder, PublicKey,
+    PublicKeyGenerationIntermediates, RelinearizationKey, SecretKey,
+};
 pub use ops::{Multiplicator, dot_product_scalar};
 pub use parameters::{BfvParameters, BfvParametersBuilder};
 pub use plaintext::Plaintext;

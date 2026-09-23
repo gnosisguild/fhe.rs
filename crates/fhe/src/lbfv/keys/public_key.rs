@@ -11,7 +11,8 @@ use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
 use crate::bfv::{
-    BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, traits::TryConvertFrom,
+    BfvParameters, Ciphertext, Encoding, EncryptionIntermediates, Plaintext, SecretKey,
+    traits::TryConvertFrom,
 };
 use crate::proto::bfv::Ciphertext as CiphertextProto;
 use crate::proto::lbfv::LbfvPublicKey as LBFVPublicKeyProto;
@@ -78,15 +79,15 @@ impl LBFVPublicKey {
         Ok(Self::new_with_seed(sk, seed, rng))
     }
 
-    /// Encrypt a plaintext and retain the witness needed to prove its encryption.
+    /// Encrypt a plaintext and return the randomness and errors used to construct it.
     ///
-    /// The witness zeroizes its polynomials when dropped.
+    /// The intermediates zeroize their polynomials when dropped.
     #[allow(clippy::indexing_slicing)] // ct.c always has exactly 2 components (BFV invariant)
-    pub fn try_encrypt_with_witness<R: RngCore + CryptoRng>(
+    pub fn try_encrypt_with_intermediates<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
         rng: &mut R,
-    ) -> Result<(Ciphertext, crate::zk_witness::Encryption)> {
+    ) -> Result<(Ciphertext, EncryptionIntermediates)> {
         if self.c.is_empty() {
             return Err(crate::EvaluationKeyError::EmptyPublicKey.into());
         }
@@ -123,7 +124,7 @@ impl LBFVPublicKey {
 
         Ok((
             ciphertext,
-            crate::zk_witness::Encryption {
+            EncryptionIntermediates {
                 randomness: u,
                 error_0: e1,
                 error_1: e2,
@@ -404,7 +405,7 @@ mod tests {
         Ok(())
     }
 
-    /// `try_encrypt` and `try_encrypt_with_witness` must sample `e1` from the
+    /// `try_encrypt` and `try_encrypt_with_intermediates` must sample `e1` from the
     /// configured `error1_variance`, independently of `variance` (used for
     /// `u` and `e2`), mirroring `bfv::PublicKey`.
     #[test]
@@ -437,17 +438,17 @@ mod tests {
         assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
         assert_eq!(params.variance(), 10);
 
-        let (ct_ext, _witness) = pk.try_encrypt_with_witness(&pt, &mut rng)?;
+        let (ct_ext, _intermediates) = pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
         let pt2_ext = sk.try_decrypt(&ct_ext)?;
         assert_eq!(pt2_ext, pt);
 
         Ok(())
     }
 
-    /// `try_encrypt_with_witness` witness equations: `c0 = u·b + e1 + m` and
+    /// `try_encrypt_with_intermediates` equations: `c0 = u·b + e1 + m` and
     /// `c1 = u·a + e2`, per `.rules/witness.md`.
     #[test]
-    fn extended_encrypt_witness_equations() -> Result<(), Box<dyn Error>> {
+    fn extended_encrypt_intermediates_equations() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(6, 8);
         let sk = SecretKey::random(&params, &mut rng);
@@ -459,17 +460,17 @@ mod tests {
             &params,
         )?;
 
-        let (ct, witness) = pk.try_encrypt_with_witness(&pt, &mut rng)?;
+        let (ct, intermediates) = pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
 
         let b = pk.c[0].c[0].clone();
         let a = pk.c[0].c[1].clone();
         let m = pt.to_poly();
 
-        let mut expected_c0 = witness.randomness() * &b;
-        expected_c0 += witness.error_0();
+        let mut expected_c0 = intermediates.randomness() * &b;
+        expected_c0 += intermediates.error_0();
         expected_c0 += &m;
-        let mut expected_c1 = witness.randomness() * &a;
-        expected_c1 += witness.error_1();
+        let mut expected_c1 = intermediates.randomness() * &a;
+        expected_c1 += intermediates.error_1();
 
         assert_eq!(ct.c[0].coefficients(), expected_c0.coefficients());
         assert_eq!(ct.c[1].coefficients(), expected_c1.coefficients());

@@ -13,7 +13,7 @@ use prost::Message;
 use rand::{CryptoRng, Rng as RngCore};
 use std::borrow::Cow;
 use std::sync::Arc;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::SecretKey;
 
@@ -24,6 +24,94 @@ pub struct PublicKey {
     pub params: Arc<BfvParameters>,
     /// The public key ciphertext
     pub c: Ciphertext,
+}
+
+/// Intermediates from BFV public-key generation.
+///
+/// These intermediates zeroize their polynomials when dropped. Retain them only while the
+/// calling protocol needs these values.
+pub struct PublicKeyGenerationIntermediates {
+    a: Poly<Ntt>,
+    secret_key: Poly<Ntt>,
+    error: Poly<Ntt>,
+}
+
+impl PublicKeyGenerationIntermediates {
+    /// Returns the sampled polynomial `a`.
+    #[must_use]
+    pub fn a(&self) -> &Poly<Ntt> {
+        &self.a
+    }
+
+    /// Returns the secret-key polynomial in NTT form.
+    #[must_use]
+    pub fn secret_key(&self) -> &Poly<Ntt> {
+        &self.secret_key
+    }
+
+    /// Returns the public-key error polynomial.
+    #[must_use]
+    pub fn error(&self) -> &Poly<Ntt> {
+        &self.error
+    }
+}
+
+impl Zeroize for PublicKeyGenerationIntermediates {
+    fn zeroize(&mut self) {
+        self.a.zeroize();
+        self.secret_key.zeroize();
+        self.error.zeroize();
+    }
+}
+
+impl Drop for PublicKeyGenerationIntermediates {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+/// Intermediates from BFV encryption, including encryption with an l-BFV public key.
+///
+/// These intermediates zeroize their polynomials when dropped. Retain them only while the
+/// calling protocol needs these values.
+pub struct EncryptionIntermediates {
+    pub(crate) randomness: Poly<Ntt>,
+    pub(crate) error_0: Poly<Ntt>,
+    pub(crate) error_1: Poly<Ntt>,
+}
+
+impl EncryptionIntermediates {
+    /// Returns the encryption randomness polynomial.
+    #[must_use]
+    pub fn randomness(&self) -> &Poly<Ntt> {
+        &self.randomness
+    }
+
+    /// Returns the first encryption error polynomial.
+    #[must_use]
+    pub fn error_0(&self) -> &Poly<Ntt> {
+        &self.error_0
+    }
+
+    /// Returns the second encryption error polynomial.
+    #[must_use]
+    pub fn error_1(&self) -> &Poly<Ntt> {
+        &self.error_1
+    }
+}
+
+impl Zeroize for EncryptionIntermediates {
+    fn zeroize(&mut self) {
+        self.randomness.zeroize();
+        self.error_0.zeroize();
+        self.error_1.zeroize();
+    }
+}
+
+impl Drop for EncryptionIntermediates {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 
 impl PublicKey {
@@ -41,13 +129,13 @@ impl PublicKey {
         }
     }
 
-    /// Generate a public key and retain the witness needed to prove its generation.
+    /// Generate a public key and return the sampled values used to construct it.
     ///
-    /// The witness zeroizes its polynomials when dropped.
-    pub fn new_with_witness<R: RngCore + CryptoRng>(
+    /// The intermediates zeroize their polynomials when dropped.
+    pub fn new_with_intermediates<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         rng: &mut R,
-    ) -> Result<(Self, crate::zk_witness::BfvKeyGeneration)> {
+    ) -> Result<(Self, PublicKeyGenerationIntermediates)> {
         let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
         let zero_poly = Zeroizing::new(zero.to_poly());
 
@@ -65,7 +153,7 @@ impl PublicKey {
 
         Ok((
             pk,
-            crate::zk_witness::BfvKeyGeneration {
+            PublicKeyGenerationIntermediates {
                 a,
                 secret_key: s,
                 error: e,
@@ -73,14 +161,14 @@ impl PublicKey {
         ))
     }
 
-    /// Encrypt a plaintext and retain the witness needed to prove its encryption.
+    /// Encrypt a plaintext and return the randomness and errors used to construct it.
     ///
-    /// The witness zeroizes its polynomials when dropped.
-    pub fn try_encrypt_with_witness<R: RngCore + CryptoRng>(
+    /// The intermediates zeroize their polynomials when dropped.
+    pub fn try_encrypt_with_intermediates<R: RngCore + CryptoRng>(
         &self,
         pt: &Plaintext,
         rng: &mut R,
-    ) -> Result<(Ciphertext, crate::zk_witness::Encryption)> {
+    ) -> Result<(Ciphertext, EncryptionIntermediates)> {
         let mut ct = self.c.clone();
         while ct.level != pt.level() {
             ct.switch_down()?;
@@ -133,7 +221,7 @@ impl PublicKey {
 
         Ok((
             ciphertext,
-            crate::zk_witness::Encryption {
+            EncryptionIntermediates {
                 randomness: u_copy,
                 error_0: e1_copy,
                 error_1: e2_copy,
@@ -286,6 +374,7 @@ mod tests {
     use num_bigint::BigUint;
     use rand::rng;
     use std::error::Error;
+    use zeroize::Zeroize;
 
     #[test]
     fn keygen() -> Result<(), Box<dyn Error>> {
@@ -438,7 +527,7 @@ mod tests {
             &params,
         )?;
 
-        let (ct, _witness) = pk.try_encrypt_with_witness(&pt, &mut rng)?;
+        let (ct, _intermediates) = pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
         let pt2 = sk.try_decrypt(&ct)?;
 
         println!("Extended encryption - noise polynomials returned successfully");
@@ -536,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_with_witness() -> Result<(), Box<dyn Error>> {
+    fn test_new_with_intermediates() -> Result<(), Box<dyn Error>> {
         use fhe_math::rq::Representation;
 
         let mut rng = rng();
@@ -544,10 +633,10 @@ mod tests {
 
         let sk = SecretKey::random(&params, &mut rng);
 
-        let (pk, witness) = PublicKey::new_with_witness(&sk, &mut rng)?;
-        let a = witness.a();
-        let s = witness.secret_key();
-        let e = witness.error();
+        let (pk, intermediates) = PublicKey::new_with_intermediates(&sk, &mut rng)?;
+        let a = intermediates.a();
+        let s = intermediates.secret_key();
+        let e = intermediates.error();
 
         assert_eq!(pk.params, params);
         assert_eq!(pk.c.params, params);
@@ -588,14 +677,14 @@ mod tests {
     }
 
     #[test]
-    fn test_new_vs_new_with_witness_consistency() -> Result<(), Box<dyn Error>> {
+    fn test_new_vs_new_with_intermediates_consistency() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
 
         let sk = SecretKey::random(&params, &mut rng);
 
         let pk1 = PublicKey::new(&sk, &mut rng);
-        let (pk2, _witness) = PublicKey::new_with_witness(&sk, &mut rng)?;
+        let (pk2, _intermediates) = PublicKey::new_with_intermediates(&sk, &mut rng)?;
 
         assert_eq!(pk1.params, pk2.params);
         assert_eq!(pk1.c.len(), 2);
@@ -616,17 +705,17 @@ mod tests {
     }
 
     #[test]
-    fn test_new_with_witness_security_properties() -> Result<(), Box<dyn Error>> {
+    fn test_new_with_intermediates_security_properties() -> Result<(), Box<dyn Error>> {
         use fhe_math::rq::Representation;
 
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
         let sk = SecretKey::random(&params, &mut rng);
 
-        let (_pk, witness) = PublicKey::new_with_witness(&sk, &mut rng)?;
-        let a = witness.a();
-        let s = witness.secret_key();
-        let e = witness.error();
+        let (_pk, intermediates) = PublicKey::new_with_intermediates(&sk, &mut rng)?;
+        let a = intermediates.a();
+        let s = intermediates.secret_key();
+        let e = intermediates.error();
 
         assert_eq!(a.representation(), Representation::Ntt);
         assert_eq!(s.representation(), Representation::Ntt);
@@ -635,6 +724,44 @@ mod tests {
         let mut s_squared = s.clone();
         s_squared *= s;
         assert_eq!(s_squared.representation(), Representation::Ntt);
+
+        Ok(())
+    }
+
+    #[test]
+    fn intermediates_zeroize_their_polynomials() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let (pk, mut key_intermediates) = PublicKey::new_with_intermediates(&sk, &mut rng)?;
+        key_intermediates.zeroize();
+        for poly in [
+            key_intermediates.a(),
+            key_intermediates.secret_key(),
+            key_intermediates.error(),
+        ] {
+            assert!(
+                poly.coefficients()
+                    .iter()
+                    .all(|&coefficient| coefficient == 0)
+            );
+        }
+
+        let pt = Plaintext::zero(Encoding::poly(), &params)?;
+        let (_ct, mut encryption_intermediates) =
+            pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
+        encryption_intermediates.zeroize();
+        for poly in [
+            encryption_intermediates.randomness(),
+            encryption_intermediates.error_0(),
+            encryption_intermediates.error_1(),
+        ] {
+            assert!(
+                poly.coefficients()
+                    .iter()
+                    .all(|&coefficient| coefficient == 0)
+            );
+        }
 
         Ok(())
     }

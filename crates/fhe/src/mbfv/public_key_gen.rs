@@ -5,7 +5,7 @@ use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
 use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, Rng as RngCore};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 //use serde::{Serialize, Deserialize};
 
 use crate::bfv::CommonRandomPoly;
@@ -20,6 +20,42 @@ pub struct PublicKeyShare {
     pub(crate) params: Arc<BfvParameters>,
     pub(crate) crp: CommonRandomPoly,
     pub(crate) p0_share: Poly<Ntt>,
+}
+
+/// Intermediates from multiparty BFV public-key share generation.
+///
+/// These intermediates zeroize their polynomials when dropped. Retain them only while the
+/// calling protocol needs these values.
+pub struct PublicKeyShareIntermediates {
+    secret_key: Poly<Ntt>,
+    error: Poly<Ntt>,
+}
+
+impl PublicKeyShareIntermediates {
+    /// Returns the secret-key share polynomial in NTT form.
+    #[must_use]
+    pub fn secret_key(&self) -> &Poly<Ntt> {
+        &self.secret_key
+    }
+
+    /// Returns the public-key share error polynomial.
+    #[must_use]
+    pub fn error(&self) -> &Poly<Ntt> {
+        &self.error
+    }
+}
+
+impl Zeroize for PublicKeyShareIntermediates {
+    fn zeroize(&mut self) {
+        self.secret_key.zeroize();
+        self.error.zeroize();
+    }
+}
+
+impl Drop for PublicKeyShareIntermediates {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 
 impl PublicKeyShare {
@@ -64,14 +100,14 @@ impl PublicKeyShare {
         })
     }
 
-    /// Generate a public-key share and retain the witness needed to prove its generation.
+    /// Generate a public-key share and return the secret-key polynomial and sampled error.
     ///
-    /// The witness zeroizes its polynomials when dropped.
-    pub fn new_with_witness<R: RngCore + CryptoRng>(
+    /// The intermediates zeroize their polynomials when dropped.
+    pub fn new_with_intermediates<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
         crp: CommonRandomPoly,
         rng: &mut R,
-    ) -> Result<(Self, crate::zk_witness::MbfvPublicKeyShare)> {
+    ) -> Result<(Self, PublicKeyShareIntermediates)> {
         let params = sk_share.params.clone();
         let ctx = params.context_at_level(0)?;
 
@@ -94,7 +130,7 @@ impl PublicKeyShare {
                 crp,
                 p0_share,
             },
-            crate::zk_witness::MbfvPublicKeyShare {
+            PublicKeyShareIntermediates {
                 secret_key: (*s).clone(),
                 error: (*e).clone(),
             },
@@ -263,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_with_witness() {
+    fn test_new_with_intermediates() {
         let mut rng = rng();
 
         // Test with different parameter configurations
@@ -274,12 +310,12 @@ mod tests {
             let sk_share = SecretKey::random(&params, &mut rng);
             let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
 
-            let (share, witness) =
-                PublicKeyShare::new_with_witness(&sk_share, crp.clone(), &mut rng).unwrap();
+            let (share, intermediates) =
+                PublicKeyShare::new_with_intermediates(&sk_share, crp.clone(), &mut rng).unwrap();
             let pk_0 = &share.p0_share;
             let pk_1 = &share.crp.poly;
-            let s = witness.secret_key();
-            let e = witness.error();
+            let s = intermediates.secret_key();
+            let e = intermediates.error();
 
             // Verify pk_1 is the same as crp polynomial
             assert_eq!(*pk_1, crp.poly, "pk_1 should be the same as crp polynomial");
@@ -303,31 +339,31 @@ mod tests {
     }
 
     #[test]
-    fn test_new_with_witness_multiple_parties() {
+    fn test_new_with_intermediates_multiple_parties() {
         let mut rng = rng();
         const NUM_PARTIES: usize = 5;
 
         let params = BfvParameters::default_arc(1, 8);
         let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
 
-        let mut witness_data = vec![];
+        let mut intermediates_data = vec![];
         for _ in 0..NUM_PARTIES {
             let sk_share = SecretKey::random(&params, &mut rng);
-            let (share, witness) =
-                PublicKeyShare::new_with_witness(&sk_share, crp.clone(), &mut rng).unwrap();
-            witness_data.push((share, witness));
+            let (share, intermediates) =
+                PublicKeyShare::new_with_intermediates(&sk_share, crp.clone(), &mut rng).unwrap();
+            intermediates_data.push((share, intermediates));
         }
 
-        for (share, _) in &witness_data {
+        for (share, _) in &intermediates_data {
             assert_eq!(share.crp.poly, crp.poly, "All parties use the same CRP");
         }
 
         // Verify the mathematical relationship holds for each party
-        for (share, witness) in &witness_data {
+        for (share, intermediates) in &intermediates_data {
             let mut expected = -share.crp.poly.clone();
             expected.disallow_variable_time_computations();
-            expected *= witness.secret_key();
-            expected += witness.error();
+            expected *= intermediates.secret_key();
+            expected += intermediates.error();
             expected.allow_variable_time_computations(fhe_traits::VariableTime::new(
                 fhe_traits::PublicData::assert_public(),
             ));
@@ -339,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_with_witness_consistency_with_new() {
+    fn test_new_with_intermediates_consistency_with_new() {
         let mut rng = rng();
 
         let params = BfvParameters::default_arc(1, 8);
@@ -349,16 +385,37 @@ mod tests {
         // Create PublicKeyShare using original new()
         let pks = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
 
-        let (share, _witness) =
-            PublicKeyShare::new_with_witness(&sk_share, crp.clone(), &mut rng).unwrap();
+        let (share, _intermediates) =
+            PublicKeyShare::new_with_intermediates(&sk_share, crp.clone(), &mut rng).unwrap();
 
         assert_eq!(
             share.crp.poly, pks.crp.poly,
-            "pk_1 from new_with_witness should match crp from PublicKeyShare"
+            "pk_1 from new_with_intermediates should match crp from PublicKeyShare"
         );
         assert_eq!(
             share.crp.poly, crp.poly,
             "pk_1 should be the crp polynomial"
         );
+    }
+
+    #[test]
+    fn public_key_share_intermediates_zeroize_their_polynomials() {
+        use zeroize::Zeroize;
+
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk_share = SecretKey::random(&params, &mut rng);
+        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        let (_share, mut intermediates) =
+            PublicKeyShare::new_with_intermediates(&sk_share, crp, &mut rng).unwrap();
+
+        intermediates.zeroize();
+        for poly in [intermediates.secret_key(), intermediates.error()] {
+            assert!(
+                poly.coefficients()
+                    .iter()
+                    .all(|&coefficient| coefficient == 0)
+            );
+        }
     }
 }

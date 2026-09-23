@@ -25,7 +25,7 @@ mod secret_key_switch;
 
 pub use crate::aggregate::{Aggregate, AggregateIter};
 pub use crate::bfv::CommonRandomPoly;
-pub use public_key_gen::PublicKeyShare;
+pub use public_key_gen::{PublicKeyShare, PublicKeyShareIntermediates};
 pub use public_key_switch::PublicKeySwitchShare;
 pub use relin_key_gen::{RelinKeyGenerator, RelinKeyShare};
 pub use secret_key_switch::{DecryptionShare, SecretKeySwitchShare};
