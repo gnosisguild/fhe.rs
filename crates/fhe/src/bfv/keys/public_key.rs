@@ -81,24 +81,6 @@ impl PublicKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<(Ciphertext, crate::zk_witness::Encryption)> {
-        let (ciphertext, randomness, error_0, error_1) =
-            self.try_encrypt_with_witness_parts(pt, rng)?;
-        Ok((
-            ciphertext,
-            crate::zk_witness::Encryption {
-                randomness,
-                error_0,
-                error_1,
-            },
-        ))
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn try_encrypt_with_witness_parts<R: RngCore + CryptoRng>(
-        &self,
-        pt: &Plaintext,
-        rng: &mut R,
-    ) -> Result<(Ciphertext, Poly<Ntt>, Poly<Ntt>, Poly<Ntt>)> {
         let mut ct = self.c.clone();
         while ct.level != pt.level() {
             ct.switch_down()?;
@@ -149,7 +131,14 @@ impl PublicKey {
             level: ct.level,
         };
 
-        Ok((ciphertext, u_copy, e1_copy, e2_copy))
+        Ok((
+            ciphertext,
+            crate::zk_witness::Encryption {
+                randomness: u_copy,
+                error_0: e1_copy,
+                error_1: e2_copy,
+            },
+        ))
     }
 }
 
