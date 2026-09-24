@@ -552,6 +552,42 @@ mod tests {
     }
 
     #[test]
+    fn rejects_congruent_noncanonical_residues_near_u64_max() -> Result<(), Box<dyn Error>> {
+        let source_moduli = [4, 15, 1153];
+        let destination_moduli = [7, 1153, 4611686018309947393];
+        let from = Arc::new(RnsContext::new(&source_moduli)?);
+        let to = Arc::new(RnsContext::new(&destination_moduli)?);
+        let factor = ScalingFactor::new(
+            &BigUint::from(41969283214616u64),
+            &BigUint::from(34263817073227u64),
+        )?;
+        let scaler = RnsScaler::new(&from, &to, factor);
+
+        let canonical = [0, 10, 178];
+        // These residues are congruent but large enough to invalidate the
+        // theta-garner bounds used by the scaling arithmetic if accepted.
+        let noncanonical = [u64::MAX - 3, u64::MAX - 5, u64::MAX - 451];
+        assert!(
+            noncanonical
+                .iter()
+                .zip(source_moduli)
+                .zip(canonical)
+                .all(|((&raw, modulus), reduced)| raw % modulus == reduced)
+        );
+        assert_eq!(
+            scaler.scale_new((&canonical[..]).into(), destination_moduli.len()),
+            [4, 968, 4611686018309939137]
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                scaler.scale_new((&noncanonical[..]).into(), destination_moduli.len())
+            })
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn scale_same_context() -> Result<(), Box<dyn Error>> {
         let ntests = 1000;
         let q = Arc::new(RnsContext::new(&[4u64, 4611686018326724609, 1153])?);
