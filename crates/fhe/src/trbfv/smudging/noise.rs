@@ -96,6 +96,20 @@ impl SmudgingNoiseGenerator {
         // B_C^(0): initial ciphertext noise bound (additive).
         let b_c_additive = BigUint::from(config.m) * (&b_fresh + &q_full % &t);
 
+        // B_C grows with multiplicative depth. Once the correctness inequality
+        // fails, later rounds cannot restore it, so reject before growing an
+        // unbounded BigUint for an infeasible caller-provided depth.
+        let check_correctness = |b_c: &BigUint| -> Result<(), Error> {
+            let two_b_c = b_c << 1usize;
+            if two_b_c >= delta {
+                return Err(Error::smudging_bound_infeasible(format!(
+                    "2*B_C = {two_b_c} exceeds Delta = {delta}: circuit too deep or parameters too small"
+                )));
+            }
+            Ok(())
+        };
+        check_correctness(&b_c_additive)?;
+
         // --- Multiplicative depth recursion (Prop. 20) ---
         //
         // B_C^{i+1} = 2·k·N²·‖sk‖ · B_C^{i} + B_relin
@@ -127,19 +141,12 @@ impl SmudgingNoiseGenerator {
             let mut b = b_c_additive;
             for _ in 0..config.mult_depth {
                 b = &coeff * &b + &b_relin;
+                check_correctness(&b)?;
             }
             b
         } else {
             b_c_additive
         };
-
-        // --- Correctness: 2 * B_C < Delta ---
-        let two_b_c = BigUint::from(2_u64) * &b_c;
-        if two_b_c >= delta {
-            return Err(Error::smudging_bound_infeasible(format!(
-                "2*B_C = {two_b_c} exceeds Delta = {delta}: circuit too deep or parameters too small"
-            )));
-        }
 
         // --- Compute B_sm = 2^(lambda + 1) * d * B_C
         //
@@ -634,6 +641,28 @@ mod tests {
             .smudging_bound()
             .clone();
         assert!(bound_mul > bound_add);
+    }
+
+    #[test]
+    fn infeasible_depth_returns_before_unbounded_recursion() {
+        let params = small_params(&[62, 62, 62]);
+        let config = SmudgingConfig::new(params.clone(), 3, 1, 2).unwrap();
+        assert!(SmudgingNoiseGenerator::new(config.clone().with_mult_depth(1)).is_ok());
+
+        assert!(matches!(
+            SmudgingNoiseGenerator::new(config.with_mult_depth(u32::MAX)),
+            Err(Error::Threshold(
+                crate::ThresholdError::SmudgingBoundInfeasible { .. }
+            ))
+        ));
+
+        let additive_infeasible = SmudgingConfig::new(params, 3, usize::MAX, 2).unwrap();
+        assert!(matches!(
+            SmudgingNoiseGenerator::new(additive_infeasible.with_mult_depth(u32::MAX)),
+            Err(Error::Threshold(
+                crate::ThresholdError::SmudgingBoundInfeasible { .. }
+            ))
+        ));
     }
 
     #[test]

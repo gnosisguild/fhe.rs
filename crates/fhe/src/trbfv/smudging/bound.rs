@@ -105,8 +105,9 @@ impl SmudgingConfig {
 
     /// Set the circuit depth before creating a smudging noise generator.
     ///
-    /// All `u32` depths are valid configuration inputs; feasibility of the
-    /// resulting bound is checked by [`crate::trbfv::smudging::SmudgingNoiseGenerator::new`].
+    /// The resulting bound is checked for feasibility by
+    /// [`crate::trbfv::smudging::SmudgingNoiseGenerator::new`], including
+    /// during the depth recursion.
     #[must_use]
     pub fn with_mult_depth(mut self, depth: u32) -> Self {
         self.mult_depth = depth;

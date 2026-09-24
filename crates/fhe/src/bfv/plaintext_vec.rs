@@ -103,6 +103,7 @@ impl PlaintextVec {
     }
 
     /// Iterate over borrowed plaintexts in order.
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
     pub fn iter(&self) -> std::slice::Iter<'_, Plaintext> {
         self.0.iter()
     }
@@ -113,7 +114,8 @@ impl PlaintextVec {
         self.0.len()
     }
 
-    /// Return whether the collection is empty.
+    /// Return whether the collection is empty (always `false` for a constructed
+    /// `PlaintextVec`).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
