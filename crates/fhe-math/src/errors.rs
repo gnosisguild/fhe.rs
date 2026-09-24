@@ -115,6 +115,14 @@ pub enum Error {
     #[error("RNS moduli {left} and {right} are not coprime.")]
     NonCoprimeModuli { left: u64, right: u64 },
 
+    /// Indicates that a CRT lift received the wrong number of residues.
+    #[error("Invalid RNS residue count {actual}; expected {expected}.")]
+    InvalidResidueCount { actual: usize, expected: usize },
+
+    /// Indicates that a scaling factor has no valid denominator.
+    #[error("Scaling factor denominator must be nonzero.")]
+    ZeroScalingDenominator,
+
     /// Indicates that a modular inverse does not exist.
     #[error("Value {value} is not invertible modulo {modulus}.")]
     NonInvertible { value: u64, modulus: u64 },

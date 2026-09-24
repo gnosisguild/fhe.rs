@@ -745,7 +745,7 @@ impl BfvParametersBuilder {
             // Use RnsContext to lift the delta values and create the scaling polynomial
             let rns = RnsContext::new(level_moduli)?;
             let delta = Poly::<PowerBasis>::try_convert_from(
-                &[rns.lift((&delta_rests).into())],
+                &[rns.lift((&delta_rests).into())?],
                 &cipher_ctx,
                 true,
             )?
@@ -761,7 +761,7 @@ impl BfvParametersBuilder {
             let scaler = Scaler::new(
                 &cipher_ctx,
                 &plaintext_context,
-                ScalingFactor::new(plaintext_big, rns.modulus()),
+                ScalingFactor::new(plaintext_big, rns.modulus())?,
             )?;
 
             let cipher_plain_ctx = CipherPlainContext::new_arc(
@@ -818,7 +818,7 @@ impl BfvParametersBuilder {
                     &poly_context,
                     &multiplication_context,
                     ScalingFactor::one(),
-                    ScalingFactor::new(plaintext_big, poly_context.modulus()),
+                    ScalingFactor::new(plaintext_big, poly_context.modulus())?,
                 )?;
 
                 Ok(ContextLevel::new(

@@ -102,6 +102,8 @@ impl Plaintext {
 
     fn coefficients(&self) -> PlaintextCoefficients {
         let poly = Zeroizing::new(self.poly_ntt.clone().into_power_basis());
+        // Backward NTT produces canonical residues in the polynomial's validated
+        // context, so the BigUint CRT lifts below cannot reject their inputs.
         match self.params.plaintext.small() {
             Some(modulus)
                 if self
@@ -117,7 +119,7 @@ impl Plaintext {
                 PlaintextCoefficients::Small(values)
             }
             Some(_) => {
-                let mut values = Vec::<BigUint>::from(poly.as_ref());
+                let mut values = Vec::<BigUint>::try_from(poly.as_ref()).unwrap();
                 self.params.plaintext.reduce_vec(&mut values);
                 PlaintextCoefficients::Small(
                     values
@@ -127,7 +129,7 @@ impl Plaintext {
                 )
             }
             None => {
-                let mut values = Vec::<BigUint>::from(poly.as_ref());
+                let mut values = Vec::<BigUint>::try_from(poly.as_ref()).unwrap();
                 self.params.plaintext.reduce_vec(&mut values);
                 PlaintextCoefficients::Large(values)
             }
