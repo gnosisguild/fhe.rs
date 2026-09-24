@@ -466,14 +466,11 @@ impl<R: RepresentationTag> Poly<R> {
             });
         }
 
-        let variance_u64 = variance.to_u64().unwrap_or(u64::MAX);
-
-        if variance_u64 <= 16 {
-            let variance_usize = variance.to_usize().unwrap_or(0);
-            Self::small(ctx, variance_usize, rng)
-        } else {
-            let bound = variance_to_uniform_bound(variance)?;
-            Self::uniform_bigint(ctx, representation, &bound, rng)
+        match error_sampler(variance)? {
+            ErrorSampler::Cbd { variance, .. } => Self::small(ctx, variance, rng),
+            ErrorSampler::Uniform { bound } => {
+                Self::uniform_biguint(ctx, representation, &bound, rng)
+            }
         }
     }
 
@@ -949,6 +946,42 @@ pub fn sample_uniform_coefficients_bigint<T: RngCore + CryptoRng>(
         .collect()
 }
 
+const CBD_ERROR_VARIANCE_MAX: u64 = 16;
+
+enum ErrorSampler {
+    Cbd { variance: usize, bound: BigUint },
+    Uniform { bound: BigUint },
+}
+
+fn error_sampler(variance: &BigUint) -> Result<ErrorSampler> {
+    match variance.to_u64() {
+        Some(0) => Err(Error::InvalidVariance {
+            variance: 0,
+            minimum: 1,
+            maximum: 32,
+        }),
+        Some(v) if v <= CBD_ERROR_VARIANCE_MAX => Ok(ErrorSampler::Cbd {
+            variance: v as usize,
+            bound: variance * 2u32,
+        }),
+        _ => Ok(ErrorSampler::Uniform {
+            bound: uniform_coefficient_bound(variance),
+        }),
+    }
+}
+
+/// Maximum absolute coefficient emitted by [`Poly::conditional_error`].
+///
+/// For positive variances through 16, CBD has coefficient bound `2 * variance`.
+/// Larger variances use the smallest uniform bound whose variance reaches the
+/// requested variance. This is a worst-case coefficient bound, not a statistical
+/// noise estimate.
+pub fn error_coefficient_bound(variance: &BigUint) -> Result<BigUint> {
+    Ok(match error_sampler(variance)? {
+        ErrorSampler::Cbd { bound, .. } | ErrorSampler::Uniform { bound } => bound,
+    })
+}
+
 /// Convert variance to bound for uniform distribution.
 ///
 /// The sampler draws from the discrete uniform distribution on the `2B + 1`
@@ -956,6 +989,10 @@ pub fn sample_uniform_coefficients_bigint<T: RngCore + CryptoRng>(
 /// `B(B+1)/3 >= variance`, so the achieved variance never falls short of the
 /// requested value.
 pub fn variance_to_uniform_bound(variance: &BigUint) -> Result<BigInt> {
+    Ok(BigInt::from(uniform_coefficient_bound(variance)))
+}
+
+fn uniform_coefficient_bound(variance: &BigUint) -> BigUint {
     let target = variance * 3u32;
 
     // `sqrt` floors, and B² <= B(B+1), so this is a safe starting point that
@@ -968,14 +1005,14 @@ pub fn variance_to_uniform_bound(variance: &BigUint) -> Result<BigInt> {
         bound -= 1u32;
     }
 
-    Ok(BigInt::from(bound))
+    bound
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Context, Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher,
-        variance_to_uniform_bound,
+        Context, Ntt, NttShoup, Poly, PowerBasis, Representation, error_coefficient_bound,
+        switcher::Switcher, variance_to_uniform_bound,
     };
     use crate::{rq::SubstitutionExponent, zq::Modulus};
     use fhe_util::variance;
@@ -1268,6 +1305,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn error_coefficient_bound_matches_conditional_sampler() -> Result<(), Box<dyn Error>> {
+        assert_eq!(
+            error_coefficient_bound(&BigUint::zero()).unwrap_err(),
+            crate::Error::InvalidVariance {
+                variance: 0,
+                minimum: 1,
+                maximum: 32,
+            }
+        );
+        assert_eq!(
+            error_coefficient_bound(&BigUint::from(16u32))?,
+            32u32.into()
+        );
+        assert_eq!(error_coefficient_bound(&BigUint::from(17u32))?, 7u32.into());
+
+        let ctx = Arc::new(Context::new(&[MODULI[1]], 16)?);
+        let q = Modulus::new(MODULI[1])?;
+        let mut rng = rand::rng();
+        for variance in [
+            BigUint::from(1u32),
+            BigUint::from(16u32),
+            BigUint::from(17u32),
+        ] {
+            let bound = error_coefficient_bound(&variance)?.to_i64().unwrap();
+            let p = Poly::<PowerBasis>::conditional_error(
+                &ctx,
+                Representation::PowerBasis,
+                &variance,
+                &mut rng,
+            )?;
+            assert!(
+                q.center_vec(p.coefficients().to_slice().unwrap())
+                    .iter()
+                    .all(|&coefficient| coefficient.abs() <= bound)
+            );
+        }
+        Ok(())
     }
 
     #[test]

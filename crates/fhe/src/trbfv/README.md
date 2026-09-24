@@ -131,15 +131,10 @@ Let `mult_depth` be the number of multiplication levels.
 
 ### Sampler-specific `B_enc`
 
-`B_enc` is derived from the actual BFV error sampler configuration, not from a
-fixed formula:
-
-| Error sampler branch                     | `B_enc` bound                    |
-| ---------------------------------------- | -------------------------------- |
-| CBD (error1 variance `<= 16` as `u64`)    | `2 &middot; error1_variance` |
-| Uniform (larger / non-`u64` variance)     | Smallest `B` with `B(B + 1) >= 3 &middot; error1_variance` |
-
-This matches the branches chosen by `Poly::conditional_error` in `fhe-math`.
+`B_enc` is the worst-case coefficient magnitude returned by
+`fhe_math::rq::error_coefficient_bound(error1_variance)`. This shared helper
+selects the same CBD or uniform sampler as `Poly::conditional_error`, so the
+smudging bound tracks the encryption sampler's actual coefficient bound.
 
 `SmudgingConfig::new` is fallible: it rejects zero parties, zero ciphertexts,
 and unsupported lambda values. `SmudgingNoiseGenerator::new` revalidates the

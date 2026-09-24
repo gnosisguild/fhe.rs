@@ -78,7 +78,7 @@ impl SmudgingNoiseGenerator {
 
         // --- Core computation ---
         let d = BigUint::from(config.params.degree());
-        let b_enc = compute_b_enc(error1_var);
+        let b_enc = compute_b_enc(error1_var)?;
         let variance = config.params.variance();
         let b_e = BigUint::from((2 * variance) as u64);
         let e_norm = BigUint::from((config.n as u64) * (2 * variance) as u64);
@@ -430,13 +430,16 @@ mod tests {
 
     #[test]
     fn b_enc_matches_cbd_boundary() {
-        assert_eq!(compute_b_enc(&BigUint::from(16u32)), BigUint::from(32u32));
+        assert_eq!(
+            compute_b_enc(&BigUint::from(16u32)).unwrap(),
+            BigUint::from(32u32)
+        );
     }
 
     #[test]
     fn b_enc_uniform_branch_uses_minimal_bound() {
         let variance = BigUint::from(20u32);
-        assert_eq!(compute_b_enc(&variance), BigUint::from(8u32));
+        assert_eq!(compute_b_enc(&variance).unwrap(), BigUint::from(8u32));
     }
 
     #[test]
@@ -446,7 +449,7 @@ mod tests {
         while &expected * (&expected + 1u32) < BigUint::from(3u32) * &variance {
             expected += 1u32;
         }
-        assert_eq!(compute_b_enc(&variance), expected);
+        assert_eq!(compute_b_enc(&variance).unwrap(), expected);
     }
 
     #[test]

@@ -2,8 +2,8 @@
 
 use crate::Error;
 use crate::bfv::BfvParameters;
+use fhe_math::rq::error_coefficient_bound;
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
 use std::sync::Arc;
 
 /// Maximum statistical security parameter accepted for the smudging bound.
@@ -45,28 +45,9 @@ pub struct SmudgingConfig {
 
 /// Compute a coefficient bound (B_enc) from the configured error sampler variance.
 ///
-/// This mirrors `Poly::conditional_error`: CBD is used through variance 16,
-/// while the uniform branch uses the smallest `B` whose variance
-/// `B * (B + 1) / 3` reaches the requested variance.
-pub(super) fn compute_b_enc(error1_variance: &BigUint) -> BigUint {
-    match error1_variance.to_u64() {
-        Some(v) if v <= 16 => {
-            // CBD(2*v): maximum absolute coefficient = 2 * variance.
-            BigUint::from(2u32 * v as u32)
-        }
-        _ => {
-            // Uniform branch: find the smallest B with B*(B+1) >= 3*variance.
-            let target = BigUint::from(3u32) * error1_variance;
-            let mut bound = target.sqrt();
-            while &bound * (&bound + 1u32) < target {
-                bound += 1u32;
-            }
-            while bound > 0u32.into() && (&bound - 1u32) * &bound >= target {
-                bound -= 1u32;
-            }
-            bound
-        }
-    }
+/// Uses the same worst-case coefficient bound as the encryption sampler.
+pub(super) fn compute_b_enc(error1_variance: &BigUint) -> crate::Result<BigUint> {
+    Ok(error_coefficient_bound(error1_variance)?)
 }
 
 /// Compute Q = product of all moduli as a BigUint.
