@@ -111,12 +111,8 @@ impl LBFVPublicKey {
         Self::new_with_seed_inner(sk, seed, rng)
     }
 
-    /// Fallible version of [`new_with_seed`](Self::new_with_seed).
-    ///
-    /// Validates that the secret key's coefficient count matches the parameter
-    /// degree before delegating.  Callers that should never panic (e.g.
-    /// bound distributed-construction paths) must use this instead of the
-    /// infallible [`new_with_seed`](Self::new_with_seed).
+    /// Internal implementation for [`new_with_seed`](Self::new_with_seed).
+    /// Validates the secret key's coefficient count before encryption.
     fn new_with_seed_inner<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         seed: <ChaCha8Rng as SeedableRng>::Seed,

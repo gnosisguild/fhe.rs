@@ -380,7 +380,9 @@ mod tests {
     use crate::bfv::{
         BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, encoding::EncodingEnum,
     };
-    use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
+    use fhe_traits::{
+        DeserializeParametrized, FheDecoder, FheDecrypter, FheEncoder, FheEncrypter, Serialize,
+    };
     use rand::rng;
     use std::error::Error;
 
@@ -491,6 +493,11 @@ mod tests {
             let encoding = Encoding::poly_at_level(level);
             let pt = Plaintext::try_encode(&values, encoding.clone(), &params)?;
             let zero = Ciphertext::zero(&params);
+
+            let mut multiplied = zero.clone();
+            multiplied *= &pt;
+            assert_eq!(multiplied, zero);
+            assert!(Ciphertext::from_bytes(&zero.to_bytes(), &params).is_err());
 
             let mut added = zero.clone();
             added += &pt;
@@ -776,11 +783,25 @@ mod tests {
         for level in 0..=1 {
             let pt = Plaintext::try_encode(&[1u64][..], Encoding::poly_at_level(level), &params)?;
             let ct: Ciphertext = sk.try_encrypt(&pt, &mut rng())?;
+            // The unmaterialized result has no context; its level is a placeholder.
             assert_eq!(&zero * &ct, zero);
             assert_eq!(&ct * &zero, zero);
             assert_eq!(&zero * &zero, zero);
         }
         Ok(())
+    }
+
+    #[test]
+    fn empty_accumulator_multiplication_checks_parameter_identity() {
+        let params = BfvParameters::default_arc(1, 16);
+        let other_params = BfvParameters::default_arc(1, 16);
+        assert_eq!(params, other_params);
+        assert!(!std::sync::Arc::ptr_eq(&params, &other_params));
+        let sk = SecretKey::random(&other_params, &mut rng());
+        let pt = Plaintext::try_encode(&[1u64][..], Encoding::poly(), &other_params).unwrap();
+        let ct: Ciphertext = sk.try_encrypt(&pt, &mut rng()).unwrap();
+        assert!(std::panic::catch_unwind(|| &Ciphertext::zero(&params) * &ct).is_err());
+        assert!(std::panic::catch_unwind(|| &ct * &Ciphertext::zero(&params)).is_err());
     }
 
     #[test]

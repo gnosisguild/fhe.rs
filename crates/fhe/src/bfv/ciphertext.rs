@@ -213,9 +213,11 @@ impl DeserializeParametrized for Ciphertext {
 impl Ciphertext {
     /// Create an empty additive-zero accumulator.
     ///
-    /// Its components are materialized when a ciphertext or plaintext is added.
-    /// Until then it is not a structurally valid ciphertext for decryption,
-    /// serialization round trips, or operations requiring ciphertext components.
+    /// Adding or subtracting a nonempty ciphertext or a plaintext materializes
+    /// its components; multiplication leaves it empty. Until materialized, it has
+    /// no polynomial context, and its `level` is only a placeholder, not a
+    /// ciphertext level. It is not valid for decryption, serialization round
+    /// trips, or operations requiring ciphertext components.
     #[must_use]
     pub fn zero(params: &Arc<BfvParameters>) -> Self {
         Self {
