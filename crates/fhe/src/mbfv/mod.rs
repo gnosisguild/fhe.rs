@@ -16,12 +16,17 @@
 //! not be used in production or to protect sensitive data.
 //!
 //! The module is available only with the `experimental-mbfv` Cargo feature.
+//! Aggregation checks shared parameters, reference polynomials, row shapes,
+//! and public-input binding. Share bytes do not authenticate their original
+//! ciphertext or CRP; the surrounding protocol must authenticate contributors
+//! and associate received shares with their public inputs.
 
 mod public_key_gen;
 mod public_key_switch;
 mod relin_key_gen;
 pub mod round;
 mod secret_key_switch;
+mod validate;
 
 pub use crate::aggregate::{Aggregate, AggregateIter};
 pub use crate::bfv::CommonRandomPoly;

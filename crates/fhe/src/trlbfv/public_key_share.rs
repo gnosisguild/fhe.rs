@@ -54,7 +54,7 @@ impl PublicKeyShare {
 
     /// Create a public-key contribution from a secret-key contribution and a
     /// shared CRS seed.
-    pub fn new_with_seed<R: RngCore + CryptoRng>(
+    pub fn contribute_with_seed<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
@@ -68,7 +68,7 @@ impl PublicKeyShare {
     ///
     /// The CRS is borrowed so multiple parties can contribute using the same
     /// rows. [`Self::from_parts`] consumes its polynomials to build an owner.
-    pub fn contribute<R: RngCore + CryptoRng>(
+    pub fn contribute_with_polys<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         a_polynomials: &[Poly<Ntt>],
         rng: &mut R,
@@ -93,7 +93,8 @@ impl PublicKeyShare {
     /// Build a public-key contribution from explicit key polynomials.
     ///
     /// Takes ownership of the rows and validates their count, context, and
-    /// optional seed. Use [`Self::contribute`] to borrow a reusable CRS instead.
+    /// optional seed. Use [`Self::contribute_with_polys`] to borrow a reusable
+    /// CRS instead.
     pub fn from_parts(
         b_polynomials: Vec<Poly<Ntt>>,
         a_polynomials: Vec<Poly<Ntt>>,
@@ -179,7 +180,7 @@ mod tests {
         let seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         let shares = sks
             .iter()
-            .map(|sk| PublicKeyShare::new_with_seed(sk, seed, &mut rng))
+            .map(|sk| PublicKeyShare::contribute_with_seed(sk, seed, &mut rng))
             .collect::<Result<Vec<_>>>()?;
 
         let aggregated: LBFVPublicKey = shares.into_iter().aggregate()?;
@@ -203,8 +204,8 @@ mod tests {
         let seed1 = <ChaCha8Rng as SeedableRng>::Seed::default();
         let mut seed2 = seed1;
         seed2[0] = 1;
-        let share1 = PublicKeyShare::new_with_seed(&sk1, seed1, &mut rng)?;
-        let share2 = PublicKeyShare::new_with_seed(&sk2, seed2, &mut rng)?;
+        let share1 = PublicKeyShare::contribute_with_seed(&sk1, seed1, &mut rng)?;
+        let share2 = PublicKeyShare::contribute_with_seed(&sk2, seed2, &mut rng)?;
 
         assert!(
             <LBFVPublicKey as Aggregate<PublicKeyShare>>::from_shares([share1, share2]).is_err()
@@ -219,6 +220,10 @@ mod tests {
         let sk = SecretKey::random(&params, &mut rng);
         let crp = CommonRandomPolyVec::from_seed(&params, [7u8; 32])?;
         let share = PublicKeyShare::contribute_with_crp(&sk, &crp, &mut rng)?;
+        let explicit_crs = crp.to_polys();
+        let from_polys = PublicKeyShare::contribute_with_polys(&sk, &explicit_crs, &mut rng)?;
+        assert_eq!(from_polys.a_components()?, explicit_crs);
+        assert!(from_polys.key.seed.is_none());
 
         assert_eq!(share.key.seed, crp.seed());
         assert_eq!(share.a_components()?, crp.to_polys());
@@ -250,7 +255,7 @@ mod tests {
         let mut rng = rng();
         let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, &mut rng);
-        let share = PublicKeyShare::new_with_seed(
+        let share = PublicKeyShare::contribute_with_seed(
             &sk,
             <ChaCha8Rng as SeedableRng>::Seed::default(),
             &mut rng,

@@ -160,10 +160,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // l-BFV PK contribution (CRS seed = pk_seed, shared by all parties).
                 let pk_lbfv_share =
-                    PublicKeyShare::new_with_seed(&secret_key, pk_seed, &mut rng).unwrap();
+                    PublicKeyShare::contribute_with_seed(&secret_key, pk_seed, &mut rng).unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
-                let rlk_share = RelinKeyShare::contribution(
+                let rlk_share = RelinKeyShare::contribute_with_seed(
                     &secret_key,
                     d1_seed,
                     pk_seed, // a_seed must match pk_lbfv_share's CRS seed

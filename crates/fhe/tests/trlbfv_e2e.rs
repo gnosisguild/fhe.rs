@@ -55,7 +55,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     // ── Distributed l-BFV public key ╌─────────────────────────────────
     let pk_contributions: Vec<PublicKeyShare> = sk_shares
         .iter()
-        .map(|sk_i| PublicKeyShare::new_with_seed(sk_i, crs_seed, &mut rng))
+        .map(|sk_i| PublicKeyShare::contribute_with_seed(sk_i, crs_seed, &mut rng))
         .collect::<Result<Vec<_>, _>>()
         .expect("PK contribution generation");
     let pk = pk_contributions
@@ -67,7 +67,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     let rlk_shares: Vec<RelinKeyShare> = sk_shares
         .iter()
         .map(|sk_i| {
-            RelinKeyShare::contribution(
+            RelinKeyShare::contribute_with_seed(
                 sk_i, urs_seed, crs_seed, 0, // ciphertext_level
                 0, // key_level
                 &mut rng,

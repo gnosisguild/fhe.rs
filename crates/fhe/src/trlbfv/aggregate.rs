@@ -414,14 +414,14 @@ mod tests {
 
         let pk_shares: Vec<PublicKeyShare> = sks
             .iter()
-            .map(|sk| PublicKeyShare::new_with_seed(sk, a_seed, &mut rng))
+            .map(|sk| PublicKeyShare::contribute_with_seed(sk, a_seed, &mut rng))
             .collect::<Result<Vec<_>>>()?;
 
         let pk: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
 
         let rlk_shares: Vec<RelinKeyShare> = sks
             .iter()
-            .map(|sk| RelinKeyShare::contribution(sk, d1_seed, a_seed, 0, 0, &mut rng))
+            .map(|sk| RelinKeyShare::contribute_with_seed(sk, d1_seed, a_seed, 0, 0, &mut rng))
             .collect::<Result<Vec<_>>>()?;
 
         let rlk = aggregate_relinearization_key(&rlk_shares, &pk)?;

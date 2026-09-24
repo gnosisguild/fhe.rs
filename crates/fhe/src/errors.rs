@@ -354,6 +354,16 @@ pub enum MultipartyError {
     #[error("At least one protocol share is required")]
     NoShares,
 
+    #[error("Incompatible protocol shares: {reason}")]
+    IncompatibleShares { reason: &'static str },
+
+    #[error("{component} has {actual} polynomials; expected {expected}")]
+    SharePolynomialCountMismatch {
+        component: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
     #[error("Expected {expected} common random polynomials, got {actual}")]
     InvalidCommonRandomPolynomialCount { actual: usize, expected: usize },
 

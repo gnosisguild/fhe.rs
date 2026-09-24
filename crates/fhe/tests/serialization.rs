@@ -97,7 +97,7 @@ fn lbfv_keys_round_trip_and_reject_malformed_or_mismatched_inputs() {
 
     let public_key_share = PublicKeyShare::contribute_with_crp(&sk, &crp_a, &mut rng).unwrap();
     let relin_key_share =
-        RelinKeyShare::contribution_with_crp(&sk, &crp_d1, &crp_a, 0, 0, &mut rng).unwrap();
+        RelinKeyShare::contribute_with_crp(&sk, &crp_d1, &crp_a, 0, 0, &mut rng).unwrap();
     assert_eq!(
         PublicKeyShare::from_bytes(&public_key_share.to_bytes(), &params).unwrap(),
         public_key_share

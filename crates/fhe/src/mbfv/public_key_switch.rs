@@ -7,9 +7,10 @@ use rand::{CryptoRng, Rng as RngCore};
 use zeroize::Zeroizing;
 
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
-use crate::{Error, Result};
+use crate::{Error, MultipartyError, Result};
 
 use super::Aggregate;
+use super::validate::{same_params, switch_ciphertext};
 
 /// A party's share in the public key switch protocol.
 ///
@@ -19,6 +20,9 @@ pub struct PublicKeySwitchShare {
     pub(crate) params: Arc<BfvParameters>,
     /// The first component of the input ciphertext
     pub(crate) c0: Poly<Ntt>,
+    // Shared public inputs must agree across all contributions.
+    input_c1: Poly<Ntt>,
+    output_key: Ciphertext,
     pub(crate) h0_share: Poly<Ntt>,
     pub(crate) h1_share: Poly<Ntt>,
 }
@@ -49,12 +53,15 @@ impl PublicKeySwitchShare {
             });
         }
         let params = sk_share.params.clone();
+        switch_ciphertext(ct, &params)?;
 
         // Get appropriate context / level for the following computations
         let mut pk_ct = public_key.c.clone();
+        switch_ciphertext(&pk_ct, &params)?;
         while pk_ct.level != ct.level {
             pk_ct.switch_down()?;
         }
+        switch_ciphertext(&pk_ct, &params)?;
         let ctx = params.context_at_level(ct.level)?;
 
         let mut s = Zeroizing::new(
@@ -86,6 +93,8 @@ impl PublicKeySwitchShare {
         Ok(Self {
             params,
             c0: ct[0].clone(),
+            input_c1: ct[1].clone(),
+            output_key: pk_ct,
             h0_share: h0,
             h1_share: h1,
         })
@@ -99,9 +108,36 @@ impl Aggregate<PublicKeySwitchShare> for Ciphertext {
     {
         let mut shares = iter.into_iter();
         let share = shares.next().ok_or(crate::MultipartyError::NoShares)?;
+        let ctx = share.c0.ctx();
+        let level = share.params.level_of_context(ctx)?;
+        switch_ciphertext(&share.output_key, &share.params)?;
+        if share.output_key.level != level
+            || share.input_c1.ctx() != ctx
+            || share.h0_share.ctx() != ctx
+            || share.h1_share.ctx() != ctx
+        {
+            return Err(MultipartyError::IncompatibleShares {
+                reason: "public-key-switch share contexts or levels differ",
+            }
+            .into());
+        }
         let mut h0 = share.h0_share;
         let mut h1 = share.h1_share;
         for sh in shares {
+            same_params(&share.params, &sh.params)?;
+            switch_ciphertext(&sh.output_key, &sh.params)?;
+            if sh.c0 != share.c0
+                || sh.input_c1 != share.input_c1
+                || sh.output_key.c != share.output_key.c
+                || sh.output_key.level != level
+                || sh.h0_share.ctx() != ctx
+                || sh.h1_share.ctx() != ctx
+            {
+                return Err(MultipartyError::IncompatibleShares {
+                    reason: "public-key-switch shares use different ciphertexts, keys, or contexts",
+                }
+                .into());
+            }
             h0 += &sh.h0_share;
             h1 += &sh.h1_share;
         }
@@ -120,11 +156,55 @@ mod tests {
     use rand::rng;
 
     use crate::{
-        bfv::{BfvParameters, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
-        mbfv::{AggregateIter, PublicKeyShare, PublicKeySwitchShare},
+        bfv::{
+            BfvParameters, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey,
+        },
+        mbfv::{Aggregate, AggregateIter, PublicKeyShare, PublicKeySwitchShare},
     };
 
     const NUM_PARTIES: usize = 11;
+
+    #[test]
+    fn aggregation_rejects_public_switch_input_and_output_mismatch() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let ctx = params.context_at_level(0).unwrap();
+        let sk = SecretKey::random(&params, &mut rng);
+        let output = PublicKey::new(&sk, &mut rng);
+        let other_output = PublicKey::new(&sk, &mut rng);
+        let ct = Ciphertext::new(
+            vec![
+                fhe_math::rq::Poly::random(ctx, &mut rng),
+                fhe_math::rq::Poly::random(ctx, &mut rng),
+            ],
+            &params,
+        )
+        .unwrap();
+        let other_ct = Ciphertext::new(
+            vec![
+                fhe_math::rq::Poly::random(ctx, &mut rng),
+                fhe_math::rq::Poly::random(ctx, &mut rng),
+            ],
+            &params,
+        )
+        .unwrap();
+        let first = PublicKeySwitchShare::new(&sk, &output, &ct, &mut rng).unwrap();
+        let wrong_input = PublicKeySwitchShare::new(&sk, &output, &other_ct, &mut rng).unwrap();
+        let wrong_output = PublicKeySwitchShare::new(&sk, &other_output, &ct, &mut rng).unwrap();
+        for wrong in [wrong_input, wrong_output] {
+            assert!(matches!(
+                Ciphertext::from_shares([
+                    PublicKeySwitchShare::new(&sk, &output, &ct, &mut rng).unwrap(),
+                    wrong
+                ]),
+                Err(crate::Error::Multiparty(
+                    crate::MultipartyError::IncompatibleShares { .. }
+                ))
+            ));
+        }
+        let same_inputs = PublicKeySwitchShare::new(&sk, &output, &ct, &mut rng).unwrap();
+        assert!(Ciphertext::from_shares([first, same_inputs]).is_ok());
+    }
 
     struct Party {
         sk_share: SecretKey,

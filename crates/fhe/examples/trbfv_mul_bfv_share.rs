@@ -171,7 +171,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     PublicKeyShare::contribute_with_crp(&secret_key, &crp_a, &mut rng).unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
-                let rlk_share = RelinKeyShare::contribution_with_crp(
+                let rlk_share = RelinKeyShare::contribute_with_crp(
                     &secret_key,
                     &crp_d1,
                     &crp_a,
