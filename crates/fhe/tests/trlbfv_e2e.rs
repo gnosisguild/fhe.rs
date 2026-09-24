@@ -55,7 +55,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     // ── Distributed l-BFV public key ╌─────────────────────────────────
     let pk_contributions: Vec<PublicKeyShare> = sk_shares
         .iter()
-        .map(|sk_i| PublicKeyShare::new_with_seed(sk_i, crs_seed, &mut rng))
+        .map(|sk_i| PublicKeyShare::contribute_with_seed(sk_i, crs_seed, &mut rng))
         .collect::<Result<Vec<_>, _>>()
         .expect("PK contribution generation");
     let pk = pk_contributions
@@ -67,7 +67,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     let rlk_shares: Vec<RelinKeyShare> = sk_shares
         .iter()
         .map(|sk_i| {
-            RelinKeyShare::contribution(
+            RelinKeyShare::contribute_with_seed(
                 sk_i, urs_seed, crs_seed, 0, // ciphertext_level
                 0, // key_level
                 &mut rng,
@@ -82,9 +82,9 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     // straight into Shamir shares without exposing the polynomial.
     let mut smudging_noises = (0..N)
         .map(|_| {
-            let mut config =
-                SmudgingConfig::new(params.clone(), N, 1, LAMBDA_VALUE).expect("smudging config");
-            config.mult_depth = MULT_DEPTH;
+            let config = SmudgingConfig::new(params.clone(), N, 1, LAMBDA_VALUE)
+                .expect("smudging config")
+                .with_mult_depth(MULT_DEPTH);
             // Use n as the conservative aggregate RLK contribution count.
             SmudgingNoiseGenerator::new(config)
                 .expect("smudging generator")
@@ -222,7 +222,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
             let party = &mut parties[party_id - 1];
             manager
                 .decryption_share(
-                    tally.clone(),
+                    &tally,
                     party
                         .secret_key_aggregate
                         .as_ref()
@@ -238,9 +238,9 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
 
     // A single share must be insufficient.
     let one_share_result = manager.decrypt_from_shares(
-        vec![decryption_shares[0].clone()],
-        vec![reconstructing[0]],
-        tally.clone(),
+        std::slice::from_ref(&decryption_shares[0]),
+        &[reconstructing[0]],
+        &tally,
     );
     assert!(
         one_share_result.is_err(),
@@ -250,7 +250,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
 
     // Exactly threshold + 1 shares must decrypt to the correct product.
     let decrypted = manager
-        .decrypt_from_shares(decryption_shares, reconstructing, tally)
+        .decrypt_from_shares(&decryption_shares, &reconstructing, &tally)
         .expect("threshold decryption with t+1 shares");
     let result_vec =
         Vec::<u64>::try_decode(&decrypted, Encoding::poly()).expect("decode decryption result");

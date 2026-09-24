@@ -59,17 +59,14 @@ fn named_profiles_have_feasible_smudging_bounds() {
         // above fhe::trbfv::smudging::MAX_LAMBDA.
         let lambda = profile.lambda;
         let config = match profile.multiplicative_depth {
-            Some(depth) => {
-                let mut config = SmudgingConfig::new(
-                    profile.parameters.clone(),
-                    profile.num_parties,
-                    profile.max_ciphertexts,
-                    lambda,
-                )
-                .unwrap();
-                config.mult_depth = depth;
-                config
-            }
+            Some(depth) => SmudgingConfig::new(
+                profile.parameters.clone(),
+                profile.num_parties,
+                profile.max_ciphertexts,
+                lambda,
+            )
+            .unwrap()
+            .with_mult_depth(depth),
             None => SmudgingConfig::new(
                 profile.parameters.clone(),
                 profile.num_parties,
@@ -103,7 +100,7 @@ fn reconstruction_rejects_invalid_public_inputs() {
     let ciphertext = Arc::new(Ciphertext::zero(&profile.parameters));
 
     let too_few = manager
-        .decrypt_from_shares(vec![share()], vec![1], ciphertext.clone())
+        .decrypt_from_shares(&[share()], &[1], &ciphertext)
         .unwrap_err();
     assert!(matches!(
         too_few,
@@ -114,15 +111,12 @@ fn reconstruction_rejects_invalid_public_inputs() {
     ));
 
     let share_count = profile.threshold + 1;
+    let shares: Vec<_> = (0..share_count).map(|_| share()).collect();
     let duplicate_parties: Vec<_> = (0..share_count)
         .map(|index| if index == 1 { 1 } else { index + 1 })
         .collect();
     let duplicate = manager
-        .decrypt_from_shares(
-            (0..share_count).map(|_| share()).collect(),
-            duplicate_parties,
-            ciphertext.clone(),
-        )
+        .decrypt_from_shares(&shares, &duplicate_parties, &ciphertext)
         .unwrap_err();
     assert!(matches!(
         duplicate,
@@ -132,11 +126,7 @@ fn reconstruction_rejects_invalid_public_inputs() {
     let zero_id_parties: Vec<_> = (0..share_count)
         .map(|index| if index == 0 { 0 } else { index + 1 })
         .collect();
-    let zero_id = manager.decrypt_from_shares(
-        (0..share_count).map(|_| share()).collect(),
-        zero_id_parties,
-        ciphertext,
-    );
+    let zero_id = manager.decrypt_from_shares(&shares, &zero_id_parties, &ciphertext);
     assert!(matches!(
         zero_id.unwrap_err(),
         Error::Threshold(ThresholdError::InvalidPartyId { party_id: 0, n })

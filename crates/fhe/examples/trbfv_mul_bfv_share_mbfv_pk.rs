@@ -148,9 +148,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications).
                 // The default accepted set is all n parties.
-                let mut config =
-                    SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda).unwrap();
-                config.mult_depth = preset.multiplicative_depth.unwrap();
+                let config = SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda)
+                    .unwrap()
+                    .with_mult_depth(preset.multiplicative_depth.unwrap());
                 let generator = SmudgingNoiseGenerator::new(config).unwrap();
                 let smudging_noise = generator.generate(&mut rng).unwrap();
                 let smudging_shares_transport = share_manager
@@ -160,10 +160,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // l-BFV PK contribution (CRS seed = pk_seed, shared by all parties).
                 let pk_lbfv_share =
-                    PublicKeyShare::new_with_seed(&secret_key, pk_seed, &mut rng).unwrap();
+                    PublicKeyShare::contribute_with_seed(&secret_key, pk_seed, &mut rng).unwrap();
 
                 // l-BFV RLK share for SK = Σ sk_j.
-                let rlk_share = RelinKeyShare::contribution(
+                let rlk_share = RelinKeyShare::contribute_with_seed(
                     &secret_key,
                     d1_seed,
                     pk_seed, // a_seed must match pk_lbfv_share's CRS seed
@@ -356,7 +356,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let smudging = party.shares.take_smudging().unwrap();
         let secret_key = party.shares.secret_key().unwrap();
         party.decryption_share = share_manager
-            .decryption_share(product.clone(), secret_key, smudging)
+            .decryption_share(&product, secret_key, smudging)
             .unwrap();
     });
     println!(
@@ -374,7 +374,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = timeit!("Combine shares and decrypt", {
         let party_indices: Vec<usize> = (1..=threshold + 1).collect();
         let pt = share_manager
-            .decrypt_from_shares(decryption_shares, party_indices, product.clone())
+            .decrypt_from_shares(&decryption_shares, &party_indices, &product)
             .unwrap();
         let v = Vec::<u64>::try_decode(&pt, Encoding::poly())?;
         Ok::<u64, Box<dyn Error>>(v.first().copied().unwrap_or_default())

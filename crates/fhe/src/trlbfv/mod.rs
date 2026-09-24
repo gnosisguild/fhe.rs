@@ -5,6 +5,10 @@
 //! values here, and aggregation produces the operational key types from
 //! [`crate::lbfv`]. The shares are additive contributions from secret-key
 //! summands; they are not Shamir shares used for threshold decryption.
+//! The operational key types are re-exported here for convenience; their
+//! canonical definitions are in [`crate::lbfv`]. Public-key shares use the
+//! shared [`Aggregate`] trait, while relinearization-key aggregation takes a
+//! public key as additional input through [`aggregate_relinearization_key`].
 //!
 //! The implementation covers the additive public-key and linear
 //! relinearization-key construction described by Urban--Rambaud, §5. DKG
@@ -21,4 +25,4 @@ pub use crate::aggregate::{Aggregate, AggregateIter};
 pub use crate::lbfv::{LBFVPublicKey, LBFVRelinearizationKey};
 pub use aggregate::aggregate_relinearization_key;
 pub use public_key_share::PublicKeyShare;
-pub use relin_key_share::{RelinKeyShare, RlkWitness};
+pub use relin_key_share::{RelinKeyShare, RelinKeyWitness};

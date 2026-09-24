@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::Result;
 use crate::bfv::{BfvParameters, Ciphertext, PublicKey, SecretKey};
+use crate::{MultipartyError, Result};
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
 use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, Rng as RngCore};
@@ -10,6 +10,7 @@ use zeroize::Zeroizing;
 use crate::bfv::CommonRandomPoly;
 
 use super::Aggregate;
+use super::validate::{same_params, same_polys};
 
 /// A party's share in public key generation protocol.
 ///
@@ -81,6 +82,12 @@ impl PublicKeyShare {
     ) -> Result<(Self, PublicKeyShareIntermediates)> {
         let params = sk_share.params.clone();
         let ctx = params.context_at_level(0)?;
+        if crp.poly.ctx() != ctx {
+            return Err(MultipartyError::IncompatibleShares {
+                reason: "public-key CRP context does not match secret-key parameters",
+            }
+            .into());
+        }
 
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(sk_share.coeffs.as_ref(), ctx, false)?.into_ntt(),
@@ -109,13 +116,20 @@ impl PublicKeyShare {
     }
 
     /// Deserialize a PublicKeyShare from bytes with the given parameters and
-    /// CRP
+    /// CRP. The share bytes do not identify the CRP; the caller must provide
+    /// and authenticate the one used by the contributor.
     pub fn deserialize(
         bytes: &[u8],
         params: &Arc<BfvParameters>,
         crp: CommonRandomPoly,
     ) -> Result<Self> {
         let ctx = params.context_at_level(0)?;
+        if crp.poly.ctx() != ctx {
+            return Err(MultipartyError::IncompatibleShares {
+                reason: "public-key CRP context does not match share parameters",
+            }
+            .into());
+        }
         let p0_share = Poly::<Ntt>::from_bytes(bytes, ctx)?;
         Ok(Self {
             params: params.clone(),
@@ -160,8 +174,34 @@ impl Aggregate<PublicKeyShare> for PublicKey {
     {
         let mut shares = iter.into_iter();
         let share = shares.next().ok_or(crate::MultipartyError::NoShares)?;
+        let ctx = share.params.context_at_level(0)?;
+        if share.crp.poly.ctx() != ctx {
+            return Err(MultipartyError::IncompatibleShares {
+                reason: "public-key CRP context does not match share parameters",
+            }
+            .into());
+        }
+        same_polys(
+            std::slice::from_ref(&share.p0_share),
+            1,
+            "public-key share",
+            &share.params,
+        )?;
         let mut p0 = share.p0_share;
         for sh in shares {
+            same_params(&share.params, &sh.params)?;
+            if sh.crp != share.crp {
+                return Err(MultipartyError::IncompatibleShares {
+                    reason: "different public-key CRP polynomials",
+                }
+                .into());
+            }
+            same_polys(
+                std::slice::from_ref(&sh.p0_share),
+                1,
+                "public-key share",
+                &sh.params,
+            )?;
             p0 += &sh.p0_share;
         }
 
@@ -180,7 +220,7 @@ impl Serialize for PublicKeyShare {
 
 #[cfg(test)]
 mod tests {
-    use fhe_traits::{FheEncoder, FheEncrypter};
+    use fhe_traits::{FheEncoder, FheEncrypter, Serialize};
     use rand::rng;
     use zeroize::Zeroize;
 
@@ -192,6 +232,57 @@ mod tests {
     use super::PublicKeyShare;
 
     const NUM_PARTIES: usize = 11;
+
+    #[test]
+    fn aggregation_rejects_different_public_key_crps_and_parameters() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        let other_crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
+        let first = PublicKeyShare::new(&sk, crp.clone(), &mut rng).unwrap();
+        let different_crp = PublicKeyShare::new(&sk, other_crp, &mut rng).unwrap();
+        let same_crp = PublicKeyShare::new(&sk, crp.clone(), &mut rng).unwrap();
+        assert!(PublicKey::from_shares([first.clone(), same_crp]).is_ok());
+        assert!(matches!(
+            PublicKey::from_shares([first.clone(), different_crp]),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::IncompatibleShares { .. }
+            ))
+        ));
+
+        let other_params = BfvParameters::default_arc(6, 8);
+        let other_sk = SecretKey::random(&other_params, &mut rng);
+        let other = PublicKeyShare::new(
+            &other_sk,
+            CommonRandomPoly::new(&other_params, &mut rng).unwrap(),
+            &mut rng,
+        )
+        .unwrap();
+        assert!(matches!(
+            PublicKey::from_shares([first, other]),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::IncompatibleShares { .. }
+            ))
+        ));
+
+        assert!(
+            PublicKeyShare::new(
+                &sk,
+                CommonRandomPoly::new(&other_params, &mut rng).unwrap(),
+                &mut rng
+            )
+            .is_err()
+        );
+        assert!(
+            PublicKeyShare::deserialize(
+                &PublicKeyShare::new(&sk, crp, &mut rng).unwrap().to_bytes(),
+                &params,
+                CommonRandomPoly::new(&other_params, &mut rng).unwrap()
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     // This just makes sure the public key creation is successful, and arbitrary

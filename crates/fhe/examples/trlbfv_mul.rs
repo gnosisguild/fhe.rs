@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // crp_a must equal the CRP used for pk_shares.
     let rlk_shares: Vec<RelinKeyShare> = sk_shares
         .iter()
-        .map(|sk_i| RelinKeyShare::contribution_with_crp(sk_i, &crp_d1, &crp_a, 0, 0, &mut rng))
+        .map(|sk_i| RelinKeyShare::contribute_with_crp(sk_i, &crp_d1, &crp_a, 0, 0, &mut rng))
         .collect::<Result<Vec<_>, _>>()?;
 
     println!("  {} parties generated (pk_share, rlk_share)", num_parties);

@@ -16,12 +16,12 @@ use fhe_traits::{DeserializeParametrized, Serialize};
 use prost::Message;
 use std::sync::Arc;
 
-/// Witness material produced alongside an [`RelinKeyShare`] for ZK proof generation.
+/// Witness material produced alongside a [`RelinKeyShare`] for ZK proof generation.
 ///
 /// Holds the private values that a party must commit to in order to prove
 /// correct construction of its relinearization-key contribution.  The witness
 /// must be kept confidential and **zeroized after use**.
-pub struct RlkWitness {
+pub struct RelinKeyWitness {
     /// Ephemeral randomness key used during RLK generation.
     /// Auto-zeroized when dropped.
     pub r: Zeroizing<SecretKey>,
@@ -80,7 +80,7 @@ impl RelinKeyShare {
     }
 
     /// Generate a relinearization-key contribution from shared seeds.
-    pub fn contribution<R: RngCore + CryptoRng>(
+    pub fn contribute_with_seed<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         d1_seed: <ChaCha8Rng as SeedableRng>::Seed,
         a_seed: <ChaCha8Rng as SeedableRng>::Seed,
@@ -104,7 +104,7 @@ impl RelinKeyShare {
 
     /// Generate a relinearization-key contribution from explicit
     /// URS/CRS polynomials.
-    pub fn contribution_with_polys<R: RngCore + CryptoRng>(
+    pub fn contribute_with_polys<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         d1_polys: Vec<Poly<NttShoup>>,
         a_polys: Vec<Poly<NttShoup>>,
@@ -128,7 +128,7 @@ impl RelinKeyShare {
 
     /// Generate a relinearization-key contribution from shared CRP
     /// vectors.
-    pub fn contribution_with_crp<R: RngCore + CryptoRng>(
+    pub fn contribute_with_crp<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         crp_d1: &CommonRandomPolyVec,
         crp_a: &CommonRandomPolyVec,
@@ -167,17 +167,17 @@ impl RelinKeyShare {
         })
     }
 
-    /// Like [`contribution_with_crp`](Self::contribution_with_crp) but also
-    /// returns an [`RlkWitness`] containing the ephemeral key `r` and the
+    /// Like [`contribute_with_crp`](Self::contribute_with_crp) but also
+    /// returns a [`RelinKeyWitness`] containing the ephemeral key `r` and the
     /// per-row error polynomials needed for ZK witness generation.
-    pub fn contribution_with_crp_extended<R: RngCore + CryptoRng>(
+    pub fn contribute_with_crp_and_witness<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         crp_d1: &CommonRandomPolyVec,
         crp_a: &CommonRandomPolyVec,
         ciphertext_level: usize,
         key_level: usize,
         rng: &mut R,
-    ) -> Result<(Self, RlkWitness)> {
+    ) -> Result<(Self, RelinKeyWitness)> {
         let d1_polys: Vec<Poly<NttShoup>> = crp_d1
             .to_polys()
             .into_iter()
@@ -207,7 +207,7 @@ impl RelinKeyShare {
                 ksk_r_to_s,
                 ksk_s_to_r,
             },
-            RlkWitness {
+            RelinKeyWitness {
                 r,
                 errors_d0,
                 errors_d2,
@@ -245,13 +245,13 @@ mod tests {
 
         let pk_shares: Vec<PublicKeyShare> = sks
             .iter()
-            .map(|sk| PublicKeyShare::new_with_seed(sk, pk_seed, &mut rng))
+            .map(|sk| PublicKeyShare::contribute_with_seed(sk, pk_seed, &mut rng))
             .collect::<Result<Vec<_>>>()?;
         let aggregated_pk: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
 
         let rlk_shares: Vec<RelinKeyShare> = sks
             .iter()
-            .map(|sk| RelinKeyShare::contribution(sk, d1_seed, a_seed, 0, 0, &mut rng))
+            .map(|sk| RelinKeyShare::contribute_with_seed(sk, d1_seed, a_seed, 0, 0, &mut rng))
             .collect::<Result<Vec<_>>>()?;
         let relin_key = aggregate_relinearization_key(&rlk_shares, &aggregated_pk)?;
 
@@ -285,13 +285,13 @@ mod tests {
 
         let pk_shares: Vec<PublicKeyShare> = sks
             .iter()
-            .map(|sk| PublicKeyShare::new_with_seed(sk, pk_seed, &mut rng))
+            .map(|sk| PublicKeyShare::contribute_with_seed(sk, pk_seed, &mut rng))
             .collect::<Result<Vec<_>>>()?;
         let aggregated_pk: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
 
         let rlk_shares: Vec<RelinKeyShare> = sks
             .iter()
-            .map(|sk| RelinKeyShare::contribution(sk, d1_seed, a_seed, 0, 0, &mut rng))
+            .map(|sk| RelinKeyShare::contribute_with_seed(sk, d1_seed, a_seed, 0, 0, &mut rng))
             .collect::<Result<Vec<_>>>()?;
         let relin_key = aggregate_relinearization_key(&rlk_shares, &aggregated_pk)?;
 
@@ -323,11 +323,12 @@ mod tests {
         other_d1_seed[0] ^= 1;
         let pk_shares = sks
             .iter()
-            .map(|sk| PublicKeyShare::new_with_seed(sk, pk_seed, &mut rng))
+            .map(|sk| PublicKeyShare::contribute_with_seed(sk, pk_seed, &mut rng))
             .collect::<Result<Vec<_>>>()?;
         let aggregated_pk: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
-        let rlk1 = RelinKeyShare::contribution(&sks[0], d1_seed, pk_seed, 0, 0, &mut rng)?;
-        let rlk2 = RelinKeyShare::contribution(&sks[1], other_d1_seed, pk_seed, 0, 0, &mut rng)?;
+        let rlk1 = RelinKeyShare::contribute_with_seed(&sks[0], d1_seed, pk_seed, 0, 0, &mut rng)?;
+        let rlk2 =
+            RelinKeyShare::contribute_with_seed(&sks[1], other_d1_seed, pk_seed, 0, 0, &mut rng)?;
 
         let result = aggregate_relinearization_key(&[rlk1, rlk2], &aggregated_pk);
         assert!(result.is_err());
@@ -348,12 +349,12 @@ mod tests {
         rlk_a_seed[0] ^= 1;
         let pk_shares = sks
             .iter()
-            .map(|sk| PublicKeyShare::new_with_seed(sk, pk_seed, &mut rng))
+            .map(|sk| PublicKeyShare::contribute_with_seed(sk, pk_seed, &mut rng))
             .collect::<Result<Vec<_>>>()?;
         let aggregated_pk: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
         let rlk_shares = sks
             .iter()
-            .map(|sk| RelinKeyShare::contribution(sk, d1_seed, rlk_a_seed, 0, 0, &mut rng))
+            .map(|sk| RelinKeyShare::contribute_with_seed(sk, d1_seed, rlk_a_seed, 0, 0, &mut rng))
             .collect::<Result<Vec<_>>>()?;
 
         let result = aggregate_relinearization_key(&rlk_shares, &aggregated_pk);
@@ -388,14 +389,14 @@ mod tests {
         // Aggregate public key.
         let pk_shares: Vec<PublicKeyShare> = sks
             .iter()
-            .map(|sk| PublicKeyShare::new_with_seed(sk, pk_seed, &mut rng))
+            .map(|sk| PublicKeyShare::contribute_with_seed(sk, pk_seed, &mut rng))
             .collect::<Result<Vec<_>>>()?;
         let aggregated_pk: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
 
         // Aggregate relinearization keys.
         let rlk_shares: Vec<RelinKeyShare> = sks
             .iter()
-            .map(|sk| RelinKeyShare::contribution(sk, d1_seed, a_seed, 0, 0, &mut rng))
+            .map(|sk| RelinKeyShare::contribute_with_seed(sk, d1_seed, a_seed, 0, 0, &mut rng))
             .collect::<Result<Vec<_>>>()?;
         let relin_key = aggregate_relinearization_key(&rlk_shares, &aggregated_pk)?;
 
@@ -422,8 +423,8 @@ mod tests {
         let crp_d1 = CommonRandomPolyVec::new(&params, &mut rng)?;
         let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
 
-        let (share, witness) =
-            RelinKeyShare::contribution_with_crp_extended(&sk, &crp_d1, &crp_a, 0, 0, &mut rng)?;
+        let (share, witness): (RelinKeyShare, crate::trlbfv::RelinKeyWitness) =
+            RelinKeyShare::contribute_with_crp_and_witness(&sk, &crp_d1, &crp_a, 0, 0, &mut rng)?;
 
         assert_eq!(share.d0_components().len(), crp_d1.len());
         assert_eq!(share.d2_components().len(), crp_a.len());
@@ -544,7 +545,7 @@ mod proto_tests {
         let sk = SecretKey::random(&params, &mut rng);
         let a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         let d1_seed = <ChaCha8Rng as SeedableRng>::Seed::from([2u8; 32]);
-        let share = RelinKeyShare::contribution(&sk, d1_seed, a_seed, 0, 0, &mut rng)?;
+        let share = RelinKeyShare::contribute_with_seed(&sk, d1_seed, a_seed, 0, 0, &mut rng)?;
         let bytes = share.to_bytes();
         let restored = RelinKeyShare::from_bytes(&bytes, &params)?;
         assert_eq!(restored.ksk_r_to_s, share.ksk_r_to_s);
@@ -560,7 +561,7 @@ mod proto_tests {
         let a_seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         let d1_seed = <ChaCha8Rng as SeedableRng>::Seed::from([2u8; 32]);
         let public_key = LBFVPublicKey::new_with_seed(&sk, a_seed, &mut rng)?;
-        let share = RelinKeyShare::contribution(&sk, d1_seed, a_seed, 0, 0, &mut rng)?;
+        let share = RelinKeyShare::contribute_with_seed(&sk, d1_seed, a_seed, 0, 0, &mut rng)?;
         let operational = LBFVRelinearizationKey::new(&sk, &public_key, Some(d1_seed), &mut rng)?;
 
         assert!(RelinKeyShare::from_bytes(&operational.to_bytes(), &params).is_err());

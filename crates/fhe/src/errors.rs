@@ -230,6 +230,9 @@ pub enum ThresholdError {
 #[expect(missing_docs, reason = "error variants are documented inline")]
 #[non_exhaustive]
 pub enum PlaintextError {
+    #[error("A plaintext vector must contain at least one plaintext")]
+    EmptyPlaintextVec,
+
     #[error("Polynomial context does not match plaintext level {level}")]
     PolynomialContextMismatch { level: usize },
 
@@ -350,6 +353,16 @@ pub enum DotProductError {
 pub enum MultipartyError {
     #[error("At least one protocol share is required")]
     NoShares,
+
+    #[error("Incompatible protocol shares: {reason}")]
+    IncompatibleShares { reason: &'static str },
+
+    #[error("{component} has {actual} polynomials; expected {expected}")]
+    SharePolynomialCountMismatch {
+        component: &'static str,
+        actual: usize,
+        expected: usize,
+    },
 
     #[error("Expected {expected} common random polynomials, got {actual}")]
     InvalidCommonRandomPolynomialCount { actual: usize, expected: usize },

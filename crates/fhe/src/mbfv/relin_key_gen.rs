@@ -1,8 +1,8 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::Result;
 use crate::bfv::{BfvParameters, KeySwitchingKey, RelinearizationKey, SecretKey};
+use crate::{MultipartyError, Result};
 use fhe_math::rns::RnsContext;
 use fhe_math::rq::{Ntt, NttShoup, Poly, PowerBasis, traits::TryConvertFrom};
 use itertools::izip;
@@ -13,14 +13,19 @@ use crate::bfv::{CommonRandomPoly, CommonRandomPolyVec};
 
 use super::Aggregate;
 use super::round::{R1, R1Aggregated, R2, Round};
+use super::validate::{same_params, same_polys};
 
 /// A party's share in the relinearization key generation protocol.
 /// Use the [`RelinKeyGenerator`] to create these shares.
+/// Round-one shares retain their concrete CRP vector so aggregation can reject
+/// contributions generated from different reference polynomials.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct RelinKeyShare<R: Round = R1> {
     pub(crate) params: Arc<BfvParameters>,
     pub(crate) h0: Box<[Poly<Ntt>]>,
     pub(crate) h1: Box<[Poly<Ntt>]>,
+    // Retain the concrete round-one reference string for aggregation checks.
+    crp: Option<CommonRandomPolyVec>,
     last_round: Option<Arc<RelinKeyShare<R1Aggregated>>>,
     _phantom_data: PhantomData<R>,
 }
@@ -90,6 +95,11 @@ impl<'a, 'b> RelinKeyGenerator<'a, 'b> {
                 expected: ctx.moduli().len(),
             }
             .into())
+        } else if crp.as_slice().iter().any(|p| p.poly().ctx() != ctx) {
+            Err(MultipartyError::IncompatibleShares {
+                reason: "relinearization CRP context does not match secret-key parameters",
+            }
+            .into())
         } else {
             let u = Zeroizing::new(Poly::<Ntt>::small(ctx, params.variance, rng)?);
             Ok(Self { sk_share, crp, u })
@@ -98,7 +108,7 @@ impl<'a, 'b> RelinKeyGenerator<'a, 'b> {
 
     /// Generate share for round 1
     pub fn round_1<R: RngCore + CryptoRng>(&self, rng: &mut R) -> Result<RelinKeyShare<R1>> {
-        <RelinKeyShare<R1>>::new(self.sk_share, self.crp.as_slice(), &self.u, rng)
+        <RelinKeyShare<R1>>::new(self.sk_share, self.crp, &self.u, rng)
     }
 
     /// Generate share for round 2
@@ -114,7 +124,7 @@ impl<'a, 'b> RelinKeyGenerator<'a, 'b> {
 impl RelinKeyShare<R1> {
     fn new<R: RngCore + CryptoRng>(
         sk_share: &SecretKey,
-        crp: &[CommonRandomPoly],
+        crp: &CommonRandomPolyVec,
         u: &Zeroizing<Poly<Ntt>>,
         rng: &mut R,
     ) -> Result<Self> {
@@ -128,12 +138,13 @@ impl RelinKeyShare<R1> {
             }
             .into())
         } else {
-            let h0 = Self::generate_h0(sk_share, crp, u, rng)?;
-            let h1 = Self::generate_h1(sk_share, crp, rng)?;
+            let h0 = Self::generate_h0(sk_share, crp.as_slice(), u, rng)?;
+            let h1 = Self::generate_h1(sk_share, crp.as_slice(), rng)?;
             Ok(Self {
                 params,
                 h0,
                 h1,
+                crp: Some(crp.clone()),
                 last_round: None,
                 _phantom_data: PhantomData,
             })
@@ -206,9 +217,34 @@ impl Aggregate<RelinKeyShare<R1>> for RelinKeyShare<R1Aggregated> {
     {
         let mut shares = iter.into_iter();
         let share = shares.next().ok_or(crate::MultipartyError::NoShares)?;
+        let expected = share.params.moduli().len();
+        same_polys(&share.h0, expected, "round-one h0", &share.params)?;
+        same_polys(&share.h1, expected, "round-one h1", &share.params)?;
+        let crp = share
+            .crp
+            .as_ref()
+            .ok_or(MultipartyError::IncompatibleShares {
+                reason: "missing round-one CRP",
+            })?;
+        let ctx = share.params.context_at_level(0)?;
+        if crp.len() != expected || crp.as_slice().iter().any(|p| p.poly().ctx() != ctx) {
+            return Err(MultipartyError::IncompatibleShares {
+                reason: "invalid round-one CRP",
+            }
+            .into());
+        }
         let mut h0 = share.h0;
         let mut h1 = share.h1;
         for sh in shares {
+            same_params(&share.params, &sh.params)?;
+            same_polys(&sh.h0, expected, "round-one h0", &sh.params)?;
+            same_polys(&sh.h1, expected, "round-one h1", &sh.params)?;
+            if sh.crp.as_ref() != Some(crp) {
+                return Err(MultipartyError::IncompatibleShares {
+                    reason: "different relinearization CRP polynomials",
+                }
+                .into());
+            }
             izip!(h0.iter_mut(), sh.h0.iter()).for_each(|(h0i, sh_h0i)| *h0i += sh_h0i);
             izip!(h1.iter_mut(), sh.h1.iter()).for_each(|(h1i, sh_h1i)| *h1i += sh_h1i);
         }
@@ -217,6 +253,7 @@ impl Aggregate<RelinKeyShare<R1>> for RelinKeyShare<R1Aggregated> {
             params: share.params,
             h0,
             h1,
+            crp: share.crp,
             last_round: None,
             _phantom_data: PhantomData,
         })
@@ -231,12 +268,17 @@ impl RelinKeyShare<R2> {
         rng: &mut R,
     ) -> Result<Self> {
         let params = sk_share.params.clone();
+        same_params(&params, &r1.params)?;
+        let expected = params.moduli().len();
+        same_polys(&r1.h0, expected, "aggregated round-one h0", &params)?;
+        same_polys(&r1.h1, expected, "aggregated round-one h1", &params)?;
         let h0 = Self::generate_h0(sk_share, &r1.h0, rng)?;
         let h1 = Self::generate_h1(sk_share, u, &r1.h1, rng)?;
         Ok(Self {
             params,
             h0,
             h1,
+            crp: None,
             last_round: Some(Arc::clone(r1)),
             _phantom_data: PhantomData,
         })
@@ -306,14 +348,29 @@ impl Aggregate<RelinKeyShare<R2>> for RelinearizationKey {
         let mut shares = iter.into_iter();
         let share = shares.next().ok_or(crate::MultipartyError::NoShares)?;
         let params = share.params.clone();
+        let expected = params.moduli().len();
+        same_polys(&share.h0, expected, "round-two h0", &params)?;
+        same_polys(&share.h1, expected, "round-two h1", &params)?;
         let ctx = params.context_at_level(0)?.clone();
         let r1 = share
             .last_round
             .ok_or(crate::MultipartyError::MissingRelinearizationRoundOneShare)?;
+        same_params(&params, &r1.params)?;
+        same_polys(&r1.h0, expected, "aggregated round-one h0", &params)?;
+        same_polys(&r1.h1, expected, "aggregated round-one h1", &params)?;
 
         let mut h0 = share.h0;
         let mut h1 = share.h1;
         for sh in shares {
+            same_params(&params, &sh.params)?;
+            same_polys(&sh.h0, expected, "round-two h0", &params)?;
+            same_polys(&sh.h1, expected, "round-two h1", &params)?;
+            if sh.last_round.as_deref() != Some(r1.as_ref()) {
+                return Err(MultipartyError::IncompatibleShares {
+                    reason: "round-two shares reference different round-one aggregations",
+                }
+                .into());
+            }
             izip!(h0.iter_mut(), h1.iter_mut(), sh.h0.iter(), sh.h1.iter()).for_each(
                 |(h0, h1, h0i, h1i)| {
                     *h0 += h0i;
@@ -369,6 +426,95 @@ mod tests {
     };
 
     const NUM_PARTIES: usize = 5;
+
+    #[test]
+    fn aggregation_rejects_mismatched_relinearization_crps_rows_and_rounds() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(3, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let crp = CommonRandomPolyVec::new(&params, &mut rng).unwrap();
+        let other_crp = CommonRandomPolyVec::new(&params, &mut rng).unwrap();
+        let generator = RelinKeyGenerator::new(&sk, &crp, &mut rng).unwrap();
+        let other_generator = RelinKeyGenerator::new(&sk, &other_crp, &mut rng).unwrap();
+        let other_params = BfvParameters::default_arc(6, 16);
+        let other_params_crp = CommonRandomPolyVec::new(&other_params, &mut rng).unwrap();
+        assert!(RelinKeyGenerator::new(&sk, &other_params_crp, &mut rng).is_err());
+        let first = generator.round_1(&mut rng).unwrap();
+        let different_crp = other_generator.round_1(&mut rng).unwrap();
+        assert!(
+            crate::mbfv::RelinKeyShare::<crate::mbfv::round::R1Aggregated>::from_shares([
+                first.clone(),
+                generator.round_1(&mut rng).unwrap(),
+            ])
+            .is_ok()
+        );
+        assert!(matches!(
+            crate::mbfv::RelinKeyShare::<crate::mbfv::round::R1Aggregated>::from_shares([
+                first.clone(),
+                different_crp
+            ]),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::IncompatibleShares { .. }
+            ))
+        ));
+
+        let mut short = generator.round_1(&mut rng).unwrap();
+        short.h0 = Vec::new().into_boxed_slice();
+        assert!(matches!(
+            crate::mbfv::RelinKeyShare::<crate::mbfv::round::R1Aggregated>::from_shares([
+                first.clone(),
+                short
+            ]),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::SharePolynomialCountMismatch { .. }
+            ))
+        ));
+
+        let r1a = Arc::new(
+            crate::mbfv::RelinKeyShare::<crate::mbfv::round::R1Aggregated>::from_shares([
+                first.clone()
+            ])
+            .unwrap(),
+        );
+        let r1b = Arc::new(
+            crate::mbfv::RelinKeyShare::<crate::mbfv::round::R1Aggregated>::from_shares([
+                generator.round_1(&mut rng).unwrap(),
+            ])
+            .unwrap(),
+        );
+        let first_r2 = generator.round_2(&r1a, &mut rng).unwrap();
+        let different_round = generator.round_2(&r1b, &mut rng).unwrap();
+        assert!(matches!(
+            RelinearizationKey::from_shares([first_r2.clone(), different_round]),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::IncompatibleShares { .. }
+            ))
+        ));
+
+        let mut short_r2 = generator.round_2(&r1a, &mut rng).unwrap();
+        short_r2.h1 = Vec::new().into_boxed_slice();
+        assert!(matches!(
+            RelinearizationKey::from_shares([first_r2, short_r2]),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::SharePolynomialCountMismatch { .. }
+            ))
+        ));
+
+        let same_round = generator.round_2(&r1a, &mut rng).unwrap();
+        let another_same_round = generator.round_2(&r1a, &mut rng).unwrap();
+        assert!(RelinearizationKey::from_shares([same_round, another_same_round]).is_ok());
+
+        let other_sk = SecretKey::random(&other_params, &mut rng);
+        let other_generator =
+            RelinKeyGenerator::new(&other_sk, &other_params_crp, &mut rng).unwrap();
+        let other_r1 = Arc::new(
+            crate::mbfv::RelinKeyShare::<crate::mbfv::round::R1Aggregated>::from_shares([
+                other_generator.round_1(&mut rng).unwrap(),
+            ])
+            .unwrap(),
+        );
+        assert!(generator.round_2(&other_r1, &mut rng).is_err());
+    }
 
     #[test]
     fn relinearization_works() {

@@ -68,7 +68,7 @@ layout.
 > `ShareManager` is the single public trBFV type (`ShareManager::
 > decrypt_from_shares` is the former `TRBFV::decrypt`). Smudging noise is
 > generated directly with the smudging module's public machinery:
-> `SmudgingConfig::new` (set `config.mult_depth` when needed) →
+> `SmudgingConfig::new` (chain `.with_mult_depth(depth)` when needed) →
 > `SmudgingNoiseGenerator::new` → `generate`. Sampled noise remains a non-cloneable
 > `SmudgingNoise` owner that must be dealt with
 > `ShareManager::generate_smudging_shares`, which consumes
@@ -137,8 +137,10 @@ selects the same CBD or uniform sampler as `Poly::conditional_error`, so the
 smudging bound tracks the encryption sampler's actual coefficient bound.
 
 `SmudgingConfig::new` is fallible: it rejects zero parties, zero ciphertexts,
-and unsupported lambda values. `SmudgingNoiseGenerator::new` revalidates the
-public configuration fields before computing the bound.
+and unsupported lambda values. Its fields are private; use accessors to inspect
+them and `.with_mult_depth(depth)` before passing the config to
+`SmudgingNoiseGenerator::new`. The generator checks feasibility, including
+during the multiplicative-depth recursion.
 
 ## Known Limitations
 
@@ -218,10 +220,9 @@ let secret_key_dealt = secret_key_dealt.into_transport();
 // Each party: sample smudging noise with the smudging machinery, then deal
 // it immediately; the noise owner is one-time material consumed by the
 // dealing operation and the intermediate noise polynomial is never exposed.
-let mut config = SmudgingConfig::new(
+let config = SmudgingConfig::new(
     params.clone(), n_parties, num_ciphertexts, lambda,
-)?;
-config.mult_depth = mult_depth;
+)?.with_mult_depth(mult_depth);
 let generator = SmudgingNoiseGenerator::new(config)?;
 let smudging_noise = generator.generate(&mut rng)?;
 let smudging_dealt = share_manager.generate_smudging_shares(smudging_noise, &mut rng)?;
@@ -243,13 +244,18 @@ let smudging_aggregate = share_manager.aggregate_smudging_shares(
 
 // Each decrypting party: compute a decryption share from its aggregated shares
 let decryption_share =
-    share_manager.decryption_share(ciphertext.clone(), &secret_key_aggregate, smudging_aggregate)?;
+    share_manager.decryption_share(&ciphertext, &secret_key_aggregate, smudging_aggregate)?;
 
 // Combine exactly threshold + 1 decryption shares; reconstructing_parties
 // holds the 1-based indices of the parties the shares came from
 let plaintext =
-    share_manager.decrypt_from_shares(decryption_shares, reconstructing_parties, ciphertext)?;
+    share_manager.decrypt_from_shares(&decryption_shares, &reconstructing_parties, &ciphertext)?;
 ```
+
+`decryption_share` borrows the ciphertext but consumes the one-time smudging
+aggregate. `decrypt_from_shares` borrows the ciphertext, decryption shares, and
+party indices; callers with owned `Vec`s or `Arc<Ciphertext>` should pass
+references rather than cloning or transferring them.
 
 ## Security Considerations
 

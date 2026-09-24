@@ -25,6 +25,11 @@ impl DealtSecretKeyShares {
     }
 
     /// Consume the dealt result at an explicit application transport boundary.
+    /// The returned matrices are ordered by modulus `q_i`, each with rows
+    /// ordered by recipient; the application transposes them into one
+    /// `[moduli, degree]` matrix per recipient before calling
+    /// [`SecretKeyShare::from_transport`]. Ownership (and responsibility for
+    /// clearing discarded buffers) passes to the caller.
     #[must_use]
     pub fn into_transport(mut self) -> Vec<Array2<u64>> {
         // `Drop` zeroizes the field, so replace it before moving the matrices

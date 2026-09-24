@@ -8,9 +8,10 @@ use rand::{CryptoRng, Rng as RngCore};
 use zeroize::Zeroizing;
 
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext, SecretKey};
-use crate::{Error, Result};
+use crate::{Error, MultipartyError, Result};
 
 use super::Aggregate;
+use super::validate::{same_params, switch_ciphertext};
 
 /// A party's share in the secret key switch protocol.
 ///
@@ -65,6 +66,7 @@ impl SecretKeySwitchShare {
         }
 
         let params = sk_input_share.params.clone();
+        switch_ciphertext(&ct, &params)?;
         let s_in = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(
                 sk_input_share.coeffs.as_ref(),
@@ -100,13 +102,16 @@ impl SecretKeySwitchShare {
     }
 
     /// Deserialize a SecretKeySwitchShare from bytes with the given parameters
-    /// and ciphertext
+    /// and ciphertext. The bytes contain only the share polynomial; callers
+    /// must associate it with the original ciphertext and authenticate that
+    /// association at the protocol layer.
     pub fn deserialize(
         bytes: &[u8],
         params: &Arc<BfvParameters>,
         ct: Arc<Ciphertext>,
     ) -> Result<Self> {
-        let ctx = params.context_at_level(0)?;
+        switch_ciphertext(&ct, params)?;
+        let ctx = params.context_at_level(ct.level)?;
         let h_share = Poly::<Ntt>::from_bytes(bytes, ctx)?;
         Ok(Self {
             params: params.clone(),
@@ -123,8 +128,26 @@ impl Aggregate<SecretKeySwitchShare> for Ciphertext {
     {
         let mut shares = iter.into_iter();
         let share = shares.next().ok_or(crate::MultipartyError::NoShares)?;
+        switch_ciphertext(&share.ct, &share.params)?;
+        if share.h_share.ctx() != share.ct[0].ctx() {
+            return Err(MultipartyError::IncompatibleShares {
+                reason: "secret-key-switch share context does not match ciphertext",
+            }
+            .into());
+        }
         let mut h = share.h_share;
         for sh in shares {
+            same_params(&share.params, &sh.params)?;
+            switch_ciphertext(&sh.ct, &sh.params)?;
+            if sh.ct.c != share.ct.c
+                || sh.ct.level != share.ct.level
+                || sh.h_share.ctx() != share.ct[0].ctx()
+            {
+                return Err(MultipartyError::IncompatibleShares {
+                    reason: "secret-key-switch shares use different ciphertexts or contexts",
+                }
+                .into());
+            }
             h += &sh.h_share;
         }
 
@@ -169,7 +192,8 @@ impl DecryptionShare {
     }
 
     /// Deserialize a DecryptionShare from bytes with the given parameters and
-    /// ciphertext
+    /// ciphertext. Callers must authenticate the ciphertext association; the
+    /// serialized share polynomial does not carry a ciphertext identifier.
     pub fn deserialize(
         bytes: &[u8],
         params: &Arc<BfvParameters>,
@@ -200,11 +224,11 @@ impl Aggregate<DecryptionShare> for Plaintext {
         c.disallow_variable_time_computations();
         let ctx = c.ctx().clone();
         let c_inner = std::mem::replace(c.as_mut(), Poly::<Ntt>::zero(&ctx));
-        let c = c_inner.into_power_basis();
+        let c = Zeroizing::new(c_inner.into_power_basis());
 
         // The true decryption part is done during SKS; all that is left is to scale
         let ctx_lvl = ct.params.context_level_at(ct.level)?;
-        let d = Zeroizing::new(c.scale(&ctx_lvl.cipher_plain_context.scaler)?);
+        let d = Zeroizing::new(c.as_ref().scale(&ctx_lvl.cipher_plain_context.scaler)?);
 
         let v: Vec<BigUint> = Vec::<BigUint>::try_from(d.as_ref())?
             .into_iter()
@@ -234,7 +258,7 @@ impl Aggregate<DecryptionShare> for Plaintext {
 mod tests {
     use std::sync::Arc;
 
-    use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
+    use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter, Serialize};
     use rand::rng;
 
     use crate::{
@@ -243,6 +267,73 @@ mod tests {
     };
 
     const NUM_PARTIES: usize = 11;
+
+    #[test]
+    fn aggregation_rejects_secret_switch_and_decryption_ciphertext_mismatch() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let ctx = params.context_at_level(0).unwrap();
+        let sk = SecretKey::random(&params, &mut rng);
+        let mk_ct = |rng: &mut _| {
+            Arc::new(
+                crate::bfv::Ciphertext::new(
+                    vec![
+                        fhe_math::rq::Poly::random(ctx, rng),
+                        fhe_math::rq::Poly::random(ctx, rng),
+                    ],
+                    &params,
+                )
+                .unwrap(),
+            )
+        };
+        let ct = mk_ct(&mut rng);
+        let other_ct = mk_ct(&mut rng);
+        let first = SecretKeySwitchShare::new(&sk, &sk, ct.clone(), &mut rng).unwrap();
+        let wrong = SecretKeySwitchShare::new(&sk, &sk, other_ct.clone(), &mut rng).unwrap();
+        assert!(matches!(
+            crate::bfv::Ciphertext::from_shares([first, wrong]),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::IncompatibleShares { .. }
+            ))
+        ));
+        assert!(matches!(
+            crate::bfv::Plaintext::from_shares([
+                DecryptionShare::new(&sk, &ct, &mut rng).unwrap(),
+                DecryptionShare::new(&sk, &other_ct, &mut rng).unwrap(),
+            ]),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::IncompatibleShares { .. }
+            ))
+        ));
+        assert!(
+            crate::bfv::Plaintext::from_shares([
+                DecryptionShare::new(&sk, &ct, &mut rng).unwrap(),
+                DecryptionShare::new(&sk, &ct, &mut rng).unwrap(),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn deserialization_binds_switch_share_at_ciphertext_level() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(2, 8);
+        let ctx = params.context_at_level(1).unwrap();
+        let sk = SecretKey::random(&params, &mut rng);
+        let ct = Arc::new(
+            crate::bfv::Ciphertext::new(
+                vec![
+                    fhe_math::rq::Poly::random(ctx, &mut rng),
+                    fhe_math::rq::Poly::random(ctx, &mut rng),
+                ],
+                &params,
+            )
+            .unwrap(),
+        );
+        let share = SecretKeySwitchShare::new(&sk, &sk, ct.clone(), &mut rng).unwrap();
+        let restored = SecretKeySwitchShare::deserialize(&share.to_bytes(), &params, ct).unwrap();
+        assert_eq!(restored.h_share, share.h_share);
+    }
 
     struct Party {
         sk_share: SecretKey,

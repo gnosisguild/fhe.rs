@@ -215,8 +215,8 @@ fn trlbfv_aggregation_rejects_inconsistent_reference_strings() {
     let other_urs_seed = support::presets::seed(56);
 
     let inconsistent_pk_shares = [
-        PublicKeyShare::new_with_seed(&secret_keys[0], crs_seed, &mut rng).unwrap(),
-        PublicKeyShare::new_with_seed(&secret_keys[1], other_crs_seed, &mut rng).unwrap(),
+        PublicKeyShare::contribute_with_seed(&secret_keys[0], crs_seed, &mut rng).unwrap(),
+        PublicKeyShare::contribute_with_seed(&secret_keys[1], other_crs_seed, &mut rng).unwrap(),
     ];
     assert!(
         inconsistent_pk_shares
@@ -227,22 +227,39 @@ fn trlbfv_aggregation_rejects_inconsistent_reference_strings() {
 
     let public_key = secret_keys
         .iter()
-        .map(|secret_key| PublicKeyShare::new_with_seed(secret_key, crs_seed, &mut rng).unwrap())
+        .map(|secret_key| {
+            PublicKeyShare::contribute_with_seed(secret_key, crs_seed, &mut rng).unwrap()
+        })
         .aggregate::<LBFVPublicKey>()
         .unwrap();
 
     let inconsistent_urs_shares = [
-        RelinKeyShare::contribution(&secret_keys[0], urs_seed, crs_seed, 0, 0, &mut rng).unwrap(),
-        RelinKeyShare::contribution(&secret_keys[1], other_urs_seed, crs_seed, 0, 0, &mut rng)
+        RelinKeyShare::contribute_with_seed(&secret_keys[0], urs_seed, crs_seed, 0, 0, &mut rng)
             .unwrap(),
+        RelinKeyShare::contribute_with_seed(
+            &secret_keys[1],
+            other_urs_seed,
+            crs_seed,
+            0,
+            0,
+            &mut rng,
+        )
+        .unwrap(),
     ];
     assert!(aggregate_relinearization_key(&inconsistent_urs_shares, &public_key).is_err());
 
     let mismatched_crs_shares = secret_keys
         .iter()
         .map(|secret_key| {
-            RelinKeyShare::contribution(secret_key, urs_seed, other_crs_seed, 0, 0, &mut rng)
-                .unwrap()
+            RelinKeyShare::contribute_with_seed(
+                secret_key,
+                urs_seed,
+                other_crs_seed,
+                0,
+                0,
+                &mut rng,
+            )
+            .unwrap()
         })
         .collect::<Vec<_>>();
     assert!(aggregate_relinearization_key(&mismatched_crs_shares, &public_key).is_err());

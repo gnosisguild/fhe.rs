@@ -106,14 +106,14 @@ fn secure16384_profile_is_feasible_and_covers_share_moduli() {
     assert_eq!(preset.lambda, 31);
     assert_eq!(preset.multiplicative_depth, Some(3));
 
-    let mut config = SmudgingConfig::new(
+    let config = SmudgingConfig::new(
         preset.parameters.clone(),
         preset.num_parties,
         preset.max_ciphertexts,
         preset.lambda,
     )
-    .unwrap();
-    config.mult_depth = preset.multiplicative_depth.unwrap();
+    .unwrap()
+    .with_mult_depth(preset.multiplicative_depth.unwrap());
     let bound = SmudgingNoiseGenerator::new(config)
         .unwrap()
         .smudging_bound()
