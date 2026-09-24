@@ -65,7 +65,7 @@ The module follows a modular design with clear separation of concerns:
 
 - `../rns_shamir.rs` - crate-private direct RNS Shamir arithmetic shared by threshold schemes
 - `prf.rs` - committee PRF keys and partial-decryption masks
-- `smudging.rs` - Smudging noise generation with optimal variance calculation using arbitrary precision arithmetic  
+- `smudging/` - Smudging noise generation with optimal variance calculation using arbitrary precision arithmetic  
 - `shares.rs` - Share aggregation and decryption operations management
 - `config.rs` - Parameter validation
 - `errors.rs` - Threshold-specific error types
@@ -83,67 +83,98 @@ layout.
 > set `S`. FinDec sums the partial decryptions instead of Lagrange-
 > reconstructing them.
 
-## Noise and Correctness Formulas (Urban–Rambaud 2024)
+## Noise and Correctness Formulas
 
 This section summarises the formulas implemented in
-[`smudging.rs`](smudging.rs).  See the paper for full derivations.
+[`smudging/`](smudging/). Ciphertext-noise growth follows Urban–Rambaud 2024
+(Prop. 20 and Eq. 30). The smudging bound instantiates
+`B_SM = Ω(2^λ · B_Dec)` from the 2026 synchronized-decryptor paper, with
+`B_Dec` taken to be this crate's `B_C` after circuit evaluation.
 
 ### Delta and the strict correctness inequality
 
-The plaintext scaling factor is **&Delta; = &lfloor;Q / t&rfloor;** (not `Q/(2t)`):
+BFV encodes a plaintext `m` as `Δ · m` with scaling factor
+`Δ = ⌊Q / t⌋`. Rounding back to the nearest multiple of `Δ` is correct only
+when the total noise is strictly less than half a gap, `Δ / 2`:
 
-> `2 * (B&#x1d9c; + n * B&#x209b;&#x2098;) < &Delta;`
+```text
+2 * (B_C + n * B_sm) < Δ
+```
 
 where
 - `Q` is the product of all CRT moduli,
 - `t` is the plaintext modulus,
-- `n` is the total number of parties,
-- `B&#x1d9c;` is the ciphertext noise infinity-norm bound after circuit evaluation,
-- `B&#x209b;&#x2098;` is the smudging-noise coefficient bound.
+- `n` is the total number of parties (used even when only `|S| = threshold + 1`
+  parties smudge; this is conservative),
+- `B_C` is the ciphertext noise infinity-norm bound after circuit evaluation,
+- `B_sm` is the smudging-noise coefficient bound.
 
-Equality (`>=`) is **rejected**: a smudging bound that merely meets &Delta; does
-not guarantee correct decryption.
+`SmudgingNoiseGenerator::new` also requires `2 * B_C < Δ` before adding
+smudging. Equality is rejected on both checks (`>= Δ`): a bound that only
+meets `Δ / 2` does not guarantee correct rounding.
 
 ### Ciphertext noise recursion (multiplicative circuits)
 
-Let `mult_depth` be the number of multiplication levels.
+Let `d` be the polynomial ring degree, `ℓ` the number of CRT moduli,
+`B_g` the largest CRT modulus, and `mult_depth` the number of multiplication
+levels. The code uses `||sk||_∞ = n` and `B_e = 2 · variance` (the BFV
+error-polynomial variance, distinct from `error1_variance` used for `B_enc`).
 
-- **Initial bound:** `B&#x1d9c;&sup0;` = `m &middot; (B_fresh + Q mod t)`
-  `B_fresh` itself is derived from the encryption-noise and key-norm bounds,
-  using the sampler-specific `B_enc` (see below).
+- **Fresh encryption noise:**
 
-- **Recursion** (Prop.&nbsp;20 of Urban–Rambaud 2024):
+  ```text
+  ||e_ek||_∞ = n * (2 * variance)
+  B_fresh    = d * ||e_ek||_∞ + B_enc + d * B_e * ||sk||_∞
+  ```
 
-  > `B&#x1d9c;&sup1;&plus;&sup1; = 2&middot;k&middot;N&sup2;&middot;||sk|| &middot; B&#x1d9c;&sup1; + B_relin`
+  `B_enc` comes from the error sampler (see below).
 
-  where
-  - `k = t` (plaintext modulus),
-  - `N` is the polynomial ring degree,
-  - `||sk||` is the secret-key infinity-norm bound,
-  - `B_relin` is the relinearisation error bound (Eq.&nbsp;30 of the paper)
-    with **aggregate RLK error** `n &middot; B_e`. This is conservative when fewer
-    than all `n` relinearization contributions are aggregated.
+- **Initial bound** (additive circuit, `mult_depth = 0`):
 
-- **Smudging bound:** `B&#x209b;&#x2098; = 2^(lambda + 1) &middot; d &middot; B&#x1d9c;` where
-  `lambda` is the statistical security parameter and `d` is the polynomial
-  ring degree. The extra
-  factor `2 &middot; d` is the whole-transcript policy (issue #108): a single
-  decryption reveals all `d` coefficients of the smudging noise at once, so a
-  union bound over the coefficients adds a factor `d`, and `2^(lambda + 1)`
-  keeps the constant-`2` convention of the correctness inequality. The older
-  `B&#x209b;&#x2098; = 2^lambda &middot; B&#x1d9c;` form only bounds the statistical distance for
-  a *single* coefficient and is not what [`smudging.rs`](smudging.rs)
-  implements.
+  ```text
+  B_C^(0) = m * (B_fresh + (Q mod t))
+  ```
+
+- **Recursion** (Prop. 20 of Urban–Rambaud 2024), applied `mult_depth` times:
+
+  ```text
+  B_C^(i+1) = 2 * k * d^2 * ||sk||_∞ * B_C^(i) + B_relin
+  ```
+
+  with `k = t`. The relinearisation error (Eq. 30) uses aggregate RLK error
+  `B_e^agg = n * B_e`:
+
+  ```text
+  B_relin = d * ℓ * ||sk||_∞ * B_g * B_e^agg
+          + 2 * d^2 * ℓ^2 * ||sk||_∞^2 * B_g * B_e^agg
+  ```
+
+  Using all `n` parties is conservative when fewer relinearization
+  contributions are aggregated.
+
+- **Smudging bound:**
+
+  ```text
+  B_sm = 2^(lambda + 1) * d * B_C
+  ```
+
+  `lambda` is the statistical security parameter. The extra factor `2 * d`
+  is the whole-transcript policy (issue #108): a single decryption reveals
+  all `d` coefficients of the smudging noise at once, so a union bound over
+  the coefficients adds a factor `d`, and `2^(lambda + 1)` keeps the
+  constant-`2` convention of the correctness inequality. The older form
+  `B_sm = 2^lambda * B_C` only bounds the statistical distance for a
+  *single* coefficient and is not what this module implements.
 
 ### Sampler-specific `B_enc`
 
 `B_enc` is derived from the actual BFV error sampler configuration, not from a
 fixed formula:
 
-| Error sampler branch                     | `B_enc` bound                    |
-| ---------------------------------------- | -------------------------------- |
-| CBD (error1 variance `<= 16` as `u64`)    | `2 &middot; error1_variance` |
-| Uniform (larger / non-`u64` variance)     | Smallest `B` with `B(B + 1) >= 3 &middot; error1_variance` |
+| Error sampler branch                      | `B_enc` bound                                      |
+| ----------------------------------------- | -------------------------------------------------- |
+| CBD (`error1_variance <= 16` as `u64`)    | `2 * error1_variance`                              |
+| Uniform (larger / non-`u64` variance)     | Smallest `B` with `B*(B + 1) >= 3 * error1_variance` |
 
 This matches the branches chosen by `Poly::conditional_error` in `fhe-math`.
 
