@@ -110,9 +110,6 @@ pub fn get_smallest_prime_factor(moduli: &[u64]) -> Result<u64, FactorError> {
     factors.into_iter().min().ok_or(FactorError::NoResult)
 }
 
-/// Sample a vector of independent centered binomial distributions with usize variance.
-/// Supports integer variances from 1 to 16.
-/// Returns an error if variance is outside [1, 16].
 /// Sample a vector of independent centered binomial distributions of a given
 /// variance. Returns an error if the variance is not between 1 and 32.
 pub fn sample_vec_cbd<R: RngCore + CryptoRng>(

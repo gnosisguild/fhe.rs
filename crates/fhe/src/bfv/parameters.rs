@@ -13,7 +13,7 @@ use fhe_traits::{Deserialize, FheParameters, Serialize};
 use fhe_util::is_prime;
 use itertools::Itertools;
 use num_bigint::BigUint;
-use num_traits::{PrimInt as _, ToPrimitive};
+use num_traits::{PrimInt as _, ToPrimitive, Zero};
 use prost::Message;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -344,11 +344,15 @@ impl BfvParameters {
             .unwrap()
     }
 
-    /// Create a new BfvParameters with custom error1_variance for threshold BFV
-    #[must_use]
-    pub fn with_error1_variance(mut self, error1_variance: BigUint) -> Self {
+    /// Set the threshold-BFV error variance, validating it against the ciphertext modulus.
+    pub fn with_error1_variance(mut self, error1_variance: BigUint) -> Result<Self> {
+        BfvParametersBuilder::validate_error1_variance(
+            &error1_variance,
+            &self.moduli.iter().copied().map(BigUint::from).product(),
+            self.plaintext.as_biguint(),
+        )?;
         self.error1_variance = error1_variance;
-        self
+        Ok(self)
     }
 }
 
@@ -374,6 +378,8 @@ impl BfvParametersBuilder {
     const MAX_DEGREE: usize = 65536;
     const MIN_VARIANCE: usize = 1;
     const MAX_VARIANCE: usize = 32;
+    // A 256-bit variance produces at most a 129-bit uniform-sampler bound.
+    const MAX_ERROR1_VARIANCE_BITS: u64 = 256;
 
     /// Creates a new instance of the builder
     #[expect(
@@ -437,14 +443,19 @@ impl BfvParametersBuilder {
         self
     }
 
-    /// Sets the error2 variance for threshold BFV using BigUint.
+    /// Sets the e1 variance for threshold BFV using BigUint.
+    /// [`Self::build`] rejects zero, oversized values, and values whose sampled
+    /// error alone would exhaust the level-0 decryption margin. The check uses
+    /// the sampler's worst-case coefficient magnitude, not a statistical bound.
+    /// At variance 17 the sampler switches from CBD to uniform, so the bound
+    /// can decrease even when the configured variance increases.
     pub fn set_error1_variance(&mut self, error1_variance: BigUint) -> &mut Self {
         self.error1_variance = error1_variance;
         self.error1_variance_explicitly_set = true;
         self
     }
 
-    /// Sets the error2 variance for threshold BFV from a usize.
+    /// Sets the e1 variance for threshold BFV from a usize.
     /// Convenience method for smaller values.
     pub fn set_error1_variance_usize(&mut self, error1_variance: usize) -> &mut Self {
         self.error1_variance = BigUint::from(error1_variance);
@@ -452,7 +463,7 @@ impl BfvParametersBuilder {
         self
     }
 
-    /// Sets the error2 variance for threshold BFV from a string representation.
+    /// Sets the e1 variance for threshold BFV from a string representation.
     /// Useful for very large numbers that can't fit in standard integer types.
     pub fn set_error1_variance_str(&mut self, error1_variance: &str) -> Result<&mut Self> {
         let big_uint = error1_variance.parse::<BigUint>().map_err(|_| {
@@ -546,7 +557,7 @@ impl BfvParametersBuilder {
         Ok(())
     }
 
-    fn validate_moduli(&self, moduli: &[u64], plaintext: &BigUint) -> Result<()> {
+    fn validate_moduli(&self, moduli: &[u64], plaintext: &BigUint) -> Result<BigUint> {
         for (index, modulus) in moduli.iter().copied().enumerate() {
             Modulus::new(modulus).map_err(|error| {
                 Error::ParametersError(ParametersError::InvalidCiphertextModulus {
@@ -626,6 +637,38 @@ impl BfvParametersBuilder {
             }
         }
 
+        Ok(ciphertext_modulus)
+    }
+
+    /// A single e1 coefficient must fit within half of the level-0 BFV scaling
+    /// factor `Delta = floor(Q / t)`. Other noise terms and switching levels need
+    /// their own correctness analysis; this is a necessary, not sufficient, bound.
+    fn validate_error1_variance(
+        variance: &BigUint,
+        ciphertext_modulus: &BigUint,
+        plaintext_modulus: &BigUint,
+    ) -> Result<()> {
+        if variance.is_zero() {
+            return Err(ParametersError::ZeroError1Variance.into());
+        }
+        if variance.bits() > Self::MAX_ERROR1_VARIANCE_BITS {
+            return Err(ParametersError::Error1VarianceTooLarge {
+                bits: variance.bits(),
+                maximum_bits: Self::MAX_ERROR1_VARIANCE_BITS,
+            }
+            .into());
+        }
+
+        let delta = ciphertext_modulus / plaintext_modulus;
+        let maximum_bound = (delta - 1u32) / 2u32;
+        let bound = fhe_math::rq::error_coefficient_bound(variance)?;
+        if bound > maximum_bound {
+            return Err(ParametersError::Error1VarianceExceedsNoiseBudget {
+                bound,
+                maximum_bound,
+            }
+            .into());
+        }
         Ok(())
     }
 
@@ -646,7 +689,8 @@ impl BfvParametersBuilder {
         if !self.ciphertext_moduli_sizes.is_empty() {
             moduli = Self::generate_moduli(&self.ciphertext_moduli_sizes, self.degree)?
         }
-        self.validate_moduli(&moduli, plaintext_big)?;
+        let ciphertext_modulus = self.validate_moduli(&moduli, plaintext_big)?;
+        Self::validate_error1_variance(&self.error1_variance, &ciphertext_modulus, plaintext_big)?;
 
         // Recomputes the moduli sizes
         let moduli_sizes = moduli
@@ -1050,6 +1094,24 @@ mod tests {
     }
 
     #[test]
+    fn deserialization_rejects_oversized_degree_before_allocating_contexts() {
+        let proto = Parameters {
+            degree: 131072,
+            moduli: vec![97],
+            variance: 10,
+            plaintext_modulus: Some(PlaintextModulusProto::Plaintext(2)),
+            error1_variance: None,
+        };
+        assert!(matches!(
+            BfvParameters::try_deserialize(&proto.encode_to_vec()),
+            Err(FheError::ParametersError(ParametersError::InvalidDegree {
+                degree: 131072,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn validates_variance_bounds() -> Result<(), Box<dyn Error>> {
         for variance in [0, 33] {
             let err = BfvParametersBuilder::new()
@@ -1098,6 +1160,120 @@ mod tests {
                 min: 1,
                 max: 32,
             })
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_oversized_and_unaffordable_error1_variance() -> Result<(), Box<dyn Error>> {
+        let mut builder = BfvParametersBuilder::new();
+        builder
+            .set_degree(16)
+            .set_plaintext_modulus(2)
+            .set_moduli(&[97]);
+
+        builder.set_error1_variance_usize(0);
+        assert!(matches!(
+            builder.build(),
+            Err(FheError::ParametersError(
+                ParametersError::ZeroError1Variance
+            ))
+        ));
+
+        builder.set_error1_variance(BigUint::from(1u32) << 256);
+        assert!(matches!(
+            builder.build(),
+            Err(FheError::ParametersError(
+                ParametersError::Error1VarianceTooLarge {
+                    bits: 257,
+                    maximum_bits: 256,
+                }
+            ))
+        ));
+
+        // CBD variance 16 has bound 32. Variance 17 uses uniform sampling
+        // with bound 7 instead; validate the actual sampler, not just the number.
+        builder.set_error1_variance_usize(16);
+        assert!(matches!(
+            builder.build(),
+            Err(FheError::ParametersError(
+                ParametersError::Error1VarianceExceedsNoiseBudget { .. }
+            ))
+        ));
+        builder.set_error1_variance_usize(17);
+        let params = builder.build()?;
+        assert_eq!(params.get_error1_variance(), &BigUint::from(17u32));
+
+        builder.set_error1_variance_str("0")?;
+        assert!(matches!(
+            builder.build(),
+            Err(FheError::ParametersError(
+                ParametersError::ZeroError1Variance
+            ))
+        ));
+        builder.set_error1_variance_str(&"1".repeat(79))?;
+        assert!(matches!(
+            builder.build(),
+            Err(FheError::ParametersError(
+                ParametersError::Error1VarianceTooLarge { .. }
+            ))
+        ));
+        builder.set_error1_variance_str("17")?;
+        assert_eq!(
+            builder.build()?.get_error1_variance(),
+            &BigUint::from(17u32)
+        );
+
+        let params = params.with_error1_variance(BigUint::from(20u32))?;
+        assert_eq!(params.get_error1_variance(), &BigUint::from(20u32));
+        assert!(matches!(
+            params.with_error1_variance(BigUint::from(0u32)),
+            Err(FheError::ParametersError(
+                ParametersError::ZeroError1Variance
+            ))
+        ));
+        let params = builder.build()?;
+        assert!(matches!(
+            params.with_error1_variance(BigUint::from(16u32)),
+            Err(FheError::ParametersError(
+                ParametersError::Error1VarianceExceedsNoiseBudget { .. }
+            ))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn deserialization_rejects_invalid_error1_variance_before_sampling() {
+        let mut proto = Parameters {
+            degree: 16,
+            moduli: vec![97],
+            variance: 10,
+            plaintext_modulus: Some(PlaintextModulusProto::Plaintext(2)),
+            error1_variance: Some(Vec::new()),
+        };
+        assert!(matches!(
+            BfvParameters::try_deserialize(&proto.encode_to_vec()),
+            Err(FheError::ParametersError(
+                ParametersError::ZeroError1Variance
+            ))
+        ));
+
+        proto.error1_variance = Some(vec![1; 33]);
+        assert!(matches!(
+            BfvParameters::try_deserialize(&proto.encode_to_vec()),
+            Err(FheError::ParametersError(
+                ParametersError::Error1VarianceTooLarge {
+                    bits: 257,
+                    maximum_bits: 256,
+                }
+            ))
+        ));
+
+        proto.error1_variance = Some(vec![16]);
+        assert!(matches!(
+            BfvParameters::try_deserialize(&proto.encode_to_vec()),
+            Err(FheError::ParametersError(
+                ParametersError::Error1VarianceExceedsNoiseBudget { .. }
+            ))
         ));
     }
 
@@ -1242,7 +1418,7 @@ mod tests {
         let params_with_large_error2 = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62])
+            .set_moduli_sizes(&[62; 3])
             .set_variance(10)
             .set_error1_variance(large_error2.clone())
             .build()?;
@@ -1264,7 +1440,7 @@ mod tests {
         builder
             .set_degree(8)
             .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62])
+            .set_moduli_sizes(&[62; 3])
             .set_variance(10)
             .set_error1_variance_str(
                 "123456789012345678901234567890123456789012345678901234567890",
@@ -1285,10 +1461,23 @@ mod tests {
     fn test_155_bit_error1_variance() -> Result<(), Box<dyn Error>> {
         let bit_155_number = BigUint::from(2u32).pow(155) - BigUint::from(1u32);
 
+        assert!(matches!(
+            BfvParametersBuilder::new()
+                .set_degree(8)
+                .set_plaintext_modulus(1153)
+                .set_moduli_sizes(&[62])
+                .set_variance(10)
+                .set_error1_variance(bit_155_number.clone())
+                .build(),
+            Err(FheError::ParametersError(
+                ParametersError::Error1VarianceExceedsNoiseBudget { .. }
+            ))
+        ));
+
         let params = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62])
+            .set_moduli_sizes(&[62; 3])
             .set_variance(10)
             .set_error1_variance(bit_155_number.clone())
             .build()?;

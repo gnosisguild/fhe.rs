@@ -613,6 +613,21 @@ pub enum ParametersError {
     #[error("Invalid error1 variance {value}")]
     InvalidError1Variance { value: String },
 
+    /// Indicates that the threshold-BFV error variance is zero.
+    #[error("Error1 variance must be positive")]
+    ZeroError1Variance,
+
+    /// Indicates that the threshold-BFV error variance exceeds the sampler resource limit.
+    #[error("Error1 variance has {bits} bits, maximum is {maximum_bits} bits")]
+    Error1VarianceTooLarge { bits: u64, maximum_bits: u64 },
+
+    /// Indicates that the sampled error alone exceeds the level-0 decryption margin.
+    #[error("Error1 coefficient bound {bound} exceeds the level-0 limit {maximum_bound}")]
+    Error1VarianceExceedsNoiseBudget {
+        bound: BigUint,
+        maximum_bound: BigUint,
+    },
+
     /// Indicates that the error distribution variance is invalid.
     #[error("Invalid error distribution variance: {reason}")]
     InvalidSamplingVariance { reason: String },
