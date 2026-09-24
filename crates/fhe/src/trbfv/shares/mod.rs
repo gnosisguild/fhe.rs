@@ -407,12 +407,14 @@ impl ShareManager {
     ///
     /// This function performs the final step of threshold decryption by combining
     /// decryption shares from exactly `threshold + 1` parties to reconstruct the plaintext.
+    /// The shares, party indices, and ciphertext are borrowed and can be held by
+    /// the calling protocol throughout reconstruction.
     ///
     /// # Arguments
-    /// - `decryption_shares`: Borrow exactly `threshold + 1` decryption shares
-    /// - `reconstructing_parties`: Borrow the 1-based party indices the shares came from, in
+    /// - `decryption_shares`: Exactly `threshold + 1` decryption shares
+    /// - `reconstructing_parties`: The 1-based party indices the shares came from, in
     ///   the same order as `decryption_shares`; indices must be distinct and in `1..=n`
-    /// - `ciphertext`: Borrow the original ciphertext being decrypted
+    /// - `ciphertext`: The original ciphertext being decrypted
     ///
     /// # Returns
     /// The decrypted plaintext

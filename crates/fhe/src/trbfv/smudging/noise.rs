@@ -103,7 +103,7 @@ impl SmudgingNoiseGenerator {
             let two_b_c = b_c << 1usize;
             if two_b_c >= delta {
                 return Err(Error::smudging_bound_infeasible(format!(
-                    "2*B_C = {two_b_c} exceeds Delta = {delta}: circuit too deep or parameters too small"
+                    "2*B_C = {two_b_c} >= Delta = {delta}: circuit too deep or parameters too small"
                 )));
             }
             Ok(())
@@ -649,11 +649,11 @@ mod tests {
         let config = SmudgingConfig::new(params.clone(), 3, 1, 2).unwrap();
         assert!(SmudgingNoiseGenerator::new(config.clone().with_mult_depth(1)).is_ok());
 
+        let error = SmudgingNoiseGenerator::new(config.with_mult_depth(u32::MAX)).unwrap_err();
         assert!(matches!(
-            SmudgingNoiseGenerator::new(config.with_mult_depth(u32::MAX)),
-            Err(Error::Threshold(
-                crate::ThresholdError::SmudgingBoundInfeasible { .. }
-            ))
+            error,
+            Error::Threshold(crate::ThresholdError::SmudgingBoundInfeasible { reason })
+                if reason.contains(">= Delta")
         ));
 
         let additive_infeasible = SmudgingConfig::new(params, 3, usize::MAX, 2).unwrap();

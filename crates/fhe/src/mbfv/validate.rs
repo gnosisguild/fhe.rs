@@ -5,6 +5,9 @@ use std::sync::Arc;
 use crate::bfv::{BfvParameters, Ciphertext};
 
 pub(super) fn same_params(a: &Arc<BfvParameters>, b: &Arc<BfvParameters>) -> Result<()> {
+    // Shares can cross a transport boundary and be rehydrated with distinct
+    // parameter Arcs. Compare parameter values here (and polynomial contexts
+    // below), unlike in-memory BFV plaintext validation's identity check.
     if a != b {
         return Err(MultipartyError::IncompatibleShares {
             reason: "different BFV parameters",
