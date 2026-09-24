@@ -319,8 +319,9 @@ impl RnsScaler {
     /// denominator, and either rounded or floored, and store the result in
     /// `out`.
     ///
-    /// Panics if the number of rests differs from the source moduli or the
-    /// output range is outside the destination moduli.
+    /// Panics if the number of rests differs from the source moduli, `out` is
+    /// empty, or the range starting at `starting_index` with length `out.len()`
+    /// exceeds the destination moduli.
     pub fn scale(
         &self,
         rests: ArrayView1<u64>,

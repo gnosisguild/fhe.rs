@@ -102,6 +102,8 @@ impl Plaintext {
 
     fn coefficients(&self) -> PlaintextCoefficients {
         let poly = Zeroizing::new(self.poly_ntt.clone().into_power_basis());
+        // Backward NTT produces canonical residues in the polynomial's validated
+        // context, so the BigUint CRT lifts below cannot reject their inputs.
         match self.params.plaintext.small() {
             Some(modulus)
                 if self
