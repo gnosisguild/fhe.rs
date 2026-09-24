@@ -24,7 +24,7 @@ use fhe_util::sample_vec_cbd;
 use itertools::{Itertools, izip};
 use ndarray::{Array2, ArrayView2, Axis, s};
 use num_bigint::{BigInt, BigRng09, BigUint};
-use num_traits::{Signed, ToPrimitive, Zero};
+use num_traits::{Signed, ToPrimitive};
 pub use ops::dot_product;
 use rand::{CryptoRng, Rng as RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -466,12 +466,11 @@ impl<R: RepresentationTag> Poly<R> {
             });
         }
 
-        let bound = error_coefficient_bound(variance)?;
-        if uses_cbd_error_sampler(variance) {
-            // The CBD branch is limited to 16, so this conversion always fits.
-            Self::small(ctx, variance.to_usize().unwrap_or(0), rng)
-        } else {
-            Self::uniform_biguint(ctx, representation, &bound, rng)
+        match error_sampler(variance)? {
+            ErrorSampler::Cbd { variance, .. } => Self::small(ctx, variance, rng),
+            ErrorSampler::Uniform { bound } => {
+                Self::uniform_biguint(ctx, representation, &bound, rng)
+            }
         }
     }
 
@@ -949,10 +948,26 @@ pub fn sample_uniform_coefficients_bigint<T: RngCore + CryptoRng>(
 
 const CBD_ERROR_VARIANCE_MAX: u64 = 16;
 
-fn uses_cbd_error_sampler(variance: &BigUint) -> bool {
-    variance
-        .to_u64()
-        .is_some_and(|v| v <= CBD_ERROR_VARIANCE_MAX)
+enum ErrorSampler {
+    Cbd { variance: usize, bound: BigUint },
+    Uniform { bound: BigUint },
+}
+
+fn error_sampler(variance: &BigUint) -> Result<ErrorSampler> {
+    match variance.to_u64() {
+        Some(0) => Err(Error::InvalidVariance {
+            variance: 0,
+            minimum: 1,
+            maximum: 32,
+        }),
+        Some(v) if v <= CBD_ERROR_VARIANCE_MAX => Ok(ErrorSampler::Cbd {
+            variance: v as usize,
+            bound: variance * 2u32,
+        }),
+        _ => Ok(ErrorSampler::Uniform {
+            bound: uniform_coefficient_bound(variance),
+        }),
+    }
 }
 
 /// Maximum absolute coefficient emitted by [`Poly::conditional_error`].
@@ -962,18 +977,9 @@ fn uses_cbd_error_sampler(variance: &BigUint) -> bool {
 /// requested variance. This is a worst-case coefficient bound, not a statistical
 /// noise estimate.
 pub fn error_coefficient_bound(variance: &BigUint) -> Result<BigUint> {
-    if variance.is_zero() {
-        return Err(Error::InvalidVariance {
-            variance: 0,
-            minimum: 1,
-            maximum: 32,
-        });
-    }
-    if uses_cbd_error_sampler(variance) {
-        Ok(variance * 2u32)
-    } else {
-        Ok(uniform_coefficient_bound(variance))
-    }
+    Ok(match error_sampler(variance)? {
+        ErrorSampler::Cbd { bound, .. } | ErrorSampler::Uniform { bound } => bound,
+    })
 }
 
 /// Convert variance to bound for uniform distribution.
