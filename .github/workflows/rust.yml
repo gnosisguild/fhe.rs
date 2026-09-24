@@ -70,6 +70,28 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  test-workspace:
+    name: Workspace unit tests and doctests (${{ matrix.features }})
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [--no-default-features, --all-features]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Run workspace unit tests
+        run: cargo test --workspace --lib ${{ matrix.features }}
+      - name: Run workspace doctests
+        run: cargo test --workspace --doc ${{ matrix.features }}
+
   test-toy:
     name: Test toy profiles
     env:
