@@ -16,7 +16,7 @@ impl Switcher {
     /// Create a switcher from a context `from` to a context `to`.
     pub fn new(from: &Arc<Context>, to: &Arc<Context>) -> Result<Self> {
         Ok(Self {
-            scaler: Scaler::new(from, to, ScalingFactor::new(to.modulus(), from.modulus()))?,
+            scaler: Scaler::new(from, to, ScalingFactor::new(to.modulus(), from.modulus())?)?,
         })
     }
 

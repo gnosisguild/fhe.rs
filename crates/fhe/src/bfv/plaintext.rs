@@ -117,7 +117,7 @@ impl Plaintext {
                 PlaintextCoefficients::Small(values)
             }
             Some(_) => {
-                let mut values = Vec::<BigUint>::from(poly.as_ref());
+                let mut values = Vec::<BigUint>::try_from(poly.as_ref()).unwrap();
                 self.params.plaintext.reduce_vec(&mut values);
                 PlaintextCoefficients::Small(
                     values
@@ -127,7 +127,7 @@ impl Plaintext {
                 )
             }
             None => {
-                let mut values = Vec::<BigUint>::from(poly.as_ref());
+                let mut values = Vec::<BigUint>::try_from(poly.as_ref()).unwrap();
                 self.params.plaintext.reduce_vec(&mut values);
                 PlaintextCoefficients::Large(values)
             }

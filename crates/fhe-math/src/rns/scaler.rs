@@ -17,14 +17,21 @@ use serde::{Deserialize, Serialize};
 use std::{cmp::min, sync::Arc};
 
 /// Scaling factor when performing a RNS scaling.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScalingFactor {
     numerator: BigUint,
     denominator: BigUint,
     pub(crate) is_one: bool,
 }
 
+impl Default for ScalingFactor {
+    fn default() -> Self {
+        Self::one()
+    }
+}
+
 /// Serializable representation of [`ScalingFactor`].
+/// `is_one` is derived again from the numerator and denominator on import.
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalingFactorRaw {
     /// Numerator.
@@ -36,15 +43,16 @@ pub struct ScalingFactorRaw {
 }
 
 impl ScalingFactor {
-    /// Create a new scaling factor. Aborts if the denominator is 0.
-    #[must_use]
-    pub fn new(numerator: &BigUint, denominator: &BigUint) -> Self {
-        assert_ne!(denominator, &BigUint::zero());
-        Self {
+    /// Create a new scaling factor, rejecting a zero denominator.
+    pub fn new(numerator: &BigUint, denominator: &BigUint) -> crate::Result<Self> {
+        if denominator.is_zero() {
+            return Err(crate::Error::ZeroScalingDenominator);
+        }
+        Ok(Self {
             numerator: numerator.clone(),
             denominator: denominator.clone(),
             is_one: numerator == denominator,
-        }
+        })
     }
 
     /// Returns the identity element of `Self`.
@@ -71,9 +79,8 @@ impl ScalingFactor {
 }
 
 impl ScalingFactorRaw {
-    /// Import a scaling factor from raw bytes.
-    #[must_use]
-    pub fn into_scaling_factor(self) -> ScalingFactor {
+    /// Import a scaling factor from raw bytes, checking the denominator.
+    pub fn into_scaling_factor(self) -> crate::Result<ScalingFactor> {
         let numerator = BigUint::from_bytes_be(&self.numerator);
         let denominator = BigUint::from_bytes_be(&self.denominator);
         ScalingFactor::new(&numerator, &denominator)
@@ -82,7 +89,7 @@ impl ScalingFactorRaw {
 
 /// Scaler for a RNS context.
 /// This is a helper struct to perform RNS scaling.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RnsScaler {
     from: Arc<RnsContext>,
     to: Arc<RnsContext>,
@@ -106,6 +113,7 @@ pub struct RnsScaler {
 }
 
 /// Serializable representation of [`RnsScaler`].
+/// Only the scaling factor is authoritative; cached tables are ignored on import.
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RnsScalerRaw {
     /// Scaling factor.
@@ -298,8 +306,8 @@ impl RnsScaler {
     /// Output the RNS representation of the rests scaled by numerator *
     /// denominator, and either rounded or floored.
     ///
-    /// Aborts if the number of rests is different than the number of moduli in
-    /// debug mode, or if the size is not in [1, ..., rests.len()].
+    /// Panics if the number of rests differs from the source moduli or the
+    /// output size is outside [1, destination moduli count].
     #[must_use]
     pub fn scale_new(&self, rests: ArrayView1<u64>, size: usize) -> Vec<u64> {
         let mut out = vec![0; size];
@@ -311,17 +319,23 @@ impl RnsScaler {
     /// denominator, and either rounded or floored, and store the result in
     /// `out`.
     ///
-    /// Aborts if the number of rests is different than the number of moduli in
-    /// debug mode, or if the size of out is not in [1, ..., rests.len()].
+    /// Panics if the number of rests differs from the source moduli or the
+    /// output range is outside the destination moduli.
     pub fn scale(
         &self,
         rests: ArrayView1<u64>,
         mut out: ArrayViewMut1<u64>,
         starting_index: usize,
     ) {
-        debug_assert_eq!(rests.len(), self.from.moduli_u64.len());
-        debug_assert!(!out.is_empty());
-        debug_assert!(starting_index + out.len() <= self.to.moduli_u64.len());
+        assert_eq!(rests.len(), self.from.moduli_u64.len());
+        assert!(!out.is_empty());
+        assert!(
+            self.to
+                .moduli_u64
+                .len()
+                .checked_sub(starting_index)
+                .is_some_and(|remaining| out.len() <= remaining)
+        );
 
         // First, let's compute the inner product of the rests with theta_omega.
         let mut sum_theta_garner = u256::ZERO;
@@ -443,45 +457,27 @@ impl RnsScaler {
 }
 
 impl RnsScalerRaw {
-    /// Import a scaler from its raw form.
-    #[must_use]
-    pub fn into_scaler(self, from: &Arc<RnsContext>, to: &Arc<RnsContext>) -> RnsScaler {
-        RnsScaler {
-            from: from.clone(),
-            to: to.clone(),
-            scaling_factor: self.scaling_factor.into_scaling_factor(),
-            gamma: self.gamma.into_boxed_slice(),
-            gamma_shoup: self.gamma_shoup.into_boxed_slice(),
-            theta_gamma_lo: self.theta_gamma_lo,
-            theta_gamma_hi: self.theta_gamma_hi,
-            theta_gamma_sign: self.theta_gamma_sign,
-            omega: self
-                .omega
-                .into_iter()
-                .map(|row| row.into_boxed_slice())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            omega_shoup: self
-                .omega_shoup
-                .into_iter()
-                .map(|row| row.into_boxed_slice())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            theta_omega_lo: self.theta_omega_lo.into_boxed_slice(),
-            theta_omega_hi: self.theta_omega_hi.into_boxed_slice(),
-            theta_omega_sign: self.theta_omega_sign.into_boxed_slice(),
-            theta_garner_lo: self.theta_garner_lo.into_boxed_slice(),
-            theta_garner_hi: self.theta_garner_hi.into_boxed_slice(),
-            theta_garner_shift: self.theta_garner_shift,
-        }
+    /// Rebuild a scaler from validated contexts and its scaling factor.
+    /// Cached tables supplied in the raw form are ignored.
+    pub fn into_scaler(
+        self,
+        from: &Arc<RnsContext>,
+        to: &Arc<RnsContext>,
+    ) -> crate::Result<RnsScaler> {
+        Ok(RnsScaler::new(
+            from,
+            to,
+            self.scaling_factor.into_scaling_factor()?,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, panic::catch_unwind, sync::Arc};
+    use std::{error::Error, sync::Arc};
 
-    use super::RnsScaler;
+    use super::{RnsScaler, ScalingFactorRaw};
+    use crate::Error as MathError;
     use crate::rns::{RnsContext, scaler::ScalingFactor};
     use ndarray::ArrayView1;
     use num_bigint::BigUint;
@@ -495,8 +491,52 @@ mod tests {
         let scaler = RnsScaler::new(&q, &q, ScalingFactor::one());
         assert_eq!(scaler.from, q);
 
+        assert!(ScalingFactor::new(&BigUint::from(1u64), &BigUint::zero()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn raw_scaler_rebuilds_tables_and_rejects_zero_denominator() -> Result<(), Box<dyn Error>> {
+        let q = Arc::new(RnsContext::new(&[4, 15])?);
+        assert_eq!(ScalingFactor::default(), ScalingFactor::one());
+        let scaler = RnsScaler::new(&q, &q, ScalingFactor::one());
+        let mut raw = scaler.to_raw();
+        raw.gamma.clear();
+        raw.gamma_shoup.clear();
+        raw.omega.clear();
+        raw.omega_shoup.clear();
+        raw.theta_garner_shift = usize::MAX;
+        raw.scaling_factor.is_one = false;
+        let rebuilt = raw.clone().into_scaler(&q, &q)?;
+        assert_eq!(rebuilt, scaler);
+        assert_eq!(
+            rebuilt.scale_new((&[1, 2][..]).into(), 2),
+            scaler.scale_new((&[1, 2][..]).into(), 2)
+        );
+
+        raw.scaling_factor = ScalingFactorRaw::default();
+        assert_eq!(
+            raw.into_scaler(&q, &q),
+            Err(MathError::ZeroScalingDenominator)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scaler_rejects_invalid_public_dimensions() -> Result<(), Box<dyn Error>> {
+        let ctx = Arc::new(RnsContext::new(&[4, 15])?);
+        let scaler = RnsScaler::new(&ctx, &ctx, ScalingFactor::one());
+        let input = [1, 2];
+        let bad_input = [1];
+        let mut output = [0];
+
+        assert!(std::panic::catch_unwind(|| scaler.scale_new((&bad_input[..]).into(), 1)).is_err());
+        assert!(std::panic::catch_unwind(|| scaler.scale_new((&input[..]).into(), 3)).is_err());
         assert!(
-            catch_unwind(|| ScalingFactor::new(&BigUint::from(1u64), &BigUint::zero())).is_err()
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                scaler.scale((&input[..]).into(), (&mut output[..]).into(), usize::MAX);
+            }))
+            .is_err()
         );
         Ok(())
     }
@@ -511,7 +551,7 @@ mod tests {
             for denominator in &[1u64, 2, 3, 4, 100, 101, 1000, 1001, 4611686018326724610] {
                 let n = BigUint::from(*numerator);
                 let d = BigUint::from(*denominator);
-                let scaler = RnsScaler::new(&q, &q, ScalingFactor::new(&n, &d));
+                let scaler = RnsScaler::new(&q, &q, ScalingFactor::new(&n, &d)?);
 
                 for _ in 0..ntests {
                     let x = vec![
@@ -519,7 +559,7 @@ mod tests {
                         rng.next_u64() % q.moduli_u64[1],
                         rng.next_u64() % q.moduli_u64[2],
                     ];
-                    let mut x_lift = q.lift(ArrayView1::from(&x));
+                    let mut x_lift = q.lift(ArrayView1::from(&x))?;
                     let x_sign = x_lift >= (q.modulus() >> 1);
                     if x_sign {
                         x_lift = q.modulus() - x_lift;
@@ -565,7 +605,7 @@ mod tests {
             for denominator in &[1u64, 2, 3, 4, 100, 101, 1000, 1001, 4611686018326724610] {
                 let n = BigUint::from(*numerator);
                 let d = BigUint::from(*denominator);
-                let scaler = RnsScaler::new(&q, &r, ScalingFactor::new(&n, &d));
+                let scaler = RnsScaler::new(&q, &r, ScalingFactor::new(&n, &d)?);
                 for _ in 0..ntests {
                     let x = vec![
                         rng.next_u64() % q.moduli_u64[0],
@@ -573,7 +613,7 @@ mod tests {
                         rng.next_u64() % q.moduli_u64[2],
                     ];
 
-                    let mut x_lift = q.lift(ArrayView1::from(&x));
+                    let mut x_lift = q.lift(ArrayView1::from(&x))?;
                     let x_sign = x_lift >= (q.modulus() >> 1);
                     if x_sign {
                         x_lift = q.modulus() - x_lift;

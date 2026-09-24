@@ -24,6 +24,7 @@ pub struct Scaler {
 }
 
 /// Serializable representation of [`Scaler`].
+/// Only the nested scaling factor is authoritative on import.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalerRaw {
     /// Number of common moduli.
@@ -163,21 +164,14 @@ impl Scaler {
 }
 
 impl ScalerRaw {
-    /// Rebuild a [`Scaler`] using the provided contexts.
+    /// Rebuild a [`Scaler`] using the provided contexts and scaling factor.
+    /// Cached tables and the common-modulus count from the raw form are ignored.
     pub fn into_scaler(self, from: &Arc<Context>, to: &Arc<Context>) -> Result<Scaler> {
-        if from.degree != to.degree {
-            return Err(Error::DegreeMismatch {
-                found: from.degree,
-                expected: to.degree,
-            });
-        }
-
-        Ok(Scaler {
-            from: from.clone(),
-            to: to.clone(),
-            number_common_moduli: self.number_common_moduli,
-            scaler: self.rns_scaler.into_scaler(&from.rns, &to.rns),
-        })
+        Scaler::new(
+            from,
+            to,
+            self.rns_scaler.scaling_factor.into_scaling_factor()?,
+        )
     }
 }
 
@@ -205,6 +199,23 @@ mod tests {
     ];
 
     #[test]
+    fn raw_scaler_rebuilds_common_moduli_and_caches() -> Result<(), Box<dyn Error>> {
+        let from = Context::new_arc(Q, 16)?;
+        let to = Context::new_arc(P, 16)?;
+        let scaler = Scaler::new(&from, &to, ScalingFactor::one())?;
+        let mut raw = scaler.to_raw();
+        raw.number_common_moduli = usize::MAX;
+        raw.rns_scaler.omega.clear();
+        raw.rns_scaler.gamma.clear();
+
+        let rebuilt = raw.into_scaler(&from, &to)?;
+        assert_eq!(rebuilt, scaler);
+        let poly = Poly::<PowerBasis>::random(&from, &mut rng());
+        assert_eq!(rebuilt.scale(&poly)?, scaler.scale(&poly)?);
+        Ok(())
+    }
+
+    #[test]
     fn scaler() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let ntests = 100;
@@ -216,14 +227,14 @@ mod tests {
                 let n = BigUint::from(*numerator);
                 let d = BigUint::from(*denominator);
 
-                let scaler = Scaler::new(&from, &to, ScalingFactor::new(&n, &d))?;
+                let scaler = Scaler::new(&from, &to, ScalingFactor::new(&n, &d)?)?;
 
                 for _ in 0..ntests {
                     let poly = Poly::<PowerBasis>::random(&from, &mut rng);
-                    let poly_biguint = Vec::<BigUint>::from(&poly);
+                    let poly_biguint = Vec::<BigUint>::try_from(&poly)?;
 
                     let scaled_poly = scaler.scale(&poly)?;
-                    let scaled_biguint = Vec::<BigUint>::from(&scaled_poly);
+                    let scaled_biguint = Vec::<BigUint>::try_from(&scaled_poly)?;
 
                     let expected = poly_biguint
                         .iter()
@@ -248,7 +259,7 @@ mod tests {
 
                     let poly_ntt: Poly<Ntt> = poly.clone().into_ntt();
                     let scaled_poly = scaler.scale(&poly_ntt)?;
-                    let scaled_biguint = Vec::<BigUint>::from(&scaled_poly.to_power_basis());
+                    let scaled_biguint = Vec::<BigUint>::try_from(&scaled_poly.to_power_basis())?;
                     assert_eq!(expected, scaled_biguint);
                 }
             }

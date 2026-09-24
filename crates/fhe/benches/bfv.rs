@@ -292,9 +292,9 @@ pub fn bfv_benchmark(c: &mut Criterion) {
             let rns_p = RnsContext::new(&extended_basis[params.moduli().len()..]).unwrap();
             let mut multiplicator = Multiplicator::new(
                 ScalingFactor::one(),
-                ScalingFactor::new(rns_p.modulus(), rns_q.modulus()),
+                ScalingFactor::new(rns_p.modulus(), rns_q.modulus()).unwrap(),
                 &extended_basis,
-                ScalingFactor::new(&BigUint::from(params.plaintext()), rns_p.modulus()),
+                ScalingFactor::new(&BigUint::from(params.plaintext()), rns_p.modulus()).unwrap(),
                 &params,
             )
             .unwrap();
