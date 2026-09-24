@@ -1,4 +1,15 @@
 //! Number-Theoretic Transform in ZZ_q.
+//!
+//! Operators are constructed with [`NttOperator::new`], which derives the
+//! transform tables for the chosen modulus and size. There is no raw-table
+//! import path:
+//!
+//! ```compile_fail
+//! use fhe_math::{ntt::NttOperator, zq::Modulus};
+//! let modulus = Modulus::new(97).unwrap();
+//! let mut raw = NttOperator::new(&modulus, 8).unwrap().to_raw();
+//! raw.omegas = Vec::new().into_boxed_slice();
+//! ```
 
 use fhe_util::is_prime;
 
