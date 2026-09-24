@@ -230,6 +230,9 @@ pub enum ThresholdError {
 #[expect(missing_docs, reason = "error variants are documented inline")]
 #[non_exhaustive]
 pub enum PlaintextError {
+    #[error("A plaintext vector must contain at least one plaintext")]
+    EmptyPlaintextVec,
+
     #[error("Polynomial context does not match plaintext level {level}")]
     PolynomialContextMismatch { level: usize },
 

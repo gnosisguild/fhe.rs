@@ -13,8 +13,10 @@ use crate::{
 
 use super::encoding::EncodingEnum;
 
-/// A wrapper around a vector of plaintext which implements the [`FhePlaintext`]
-/// trait, and therefore can be encoded to / decoded from.
+/// A nonempty collection of plaintexts with shared parameters, level, and encoding.
+///
+/// It implements [`FhePlaintext`] for chunked encoding and can also be built
+/// from existing plaintexts with [`Self::try_from_plaintexts`].
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PlaintextVec(Vec<Plaintext>);
 
@@ -23,6 +25,24 @@ impl Deref for PlaintextVec {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl IntoIterator for PlaintextVec {
+    type Item = Plaintext;
+    type IntoIter = std::vec::IntoIter<Plaintext>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a PlaintextVec {
+    type Item = &'a Plaintext;
+    type IntoIter = std::slice::Iter<'a, Plaintext>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -35,6 +55,76 @@ impl FheParametrized for PlaintextVec {
 }
 
 impl PlaintextVec {
+    /// Wrap nonempty plaintexts with the same parameters, level, and encoding.
+    ///
+    /// The input is consumed; on validation failure its plaintexts are dropped
+    /// and zeroized. For an encoded zero vector, use [`FheEncoder::try_encode`]
+    /// instead of passing an empty collection.
+    pub fn try_from_plaintexts(
+        plaintexts: Vec<Plaintext>,
+        encoding: Encoding,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self> {
+        if plaintexts.is_empty() {
+            return Err(crate::PlaintextError::EmptyPlaintextVec.into());
+        }
+        if encoding.encoding == EncodingEnum::Simd && params.ntt_operator.is_none() {
+            return Err(crate::EncodingError::SimdUnavailable.into());
+        }
+        params.context_at_level(encoding.level)?;
+        for plaintext in &plaintexts {
+            plaintext.validate_for(params)?;
+            if plaintext.level() != encoding.level {
+                return Err(Error::InvalidLevel {
+                    level: plaintext.level(),
+                    min_level: encoding.level,
+                    max_level: encoding.level,
+                });
+            }
+            match plaintext.encoding.as_ref() {
+                None => return Err(crate::PlaintextError::MissingEncoding.into()),
+                Some(found) if found != &encoding => {
+                    return Err(crate::EncodingError::Mismatch {
+                        found: found.clone(),
+                        expected: encoding,
+                    }
+                    .into());
+                }
+                _ => {}
+            }
+        }
+        Ok(Self(plaintexts))
+    }
+
+    /// Borrow the plaintexts in order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Plaintext] {
+        &self.0
+    }
+
+    /// Iterate over borrowed plaintexts in order.
+    pub fn iter(&self) -> std::slice::Iter<'_, Plaintext> {
+        self.0.iter()
+    }
+
+    /// Return the number of plaintexts.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Return whether the collection is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Consume the collection, transferring ownership of its plaintexts.
+    #[must_use]
+    pub fn into_vec(mut self) -> Vec<Plaintext> {
+        std::mem::take(&mut self.0)
+    }
+
     fn try_encode_with<T>(
         value: &[T],
         encoding: Encoding,
@@ -169,12 +259,124 @@ impl FheEncoder<&[u64]> for PlaintextVec {
 
 #[cfg(test)]
 mod tests {
-    use crate::bfv::{BfvParameters, Encoding, PlaintextVec, parameters::BfvParametersBuilder};
+    use crate::bfv::{
+        BfvParameters, Encoding, Plaintext, PlaintextVec, parameters::BfvParametersBuilder,
+    };
+    use fhe_math::rq::{Ntt, Poly};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncoderVariableTime};
     use num_bigint::BigUint;
     use num_traits::Zero;
     use rand::rng;
     use std::error::Error;
+
+    #[test]
+    fn plaintext_container_validates_inputs_and_transfers_ownership() -> Result<(), Box<dyn Error>>
+    {
+        let params = BfvParameters::default_arc(2, 16);
+        let encoding = Encoding::poly_at_level(0);
+        let plaintext = Plaintext::zero(encoding.clone(), &params)?;
+        let wrapped = PlaintextVec::try_from_plaintexts(
+            vec![plaintext.clone(), plaintext.clone()],
+            encoding.clone(),
+            &params,
+        )?;
+        assert_eq!(wrapped.len(), 2);
+        assert!(!wrapped.is_empty());
+        assert_eq!(wrapped.as_slice(), &[plaintext.clone(), plaintext.clone()]);
+        assert_eq!(wrapped.iter().count(), 2);
+        assert_eq!((&wrapped).into_iter().count(), 2);
+        assert_eq!(
+            wrapped.into_vec(),
+            vec![plaintext.clone(), plaintext.clone()]
+        );
+        assert_eq!(
+            PlaintextVec::try_from_plaintexts(vec![plaintext.clone()], encoding.clone(), &params)?
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![plaintext.clone()]
+        );
+
+        assert!(matches!(
+            PlaintextVec::try_from_plaintexts(vec![], encoding.clone(), &params),
+            Err(crate::Error::Plaintext(
+                crate::PlaintextError::EmptyPlaintextVec
+            ))
+        ));
+        let other_params = BfvParameters::default_arc(2, 16);
+        assert!(matches!(
+            PlaintextVec::try_from_plaintexts(
+                vec![
+                    plaintext.clone(),
+                    Plaintext::zero(encoding.clone(), &other_params)?
+                ],
+                encoding.clone(),
+                &params
+            ),
+            Err(crate::Error::ParameterMismatch { .. })
+        ));
+        let mut wrong_context = plaintext.clone();
+        wrong_context.poly_ntt =
+            Poly::<Ntt>::zero(BfvParameters::default_arc(2, 32).context_at_level(0)?);
+        assert!(matches!(
+            PlaintextVec::try_from_plaintexts(
+                vec![plaintext.clone(), wrong_context],
+                encoding.clone(),
+                &params
+            ),
+            Err(crate::Error::Plaintext(
+                crate::PlaintextError::PolynomialContextMismatch { .. }
+            ))
+        ));
+        assert!(matches!(
+            PlaintextVec::try_from_plaintexts(
+                vec![
+                    plaintext.clone(),
+                    Plaintext::zero(Encoding::poly_at_level(1), &params)?
+                ],
+                encoding.clone(),
+                &params
+            ),
+            Err(crate::Error::InvalidLevel { .. })
+        ));
+        assert!(matches!(
+            PlaintextVec::try_from_plaintexts(
+                vec![
+                    plaintext.clone(),
+                    Plaintext::zero(Encoding::simd(), &params)?
+                ],
+                encoding.clone(),
+                &params
+            ),
+            Err(crate::Error::Encoding(
+                crate::EncodingError::Mismatch { .. }
+            ))
+        ));
+
+        let mut missing_encoding = plaintext.clone();
+        missing_encoding.encoding = None;
+        assert!(matches!(
+            PlaintextVec::try_from_plaintexts(vec![missing_encoding], encoding, &params),
+            Err(crate::Error::Plaintext(
+                crate::PlaintextError::MissingEncoding
+            ))
+        ));
+        let no_simd_params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(17)
+            .set_moduli_sizes(&[62])
+            .build_arc()?;
+        assert!(matches!(
+            PlaintextVec::try_from_plaintexts(
+                vec![Plaintext::zero(Encoding::simd(), &no_simd_params)?],
+                Encoding::simd(),
+                &no_simd_params
+            ),
+            Err(crate::Error::Encoding(
+                crate::EncodingError::SimdUnavailable
+            ))
+        ));
+        Ok(())
+    }
 
     #[test]
     fn encode_decode() -> Result<(), Box<dyn Error>> {

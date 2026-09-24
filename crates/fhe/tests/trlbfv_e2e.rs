@@ -82,9 +82,9 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     // straight into Shamir shares without exposing the polynomial.
     let mut smudging_noises = (0..N)
         .map(|_| {
-            let mut config =
-                SmudgingConfig::new(params.clone(), N, 1, LAMBDA_VALUE).expect("smudging config");
-            config.mult_depth = MULT_DEPTH;
+            let config = SmudgingConfig::new(params.clone(), N, 1, LAMBDA_VALUE)
+                .expect("smudging config")
+                .with_mult_depth(MULT_DEPTH);
             // Use n as the conservative aggregate RLK contribution count.
             SmudgingNoiseGenerator::new(config)
                 .expect("smudging generator")

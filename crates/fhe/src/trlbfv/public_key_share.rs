@@ -65,6 +65,9 @@ impl PublicKeyShare {
     }
 
     /// Create a public-key contribution from explicit CRS polynomials.
+    ///
+    /// The CRS is borrowed so multiple parties can contribute using the same
+    /// rows. [`Self::from_parts`] consumes its polynomials to build an owner.
     pub fn contribute<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         a_polynomials: &[Poly<Ntt>],
@@ -88,6 +91,9 @@ impl PublicKeyShare {
     }
 
     /// Build a public-key contribution from explicit key polynomials.
+    ///
+    /// Takes ownership of the rows and validates their count, context, and
+    /// optional seed. Use [`Self::contribute`] to borrow a reusable CRS instead.
     pub fn from_parts(
         b_polynomials: Vec<Poly<Ntt>>,
         a_polynomials: Vec<Poly<Ntt>>,

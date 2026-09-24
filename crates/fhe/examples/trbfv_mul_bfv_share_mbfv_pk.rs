@@ -148,9 +148,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications).
                 // The default accepted set is all n parties.
-                let mut config =
-                    SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda).unwrap();
-                config.mult_depth = preset.multiplicative_depth.unwrap();
+                let config = SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda)
+                    .unwrap()
+                    .with_mult_depth(preset.multiplicative_depth.unwrap());
                 let generator = SmudgingNoiseGenerator::new(config).unwrap();
                 let smudging_noise = generator.generate(&mut rng).unwrap();
                 let smudging_shares_transport = share_manager

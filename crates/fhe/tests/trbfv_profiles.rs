@@ -59,17 +59,14 @@ fn named_profiles_have_feasible_smudging_bounds() {
         // above fhe::trbfv::smudging::MAX_LAMBDA.
         let lambda = profile.lambda;
         let config = match profile.multiplicative_depth {
-            Some(depth) => {
-                let mut config = SmudgingConfig::new(
-                    profile.parameters.clone(),
-                    profile.num_parties,
-                    profile.max_ciphertexts,
-                    lambda,
-                )
-                .unwrap();
-                config.mult_depth = depth;
-                config
-            }
+            Some(depth) => SmudgingConfig::new(
+                profile.parameters.clone(),
+                profile.num_parties,
+                profile.max_ciphertexts,
+                lambda,
+            )
+            .unwrap()
+            .with_mult_depth(depth),
             None => SmudgingConfig::new(
                 profile.parameters.clone(),
                 profile.num_parties,

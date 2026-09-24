@@ -457,11 +457,18 @@ mod tests {
         let params = secure8192().unwrap().parameters;
         assert!(SmudgingConfig::new(params.clone(), 0, 1, 2).is_err());
         assert!(SmudgingConfig::new(params.clone(), 1, 0, 2).is_err());
-        assert!(SmudgingConfig::new(params, 1, 1, MAX_LAMBDA + 1).is_err());
+        assert!(SmudgingConfig::new(params.clone(), 1, 1, MAX_LAMBDA + 1).is_err());
+
+        let config = SmudgingConfig::new(params.clone(), 3, 2, 40)
+            .unwrap()
+            .with_mult_depth(1);
+        assert!(Arc::ptr_eq(config.params(), &params));
+        assert_eq!((config.n(), config.m(), config.lambda()), (3, 2, 40));
+        assert_eq!(config.mult_depth(), 1);
     }
 
     #[test]
-    fn generator_revalidates_public_config_fields() {
+    fn generator_revalidates_internally_corrupted_config() {
         let params = secure8192().unwrap().parameters;
         let mut config = SmudgingConfig::new(params.clone(), 1, 1, 2).unwrap();
         config.n = 0;
@@ -617,8 +624,7 @@ mod tests {
             .build_arc()
             .unwrap();
         let additive = SmudgingConfig::new(params.clone(), 3, 1, 2).unwrap();
-        let mut depth_one = additive.clone();
-        depth_one.mult_depth = 1;
+        let depth_one = additive.clone().with_mult_depth(1);
         let bound_add = SmudgingNoiseGenerator::new(additive)
             .unwrap()
             .smudging_bound()

@@ -231,7 +231,9 @@ impl LBFVPublicKey {
     /// Build an [`LBFVPublicKey`] from explicit `b` and `a` polynomials.
     ///
     /// This is the on-chain URS constructor: the caller supplies the
-    /// polynomials directly rather than deriving them from a seed.
+    /// polynomials directly rather than deriving them from a seed. Both vectors
+    /// are consumed because the resulting key owns the rows; [`Self::new_with_crp`]
+    /// borrows its shared CRS input because callers may reuse it across parties.
     ///
     /// # Arguments
     /// * `b_polynomials` - The `l` b-polynomials `(b₀, …, bₗ₋₁)` where
