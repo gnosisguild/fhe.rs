@@ -15,7 +15,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fhe-math = "0.3.0"
+fhe-math = "0.4.1"
 ```
 
 ## Testing
