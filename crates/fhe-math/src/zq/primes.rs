@@ -24,43 +24,44 @@ pub fn supports_opt(p: u64) -> bool {
 }
 
 /// Generate a `num_bits`-bit prime, congruent to 1 mod `modulo`, strictly
-/// smaller than `upper_bound`. Note that `num_bits` must belong to (10..=62),
-/// and upper_bound must be <= 1 << num_bits.
+/// smaller than `upper_bound`. Returns `None` if `num_bits` is outside
+/// `10..=62`, `modulo` is zero, or `upper_bound` is outside
+/// `(2^(num_bits - 1), 2^num_bits]`. A modulus of one imposes no congruence
+/// constraint. The upper bound is exclusive.
 #[must_use]
 pub fn generate_prime(num_bits: usize, modulo: u64, upper_bound: u64) -> Option<u64> {
-    if !(10..=62).contains(&num_bits) {
-        None
-    } else {
-        debug_assert!(
-            (1u64 << num_bits) >= upper_bound,
-            "upper_bound larger than number of bits"
-        );
-
-        let leading_zeros = (64 - num_bits) as u32;
-
-        let mut tentative_prime = upper_bound - 1;
-        while tentative_prime % modulo != 1 && tentative_prime.leading_zeros() == leading_zeros {
-            tentative_prime -= 1
-        }
-
-        while tentative_prime.leading_zeros() == leading_zeros
-            && !is_prime(tentative_prime)
-            && tentative_prime >= modulo
-        {
-            tentative_prime -= modulo
-        }
-
-        if tentative_prime.leading_zeros() == leading_zeros && is_prime(tentative_prime) {
-            Some(tentative_prime)
-        } else {
-            None
-        }
+    if !(10..=62).contains(&num_bits) || modulo == 0 {
+        return None;
     }
+
+    let lower_bound = 1u64 << (num_bits - 1);
+    if upper_bound <= lower_bound || upper_bound > (1u64 << num_bits) {
+        return None;
+    }
+
+    let start = upper_bound - 1;
+    let residue = 1 % modulo;
+    let remainder = start % modulo;
+    let offset = if remainder >= residue {
+        remainder - residue
+    } else {
+        modulo - (residue - remainder)
+    };
+    let mut candidate = start.checked_sub(offset)?;
+
+    while candidate >= lower_bound {
+        if is_prime(candidate) {
+            return Some(candidate);
+        }
+        candidate = candidate.checked_sub(modulo)?;
+    }
+
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::generate_prime;
+    use super::{generate_prime, is_prime};
 
     // Verifies that the same moduli as in the NFLlib library are generated.
     // <https://github.com/quarkslab/NFLlib/blob/master/include/nfl/params.hpp>
@@ -102,11 +103,36 @@ mod tests {
     }
 
     #[test]
-    fn upper_bound() {
-        #[cfg(debug_assertions)]
-        assert!(
-            std::panic::catch_unwind(|| generate_prime(62, 2 * 1048576, (1 << 62) + 1)).is_err()
-        );
+    fn invalid_inputs_return_none() {
+        for num_bits in [0, 9, 63, usize::MAX] {
+            assert_eq!(generate_prime(num_bits, 16, 1 << 10), None);
+        }
+        for upper_bound in [0, 1, 1 << 9, (1 << 62) + 1, u64::MAX] {
+            assert_eq!(generate_prime(62, 16, upper_bound), None);
+        }
+        assert_eq!(generate_prime(10, 0, 1 << 10), None);
+        assert_eq!(generate_prime(10, 16, 1 << 9), None);
+        assert_eq!(generate_prime(10, 16, (1 << 10) + 1), None);
+    }
+
+    #[test]
+    fn strict_bound_and_vacuous_congruence() {
+        assert_eq!(generate_prime(10, 1, 1024), Some(1021));
+        assert_eq!(generate_prime(10, 1, 1021), Some(1019));
+        assert_eq!(generate_prime(10, 16, 1009), Some(977));
+        assert_eq!(generate_prime(10, u64::MAX, 1024), None);
+    }
+
+    #[test]
+    fn finds_largest_prime_in_congruence_class_below_bound() {
+        for upper_bound in (513..=1024).step_by(17) {
+            for modulo in [1, 2, 3, 16, 1023, u64::MAX] {
+                let expected = (512..upper_bound)
+                    .rev()
+                    .find(|&p| p % modulo == 1 % modulo && is_prime(p));
+                assert_eq!(generate_prime(10, modulo, upper_bound), expected);
+            }
+        }
     }
 
     #[test]

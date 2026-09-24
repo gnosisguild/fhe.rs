@@ -144,14 +144,25 @@ impl Modulus {
         unsafe { Self::reduce1_vt(self.lazy_reduce_u128((a as u128) * (b as u128)), self.p) }
     }
 
-    /// Optimized modular multiplication of a and b in constant time.
+    /// Modular multiplication of a and b in constant time, using the optimized
+    /// reduction when the modulus supports it and the generic reduction otherwise.
     ///
     /// Aborts if a >= p or b >= p in debug mode.
     #[must_use]
     pub const fn mul_opt(&self, a: u64, b: u64) -> u64 {
-        debug_assert!(self.supports_opt);
         debug_assert!(a < self.p && b < self.p);
 
+        if self.supports_opt {
+            self.mul_opt_kernel(a, b)
+        } else {
+            self.mul(a, b)
+        }
+    }
+
+    /// The caller has already checked `supports_opt` and canonical operands.
+    const fn mul_opt_kernel(&self, a: u64, b: u64) -> u64 {
+        debug_assert!(self.supports_opt);
+        debug_assert!(a < self.p && b < self.p);
         self.reduce_opt_u128((a as u128) * (b as u128))
     }
 
@@ -334,7 +345,8 @@ impl Modulus {
 
         if self.supports_opt {
             self.arch.dispatch(|| {
-                izip!(a.iter_mut(), b.iter()).for_each(|(ai, bi)| *ai = self.mul_opt(*ai, *bi))
+                izip!(a.iter_mut(), b.iter())
+                    .for_each(|(ai, bi)| *ai = self.mul_opt_kernel(*ai, *bi))
             })
         } else {
             self.arch.dispatch(|| {
@@ -666,20 +678,30 @@ impl Modulus {
         unsafe { Self::reduce1_vt(self.lazy_reduce_opt_u128(a), self.p) }
     }
 
-    /// Optimized modular reduction of a u64 in constant time.
+    /// Modular reduction of a u64 in constant time, using the optimized kernel
+    /// when supported and generic reduction otherwise.
     #[must_use]
     pub const fn reduce_opt(&self, a: u64) -> u64 {
-        Self::reduce1(self.lazy_reduce_opt(a), self.p)
+        if self.supports_opt {
+            Self::reduce1(self.lazy_reduce_opt(a), self.p)
+        } else {
+            self.reduce(a)
+        }
     }
 
-    /// Optimized modular reduction of a u64 in variable time.
+    /// Modular reduction of a u64 in variable time, using the optimized kernel
+    /// when supported and generic reduction otherwise.
     ///
     /// # Safety
     /// This function is not constant time and its timing may reveal information
     /// about the value being reduced.
     #[must_use]
     pub const unsafe fn reduce_opt_vt(&self, a: u64) -> u64 {
-        unsafe { Self::reduce1_vt(self.lazy_reduce_opt(a), self.p) }
+        if self.supports_opt {
+            unsafe { Self::reduce1_vt(self.lazy_reduce_opt(a), self.p) }
+        } else {
+            unsafe { self.reduce_vt(a) }
+        }
     }
 
     /// Return x mod p in constant time.
@@ -879,6 +901,24 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    #[test]
+    fn optimized_entry_points_fall_back_outside_the_kernel_domain() {
+        for value in [2, 17, 97, 4611686018326724609] {
+            let modulus = Modulus::new(value).unwrap();
+            for a in [0, 1, value - 1, value, u64::MAX] {
+                assert_eq!(modulus.reduce_opt(a), modulus.reduce(a));
+                assert_eq!(unsafe { modulus.reduce_opt_vt(a) }, modulus.reduce(a));
+            }
+            for a in [0, 1, value - 1] {
+                for b in [0, 1, value - 1] {
+                    assert_eq!(modulus.mul_opt(a, b), modulus.mul(a, b));
+                }
+            }
+        }
+        assert!(!Modulus::new(2).unwrap().supports_opt);
+        assert!(Modulus::new(4611686018326724609).unwrap().supports_opt);
+    }
+
     proptest! {
         #[test]
         fn constructor(p: u64) {
@@ -988,10 +1028,8 @@ mod tests {
         fn reduce(p in valid_moduli(), a: u64) {
             prop_assert_eq!(p.reduce(a), a % *p);
             unsafe { prop_assert_eq!(p.reduce_vt(a), a % *p) }
-            if p.supports_opt {
-                prop_assert_eq!(p.reduce_opt(a), a % *p);
-                unsafe { prop_assert_eq!(p.reduce_opt_vt(a), a % *p) }
-            }
+            prop_assert_eq!(p.reduce_opt(a), a % *p);
+            unsafe { prop_assert_eq!(p.reduce_opt_vt(a), a % *p) }
         }
 
         #[test]
