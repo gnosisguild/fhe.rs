@@ -1265,11 +1265,8 @@ mod tests {
         );
         let mut mixed_shares = decryption_shares.clone();
         mixed_shares[0] = mixed_share;
-        let result_bad = managers[0].decrypt_from_shares(
-            mixed_shares,
-            reconstructing_correct,
-            ct.clone(),
-        );
+        let result_bad =
+            managers[0].decrypt_from_shares(mixed_shares, reconstructing_correct, ct.clone());
         assert!(result_bad.is_ok());
         let plaintext_found_bad =
             result_bad.expect("Decryption unexpectedly failed with mixed designated sets");

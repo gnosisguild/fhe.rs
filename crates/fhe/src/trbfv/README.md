@@ -15,8 +15,8 @@ masks, and threshold decryption with additive and limited multiplicative
 support via distributed *l*-BFV relinearization keys. It is **not** the
 complete robust protocol from Urban–Rambaud 2024: there is no distributed key
 generation, no broadcast channel, no FLSS, and no GURS generation. Committee
-PRF keys are sampled locally as uniformly random 256-bit strings; Poseidon
-(SAFE API) will replace the ChaCha expander later.
+PRF keys are sampled locally as uniformly random 256-bit strings and
+evaluated with Poseidon2 through the SAFE sponge API.
 
 This module enables distributed decryption between `n` parties without necessarily involving all of them: any `threshold + 1` of the `n` parties can decrypt a ciphertext, while any coalition of at most `threshold` parties learns nothing. The threshold must be exactly `(n-1)/2` (integer division), the maximal corruption tolerance under an honest majority — see `config.rs` for the derivation.
 
@@ -176,7 +176,7 @@ Urban–Rambaud&nbsp;2024:
 - No authenticated broadcast channel.
 - No FLSS pre-processing or GURS generation.
 - No proactive refresh or identifiable-abort mechanisms.
-- The PRF is a ChaCha expander until Poseidon is wired in.
+- The PRF is Poseidon2 via the SAFE sponge (`e3-safe`).
 
 Callers who need full end-to-end robust threshold FHE must provide these
 components externally.

@@ -7,22 +7,25 @@
 //! `r_i^{S,ct} = Σ_{j∈S} (F_{k_{i,j}}(S, ct) − F_{k_{j,i}}(S, ct))`.
 //!
 //! The masks cancel when summed over `S`. Keys are uniformly random 256-bit
-//! strings. `F` is a ChaCha8 expander that stands in for Poseidon with the
-//! SAFE API; only [`evaluate`] needs to be replaced when that library is
-//! wired in.
+//! strings, interpreted as BN254 scalar-field elements. `F` is Poseidon2
+//! via the SAFE sponge API (`e3-safe`).
 
 use crate::Error;
 use crate::bfv::Ciphertext;
+use ark_ff::PrimeField;
+use e3_safe::{ABSORB_FLAG, Field, SQUEEZE_FLAG, SafeSponge};
 use fhe_math::rq::{Poly, PowerBasis};
-use rand::{CryptoRng, RngCore, SeedableRng};
-use rand_chacha::ChaCha8Rng;
+use fhe_math::zq::Modulus;
+use rand::{CryptoRng, RngCore};
 use std::fmt;
 use zeroize_derive::{Zeroize, ZeroizeOnDrop};
 
 const KEY_LEN: usize = 32;
+const SAFE_LENGTH_MASK: u32 = 0x7FFF_FFFF;
+const DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2";
 
-/// A 256-bit PRF key. Randomly generated; Poseidon will consume the same
-/// layout.
+/// A 256-bit PRF key. Sampled uniformly at random and mapped into the
+/// Poseidon2 field inside [`evaluate`].
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PrfKey([u8; KEY_LEN]);
 
@@ -162,10 +165,34 @@ fn canonical_decryptors(decryptors: &[usize]) -> Vec<usize> {
     decryptors
 }
 
-/// Poseidon stand-in: ChaCha8 expansion of `(S, ct)` under `key`.
-///
-/// Replace this function when the Poseidon SAFE API is available. The domain
-/// is the designated decryptor set and the ciphertext, and the range is `R_q`.
+fn domain_separator() -> [u8; 64] {
+    let mut domain = [0u8; 64];
+    if let Some(prefix) = domain.get_mut(..DOMAIN_SEPARATOR_LABEL.len()) {
+        prefix.copy_from_slice(DOMAIN_SEPARATOR_LABEL);
+    }
+    domain
+}
+
+fn encode_length(length: usize, what: &str) -> Result<u32, Error> {
+    u32::try_from(length)
+        .ok()
+        .filter(|&encoded| encoded <= SAFE_LENGTH_MASK)
+        .ok_or_else(|| {
+            Error::malformed_shares(0, format!("PRF {what} length does not fit in SAFE IO word"))
+        })
+}
+
+fn field_from_usize(value: usize) -> Result<Field, Error> {
+    let value = u64::try_from(value).map_err(|_| {
+        Error::malformed_shares(
+            0,
+            "PRF input integer does not fit in a field element".to_string(),
+        )
+    })?;
+    Ok(Field::from(value))
+}
+
+/// Poseidon2 SAFE evaluation of `F_k(S, ct)` in `R_q`.
 fn evaluate(
     key: &PrfKey,
     decryptors: &[usize],
@@ -179,26 +206,40 @@ fn evaluate(
         .checked_mul(degree)
         .ok_or_else(|| Error::malformed_shares(0, "PRF output dimensions overflow".to_string()))?;
 
-    let input = serialize_prf_input(decryptors, ciphertext);
-    let expanded = chacha_expand(&key.0, &input, coefficient_count.saturating_mul(8));
+    let input = absorb_input(key, decryptors, ciphertext)?;
+    let absorb_len = encode_length(input.len(), "absorb")?;
+    let squeeze_len = encode_length(coefficient_count, "squeeze")?;
+    let io_pattern = [ABSORB_FLAG | absorb_len, SQUEEZE_FLAG | squeeze_len];
+
+    let mut sponge = SafeSponge::start(io_pattern, domain_separator());
+    sponge.absorb(input);
+    let squeezed = sponge.squeeze();
+    sponge.finish();
+    if squeezed.len() != coefficient_count {
+        return Err(Error::malformed_shares(
+            0,
+            "PRF sponge produced the wrong number of field elements".to_string(),
+        ));
+    }
 
     let mut coefficients = ndarray::Array2::zeros((moduli.len(), degree));
     for (row_index, modulus) in moduli.iter().enumerate() {
         for column_index in 0..degree {
-            let offset = (row_index * degree + column_index).saturating_mul(8);
-            let mut limb = [0u8; 8];
-            let src = expanded
-                .get(offset..offset.saturating_add(8))
+            let field_index = row_index
+                .checked_mul(degree)
+                .and_then(|offset| offset.checked_add(column_index))
                 .ok_or_else(|| {
-                    Error::malformed_shares(0, "PRF expander produced a short stream".to_string())
+                    Error::malformed_shares(0, "PRF output index overflow".to_string())
                 })?;
-            limb.copy_from_slice(src);
+            let field = squeezed.get(field_index).ok_or_else(|| {
+                Error::malformed_shares(0, "PRF output index out of range".to_string())
+            })?;
             let coefficient = coefficients
                 .get_mut((row_index, column_index))
                 .ok_or_else(|| {
                     Error::malformed_shares(0, "PRF output index out of range".to_string())
                 })?;
-            *coefficient = modulus.reduce(u64::from_le_bytes(limb));
+            *coefficient = field_to_residue(field, modulus);
         }
     }
 
@@ -208,57 +249,63 @@ fn evaluate(
     Ok(poly)
 }
 
-fn serialize_prf_input(decryptors: &[usize], ciphertext: &Ciphertext) -> Vec<u8> {
+fn absorb_input(
+    key: &PrfKey,
+    decryptors: &[usize],
+    ciphertext: &Ciphertext,
+) -> Result<Vec<Field>, Error> {
     let mut input = Vec::new();
-    input.extend_from_slice(&(decryptors.len() as u64).to_le_bytes());
+    input.push(Field::from_le_bytes_mod_order(&key.0));
+    input.push(field_from_usize(decryptors.len())?);
     for &party_id in decryptors {
-        input.extend_from_slice(&(party_id as u64).to_le_bytes());
+        input.push(field_from_usize(party_id)?);
     }
-    input.extend_from_slice(&(ciphertext.level as u64).to_le_bytes());
-    input.extend_from_slice(&(ciphertext.c.len() as u64).to_le_bytes());
+    input.push(field_from_usize(ciphertext.level)?);
+    input.push(field_from_usize(ciphertext.c.len())?);
     for poly in &ciphertext.c {
         let coefficients = poly.coefficients();
-        input.extend_from_slice(&(coefficients.nrows() as u64).to_le_bytes());
-        input.extend_from_slice(&(coefficients.ncols() as u64).to_le_bytes());
-        for &value in coefficients.iter() {
-            input.extend_from_slice(&value.to_le_bytes());
+        input.push(field_from_usize(coefficients.nrows())?);
+        input.push(field_from_usize(coefficients.ncols())?);
+        for row in 0..coefficients.nrows() {
+            for column in 0..coefficients.ncols() {
+                let value = coefficients.get((row, column)).ok_or_else(|| {
+                    Error::malformed_shares(
+                        0,
+                        "PRF ciphertext coefficient out of range".to_string(),
+                    )
+                })?;
+                input.push(Field::from(*value));
+            }
         }
     }
-    input
+    Ok(input)
 }
 
-fn chacha_expand(key: &[u8; KEY_LEN], input: &[u8], out_len: usize) -> Vec<u8> {
-    let mut state = *key;
-    for chunk in input.chunks(KEY_LEN) {
-        let mut rng = ChaCha8Rng::from_seed(state);
-        let mut keystream = [0u8; KEY_LEN];
-        rng.fill_bytes(&mut keystream);
-        state = [0u8; KEY_LEN];
-        for (index, slot) in state.iter_mut().enumerate() {
-            let data = chunk.get(index).copied().unwrap_or(0);
-            let key_byte = keystream.get(index).copied().unwrap_or(0);
-            *slot = key_byte ^ data;
-        }
+fn field_to_residue(field: &Field, modulus: &Modulus) -> u64 {
+    let mut acc = 0u64;
+    for &limb in field.into_bigint().as_ref().iter().rev() {
+        acc = modulus.reduce_u128((u128::from(acc) << 64) | u128::from(limb));
     }
-    let mut rng = ChaCha8Rng::from_seed(state);
-    let mut out = vec![0u8; out_len];
-    rng.fill_bytes(&mut out);
-    out
+    acc
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing
-    )]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
     use crate::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
     use crate::support::insecure;
     use fhe_traits::{FheEncoder, FheEncrypter};
     use rand::rng;
+
+    fn test_ciphertext<R: RngCore + CryptoRng>(rng: &mut R) -> Ciphertext {
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, rng);
+        let pk = PublicKey::new(&sk, rng);
+        let pt = Plaintext::try_encode(&[7u64], Encoding::poly(), &params).unwrap();
+        pk.try_encrypt(&pt, rng).unwrap()
+    }
 
     #[test]
     fn generate_committee_rejects_zero_parties() {
@@ -283,12 +330,7 @@ mod tests {
     #[test]
     fn masks_sum_to_zero_over_the_decryptor_set() {
         let mut rng = rng();
-        let params = insecure().unwrap().parameters;
-        let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-        let pt = Plaintext::try_encode(&[7u64], Encoding::poly(), &params).unwrap();
-        let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
-
+        let ct = test_ciphertext(&mut rng);
         let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
         let decryptors = [1usize, 3];
         let mut acc = keys[0].mask(&decryptors, &ct).unwrap();
@@ -298,5 +340,26 @@ mod tests {
             acc.coefficients().iter().all(|&value| value == 0),
             "PRF masks must cancel when summed over S"
         );
+    }
+
+    #[test]
+    fn evaluate_is_deterministic() {
+        let mut rng = rng();
+        let ct = test_ciphertext(&mut rng);
+        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let decryptors = [1usize, 2];
+        let first = evaluate(&keys[0].outgoing[1], &decryptors, &ct).unwrap();
+        let second = evaluate(&keys[0].outgoing[1], &decryptors, &ct).unwrap();
+        assert_eq!(first.coefficients(), second.coefficients());
+    }
+
+    #[test]
+    fn different_decryptor_sets_produce_different_masks() {
+        let mut rng = rng();
+        let ct = test_ciphertext(&mut rng);
+        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let first = keys[0].mask(&[1, 2], &ct).unwrap();
+        let second = keys[0].mask(&[1, 3], &ct).unwrap();
+        assert_ne!(first.coefficients(), second.coefficients());
     }
 }

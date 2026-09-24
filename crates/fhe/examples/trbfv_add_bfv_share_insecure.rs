@@ -219,16 +219,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(|party| {
                 let mut sender_encrypted_shares = Vec::new();
 
-                for (receiver_idx, receiver_pk) in pk_bfv_list.iter().enumerate().take(num_parties) {
+                for (receiver_idx, receiver_pk) in pk_bfv_list.iter().enumerate().take(num_parties)
+                {
                     let mut rng = rand::rng();
 
                     let mut encrypted_sk_shares = Vec::new();
                     for m in 0..params_trbfv.moduli().len() {
                         let share_row = party.sk_sss[m].row(receiver_idx);
                         let share_vec: Vec<u64> = share_row.to_vec();
-                        let pt =
-                            Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv)
-                                .unwrap();
+                        let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv)
+                            .unwrap();
                         let ct = receiver_pk.try_encrypt(&pt, &mut rng).unwrap();
                         encrypted_sk_shares.push(ct);
                     }

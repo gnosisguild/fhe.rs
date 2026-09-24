@@ -5,7 +5,7 @@
 //! Partial decryption follows Colin de Verdière–Passelègue–Stehlé 2026
 //! ([On Threshold Fully Homomorphic Encryption with Synchronized Decryptors](https://eprint.iacr.org/2026/031.pdf)):
 //! designated parties apply Lagrange coefficients locally, add fresh smudging
-//! noise, and mask with committee PRF keys.
+//! noise, and mask with committee Poseidon2 PRF keys.
 
 /// Internal configuration and validation for threshold BFV.
 mod config;

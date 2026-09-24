@@ -260,8 +260,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                         (0..num_moduli)
                             .map(|m| {
-                                let row =
-                                    party.sk_sss.get(m).unwrap().row(receiver_idx).to_vec();
+                                let row = party.sk_sss.get(m).unwrap().row(receiver_idx).to_vec();
                                 let pt = Plaintext::try_encode(
                                     &row,
                                     Encoding::poly(),

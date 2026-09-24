@@ -75,8 +75,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     let ciphertext = Arc::new(&ct_a + &ct_b);
 
     // The evaluated ciphertext is the sum of two fresh encryptions.
-    let config =
-        SmudgingConfig::new(params.clone(), N, 2, LAMBDA_VALUE).expect("smudging config");
+    let config = SmudgingConfig::new(params.clone(), N, 2, LAMBDA_VALUE).expect("smudging config");
     let generator = SmudgingNoiseGenerator::new(config).expect("smudging generator");
 
     let reconstructing = vec![1, 2];
