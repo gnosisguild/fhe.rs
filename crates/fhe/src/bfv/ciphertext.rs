@@ -211,7 +211,13 @@ impl DeserializeParametrized for Ciphertext {
 }
 
 impl Ciphertext {
-    /// Generate the zero ciphertext.
+    /// Create an empty additive-zero accumulator.
+    ///
+    /// Adding or subtracting a nonempty ciphertext or a plaintext materializes
+    /// its components; multiplication leaves it empty. Until materialized, it has
+    /// no polynomial context, and its `level` is only a placeholder, not a
+    /// ciphertext level. It is not valid for decryption, serialization round
+    /// trips, or operations requiring ciphertext components.
     #[must_use]
     pub fn zero(params: &Arc<BfvParameters>) -> Self {
         Self {
@@ -231,8 +237,7 @@ impl From<&Ciphertext> for CiphertextProto {
         // Split the ciphertext polynomials into all-but-last and last
         match ct.c.split_last() {
             None => {
-                // Empty ciphertext - this should not happen as new() requires
-                // at least 2 polys but we handle it gracefully
+                // The empty zero accumulator has no polynomial components.
             }
             Some((last, rest)) => {
                 // Serialize all but the last polynomial
