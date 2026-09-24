@@ -133,7 +133,7 @@ impl Multiplicator {
             ScalingFactor::one(),
             ScalingFactor::one(),
             &extended_basis,
-            ScalingFactor::new(params.plaintext_big(), ctx.modulus()),
+            ScalingFactor::new(params.plaintext_big(), ctx.modulus())?,
             rk.ciphertext_level(),
             &params,
         )?;
@@ -478,9 +478,9 @@ mod tests {
 
             let mut multiplicator = Multiplicator::new(
                 ScalingFactor::one(),
-                ScalingFactor::new(rns.modulus(), params.context_at_level(0)?.modulus()),
+                ScalingFactor::new(rns.modulus(), params.context_at_level(0)?.modulus())?,
                 &extended_basis,
-                ScalingFactor::new(&BigUint::from(params.plaintext()), rns.modulus()),
+                ScalingFactor::new(&BigUint::from(params.plaintext()), rns.modulus())?,
                 &params,
             )?;
 

@@ -466,7 +466,7 @@ impl ShareManager {
                 Scaler::new(
                     &ctx_i,
                     &plaintext_ctx,
-                    ScalingFactor::new(&BigUint::from(self.params.plaintext()), rns.modulus()),
+                    ScalingFactor::new(&BigUint::from(self.params.plaintext()), rns.modulus())?,
                 )
                 .map_err(Error::MathError)
             })

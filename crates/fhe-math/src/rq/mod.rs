@@ -1068,8 +1068,8 @@ mod tests {
         assert_eq!(p, q.to_power_basis());
         assert_eq!(Vec::<u64>::try_from(&p).unwrap(), [0; 16 * MODULI.len()]);
         assert_eq!(Vec::<u64>::try_from(&q).unwrap(), [0; 16 * MODULI.len()]);
-        assert_eq!(Vec::<BigUint>::from(&p), reference);
-        assert_eq!(Vec::<BigUint>::from(&q), reference);
+        assert_eq!(Vec::<BigUint>::try_from(&p)?, reference);
+        assert_eq!(Vec::<BigUint>::try_from(&q)?, reference);
 
         Ok(())
     }
@@ -1473,7 +1473,7 @@ mod tests {
         for _ in 0..ntests {
             // Otherwise, no error happens and the coefficients evolve as expected.
             let mut p = Poly::<PowerBasis>::random(&ctx, &mut rng);
-            let mut reference = Vec::<BigUint>::from(&p);
+            let mut reference = Vec::<BigUint>::try_from(&p)?;
             let mut current_ctx = ctx.clone();
             assert_eq!(p.ctx, current_ctx);
             while current_ctx.next_context.is_some() {
@@ -1482,7 +1482,7 @@ mod tests {
                 let numerator = current_ctx.modulus().clone();
                 assert!(p.switch_down().is_ok());
                 assert_eq!(p.ctx, current_ctx);
-                let p_biguint = Vec::<BigUint>::from(&p);
+                let p_biguint = Vec::<BigUint>::try_from(&p)?;
                 assert_eq!(
                     p_biguint,
                     reference
@@ -1508,13 +1508,13 @@ mod tests {
 
         for _ in 0..ntests {
             let mut p = Poly::<PowerBasis>::random(&ctx1, &mut rng);
-            let reference = Vec::<BigUint>::from(&p);
+            let reference = Vec::<BigUint>::try_from(&p)?;
 
             p.switch_down_to(&ctx2)?;
 
             assert_eq!(p.ctx, ctx2);
             assert_eq!(
-                Vec::<BigUint>::from(&p),
+                Vec::<BigUint>::try_from(&p)?,
                 reference
                     .iter()
                     .map(|b| ((b * ctx2.modulus()) + (ctx1.modulus() >> 1)) / ctx1.modulus())
@@ -1534,13 +1534,13 @@ mod tests {
         let switcher = Switcher::new(&ctx1, &ctx2)?;
         for _ in 0..ntests {
             let p = Poly::<PowerBasis>::random(&ctx1, &mut rng);
-            let reference = Vec::<BigUint>::from(&p);
+            let reference = Vec::<BigUint>::try_from(&p)?;
 
             let q = p.switch(&switcher)?;
 
             assert_eq!(q.ctx, ctx2);
             assert_eq!(
-                Vec::<BigUint>::from(&q),
+                Vec::<BigUint>::try_from(&q)?,
                 reference
                     .iter()
                     .map(|b| ((b * ctx2.modulus()) + (ctx1.modulus() >> 1)) / ctx1.modulus())
@@ -1568,11 +1568,11 @@ mod tests {
 
         p.multiply_inverse_power_of_x(ctx.degree)?;
         assert_eq!(
-            Vec::<BigUint>::from(&p)
+            Vec::<BigUint>::try_from(&p)?
                 .iter()
                 .map(|c| ctx.modulus() - c)
                 .collect_vec(),
-            Vec::<BigUint>::from(&q)
+            Vec::<BigUint>::try_from(&q)?
         );
 
         Ok(())

@@ -8,7 +8,7 @@ use crate::{
     Error, PolynomialSerializationError, Result,
     proto::rq::{Representation as RepresentationProto, Rq},
 };
-use itertools::{Itertools, izip};
+use itertools::izip;
 use ndarray::{Array2, ArrayView, Axis};
 use num_bigint::BigUint;
 use std::sync::Arc;
@@ -461,27 +461,36 @@ impl TryFrom<&Poly<NttShoup>> for Vec<u64> {
     }
 }
 
-impl From<&Poly<PowerBasis>> for Vec<BigUint> {
-    fn from(p: &Poly<PowerBasis>) -> Self {
-        izip!(p.coefficients.axis_iter(Axis(1)))
+impl TryFrom<&Poly<PowerBasis>> for Vec<BigUint> {
+    type Error = Error;
+
+    fn try_from(p: &Poly<PowerBasis>) -> Result<Self> {
+        p.coefficients
+            .axis_iter(Axis(1))
             .map(|c| p.ctx.rns.lift(c))
-            .collect_vec()
+            .collect()
     }
 }
 
-impl From<&Poly<Ntt>> for Vec<BigUint> {
-    fn from(p: &Poly<Ntt>) -> Self {
-        izip!(p.coefficients.axis_iter(Axis(1)))
+impl TryFrom<&Poly<Ntt>> for Vec<BigUint> {
+    type Error = Error;
+
+    fn try_from(p: &Poly<Ntt>) -> Result<Self> {
+        p.coefficients
+            .axis_iter(Axis(1))
             .map(|c| p.ctx.rns.lift(c))
-            .collect_vec()
+            .collect()
     }
 }
 
-impl From<&Poly<NttShoup>> for Vec<BigUint> {
-    fn from(p: &Poly<NttShoup>) -> Self {
-        izip!(p.coefficients.axis_iter(Axis(1)))
+impl TryFrom<&Poly<NttShoup>> for Vec<BigUint> {
+    type Error = Error;
+
+    fn try_from(p: &Poly<NttShoup>) -> Result<Self> {
+        p.coefficients
+            .axis_iter(Axis(1))
             .map(|c| p.ctx.rns.lift(c))
-            .collect_vec()
+            .collect()
     }
 }
 
@@ -687,7 +696,7 @@ mod tests {
         let mut rng = rng();
         let ctx = Arc::new(Context::new(MODULI, 16)?);
         let p = Poly::<PowerBasis>::random(&ctx, &mut rng);
-        let values = Vec::<BigUint>::from(&p);
+        let values = Vec::<BigUint>::try_from(&p)?;
         let p2 = Poly::<PowerBasis>::try_convert_from(values.as_slice(), &ctx, false)?;
         assert_eq!(p, p2);
         Ok(())

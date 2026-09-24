@@ -21,7 +21,7 @@ pub mod scaler;
 pub use scaler::{RnsScaler, RnsScalerRaw, ScalingFactor, ScalingFactorRaw};
 
 /// Context for a Residue Number System.
-#[derive(Default, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RnsContext {
     moduli_u64: Vec<u64>,
     moduli: Vec<Modulus>,
@@ -34,6 +34,7 @@ pub struct RnsContext {
 }
 
 /// Serializable form of [`RnsContext`].
+/// Only `moduli_u64` is authoritative; the cached values are ignored on import.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RnsContextRaw {
     /// Moduli in u64 form.
@@ -151,14 +152,23 @@ impl RnsContext {
 
     /// Lift rests into a BigUint.
     ///
-    /// Aborts if the number of rests is different than the number of moduli in
-    /// debug mode.
-    #[must_use]
-    pub fn lift(&self, rests: ArrayView1<u64>) -> BigUint {
+    /// Rejects incorrect residue counts and noncanonical residues.
+    pub fn lift(&self, rests: ArrayView1<u64>) -> Result<BigUint> {
+        if rests.len() != self.moduli_u64.len() {
+            return Err(Error::InvalidResidueCount {
+                actual: rests.len(),
+                expected: self.moduli_u64.len(),
+            });
+        }
+        for (&value, &modulus) in rests.iter().zip(&self.moduli_u64) {
+            if value >= modulus {
+                return Err(Error::NonCanonicalValue { value, modulus });
+            }
+        }
         let mut result = BigUint::zero();
         izip!(rests.iter(), self.garner.iter())
             .for_each(|(r_i, garner_i)| result += garner_i * *r_i);
-        result % &self.product
+        Ok(result % &self.product)
     }
 
     /// Getter for the i-th garner coefficient.
@@ -184,31 +194,9 @@ impl RnsContext {
 }
 
 impl RnsContextRaw {
-    /// Build an [`RnsContext`] from its raw parts.
+    /// Rebuild an [`RnsContext`] from the supplied moduli. Cached values are untrusted.
     pub fn into_context(self) -> Result<RnsContext> {
-        let moduli = self
-            .moduli_u64
-            .iter()
-            .map(|m| Modulus::new(*m))
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(RnsContext {
-            moduli_u64: self.moduli_u64,
-            moduli,
-            q_tilde: self.q_tilde,
-            q_tilde_shoup: self.q_tilde_shoup,
-            q_star: self
-                .q_star
-                .into_iter()
-                .map(|bytes| BigUint::from_bytes_be(&bytes))
-                .collect(),
-            garner: self
-                .garner
-                .into_iter()
-                .map(|bytes| BigUint::from_bytes_be(&bytes))
-                .collect(),
-            product: BigUint::from_bytes_be(&self.product),
-        })
+        RnsContext::new(&self.moduli_u64)
     }
 }
 
@@ -279,24 +267,24 @@ mod tests {
 
         let mut rests = rns.project(&BigUint::from(0u64));
         assert_eq!(&rests, &[0u64, 0, 0]);
-        assert_eq!(rns.lift(ArrayView1::from(&rests)), BigUint::from(0u64));
+        assert_eq!(rns.lift(ArrayView1::from(&rests))?, BigUint::from(0u64));
 
         rests = rns.project(&BigUint::from(4u64));
         assert_eq!(&rests, &[0u64, 4, 4]);
-        assert_eq!(rns.lift(ArrayView1::from(&rests)), BigUint::from(4u64));
+        assert_eq!(rns.lift(ArrayView1::from(&rests))?, BigUint::from(4u64));
 
         rests = rns.project(&BigUint::from(15u64));
         assert_eq!(&rests, &[3u64, 0, 15]);
-        assert_eq!(rns.lift(ArrayView1::from(&rests)), BigUint::from(15u64));
+        assert_eq!(rns.lift(ArrayView1::from(&rests))?, BigUint::from(15u64));
 
         rests = rns.project(&BigUint::from(1153u64));
         assert_eq!(&rests, &[1u64, 13, 0]);
-        assert_eq!(rns.lift(ArrayView1::from(&rests)), BigUint::from(1153u64));
+        assert_eq!(rns.lift(ArrayView1::from(&rests))?, BigUint::from(1153u64));
 
         rests = rns.project(&BigUint::from(product - 1));
         assert_eq!(&rests, &[3u64, 14, 1152]);
         assert_eq!(
-            rns.lift(ArrayView1::from(&rests)),
+            rns.lift(ArrayView1::from(&rests))?,
             BigUint::from(product - 1)
         );
 
@@ -305,9 +293,50 @@ mod tests {
         for _ in 0..ntests {
             let b = BigUint::from(rng.next_u64() % product);
             rests = rns.project(&b);
-            assert_eq!(rns.lift(ArrayView1::from(&rests)), b);
+            assert_eq!(rns.lift(ArrayView1::from(&rests))?, b);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn raw_context_rebuilds_caches_and_validates_moduli() -> Result<(), Box<dyn Error>> {
+        let ctx = RnsContext::new(&[4, 15, 1153])?;
+        let mut raw = ctx.to_raw();
+        raw.q_tilde.clear();
+        raw.q_tilde_shoup.clear();
+        raw.q_star.clear();
+        raw.garner.clear();
+        raw.product.clear();
+        assert_eq!(raw.clone().into_context()?, ctx);
+
+        raw.moduli_u64 = vec![4, 4];
+        assert!(matches!(
+            raw.into_context(),
+            Err(MathError::NonCoprimeModuli { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn lift_rejects_wrong_count_and_noncanonical_residues() -> Result<(), Box<dyn Error>> {
+        let ctx = RnsContext::new(&[4, 15])?;
+        for residues in [&[0][..], &[0, 1, 2][..]] {
+            assert_eq!(
+                ctx.lift(ArrayView1::from(residues)),
+                Err(MathError::InvalidResidueCount {
+                    actual: residues.len(),
+                    expected: 2,
+                })
+            );
+        }
+        assert_eq!(
+            ctx.lift(ArrayView1::from(&[4, 0][..])),
+            Err(MathError::NonCanonicalValue {
+                value: 4,
+                modulus: 4,
+            })
+        );
         Ok(())
     }
 }
