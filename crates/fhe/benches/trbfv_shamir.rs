@@ -109,7 +109,7 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
             .map(|(party_id, smudging_share)| {
                 manager
                     .decryption_share(
-                        ciphertext.clone(),
+                        &ciphertext,
                         &aggregated_shares[party_id - 1],
                         smudging_share,
                     )
@@ -139,9 +139,9 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
                     black_box(
                         manager
                             .decrypt_from_shares(
-                                black_box(decryption_shares.clone()),
-                                black_box(party_ids.clone()),
-                                ciphertext.clone(),
+                                black_box(&decryption_shares),
+                                black_box(&party_ids),
+                                &ciphertext,
                             )
                             .expect("reconstruction must succeed"),
                     )

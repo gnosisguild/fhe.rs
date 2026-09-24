@@ -352,7 +352,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let smudging = party.shares.take_smudging().unwrap();
         let secret_key = party.shares.secret_key().unwrap();
         party.decryption_share = share_manager
-            .decryption_share(product.clone(), secret_key, smudging)
+            .decryption_share(&product, secret_key, smudging)
             .unwrap();
     });
     println!(
@@ -370,7 +370,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = timeit!("Combine shares and decrypt", {
         let party_indices: Vec<usize> = (1..=threshold + 1).collect();
         let pt = share_manager
-            .decrypt_from_shares(decryption_shares, party_indices, product.clone())
+            .decrypt_from_shares(&decryption_shares, &party_indices, &product)
             .unwrap();
         let v = Vec::<u64>::try_decode(&pt, Encoding::poly())?;
         Ok::<u64, Box<dyn Error>>(v[0])

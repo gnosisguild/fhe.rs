@@ -204,7 +204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let smudging = party.shares.take_smudging().unwrap();
         let secret_key = party.shares.secret_key().unwrap();
         party.decryption_share = share_manager
-            .decryption_share(tally.clone(), secret_key, smudging)
+            .decryption_share(&tally, secret_key, smudging)
             .unwrap();
     });
 
@@ -230,7 +230,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Parties are 1-based for Shamir x-coordinates; we used the first (threshold+1) parties
         let reconstructing_parties: Vec<usize> = (1..=threshold + 1).collect();
         let open_results = share_manager
-            .decrypt_from_shares(decryption_shares, reconstructing_parties, tally.clone())
+            .decrypt_from_shares(&decryption_shares, &reconstructing_parties, &tally)
             .unwrap();
         let result_vec = Vec::<u64>::try_decode(&open_results, Encoding::poly())?;
         Ok::<u64, Box<dyn Error>>(result_vec[0])

@@ -23,7 +23,11 @@ impl DealtSmudgingShares {
         Self { matrices }
     }
 
-    /// Consume the dealt result at an application transport boundary.
+    /// Consume the dealt result at an application transport boundary. The
+    /// matrices are ordered by modulus `q_i`, each with rows ordered by
+    /// recipient; the application transposes them into `[moduli, degree]`
+    /// matrices for [`SmudgingShare::from_transport`]. Ownership (and
+    /// responsibility for clearing discarded buffers) passes to the caller.
     #[must_use]
     pub fn into_transport(mut self) -> Vec<Array2<u64>> {
         std::mem::take(&mut self.matrices)
@@ -113,16 +117,15 @@ impl std::fmt::Debug for SmudgingShare {
 /// Reusing one live owner in two decryption calls is also rejected:
 ///
 /// ```compile_fail
-/// # use std::sync::Arc;
 /// # use fhe::bfv::Ciphertext;
 /// # use fhe::trbfv::{AggregatedSecretKeyShare, AggregatedSmudgingShare, ShareManager};
 /// fn reuse(
 ///     manager: &ShareManager,
-///     ciphertext: Arc<Ciphertext>,
+///     ciphertext: &Ciphertext,
 ///     secret_key: &AggregatedSecretKeyShare,
 ///     noise: AggregatedSmudgingShare,
 /// ) {
-///     let _ = manager.decryption_share(ciphertext.clone(), secret_key, noise);
+///     let _ = manager.decryption_share(ciphertext, secret_key, noise);
 ///     let _ = manager.decryption_share(ciphertext, secret_key, noise);
 /// }
 /// ```

@@ -244,13 +244,18 @@ let smudging_aggregate = share_manager.aggregate_smudging_shares(
 
 // Each decrypting party: compute a decryption share from its aggregated shares
 let decryption_share =
-    share_manager.decryption_share(ciphertext.clone(), &secret_key_aggregate, smudging_aggregate)?;
+    share_manager.decryption_share(&ciphertext, &secret_key_aggregate, smudging_aggregate)?;
 
 // Combine exactly threshold + 1 decryption shares; reconstructing_parties
 // holds the 1-based indices of the parties the shares came from
 let plaintext =
-    share_manager.decrypt_from_shares(decryption_shares, reconstructing_parties, ciphertext)?;
+    share_manager.decrypt_from_shares(&decryption_shares, &reconstructing_parties, &ciphertext)?;
 ```
+
+`decryption_share` borrows the ciphertext but consumes the one-time smudging
+aggregate. `decrypt_from_shares` borrows the ciphertext, decryption shares, and
+party indices; callers with owned `Vec`s or `Arc<Ciphertext>` should pass
+references rather than cloning or transferring them.
 
 ## Security Considerations
 

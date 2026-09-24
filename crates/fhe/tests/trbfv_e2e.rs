@@ -130,7 +130,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
             let index = party_id - 1;
             manager
                 .decryption_share(
-                    ciphertext.clone(),
+                    &ciphertext,
                     secret_key_aggregates[index]
                         .as_ref()
                         .expect("one key owner per party"),
@@ -145,16 +145,16 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     assert!(
         manager
             .decrypt_from_shares(
-                vec![decryption_shares[0].clone()],
-                vec![reconstructing[0]],
-                ciphertext.clone(),
+                std::slice::from_ref(&decryption_shares[0]),
+                &[reconstructing[0]],
+                &ciphertext,
             )
             .is_err(),
         "one share must not decrypt"
     );
 
     let plaintext = manager
-        .decrypt_from_shares(decryption_shares, reconstructing, ciphertext)
+        .decrypt_from_shares(&decryption_shares, &reconstructing, &ciphertext)
         .expect("threshold decryption with t+1 shares");
     let decoded = Vec::<u64>::try_decode(&plaintext, Encoding::poly()).expect("decode plaintext");
     assert_eq!(decoded[0], 5);
