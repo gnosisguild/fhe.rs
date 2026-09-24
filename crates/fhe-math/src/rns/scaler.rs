@@ -306,8 +306,9 @@ impl RnsScaler {
     /// Output the RNS representation of the rests scaled by numerator *
     /// denominator, and either rounded or floored.
     ///
-    /// Panics if the number of rests differs from the source moduli or the
-    /// output size is outside [1, destination moduli count].
+    /// Panics if the number of rests differs from the source moduli, any
+    /// residue is not in `[0, q_i)`, or the output size is outside
+    /// [1, destination moduli count].
     #[must_use]
     pub fn scale_new(&self, rests: ArrayView1<u64>, size: usize) -> Vec<u64> {
         let mut out = vec![0; size];
@@ -319,9 +320,9 @@ impl RnsScaler {
     /// denominator, and either rounded or floored, and store the result in
     /// `out`.
     ///
-    /// Panics if the number of rests differs from the source moduli, `out` is
-    /// empty, or the range starting at `starting_index` with length `out.len()`
-    /// exceeds the destination moduli.
+    /// Panics if the number of rests differs from the source moduli, any
+    /// residue is not in `[0, q_i)`, `out` is empty, or the range starting at
+    /// `starting_index` with length `out.len()` exceeds the destination moduli.
     pub fn scale(
         &self,
         rests: ArrayView1<u64>,
@@ -340,11 +341,13 @@ impl RnsScaler {
 
         // First, let's compute the inner product of the rests with theta_omega.
         let mut sum_theta_garner = u256::ZERO;
-        for (thetag_lo, thetag_hi, ri) in izip!(
+        for (thetag_lo, thetag_hi, ri, modulus) in izip!(
             self.theta_garner_lo.iter(),
             self.theta_garner_hi.iter(),
-            rests
+            rests,
+            self.from.moduli_u64.iter()
         ) {
+            assert!(*ri < *modulus, "RNS residues must be canonical");
             sum_theta_garner = sum_theta_garner.wrapping_add(
                 U256::from(*ri) * U256::from((*thetag_lo as u128) | ((*thetag_hi as u128) << 64)),
             );
@@ -524,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn scaler_rejects_invalid_public_dimensions() -> Result<(), Box<dyn Error>> {
+    fn scaler_rejects_invalid_public_inputs() -> Result<(), Box<dyn Error>> {
         let ctx = Arc::new(RnsContext::new(&[4, 15])?);
         let scaler = RnsScaler::new(&ctx, &ctx, ScalingFactor::one());
         let input = [1, 2];
@@ -533,6 +536,12 @@ mod tests {
 
         assert!(std::panic::catch_unwind(|| scaler.scale_new((&bad_input[..]).into(), 1)).is_err());
         assert!(std::panic::catch_unwind(|| scaler.scale_new((&input[..]).into(), 3)).is_err());
+        for residues in [[4, 2], [1, 15], [u64::MAX, 0]] {
+            assert!(
+                std::panic::catch_unwind(|| scaler.scale_new((&residues[..]).into(), 2)).is_err()
+            );
+        }
+        assert_eq!(scaler.scale_new((&[3, 14][..]).into(), 2).len(), 2);
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 scaler.scale((&input[..]).into(), (&mut output[..]).into(), usize::MAX);
