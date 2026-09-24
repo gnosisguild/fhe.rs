@@ -163,7 +163,7 @@ impl Modulus {
     const fn mul_opt_kernel(&self, a: u64, b: u64) -> u64 {
         debug_assert!(self.supports_opt);
         debug_assert!(a < self.p && b < self.p);
-        self.reduce_opt_u128((a as u128) * (b as u128))
+        self.reduce_opt_u128_kernel((a as u128) * (b as u128))
     }
 
     /// Optimized modular multiplication of a and b in variable time.
@@ -661,11 +661,24 @@ impl Modulus {
         unsafe { Self::reduce1_vt(self.lazy_reduce(a), self.p) }
     }
 
-    /// Optimized modular reduction of a u128 in constant time.
+    /// Modular reduction of a u128 in constant time, using the optimized kernel
+    /// when the modulus supports it and generic reduction otherwise.
+    ///
+    /// For a supported modulus, the optimized kernel requires `a < p²`.
+    /// Debug builds panic when that input precondition is violated.
     #[must_use]
     pub const fn reduce_opt_u128(&self, a: u128) -> u64 {
+        if self.supports_opt {
+            self.reduce_opt_u128_kernel(a)
+        } else {
+            self.reduce_u128(a)
+        }
+    }
+
+    /// The caller has checked `supports_opt` and must supply `a < p²`.
+    const fn reduce_opt_u128_kernel(&self, a: u128) -> u64 {
         debug_assert!(self.supports_opt);
-        Self::reduce1(self.lazy_reduce_opt_u128(a), self.p)
+        Self::reduce1(self.lazy_reduce_opt_u128_kernel(a), self.p)
     }
 
     /// Optimized modular reduction of a u128 in constant time.
@@ -675,7 +688,7 @@ impl Modulus {
     /// about the value being reduced.
     pub(crate) const unsafe fn reduce_opt_u128_vt(&self, a: u128) -> u64 {
         debug_assert!(self.supports_opt);
-        unsafe { Self::reduce1_vt(self.lazy_reduce_opt_u128(a), self.p) }
+        unsafe { Self::reduce1_vt(self.lazy_reduce_opt_u128_kernel(a), self.p) }
     }
 
     /// Modular reduction of a u64 in constant time, using the optimized kernel
@@ -772,12 +785,24 @@ impl Modulus {
         r
     }
 
-    /// Lazy optimized modular reduction of a in constant time.
+    /// Lazy modular reduction of a in constant time, using the optimized kernel
+    /// when the modulus supports it and generic reduction otherwise.
     /// The output is in the interval [0, 2 * p).
     ///
-    /// Aborts if the input is >= p ^ 2 in debug mode.
+    /// For a supported modulus, the optimized kernel requires `a < p²`.
+    /// Debug builds panic when that input precondition is violated.
     #[must_use]
     pub const fn lazy_reduce_opt_u128(&self, a: u128) -> u64 {
+        if self.supports_opt {
+            self.lazy_reduce_opt_u128_kernel(a)
+        } else {
+            self.lazy_reduce_u128(a)
+        }
+    }
+
+    /// The caller has checked `supports_opt` and must supply `a < p²`.
+    const fn lazy_reduce_opt_u128_kernel(&self, a: u128) -> u64 {
+        debug_assert!(self.supports_opt);
         debug_assert!(a < (self.p as u128) * (self.p as u128));
 
         let q = (((self.barrett_lo as u128) * (a >> 64)) + (a << self.leading_zeros)) >> 64;
@@ -875,10 +900,6 @@ mod tests {
         any::<u64>().prop_filter_map("filter invalid moduli", |p| Modulus::new(p).ok())
     }
 
-    fn valid_moduli_opt() -> impl Strategy<Value = Modulus> {
-        valid_moduli().prop_filter("filter moduli not supporting opt", |p| p.supports_opt)
-    }
-
     fn vecs() -> BoxedStrategy<(Vec<u64>, Vec<u64>)> {
         prop_vec(any::<u64>(), 1..100)
             .prop_flat_map(|vec| {
@@ -905,9 +926,21 @@ mod tests {
     fn optimized_entry_points_fall_back_outside_the_kernel_domain() {
         for value in [2, 17, 97, 4611686018326724609] {
             let modulus = Modulus::new(value).unwrap();
+            let square = (value as u128) * (value as u128);
             for a in [0, 1, value - 1, value, u64::MAX] {
                 assert_eq!(modulus.reduce_opt(a), modulus.reduce(a));
                 assert_eq!(unsafe { modulus.reduce_opt_vt(a) }, modulus.reduce(a));
+            }
+            for a in [0, 1, square - 1, square, u128::MAX] {
+                if !modulus.supports_opt || a < square {
+                    assert_eq!(modulus.reduce_opt_u128(a), modulus.reduce_u128(a));
+                    let lazy = modulus.lazy_reduce_opt_u128(a);
+                    assert!(lazy < 2 * value);
+                    assert_eq!(lazy % value, (a % value as u128) as u64);
+                    if !modulus.supports_opt {
+                        assert_eq!(lazy, modulus.lazy_reduce_u128(a));
+                    }
+                }
             }
             for a in [0, 1, value - 1] {
                 for b in [0, 1, value - 1] {
@@ -915,7 +948,9 @@ mod tests {
                 }
             }
         }
-        assert!(!Modulus::new(2).unwrap().supports_opt);
+        for value in [2, 17, 97] {
+            assert!(!Modulus::new(value).unwrap().supports_opt);
+        }
         assert!(Modulus::new(4611686018326724609).unwrap().supports_opt);
     }
 
@@ -1052,9 +1087,12 @@ mod tests {
             if p.supports_opt {
                 let p_square = (*p as u128) * (*p as u128);
                 a %= p_square;
-                prop_assert_eq!(p.reduce_opt_u128(a) as u128, a % (*p as u128));
                 unsafe { prop_assert_eq!(p.reduce_opt_u128_vt(a) as u128, a % (*p as u128)) }
             }
+            prop_assert_eq!(p.reduce_opt_u128(a) as u128, a % (*p as u128));
+            let lazy = p.lazy_reduce_opt_u128(a);
+            prop_assert!(lazy < 2 * *p);
+            prop_assert_eq!(lazy % *p, (a % (*p as u128)) as u64);
         }
 
         #[test]
@@ -1213,12 +1251,14 @@ mod tests {
       }
 
         #[test]
-        fn mul_opt(p in valid_moduli_opt(), mut a: u64, mut b: u64) {
+        fn mul_opt(p in valid_moduli(), mut a: u64, mut b: u64) {
             a = p.reduce(a);
             b = p.reduce(b);
 
             prop_assert_eq!(p.mul_opt(a, b) as u128, ((a as u128) * (b as u128)) % (*p as u128));
-            unsafe { prop_assert_eq!(p.mul_opt_vt(a, b) as u128, ((a as u128) * (b as u128)) % (*p as u128)) }
+            if p.supports_opt {
+                unsafe { prop_assert_eq!(p.mul_opt_vt(a, b) as u128, ((a as u128) * (b as u128)) % (*p as u128)) }
+            }
 
             #[cfg(debug_assertions)]
             {

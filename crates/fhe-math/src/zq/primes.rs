@@ -142,8 +142,9 @@ mod tests {
 
     #[test]
     fn not_found() {
-        // 1033 is the smallest 11-bit prime congruent to 1 modulo 16, so looking for a
-        // smaller one should fail.
-        assert!(generate_prime(11, 16, 1033).is_none());
+        // 1153 is the smallest 11-bit prime congruent to 1 modulo 16;
+        // the strict upper bound excludes it.
+        assert_eq!(generate_prime(11, 16, 1153), None);
+        assert_eq!(generate_prime(11, 16, 1154), Some(1153));
     }
 }
