@@ -12,6 +12,17 @@ use fhe_math::rq::{Ntt, Poly};
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::sync::Arc;
 
+impl Ciphertext {
+    /// Materialize the empty accumulator as a ciphertext containing a plaintext.
+    fn assign_plaintext(&mut self, plaintext: &Plaintext) {
+        let c0 = plaintext.to_poly();
+        let c1 = Poly::<Ntt>::zero(c0.ctx());
+        self.c = vec![c0, c1];
+        self.level = plaintext.level();
+        self.seed = None;
+    }
+}
+
 impl Add<&Ciphertext> for &Ciphertext {
     type Output = Ciphertext;
 
@@ -89,7 +100,10 @@ impl Add<&Ciphertext> for &Plaintext {
 impl AddAssign<&Plaintext> for Ciphertext {
     fn add_assign(&mut self, rhs: &Plaintext) {
         assert!(Arc::ptr_eq(&self.params, &rhs.params));
-        assert!(!self.is_empty());
+        if self.is_empty() {
+            self.assign_plaintext(rhs);
+            return;
+        }
         assert_eq!(self.level, rhs.level());
 
         let poly = rhs.to_poly();
@@ -184,7 +198,11 @@ impl Sub<&Ciphertext> for &Plaintext {
 impl SubAssign<&Plaintext> for Ciphertext {
     fn sub_assign(&mut self, rhs: &Plaintext) {
         assert!(Arc::ptr_eq(&self.params, &rhs.params));
-        assert!(!self.is_empty());
+        if self.is_empty() {
+            self.assign_plaintext(rhs);
+            self.c[0] = -&self.c[0];
+            return;
+        }
         assert_eq!(self.level, rhs.level());
 
         let poly = rhs.to_poly();
@@ -260,8 +278,9 @@ impl Mul<&Ciphertext> for &Ciphertext {
     type Output = Ciphertext;
 
     fn mul(self, rhs: &Ciphertext) -> Ciphertext {
-        if self.is_empty() {
-            return self.clone();
+        assert!(Arc::ptr_eq(&self.params, &rhs.params));
+        if self.is_empty() || rhs.is_empty() {
+            return Ciphertext::zero(&self.params);
         }
 
         if rhs == self {
@@ -304,7 +323,6 @@ impl Mul<&Ciphertext> for &Ciphertext {
                 level: rhs.level,
             }
         } else {
-            assert!(Arc::ptr_eq(&self.params, &rhs.params));
             assert_eq!(self.level, rhs.level);
 
             let ctx_lvl = self.params.context_level_at(self.level).unwrap();
@@ -458,6 +476,49 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn empty_accumulator_materializes_plaintext_at_its_level() -> Result<(), Box<dyn Error>> {
+        let params = BfvParameters::default_arc(2, 16);
+        let sk = SecretKey::random(&params, &mut rng());
+        let mut values = vec![0u64; params.degree()];
+        values[0] = 1;
+        values[1] = 2;
+
+        for level in 0..=1 {
+            let encoding = Encoding::poly_at_level(level);
+            let pt = Plaintext::try_encode(&values, encoding.clone(), &params)?;
+            let zero = Ciphertext::zero(&params);
+
+            let mut added = zero.clone();
+            added += &pt;
+            assert_eq!(added, &zero + &pt);
+            assert_eq!(added, &pt + &zero);
+            assert_eq!(added.len(), 2);
+            assert_eq!(added.level, level);
+            assert_eq!(
+                Vec::<u64>::try_decode(&sk.try_decrypt(&added)?, encoding.clone())?,
+                values
+            );
+
+            let mut subtracted = zero.clone();
+            subtracted -= &pt;
+            assert_eq!(subtracted, &zero - &pt);
+            assert_eq!(subtracted.len(), 2);
+            assert_eq!(subtracted.level, level);
+            let mut negated = values.clone();
+            fhe_math::zq::Modulus::new(params.plaintext())?.neg_vec(&mut negated);
+            assert_eq!(
+                Vec::<u64>::try_decode(&sk.try_decrypt(&subtracted)?, encoding.clone())?,
+                negated
+            );
+            assert_eq!(
+                Vec::<u64>::try_decode(&sk.try_decrypt(&(&pt - &zero))?, encoding)?,
+                values
+            );
+        }
         Ok(())
     }
 
@@ -701,6 +762,23 @@ mod tests {
                 let pt = sk.try_decrypt(&ct4)?;
                 assert_eq!(Vec::<u64>::try_decode(&pt, Encoding::simd())?, expected);
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn empty_accumulator_absorbs_ciphertext_multiplication_in_both_orders()
+    -> Result<(), Box<dyn Error>> {
+        let params = BfvParameters::default_arc(2, 16);
+        let sk = SecretKey::random(&params, &mut rng());
+        let zero = Ciphertext::zero(&params);
+
+        for level in 0..=1 {
+            let pt = Plaintext::try_encode(&[1u64][..], Encoding::poly_at_level(level), &params)?;
+            let ct: Ciphertext = sk.try_encrypt(&pt, &mut rng())?;
+            assert_eq!(&zero * &ct, zero);
+            assert_eq!(&ct * &zero, zero);
+            assert_eq!(&zero * &zero, zero);
         }
         Ok(())
     }
