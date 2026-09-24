@@ -347,7 +347,7 @@ impl RnsScaler {
             rests,
             self.from.moduli_u64.iter()
         ) {
-            assert!(*ri < *modulus, "RNS residues must be canonical");
+            assert!(*ri < *modulus, "RNS residue {ri} must be in [0, {modulus})");
             sum_theta_garner = sum_theta_garner.wrapping_add(
                 U256::from(*ri) * U256::from((*thetag_lo as u128) | ((*thetag_hi as u128) << 64)),
             );
@@ -578,11 +578,13 @@ mod tests {
             scaler.scale_new((&canonical[..]).into(), destination_moduli.len()),
             [4, 968, 4611686018309939137]
         );
-        assert!(
-            std::panic::catch_unwind(|| {
-                scaler.scale_new((&noncanonical[..]).into(), destination_moduli.len())
-            })
-            .is_err()
+        let panic = std::panic::catch_unwind(|| {
+            scaler.scale_new((&noncanonical[..]).into(), destination_moduli.len())
+        })
+        .unwrap_err();
+        assert_eq!(
+            panic.downcast_ref::<String>().map(String::as_str),
+            Some("RNS residue 18446744073709551612 must be in [0, 4)")
         );
         Ok(())
     }
