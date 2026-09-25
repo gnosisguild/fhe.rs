@@ -11,6 +11,7 @@ use crate::{
 use itertools::{Itertools, izip};
 use ndarray::{Array2, ArrayView, Axis};
 use num_bigint::BigUint;
+use prost::Message;
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -110,6 +111,44 @@ impl TryConvertFrom<&Rq> for Poly<PowerBasis> {
             .into());
         }
         Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)
+    }
+}
+
+impl Poly<Ntt> {
+    /// Reads canonical power-basis coefficients from an NTT-tagged serialization.
+    ///
+    /// The wire format stores power-basis coefficients even for NTT polynomials.
+    /// This method avoids the forward and inverse NTT when the caller needs those
+    /// coefficients. It does not change the wire format or the standard decoder.
+    ///
+    /// Returns `None` for a different degree or representation, or for coefficients
+    /// outside `[0, q)`. The caller must use the standard decoder in these cases.
+    /// Malformed protobuf data and invalid coefficient lengths return an error.
+    /// The serialized timing flag cannot authorize variable-time computations.
+    ///
+    /// The canonicality check is variable-time. Use this method only for public
+    /// serialized data, such as ciphertext components, not for secret polynomials.
+    pub fn power_basis_from_bytes_if_canonical(
+        bytes: &[u8],
+        ctx: &Arc<Context>,
+    ) -> Result<Option<Poly<PowerBasis>>> {
+        let value: Rq = Message::decode(bytes).map_err(|_| PolynomialSerializationError::Decode)?;
+        if value.degree as usize != ctx.degree {
+            return Ok(None);
+        }
+        let (representation, coefficients, variable_time) = parse_proto(&value, ctx, false)?;
+        if representation != Representation::Ntt
+            || coefficients.len() != ctx.moduli.len() * ctx.degree
+        {
+            return Ok(None);
+        }
+        // The standard NTT round trip can reduce noncanonical coefficients.
+        for (row, modulus) in coefficients.chunks_exact(ctx.degree).zip(ctx.moduli.iter()) {
+            if row.iter().any(|coefficient| coefficient >= modulus) {
+                return Ok(None);
+            }
+        }
+        Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time).map(Some)
     }
 }
 

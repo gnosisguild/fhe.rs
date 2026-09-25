@@ -47,6 +47,102 @@ mod tests {
     ];
 
     #[test]
+    fn direct_power_basis_decode_matches_the_ntt_round_trip() -> Result<(), Box<dyn StdError>> {
+        let mut rng = rng();
+        for degree in [16, 512, 8192] {
+            for moduli in [Q.get(..1).unwrap(), Q.as_slice()] {
+                let ctx = Context::new_arc(moduli, degree)?;
+                let values: Vec<u64> = moduli
+                    .iter()
+                    .flat_map(|q| {
+                        (0..degree).map(move |i| match i % 4 {
+                            0 => 0,
+                            1 => 1,
+                            2 => q / 2,
+                            _ => q - 1,
+                        })
+                    })
+                    .collect();
+                for power in [
+                    Poly::<PowerBasis>::try_convert_from(values, &ctx, false)?,
+                    Poly::<PowerBasis>::random(&ctx, &mut rng),
+                ] {
+                    let bytes = power.clone().into_ntt().to_bytes();
+                    let direct =
+                        Poly::<Ntt>::power_basis_from_bytes_if_canonical(&bytes, &ctx)?.unwrap();
+                    let standard = Poly::<Ntt>::from_bytes(&bytes, &ctx)?.to_power_basis();
+                    assert_eq!(direct, standard);
+                    assert_eq!(direct, power);
+                    assert!(!direct.allows_variable_time_computations());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn direct_power_basis_decode_requires_canonical_coefficients() -> Result<(), Box<dyn StdError>>
+    {
+        let modulus = *Q.first().unwrap();
+        let ctx = Context::new_arc(&[modulus], 16)?;
+        let proto = Rq::from(&Poly::<Ntt>::zero(&ctx));
+        for value in [modulus, modulus + 1] {
+            let mut noncanonical = proto.clone();
+            noncanonical.coefficients =
+                crate::zq::Modulus::new(modulus)?.serialize_vec(&vec![value; ctx.degree]);
+            assert!(
+                Poly::<Ntt>::power_basis_from_bytes_if_canonical(
+                    &noncanonical.encode_to_vec(),
+                    &ctx
+                )?
+                .is_none()
+            );
+        }
+        for degree in [0, 8, 32] {
+            let mut mismatch = proto.clone();
+            mismatch.degree = degree;
+            assert!(
+                Poly::<Ntt>::power_basis_from_bytes_if_canonical(&mismatch.encode_to_vec(), &ctx)?
+                    .is_none()
+            );
+        }
+        for representation in [
+            RepresentationProto::Powerbasis,
+            RepresentationProto::Nttshoup,
+        ] {
+            let mut mismatch = proto.clone();
+            mismatch.representation = representation as i32;
+            assert!(
+                Poly::<Ntt>::power_basis_from_bytes_if_canonical(&mismatch.encode_to_vec(), &ctx)?
+                    .is_none()
+            );
+        }
+        for representation in [RepresentationProto::Unknown as i32, 99] {
+            let mut invalid = proto.clone();
+            invalid.representation = representation;
+            assert!(
+                Poly::<Ntt>::power_basis_from_bytes_if_canonical(&invalid.encode_to_vec(), &ctx)
+                    .is_err()
+            );
+        }
+        let mut invalid = proto.clone();
+        invalid.coefficients.pop();
+        assert!(
+            Poly::<Ntt>::power_basis_from_bytes_if_canonical(&invalid.encode_to_vec(), &ctx)
+                .is_err()
+        );
+        assert!(Poly::<Ntt>::power_basis_from_bytes_if_canonical(&[255], &ctx).is_err());
+
+        let mut timing_flag = proto;
+        timing_flag.allow_variable_time = true;
+        let direct =
+            Poly::<Ntt>::power_basis_from_bytes_if_canonical(&timing_flag.encode_to_vec(), &ctx)?
+                .unwrap();
+        assert!(!direct.allows_variable_time_computations());
+        Ok(())
+    }
+
+    #[test]
     fn serialize() -> Result<(), Box<dyn StdError>> {
         let mut rng = rng();
 
