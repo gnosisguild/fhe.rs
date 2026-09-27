@@ -4,29 +4,34 @@
 //! (eprint 2026/031). Each party `i` holds `2n` keys `(k_{i,j}, k_{j,i})_j`
 //! and, for a designated decryptor set `S` and ciphertext `ct`, the mask
 //!
-//! `r_i^{S,ct} = Σ_{j∈S} (F_{k_{i,j}}(S, ct) − F_{k_{j,i}}(S, ct))`.
+//! `r_i^{S,ct} = Σ_{j∈S, j≠i} (F_{k_{i,j}}(H(S, ct)) − F_{k_{j,i}}(H(S, ct)))`.
 //!
-//! The masks cancel when summed over `S`. Keys are uniformly random 256-bit
-//! strings, interpreted as BN254 scalar-field elements. `F` is Poseidon2
-//! via the SAFE sponge API (`e3-safe`).
+//! `H(S, ct)` is a Poseidon2/SAFE digest computed once per [`PartyPrfKeys::mask`]
+//! call. The `j = i` term is omitted: `k_{i,i}` appears on both sides and
+//! cancels. The masks cancel when summed over `S`. Keys are uniformly random
+//! 256-bit strings, interpreted as BN254 scalar-field elements. `F` is
+//! Poseidon2 via the SAFE sponge API (`e3-safe`).
 
 use crate::Error;
 use crate::bfv::Ciphertext;
-use ark_ff::PrimeField;
+use ark_ff::{PrimeField, Zero};
 use e3_safe::{ABSORB_FLAG, Field, SQUEEZE_FLAG, SafeSponge};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_math::zq::Modulus;
 use rand::{CryptoRng, RngCore};
 use std::fmt;
-use zeroize_derive::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, Zeroizing};
+use zeroize_derive::{Zeroize as ZeroizeFields, ZeroizeOnDrop};
 
 const KEY_LEN: usize = 32;
 const SAFE_LENGTH_MASK: u32 = 0x7FFF_FFFF;
-const DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2";
+const DIGEST_LEN: usize = 2;
+const CTX_DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2/ctx";
+const EVAL_DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2/eval";
 
 /// A 256-bit PRF key. Sampled uniformly at random and mapped into the
 /// Poseidon2 field inside [`evaluate`].
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, ZeroizeFields, ZeroizeOnDrop)]
 pub struct PrfKey([u8; KEY_LEN]);
 
 impl fmt::Debug for PrfKey {
@@ -37,7 +42,7 @@ impl fmt::Debug for PrfKey {
 
 /// The `2n` PRF keys held by one party: outgoing `k_{i,j}` and incoming
 /// `k_{j,i}` for every `j ∈ [n]`.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, ZeroizeFields, ZeroizeOnDrop)]
 pub struct PartyPrfKeys {
     party_id: usize,
     party_count: usize,
@@ -135,10 +140,16 @@ impl PartyPrfKeys {
             }
         }
 
+        let mut digest = hash_context(&decryptors, ciphertext)?;
         let ctx = ciphertext.params.context_at_level(ciphertext.level)?;
         let mut acc = Poly::<PowerBasis>::zero(ctx);
         acc.disallow_variable_time_computations();
         for &other in &decryptors {
+            // k_{i,i} appears in both outgoing and incoming, so the two
+            // evaluations cancel. The paper notes this term can be ignored.
+            if other == self.party_id {
+                continue;
+            }
             let key_index = other - 1;
             let outgoing = self
                 .outgoing
@@ -148,11 +159,14 @@ impl PartyPrfKeys {
                 .incoming
                 .get(key_index)
                 .ok_or_else(|| Error::invalid_party_id(other, self.party_count))?;
-            let positive = evaluate(outgoing, &decryptors, ciphertext)?;
-            let negative = evaluate(incoming, &decryptors, ciphertext)?;
+            let mut positive = evaluate(outgoing, &digest, ciphertext)?;
+            let mut negative = evaluate(incoming, &digest, ciphertext)?;
             acc += &positive;
             acc -= &negative;
+            positive.zeroize();
+            negative.zeroize();
         }
+        digest.zeroize();
         Ok(acc)
     }
 }
@@ -165,10 +179,13 @@ fn canonical_decryptors(decryptors: &[usize]) -> Vec<usize> {
     decryptors
 }
 
-fn domain_separator() -> [u8; 64] {
+fn domain_separator(label: &[u8]) -> [u8; 64] {
     let mut domain = [0u8; 64];
-    if let Some(prefix) = domain.get_mut(..DOMAIN_SEPARATOR_LABEL.len()) {
-        prefix.copy_from_slice(DOMAIN_SEPARATOR_LABEL);
+    let copy_len = label.len().min(domain.len());
+    if let Some(prefix) = domain.get_mut(..copy_len)
+        && let Some(label_prefix) = label.get(..copy_len)
+    {
+        prefix.copy_from_slice(label_prefix);
     }
     domain
 }
@@ -192,10 +209,48 @@ fn field_from_usize(value: usize) -> Result<Field, Error> {
     Ok(Field::from(value))
 }
 
-/// Poseidon2 SAFE evaluation of `F_k(S, ct)` in `R_q`.
+fn sponge_absorb_squeeze(
+    domain_label: &[u8],
+    input: Vec<Field>,
+    squeeze_len: usize,
+) -> Result<Zeroizing<Vec<Field>>, Error> {
+    let absorb_len = encode_length(input.len(), "absorb")?;
+    let squeeze_encoded = encode_length(squeeze_len, "squeeze")?;
+    let io_pattern = [ABSORB_FLAG | absorb_len, SQUEEZE_FLAG | squeeze_encoded];
+    let mut sponge = SafeSponge::start(io_pattern, domain_separator(domain_label));
+    sponge.absorb(input);
+    let squeezed = Zeroizing::new(sponge.squeeze());
+    sponge.finish();
+    if squeezed.len() != squeeze_len {
+        return Err(Error::malformed_shares(
+            0,
+            "PRF sponge produced the wrong number of field elements".to_string(),
+        ));
+    }
+    Ok(squeezed)
+}
+
+/// Unkeyed Poseidon2 digest of the designated set and ciphertext.
+fn hash_context(
+    decryptors: &[usize],
+    ciphertext: &Ciphertext,
+) -> Result<[Field; DIGEST_LEN], Error> {
+    let input = context_absorb_input(decryptors, ciphertext)?;
+    let squeezed = sponge_absorb_squeeze(CTX_DOMAIN_SEPARATOR_LABEL, input, DIGEST_LEN)?;
+    let mut digest = [Field::zero(); DIGEST_LEN];
+    for (index, slot) in digest.iter_mut().enumerate() {
+        let field = squeezed.get(index).ok_or_else(|| {
+            Error::malformed_shares(0, "PRF digest index out of range".to_string())
+        })?;
+        *slot = *field;
+    }
+    Ok(digest)
+}
+
+/// Poseidon2 SAFE evaluation of `F_k(H(S, ct))` in `R_q`.
 fn evaluate(
     key: &PrfKey,
-    decryptors: &[usize],
+    digest: &[Field; DIGEST_LEN],
     ciphertext: &Ciphertext,
 ) -> Result<Poly<PowerBasis>, Error> {
     let ctx = ciphertext.params.context_at_level(ciphertext.level)?;
@@ -206,21 +261,14 @@ fn evaluate(
         .checked_mul(degree)
         .ok_or_else(|| Error::malformed_shares(0, "PRF output dimensions overflow".to_string()))?;
 
-    let input = absorb_input(key, decryptors, ciphertext)?;
-    let absorb_len = encode_length(input.len(), "absorb")?;
-    let squeeze_len = encode_length(coefficient_count, "squeeze")?;
-    let io_pattern = [ABSORB_FLAG | absorb_len, SQUEEZE_FLAG | squeeze_len];
-
-    let mut sponge = SafeSponge::start(io_pattern, domain_separator());
-    sponge.absorb(input);
-    let squeezed = sponge.squeeze();
-    sponge.finish();
-    if squeezed.len() != coefficient_count {
-        return Err(Error::malformed_shares(
-            0,
-            "PRF sponge produced the wrong number of field elements".to_string(),
-        ));
-    }
+    let mut input = Zeroizing::new(Vec::with_capacity(1 + DIGEST_LEN));
+    input.push(Field::from_le_bytes_mod_order(&key.0));
+    input.extend_from_slice(digest);
+    let squeezed = sponge_absorb_squeeze(
+        EVAL_DOMAIN_SEPARATOR_LABEL,
+        input.to_vec(),
+        coefficient_count,
+    )?;
 
     let mut coefficients = ndarray::Array2::zeros((moduli.len(), degree));
     for (row_index, modulus) in moduli.iter().enumerate() {
@@ -249,13 +297,11 @@ fn evaluate(
     Ok(poly)
 }
 
-fn absorb_input(
-    key: &PrfKey,
+fn context_absorb_input(
     decryptors: &[usize],
     ciphertext: &Ciphertext,
 ) -> Result<Vec<Field>, Error> {
     let mut input = Vec::new();
-    input.push(Field::from_le_bytes_mod_order(&key.0));
     input.push(field_from_usize(decryptors.len())?);
     for &party_id in decryptors {
         input.push(field_from_usize(party_id)?);
@@ -347,10 +393,42 @@ mod tests {
         let mut rng = rng();
         let ct = test_ciphertext(&mut rng);
         let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
-        let decryptors = [1usize, 2];
-        let first = evaluate(&keys[0].outgoing[1], &decryptors, &ct).unwrap();
-        let second = evaluate(&keys[0].outgoing[1], &decryptors, &ct).unwrap();
+        let decryptors = canonical_decryptors(&[1usize, 2]);
+        let digest = hash_context(&decryptors, &ct).unwrap();
+        let first = evaluate(&keys[0].outgoing[1], &digest, &ct).unwrap();
+        let second = evaluate(&keys[0].outgoing[1], &digest, &ct).unwrap();
         assert_eq!(first.coefficients(), second.coefficients());
+    }
+
+    #[test]
+    fn context_digest_is_independent_of_the_key() {
+        let mut rng = rng();
+        let ct = test_ciphertext(&mut rng);
+        let decryptors = canonical_decryptors(&[1usize, 2]);
+        let first = hash_context(&decryptors, &ct).unwrap();
+        let second = hash_context(&decryptors, &ct).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn different_decryptor_sets_produce_different_digests() {
+        let mut rng = rng();
+        let ct = test_ciphertext(&mut rng);
+        let first = hash_context(&canonical_decryptors(&[1, 2]), &ct).unwrap();
+        let second = hash_context(&canonical_decryptors(&[1, 3]), &ct).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn self_term_is_skipped() {
+        let mut rng = rng();
+        let ct = test_ciphertext(&mut rng);
+        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let mask = keys[0].mask(&[1], &ct).unwrap();
+        assert!(
+            mask.coefficients().iter().all(|&value| value == 0),
+            "mask for S = {{i}} must be zero because k_{{i,i}} cancels"
+        );
     }
 
     #[test]
@@ -360,6 +438,17 @@ mod tests {
         let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
         let first = keys[0].mask(&[1, 2], &ct).unwrap();
         let second = keys[0].mask(&[1, 3], &ct).unwrap();
+        assert_ne!(first.coefficients(), second.coefficients());
+    }
+
+    #[test]
+    fn different_ciphertexts_produce_different_masks() {
+        let mut rng = rng();
+        let first_ct = test_ciphertext(&mut rng);
+        let second_ct = test_ciphertext(&mut rng);
+        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let first = keys[0].mask(&[1, 2], &first_ct).unwrap();
+        let second = keys[0].mask(&[1, 2], &second_ct).unwrap();
         assert_ne!(first.coefficients(), second.coefficients());
     }
 }
