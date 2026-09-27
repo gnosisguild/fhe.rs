@@ -106,6 +106,9 @@ required-features = ["experimental-mbfv"]
 name = "trbfv_add_bfv_share_insecure"
 required-features = ["experimental-mbfv"]
 
+[[example]]
+name = "trbfv_two_ciphertexts"
+
 [[test]]
 name = "trbfv_profiles"
 

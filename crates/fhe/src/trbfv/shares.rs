@@ -1565,4 +1565,80 @@ mod tests {
             .expect("Decoding plaintext failed");
         assert_eq!(decoded, plaintext_data);
     }
+
+    #[test]
+    fn two_ciphertexts_decrypt_with_independent_masks() {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let n = 3;
+        let threshold = 1;
+        let ctx = params.context_at_level(0).unwrap();
+        let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
+
+        let secret_key = SecretKey::random(&params, &mut rng);
+        let sk_poly = manager
+            .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
+            .unwrap();
+        let sk_sss = manager
+            .generate_secret_shares_from_poly(sk_poly, &mut rng)
+            .unwrap();
+
+        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
+            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        for i in 0..n {
+            let mut node_share = Array2::zeros((0, params.degree()));
+            for share in sk_sss.iter().take(params.moduli().len()) {
+                node_share
+                    .push_row(ndarray::ArrayView::from(share.row(i)))
+                    .unwrap();
+            }
+            sk_poly_sums[i] = manager
+                .aggregate_collected_shares(std::slice::from_ref(&node_share))
+                .unwrap();
+        }
+
+        let pk = PublicKey::new(&secret_key, &mut rng);
+        let mut encode = |value: u64| {
+            let mut data = vec![value];
+            data.resize(params.degree(), 0);
+            let pt = Plaintext::try_encode(&data, Encoding::poly(), &params).unwrap();
+            (data, Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap()))
+        };
+        let (left_data, ct_left) = encode(7);
+        let (right_data, ct_right) = encode(11);
+        let prf_keys = manager.generate_prf_keys(&mut rng).unwrap();
+        let reconstructing = vec![1usize, 2];
+
+        assert_ne!(
+            prf_keys[0]
+                .mask(&reconstructing, ct_left.as_ref())
+                .unwrap()
+                .coefficients(),
+            prf_keys[0]
+                .mask(&reconstructing, ct_right.as_ref())
+                .unwrap()
+                .coefficients(),
+            "each ciphertext must produce a distinct PRF mask"
+        );
+
+        for (ciphertext, expected) in [(ct_left, left_data), (ct_right, right_data)] {
+            let mut shares = Vec::new();
+            for i in 0..(threshold + 1) {
+                shares.push(part_dec(
+                    &manager,
+                    ciphertext.clone(),
+                    sk_poly_sums[i].clone(),
+                    i + 1,
+                    &reconstructing,
+                    &prf_keys[i],
+                    &params,
+                ));
+            }
+            let plaintext = manager
+                .decrypt_from_shares(shares, reconstructing.clone(), ciphertext)
+                .unwrap();
+            let decoded = Vec::<u64>::try_decode(&plaintext, Encoding::poly()).unwrap();
+            assert_eq!(decoded, expected);
+        }
+    }
 }

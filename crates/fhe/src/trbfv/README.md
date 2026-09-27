@@ -233,6 +233,11 @@ The example can be run with configurable parameters (threshold must equal `(num_
 cargo run --release --example trbfv_add -- --num_parties=10 --threshold=4
 ```
 
+Decrypting two ciphertexts with the same committee keys (a fresh mask `H(S, ct)` per ciphertext) is in [`examples/trbfv_two_ciphertexts.rs`](../../examples/trbfv_two_ciphertexts.rs):
+```bash
+cargo run --release --example trbfv_two_ciphertexts
+```
+
 Basic usage pattern:
 
 ```rust
