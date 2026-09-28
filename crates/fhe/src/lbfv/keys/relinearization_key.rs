@@ -170,7 +170,10 @@ impl LBFVRelinearizationKey {
         }
 
         // The URS `d1` and CRS `a` must not be derived from the same seed.
-        crate::reference_string::validate_distinct_seeds(&d1_seed, &a_seed)?;
+        // The role-neutral primitive reports the collision; the public
+        // multiparty error is assigned here at the l-BFV boundary.
+        crate::reference_string::validate_distinct_seeds(&d1_seed, &a_seed)
+            .map_err(|_| crate::MultipartyError::IdenticalReferenceStringSeeds)?;
 
         let r = Zeroizing::new(SecretKey::random(&sk.params, rng));
         let r_poly = Zeroizing::new(Poly::<PowerBasis>::try_convert_from(
