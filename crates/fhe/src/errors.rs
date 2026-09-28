@@ -88,6 +88,9 @@ pub enum ParameterSource {
     OutputSecretKey,
     PublicKey,
     Polynomial,
+    /// A one-time smudging noise owner's recorded binding: the party count
+    /// and complete BFV parameter set captured when the noise was sampled.
+    SmudgingNoise,
     KeySwitchingKey,
     RelinearizationKey,
     Multiplicator,
@@ -229,6 +232,23 @@ pub enum ThresholdError {
     SmudgingBoundInfeasible {
         /// Description of the violated constraint
         reason: String,
+    },
+
+    /// Smudging noise was sampled for a different party count than the
+    /// dealer's.
+    ///
+    /// Smudging noise owners record the party count of the generator that
+    /// produced them; a manager refuses to deal noise sized for another
+    /// committee because the smudging bound would no longer hold.
+    #[error(
+        "smudging noise party count {noise_parties} does not match dealer party count \
+         {dealer_parties}"
+    )]
+    SmudgingNoisePartyCountMismatch {
+        /// Party count the noise was generated for
+        noise_parties: usize,
+        /// Party count of the manager dealing the noise
+        dealer_parties: usize,
     },
 
     /// The number of parties is too large for the modulus chain.

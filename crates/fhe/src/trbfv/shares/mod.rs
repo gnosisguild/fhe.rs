@@ -160,11 +160,32 @@ impl ShareManager {
     /// noise: it consumes the [`SmudgingNoise`] owner and deals the
     /// underlying polynomial with the same layout as
     /// [`ShareManager::generate_secret_key_shares`].
+    ///
+    /// # Binding checks
+    ///
+    /// Before the polynomial is extracted or any randomness is consumed, the
+    /// noise owner must have been sampled for this manager's party count and
+    /// its complete BFV parameter set must equal this manager's parameters
+    /// (pointer-equality fast path, then value equality, so independently
+    /// built equivalent configurations are accepted). This rejects noise
+    /// dealt under a different party count, plaintext modulus, ciphertext
+    /// moduli, or error variance — cases ring-context equality alone cannot
+    /// catch. A rejected owner is dropped unread and wiped through its
+    /// zeroizing storage.
+    ///
+    /// The circuit size `m`, multiplicative depth, and `lambda` that drive
+    /// the ciphertext-noise and smudging bounds (and whether the bound is
+    /// feasible) are caller choices and are deliberately not verified here.
     pub fn generate_smudging_shares<R: RngCore + CryptoRng>(
         &self,
         noise: SmudgingNoise,
         rng: &mut R,
     ) -> Result<DealtSmudgingShares, Error> {
+        // The binding check runs first: no polynomial extraction and no
+        // dealing randomness before the noise is known to match this
+        // manager. On failure the owner is dropped here, and `Zeroizing`
+        // wipes the never-read noise.
+        noise.validate_dealer_binding(self.n, &self.params)?;
         self.deal_poly(noise.into_poly(), rng)
             .map(DealtSmudgingShares::new)
     }
@@ -614,9 +635,9 @@ mod tests {
     )]
     use super::*;
     use crate::ThresholdError;
-    use crate::bfv::{Encoding, PublicKey, SecretKey};
-    use crate::support::presets::{insecure, secure8192};
-    use crate::trbfv::smudging::{SmudgingConfig, SmudgingNoiseGenerator};
+    use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
+    use crate::support::presets::{insecure, insecure_128, secure8192};
+    use crate::trbfv::smudging::{MAX_LAMBDA, SmudgingConfig, SmudgingNoiseGenerator};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
 
@@ -779,6 +800,289 @@ mod tests {
             shares.iter().any(|m| m.iter().any(|&c| c != 0)),
             "secure smudging shares should not all be zero"
         );
+    }
+
+    /// Build threshold-BFV parameters from explicit values so a single field
+    /// can be varied while the rest (and often the ring context) is fixed.
+    fn binding_params(
+        plaintext: u64,
+        moduli: &[u64],
+        variance: usize,
+        error1_variance: &str,
+    ) -> Arc<BfvParameters> {
+        BfvParametersBuilder::new()
+            .set_degree(insecure_128::DEGREE)
+            .set_plaintext_modulus(plaintext)
+            .set_moduli(moduli)
+            .set_variance(variance)
+            .set_error1_variance_str(error1_variance)
+            .unwrap()
+            .build_arc()
+            .unwrap()
+    }
+
+    /// The supplied degree-128 threshold profile values, as an independent
+    /// builder invocation of [`crate::support::presets::insecure`].
+    fn insecure_threshold_binding_params() -> Arc<BfvParameters> {
+        binding_params(
+            insecure_128::threshold::PLAINTEXT_MODULUS,
+            insecure_128::threshold::MODULI,
+            insecure_128::threshold::VARIANCE,
+            insecure_128::threshold::ERROR1_VARIANCE,
+        )
+    }
+
+    /// Assert that a noise generator built over `generator_params` is
+    /// rejected by a manager over `manager_params` with a parameter mismatch
+    /// before any dealing randomness is consumed.
+    fn assert_dealing_rejects_mismatched_params(
+        manager_params: Arc<BfvParameters>,
+        generator_params: Arc<BfvParameters>,
+    ) {
+        let manager = ShareManager::new(5, 2, manager_params).unwrap();
+        let generator =
+            SmudgingNoiseGenerator::new(SmudgingConfig::new(generator_params, 5, 1, 2).unwrap())
+                .unwrap();
+        let mut rng = crate::support::presets::rng(172);
+        let noise = generator.generate(&mut rng).unwrap();
+
+        let rng_snapshot = rng.clone();
+        let result = manager.generate_smudging_shares(noise, &mut rng);
+        assert!(matches!(
+            result,
+            Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::SmudgingNoise,
+                right: crate::ParameterSource::Parameters,
+            })
+        ));
+        // The rejection happened before any dealing randomness was consumed.
+        assert_eq!(rng, rng_snapshot);
+    }
+
+    #[test]
+    fn smudging_dealing_accepts_matched_binding() {
+        let params = insecure_threshold_binding_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let generator =
+            SmudgingNoiseGenerator::new(SmudgingConfig::new(params, 5, 1, 2).unwrap()).unwrap();
+        let mut rng = rng();
+        let noise = generator.generate(&mut rng).unwrap();
+        assert!(manager.generate_smudging_shares(noise, &mut rng).is_ok());
+    }
+
+    #[test]
+    fn smudging_dealing_accepts_independently_built_equal_params() {
+        // The manager and the generator were configured from independent
+        // builder invocations; full value equality must accept equivalent
+        // configurations, not just identical allocations.
+        let manager_params = insecure_threshold_binding_params();
+        let generator_params = insecure_threshold_binding_params();
+        assert_ne!(Arc::as_ptr(&manager_params), Arc::as_ptr(&generator_params));
+        let manager = ShareManager::new(5, 2, manager_params).unwrap();
+        let generator =
+            SmudgingNoiseGenerator::new(SmudgingConfig::new(generator_params, 5, 1, 2).unwrap())
+                .unwrap();
+        let mut rng = rng();
+        let noise = generator.generate(&mut rng).unwrap();
+        assert!(manager.generate_smudging_shares(noise, &mut rng).is_ok());
+    }
+
+    #[test]
+    fn smudging_dealing_rejects_party_count_mismatch_before_randomness() {
+        let params = insecure_threshold_binding_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        // The review reproducer configuration: noise sized for one party,
+        // dealt by a five-party manager.
+        let generator =
+            SmudgingNoiseGenerator::new(SmudgingConfig::new(params, 1, 1, 2).unwrap()).unwrap();
+        let mut rng = crate::support::presets::rng(172);
+        let noise = generator.generate(&mut rng).unwrap();
+
+        let rng_snapshot = rng.clone();
+        let error = manager
+            .generate_smudging_shares(noise, &mut rng)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Threshold(ThresholdError::SmudgingNoisePartyCountMismatch {
+                noise_parties: 1,
+                dealer_parties: 5,
+            })
+        ));
+        // The rejection happened before any dealing randomness was consumed.
+        assert_eq!(rng, rng_snapshot);
+    }
+
+    #[test]
+    fn smudging_dealing_rejects_plaintext_modulus_mismatch_same_ring() {
+        // Same degree, ciphertext moduli, and variances: only the plaintext
+        // modulus differs, so ring-context equality alone cannot catch this.
+        assert_dealing_rejects_mismatched_params(
+            insecure_threshold_binding_params(),
+            binding_params(
+                101,
+                insecure_128::threshold::MODULI,
+                insecure_128::threshold::VARIANCE,
+                insecure_128::threshold::ERROR1_VARIANCE,
+            ),
+        );
+    }
+
+    #[test]
+    fn smudging_dealing_rejects_ciphertext_moduli_mismatch() {
+        assert_dealing_rejects_mismatched_params(
+            insecure_threshold_binding_params(),
+            binding_params(
+                insecure_128::threshold::PLAINTEXT_MODULUS,
+                insecure_128::share_enc::MODULI,
+                insecure_128::threshold::VARIANCE,
+                insecure_128::threshold::ERROR1_VARIANCE,
+            ),
+        );
+    }
+
+    #[test]
+    fn smudging_dealing_rejects_variance_mismatch_same_ring() {
+        assert_dealing_rejects_mismatched_params(
+            insecure_threshold_binding_params(),
+            binding_params(
+                insecure_128::threshold::PLAINTEXT_MODULUS,
+                insecure_128::threshold::MODULI,
+                insecure_128::threshold::VARIANCE - 1,
+                insecure_128::threshold::ERROR1_VARIANCE,
+            ),
+        );
+    }
+
+    #[test]
+    fn smudging_dealing_rejects_error1_variance_mismatch_same_ring() {
+        let mut mismatched_error1_variance = insecure_128::threshold::ERROR1_VARIANCE.to_string();
+        mismatched_error1_variance.pop();
+        mismatched_error1_variance.push('1');
+        assert_dealing_rejects_mismatched_params(
+            insecure_threshold_binding_params(),
+            binding_params(
+                insecure_128::threshold::PLAINTEXT_MODULUS,
+                insecure_128::threshold::MODULI,
+                insecure_128::threshold::VARIANCE,
+                &mismatched_error1_variance,
+            ),
+        );
+    }
+
+    /// Largest lambda accepted by `SmudgingNoiseGenerator::new` for a
+    /// configuration. `B_sm` grows monotonically with lambda, so the strict
+    /// correctness inequality fails from the first infeasible lambda on.
+    fn max_feasible_lambda(params: &Arc<BfvParameters>, n: usize, m: usize) -> usize {
+        let mut feasible = 0;
+        for lambda in 0..=MAX_LAMBDA {
+            match SmudgingNoiseGenerator::new(
+                SmudgingConfig::new(params.clone(), n, m, lambda).unwrap(),
+            ) {
+                Ok(_) => feasible = lambda,
+                Err(_) => break,
+            }
+        }
+        feasible
+    }
+
+    #[test]
+    fn smudging_dealing_rejects_reported_misdecryption_configurations() {
+        // Issue #241 recorded a five-party reproduction (degree-8192
+        // parameters, n = 5, threshold = 2, m = 1) in which dealing used to
+        // succeed without error and the plaintext later decoded incorrectly
+        // (2,590 and 8,192 of 8,192 coefficients respectively), for two
+        // configuration classes:
+        // - a generator configured for n = 1 at its largest feasible lambda
+        //   (recorded: 71), and
+        // - a same-ring generator with plaintext modulus t = 2 instead of
+        //   t = 1,000,000, at its largest feasible lambda (recorded: 88).
+        // Both classes must now be rejected at dealing, before any dealing
+        // randomness is consumed, while the matched n = 5 generator at its
+        // own largest feasible lambda (recorded: 69) is still accepted.
+        // The lambdas are computed dynamically so later bound changes cannot
+        // make the test brittle; each must stay at least the recorded value
+        // for this test to keep speaking about the reported configurations.
+        // The review's decryption-side evidence establishes what used to
+        // happen; matched decryption with real smudging is covered by
+        // `tests/trbfv_e2e.rs`.
+        let manager_params = secure8192().unwrap().parameters;
+        let same_ring_params = BfvParametersBuilder::new()
+            .set_degree(8192)
+            .set_plaintext_modulus(2)
+            .set_moduli(&[0x0400000000c00001, 0x0400000000a40001, 0x0400000000990001])
+            .set_variance(10)
+            .set_error1_variance_str("17723039943798878305460955570711717478400")
+            .unwrap()
+            .build_arc()
+            .unwrap();
+        let manager = ShareManager::new(5, 2, manager_params.clone()).unwrap();
+        let mut rng = crate::support::presets::rng(7);
+
+        // Wrong party count: a one-party generator over the manager's exact
+        // parameters.
+        let parties_lambda = max_feasible_lambda(&manager_params, 1, 1);
+        assert!(
+            parties_lambda >= 71,
+            "recorded review lambda 71 must remain feasible for the reported configuration"
+        );
+        let noise = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(manager_params.clone(), 1, 1, parties_lambda).unwrap(),
+        )
+        .unwrap()
+        .generate(&mut rng)
+        .unwrap();
+        let rng_snapshot = rng.clone();
+        assert!(matches!(
+            manager.generate_smudging_shares(noise, &mut rng),
+            Err(Error::Threshold(
+                ThresholdError::SmudgingNoisePartyCountMismatch {
+                    noise_parties: 1,
+                    dealer_parties: 5,
+                }
+            ))
+        ));
+        // Rejected before any dealing randomness was consumed.
+        assert_eq!(rng, rng_snapshot);
+
+        // Same ring, plaintext modulus t = 2 instead of t = 1,000,000, at
+        // this configuration's largest feasible lambda.
+        let plaintext_lambda = max_feasible_lambda(&same_ring_params, 5, 1);
+        assert!(
+            plaintext_lambda >= 88,
+            "recorded review lambda 88 must remain feasible for the reported configuration"
+        );
+        let noise = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(same_ring_params, 5, 1, plaintext_lambda).unwrap(),
+        )
+        .unwrap()
+        .generate(&mut rng)
+        .unwrap();
+        let rng_snapshot = rng.clone();
+        assert!(matches!(
+            manager.generate_smudging_shares(noise, &mut rng),
+            Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::SmudgingNoise,
+                right: crate::ParameterSource::Parameters,
+            })
+        ));
+        // Rejected before any dealing randomness was consumed.
+        assert_eq!(rng, rng_snapshot);
+
+        // The matched n = 5 configuration at its own largest feasible lambda
+        // (recorded: 69) is still accepted.
+        let matched_lambda = max_feasible_lambda(&manager_params, 5, 1);
+        assert!(
+            matched_lambda >= 69,
+            "recorded review lambda 69 must remain feasible for the matched configuration"
+        );
+        let noise = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(manager_params.clone(), 5, 1, matched_lambda).unwrap(),
+        )
+        .unwrap()
+        .generate(&mut rng)
+        .unwrap();
+        assert!(manager.generate_smudging_shares(noise, &mut rng).is_ok());
     }
 
     #[test]
