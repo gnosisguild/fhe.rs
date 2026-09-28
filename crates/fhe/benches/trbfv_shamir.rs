@@ -11,9 +11,7 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::{
-    SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
-};
+use fhe::trbfv::{SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe_traits::{FheEncoder, FheEncrypter};
 use ndarray::Array2;
 use rand::SeedableRng;
@@ -69,30 +67,6 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
             })
             .collect();
 
-        let smudging_config = SmudgingConfig::new(params.clone(), party_count, 1, 0)
-            .expect("zero-security smudging configuration must be valid");
-        let smudging_noise = SmudgingNoiseGenerator::new(smudging_config)
-            .expect("smudging generator must be valid")
-            .generate(&mut setup_rng)
-            .expect("smudging noise generation must succeed");
-        let smudging_shares = manager
-            .generate_smudging_shares(smudging_noise, &mut setup_rng)
-            .expect("smudging share generation must succeed")
-            .into_transport();
-        let smudging_aggregates: Vec<_> = (0..party_count)
-            .map(|party_index| {
-                let share = Array2::from_shape_fn(
-                    (modulus_count, degree),
-                    |(modulus_index, coefficient)| {
-                        smudging_shares[modulus_index][[party_index, coefficient]]
-                    },
-                );
-                manager
-                    .aggregate_smudging_shares(vec![SmudgingShare::from_transport(share)])
-                    .expect("smudging share aggregation must succeed")
-            })
-            .collect();
-
         let public_key = PublicKey::new(&secret_key, &mut setup_rng);
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params)
             .expect("plaintext encoding must succeed");
@@ -101,17 +75,28 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
                 .try_encrypt(&plaintext, &mut setup_rng)
                 .expect("encryption must succeed"),
         );
+        let prf_keys = manager
+            .generate_prf_keys(&mut setup_rng)
+            .expect("PRF keys must be generated");
+        let smudging_config = SmudgingConfig::new(params.clone(), party_count, 1, 0)
+            .expect("zero-security smudging configuration must be valid");
+        let smudging_generator =
+            SmudgingNoiseGenerator::new(smudging_config).expect("smudging generator must be valid");
         let party_ids: Vec<_> = (1..=threshold + 1).collect();
         let decryption_shares: Vec<_> = party_ids
             .iter()
             .copied()
-            .zip(smudging_aggregates)
-            .map(|(party_id, smudging_share)| {
+            .map(|party_id| {
                 manager
                     .decryption_share(
                         &ciphertext,
                         &aggregated_shares[party_id - 1],
-                        smudging_share,
+                        party_id,
+                        &party_ids,
+                        smudging_generator
+                            .generate(&mut setup_rng)
+                            .expect("smudging noise generation must succeed"),
+                        &prf_keys[party_id - 1],
                     )
                     .expect("decryption-share generation must succeed")
             })

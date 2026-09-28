@@ -47,10 +47,12 @@ impl fmt::Debug for RnsShareSet {
 }
 
 /// Wipe-on-drop RNS matrix with layout `[modulus][coefficient]`.
+#[cfg(test)]
 pub(crate) struct SecretRnsMatrix {
     values: Array2<u64>,
 }
 
+#[cfg(test)]
 impl SecretRnsMatrix {
     /// Transfers the reconstructed matrix to its caller.
     pub(crate) fn into_matrix(mut self) -> Array2<u64> {
@@ -58,12 +60,14 @@ impl SecretRnsMatrix {
     }
 }
 
+#[cfg(test)]
 impl Drop for SecretRnsMatrix {
     fn drop(&mut self) {
         self.values.iter_mut().for_each(|value| value.zeroize());
     }
 }
 
+#[cfg(test)]
 impl fmt::Debug for SecretRnsMatrix {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -235,27 +239,16 @@ impl<'a> RnsShamir<'a> {
     }
 
     /// Reconstructs one canonical RNS matrix from exactly `threshold + 1` shares.
+    #[cfg(test)]
     pub(crate) fn reconstruct(
         &self,
         shares: &[ArrayView2<'_, u64>],
         party_ids: &[usize],
     ) -> Result<SecretRnsMatrix, Error> {
-        let required = self.threshold + 1;
-        if shares.len() != required {
-            return Err(Error::share_count_mismatch(shares.len(), required));
-        }
         if party_ids.len() != shares.len() {
             return Err(Error::share_count_mismatch(party_ids.len(), shares.len()));
         }
-
-        for (index, &party_id) in party_ids.iter().enumerate() {
-            if party_id == 0 || party_id > self.party_count {
-                return Err(Error::invalid_party_id(party_id, self.party_count));
-            }
-            if party_ids[..index].contains(&party_id) {
-                return Err(Error::duplicate_party_id(party_id));
-            }
-        }
+        self.validate_decryptor_set(party_ids)?;
 
         for (&party_id, share) in party_ids.iter().zip(shares) {
             self.validate_matrix(*share, party_id, "share")?;
@@ -297,7 +290,7 @@ impl<'a> RnsShamir<'a> {
         Ok(SecretRnsMatrix { values })
     }
 
-    fn validate_matrix(
+    pub(crate) fn validate_matrix(
         &self,
         matrix: ArrayView2<'_, u64>,
         party_id: usize,
@@ -324,6 +317,24 @@ impl<'a> RnsShamir<'a> {
                         **modulus
                     ),
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks that `party_ids` is a designated decryptor set: exactly
+    /// `threshold + 1` distinct indices in `1..=n`.
+    pub(crate) fn validate_decryptor_set(&self, party_ids: &[usize]) -> Result<(), Error> {
+        let required = self.threshold + 1;
+        if party_ids.len() != required {
+            return Err(Error::share_count_mismatch(party_ids.len(), required));
+        }
+        for (index, &party_id) in party_ids.iter().enumerate() {
+            if party_id == 0 || party_id > self.party_count {
+                return Err(Error::invalid_party_id(party_id, self.party_count));
+            }
+            if party_ids[..index].contains(&party_id) {
+                return Err(Error::duplicate_party_id(party_id));
             }
         }
         Ok(())

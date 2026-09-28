@@ -5,7 +5,7 @@ mod support;
 use fhe::bfv::CommonRandomPoly;
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::PublicKeyShare;
-use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
+use fhe::trbfv::ShareManager;
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
 
@@ -52,8 +52,6 @@ fn bench_data_sizes(c: &mut Criterion) {
     // Generate parties with threshold BFV keys and BFV encryption keys
     println!("\n📊 Generating party keys...");
     let mut parties = Vec::new();
-    let mut all_secret_key_shares_transport = Vec::new();
-    let mut all_smudging_shares_transport = Vec::new();
 
     for _party_id in 0..num_parties {
         let mut rng = make_rng();
@@ -74,30 +72,16 @@ fn bench_data_sizes(c: &mut Criterion) {
             .unwrap()
             .into_transport();
 
-        // Generate smudging noise shares: compute the bound with the
-        // smudging machinery, sample the noise, and deal it immediately.
-        let config =
-            SmudgingConfig::new(params_trbfv.clone(), num_parties, 100, preset.lambda).unwrap();
-        let generator = SmudgingNoiseGenerator::new(config).unwrap();
-        let smudging_noise = generator.generate(&mut rng).unwrap();
-        let smudging_shares_transport = share_manager
-            .generate_smudging_shares(smudging_noise, &mut rng)
-            .unwrap()
-            .into_transport();
-
         // Generate BFV keys for share encryption
         let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
         let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
 
-        all_secret_key_shares_transport.push(secret_key_shares_transport.clone());
-        all_smudging_shares_transport.push(smudging_shares_transport.clone());
         parties.push((
             secret_key,
             pk_share,
             sk_bfv,
             pk_bfv,
             secret_key_shares_transport,
-            smudging_shares_transport,
         ));
     }
 
@@ -131,7 +115,7 @@ fn bench_data_sizes(c: &mut Criterion) {
     let mut encrypted_shares_count = 0;
     let mut total_encrypted_size = 0;
 
-    for (_, _, _, _, secret_key_shares_transport, smudging_shares_transport) in parties.iter() {
+    for (_, _, _, _, secret_key_shares_transport) in parties.iter() {
         for (receiver_idx, receiver_party) in parties.iter().enumerate().take(num_parties) {
             let receiver_pk = &receiver_party.3;
             let mut rng = make_rng();
@@ -145,19 +129,6 @@ fn bench_data_sizes(c: &mut Criterion) {
                 let _ct = receiver_pk.try_encrypt(&pt, &mut rng).unwrap();
 
                 // Estimate ciphertext size (2 polynomials × degree × moduli × 8 bytes)
-                let ct_size = 2 * degree * moduli_bfv.len() * 8;
-                total_encrypted_size += ct_size;
-                encrypted_shares_count += 1;
-            }
-
-            // Encrypt esi shares
-            for smudging_qi_matrix in smudging_shares_transport.iter().take(num_moduli) {
-                let share_row = smudging_qi_matrix.row(receiver_idx);
-                let share_vec: Vec<u64> = share_row.to_vec();
-
-                let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv).unwrap();
-                let _ct = receiver_pk.try_encrypt(&pt, &mut rng).unwrap();
-
                 let ct_size = 2 * degree * moduli_bfv.len() * 8;
                 total_encrypted_size += ct_size;
                 encrypted_shares_count += 1;
@@ -182,11 +153,11 @@ fn bench_data_sizes(c: &mut Criterion) {
 
     println!("\n📦 BFV Encrypted Share Sizes:");
     println!(
-        "  - Total encrypted shares: {} ({} parties × {} receivers × {} moduli × 2 share types)",
+        "  - Total encrypted shares: {} ({} parties × {} receivers × {} moduli)",
         encrypted_shares_count, num_parties, num_parties, num_moduli
     );
     println!(
-        "  - Encryptions per party: {} ({} receivers × {} moduli × 2 share types)",
+        "  - Encryptions per party: {} ({} receivers × {} moduli)",
         encrypted_shares_count / num_parties,
         num_parties,
         num_moduli
@@ -200,7 +171,7 @@ fn bench_data_sizes(c: &mut Criterion) {
     );
     let broadcast_size_per_party = total_encrypted_size / num_parties;
     println!(
-        "  - Broadcast size per party: {} ({} parties × {} moduli × 2 share types × {})",
+        "  - Broadcast size per party: {} ({} parties × {} moduli × {})",
         format_bytes(broadcast_size_per_party),
         num_parties,
         num_moduli,

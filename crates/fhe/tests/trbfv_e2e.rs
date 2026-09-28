@@ -1,18 +1,15 @@
 //! End-to-end threshold BFV addition test.
 //!
-//! Verifies standard BFV encryption, Shamir secret sharing, smudging, and
-//! threshold decryption without the distributed l-BFV key or relinearization
-//! layer.
+//! Verifies standard BFV encryption, Shamir secret sharing, local smudging,
+//! PRF masking, and threshold decryption without the distributed l-BFV key
+//! or relinearization layer.
 
 #![allow(clippy::expect_used, clippy::indexing_slicing, clippy::unwrap_used)]
 
 use std::sync::Arc;
 
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::{
-    AggregatedSecretKeyShare, AggregatedSmudgingShare, SecretKeyShare, ShareManager,
-    SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
-};
+use fhe::trbfv::{SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::Array2;
@@ -41,74 +38,33 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
         .generate_secret_key_shares(secret_key_poly, &mut rng)
         .expect("secret key share generation")
         .into_transport();
+    let prf_keys = manager
+        .generate_prf_keys(&mut rng)
+        .expect("committee PRF keys");
 
-    let smudging_shares_transport: Vec<Vec<Array2<u64>>> = (0..N)
-        .map(|_| {
-            // The evaluated ciphertext below is the sum of two fresh encryptions.
-            let config =
-                SmudgingConfig::new(params.clone(), N, 2, LAMBDA_VALUE).expect("smudging config");
-            let generator = SmudgingNoiseGenerator::new(config).expect("smudging generator");
-            let noise = generator
-                .generate(&mut rng)
-                .expect("smudging noise generation");
-            manager
-                .generate_smudging_shares(noise, &mut rng)
-                .expect("smudging noise share generation")
-                .into_transport()
-        })
-        .collect();
-
-    let mut secret_key_shares_collected: Vec<Vec<SecretKeyShare>> =
-        (0..N).map(|_| Vec::new()).collect();
-    let mut smudging_shares_collected: Vec<Vec<SmudgingShare>> =
-        (0..N).map(|_| Vec::new()).collect();
-    for receiver_idx in 0..N {
-        let mut secret_key_rows = Array2::zeros((0, params.degree()));
-        for shares_for_modulus in secret_key_shares_transport
-            .iter()
-            .take(params.moduli().len())
-        {
-            secret_key_rows
-                .push_row(ndarray::ArrayView::from(
-                    shares_for_modulus.row(receiver_idx),
-                ))
-                .expect("append secret key share row");
-        }
-        secret_key_shares_collected[receiver_idx]
-            .push(SecretKeyShare::from_transport(secret_key_rows));
-
-        for noise_shares in &smudging_shares_transport {
-            let mut smudging_rows = Array2::zeros((0, params.degree()));
-            for shares_for_modulus in noise_shares.iter().take(params.moduli().len()) {
-                smudging_rows
+    let secret_key_shares_collected: Vec<Vec<SecretKeyShare>> = (0..N)
+        .map(|receiver_idx| {
+            let mut secret_key_rows = Array2::zeros((0, params.degree()));
+            for shares_for_modulus in secret_key_shares_transport
+                .iter()
+                .take(params.moduli().len())
+            {
+                secret_key_rows
                     .push_row(ndarray::ArrayView::from(
                         shares_for_modulus.row(receiver_idx),
                     ))
-                    .expect("append smudging share row");
+                    .expect("append secret key share row");
             }
-            smudging_shares_collected[receiver_idx]
-                .push(SmudgingShare::from_transport(smudging_rows));
-        }
-    }
-
-    let secret_key_aggregates: Vec<Option<AggregatedSecretKeyShare>> = secret_key_shares_collected
-        .into_iter()
-        .map(|collected| {
-            Some(
-                manager
-                    .aggregate_secret_key_shares(collected.into_iter().collect())
-                    .expect("aggregate secret key shares"),
-            )
+            vec![SecretKeyShare::from_transport(secret_key_rows)]
         })
         .collect();
-    let mut smudging_aggregates: Vec<Option<AggregatedSmudgingShare>> = smudging_shares_collected
+
+    let secret_key_aggregates: Vec<_> = secret_key_shares_collected
         .into_iter()
         .map(|collected| {
-            Some(
-                manager
-                    .aggregate_smudging_shares(collected.into_iter().collect())
-                    .expect("aggregate smudging shares"),
-            )
+            manager
+                .aggregate_secret_key_shares(collected)
+                .expect("aggregate secret key shares")
         })
         .collect();
 
@@ -123,6 +79,9 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     let ct_b = encrypt(3);
     let ciphertext = Arc::new(&ct_a + &ct_b);
 
+    let config = SmudgingConfig::new(params.clone(), N, 2, LAMBDA_VALUE).expect("smudging config");
+    let generator = SmudgingNoiseGenerator::new(config).expect("smudging generator");
+
     let reconstructing = vec![1, 2];
     let decryption_shares: Vec<Poly<PowerBasis>> = reconstructing
         .iter()
@@ -131,12 +90,11 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
             manager
                 .decryption_share(
                     &ciphertext,
-                    secret_key_aggregates[index]
-                        .as_ref()
-                        .expect("one key owner per party"),
-                    smudging_aggregates[index]
-                        .take()
-                        .expect("one noise owner per party"),
+                    &secret_key_aggregates[index],
+                    party_id,
+                    &reconstructing,
+                    generator.generate(&mut rng).expect("local smudging"),
+                    &prf_keys[index],
                 )
                 .expect("decryption share")
         })
