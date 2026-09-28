@@ -17,6 +17,19 @@
 //! the paper's gadget dimension because of the HPS optimisation
 //! (<https://eprint.iacr.org/2018/117>).
 //!
+//! # Independence of the reference strings
+//!
+//! l-BFV key generation consumes two shared reference strings: the CRS `a`
+//! carried by the public key and the URS `d1` used for relinearization-key
+//! generation. The two strings **must be generated independently** (distinct
+//! seeds or separately sampled polynomials). Constructors in this module
+//! reject identical seeds, rows repeated within one string, and rows shared
+//! between the two strings, so no key built from observably reused randomness
+//! is returned or deserialized. These equality checks cannot certify
+//! independence against deliberately correlated but unequal randomness;
+//! obtaining the reference strings from an independently sampled, honestly
+//! generated source remains a protocol responsibility.
+//!
 //! The l-BFV relinearization argument relies on the circular-security
 //! assumption inherited from the cited multi-key construction. This caveat
 //! applies to all key material produced by this module and by [`crate::trlbfv`].

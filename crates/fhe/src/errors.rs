@@ -93,6 +93,25 @@ pub enum ParameterSource {
     Multiplicator,
 }
 
+/// Identifies which reference-string vector a validation failure refers to.
+///
+/// l-BFV key generation consumes two shared reference strings: the common
+/// reference string (CRS) `a` and the uniform random string (URS) `d1`. The
+/// two vectors must be generated independently; this enum names the vector a
+/// [`MultipartyError`] refers to without disclosing any polynomial contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReferenceStringRole {
+    /// The common reference string `a` (public-key CRS rows, or the
+    /// relinearization-key `s -> r` rows).
+    Crs,
+    /// The uniform random string `d1` (the relinearization-key `r -> s` rows).
+    Urs,
+    /// A standalone common-random-polynomial vector whose CRS/URS role is not
+    /// bound at construction time.
+    CommonRandomPolyVector,
+}
+
 /// Ciphertext validation failures.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[expect(missing_docs, reason = "error variants are documented inline")]
@@ -369,6 +388,25 @@ pub enum MultipartyError {
 
     #[error("Common random polynomial seed does not match polynomial at index {index}")]
     CommonRandomPolynomialSeedMismatch { index: usize },
+
+    #[error(
+        "Reference strings must be generated independently: the CRS and URS seeds are identical"
+    )]
+    IdenticalReferenceStringSeeds,
+
+    #[error(
+        "{role:?} reference string contains a repeated polynomial row (indices {first_index} and {second_index})"
+    )]
+    RepeatedReferenceStringRow {
+        role: ReferenceStringRole,
+        first_index: usize,
+        second_index: usize,
+    },
+
+    #[error(
+        "Reference strings are not independent: CRS row {crs_index} equals URS row {urs_index}"
+    )]
+    OverlappingReferenceStringRows { crs_index: usize, urs_index: usize },
 
     #[error("Round-two relinearization share is missing its round-one aggregation")]
     MissingRelinearizationRoundOneShare,
@@ -687,7 +725,7 @@ impl ParametersError {
 mod tests {
     use super::{
         Error, EvaluationKeyError, EvaluationOperation, MultipartyError, ParameterSource,
-        ParametersError, SerializationError, SerializedObject,
+        ParametersError, ReferenceStringRole, SerializationError, SerializedObject,
     };
 
     #[test]
@@ -730,6 +768,27 @@ mod tests {
             })
             .to_string(),
             "Multiparty protocol error: Expected 3 common random polynomials, got 2"
+        );
+        assert_eq!(
+            Error::Multiparty(MultipartyError::IdenticalReferenceStringSeeds).to_string(),
+            "Multiparty protocol error: Reference strings must be generated independently: the CRS and URS seeds are identical"
+        );
+        assert_eq!(
+            Error::Multiparty(MultipartyError::RepeatedReferenceStringRow {
+                role: ReferenceStringRole::Urs,
+                first_index: 0,
+                second_index: 2,
+            })
+            .to_string(),
+            "Multiparty protocol error: Urs reference string contains a repeated polynomial row (indices 0 and 2)"
+        );
+        assert_eq!(
+            Error::Multiparty(MultipartyError::OverlappingReferenceStringRows {
+                crs_index: 1,
+                urs_index: 2,
+            })
+            .to_string(),
+            "Multiparty protocol error: Reference strings are not independent: CRS row 1 equals URS row 2"
         );
     }
 }

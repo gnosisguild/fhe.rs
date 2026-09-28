@@ -138,6 +138,12 @@ impl LBFVRelinearizationKey {
     /// Generate the two key-switching-key components from a secret key using
     /// provided seeds for `d1` (URS) and `a` (CRS).
     ///
+    /// The two seeds must be distinct: the URS and CRS are separate reference
+    /// strings and must be generated independently. Identical seeds are
+    /// rejected before any key material is produced, and the generated
+    /// concrete rows are validated (row uniqueness and CRS/URS separation)
+    /// before the KSKs are returned.
+    ///
     /// Returns `(ksk_r_to_s, ksk_s_to_r)` — the two KSKs that together with
     /// a `b_vec` form a complete relinearization key.
     pub(crate) fn generate_components_with_seed<R: RngCore + CryptoRng>(
@@ -162,6 +168,9 @@ impl LBFVRelinearizationKey {
                 "These parameters do not support key switching".to_string(),
             ));
         }
+
+        // The URS `d1` and CRS `a` must not be derived from the same seed.
+        crate::reference_string::validate_distinct_seeds(&d1_seed, &a_seed)?;
 
         let r = Zeroizing::new(SecretKey::random(&sk.params, rng));
         let r_poly = Zeroizing::new(Poly::<PowerBasis>::try_convert_from(
@@ -203,11 +212,28 @@ impl LBFVRelinearizationKey {
             rng,
         )?;
 
+        // Final row-level gate on the generated concrete rows. Distinct seeds
+        // make collisions implausible, but this boundary also returns key
+        // material directly to callers (for example threshold shares), so the
+        // generated URS `d1` and CRS `a` rows are validated like every other
+        // reference-string input before the KSKs are handed out.
+        crate::reference_string::validate_reference_string_pair(
+            ctx_relin_key,
+            &ksk_s_to_r.c1,
+            &ksk_r_to_s.c1,
+        )?;
+
         Ok((ksk_r_to_s, ksk_s_to_r))
     }
 
     /// Generate the two key-switching-key components from a secret key using
     /// explicit URS/CRS polynomials instead of seeds.
+    ///
+    /// The CRS `a_polys` and URS `d1_polys` must be generated independently:
+    /// rows repeated within either vector and rows shared between the two
+    /// vectors are rejected before any secret-dependent computation runs.
+    /// The checks operate on the supplied concrete values only; they cannot
+    /// certify independence of deliberately correlated but unequal randomness.
     ///
     /// Returns `(ksk_r_to_s, ksk_s_to_r)` — the two KSKs that together with
     /// a `b_vec` form a complete relinearization key.
@@ -233,6 +259,14 @@ impl LBFVRelinearizationKey {
                 "These parameters do not support key switching".to_string(),
             ));
         }
+
+        // Validate the reference-string rows (context, row uniqueness, and
+        // CRS/URS separation) before sampling the ephemeral key `r`.
+        crate::reference_string::validate_reference_string_pair(
+            ctx_relin_key,
+            &a_polys,
+            &d1_polys,
+        )?;
 
         let r = Zeroizing::new(SecretKey::random(&sk.params, rng));
         let r_poly = Zeroizing::new(Poly::<PowerBasis>::try_convert_from(
@@ -281,6 +315,10 @@ impl LBFVRelinearizationKey {
     /// but also returns the ephemeral key `r` and the per-row error polynomials
     /// from both KSKs — needed for ZK witness generation.
     ///
+    /// The same URS/CRS validation applies: identical rows across the two
+    /// reference strings and repeated rows within either vector are rejected
+    /// before any secret-dependent computation.
+    ///
     /// Returns `(ksk_r_to_s, ksk_s_to_r, r, errors_d0, errors_d2)` where:
     /// - `r` is the ephemeral `SecretKey`; auto-zeroized when dropped.
     /// - `errors_d0[i]` is the small error `eᵢ` such that `d0ᵢ = eᵢ − sk·d1ᵢ + gᵢ·r`.
@@ -314,6 +352,13 @@ impl LBFVRelinearizationKey {
                 "These parameters do not support key switching".to_string(),
             ));
         }
+
+        // Validate the reference-string rows before sampling the ephemeral key.
+        crate::reference_string::validate_reference_string_pair(
+            ctx_relin_key,
+            &a_polys,
+            &d1_polys,
+        )?;
 
         let r = Zeroizing::new(SecretKey::random(&sk.params, rng));
         let r_poly = Zeroizing::new(Poly::<PowerBasis>::try_convert_from(
@@ -359,8 +404,11 @@ impl LBFVRelinearizationKey {
     /// Build a relinearization key from pre-computed components.
     ///
     /// Validates that the two KSKs are structurally consistent and that
-    /// `b_vec` has the correct length. The resulting key is operational
-    /// (single-party construction).
+    /// `b_vec` has the correct length. The URS `d1` (the `r -> s` key's `c1`
+    /// rows) and the CRS `a` (the `s -> r` key's `c1` rows) are validated as
+    /// reference strings: repeated rows within either vector and rows shared
+    /// between the two vectors are rejected, so no operational key built from
+    /// observably reused randomness is ever returned.
     pub(crate) fn from_components(
         ksk_r_to_s: KeySwitchingKey,
         ksk_s_to_r: KeySwitchingKey,
@@ -412,6 +460,16 @@ impl LBFVRelinearizationKey {
             )));
         }
 
+        // Reference-string gate: the shared URS `d1` rows (ksk_r_to_s.c1) and
+        // CRS `a` rows (ksk_s_to_r.c1) must be distinct within each vector and
+        // disjoint across the two vectors. The structural checks above already
+        // guarantee a common key context.
+        crate::reference_string::validate_reference_string_pair(
+            &ksk_r_to_s.ctx_ksk,
+            &ksk_s_to_r.c1,
+            &ksk_r_to_s.c1,
+        )?;
+
         Ok(Self {
             ksk_r_to_s,
             ksk_s_to_r,
@@ -439,6 +497,16 @@ impl LBFVRelinearizationKey {
     /// * `ciphertext_level` - The level of the ciphertext to relinearize
     /// * `key_level` - The level of the key to use for relinearization
     /// * `rng` - The random number generator to use for key generation
+    ///
+    /// # Reference-string validation
+    ///
+    /// The URS `d1` and the CRS `a` are two shared reference strings that the
+    /// protocol must generate independently. Identical `d1_seed` and `a_seed`
+    /// values are rejected before any key material is produced. When the
+    /// public key carries a CRS seed, it must differ from `d1_seed`. These
+    /// equality checks catch observably reused randomness; they cannot
+    /// certify independence of deliberately correlated but unequal
+    /// randomness, which remains a protocol responsibility.
     pub fn new_leveled<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         pk: &LBFVPublicKey,
@@ -528,6 +596,17 @@ impl LBFVRelinearizationKey {
     /// directly and the `a` (CRS) polynomials are extracted from the public key's
     /// concrete ciphertext polynomials. The caller cannot supply an unrelated `a`.
     ///
+    /// # Reference-string validation
+    ///
+    /// The caller-supplied URS `d1_polys` must be pairwise distinct and must
+    /// not share any row with the public key's CRS `a` rows (all row-pairs are
+    /// compared, so cross-index collisions are rejected too). Rows are
+    /// validated before any secret-dependent computation, and the assembled
+    /// key is validated again before it is returned. The checks compare
+    /// concrete values only: they reject observably reused randomness but
+    /// cannot certify independence of deliberately correlated yet unequal
+    /// randomness.
+    ///
     /// # Arguments
     /// * `sk` - The secret key to use for key generation.
     /// * `pk` - The l-BFV public key whose concrete `a` polynomials are used as
@@ -564,6 +643,10 @@ impl LBFVRelinearizationKey {
     /// The `d1` polynomials are extracted from `crp_d1` and converted to
     /// `NttShoup`; the `a` (CRS) polynomials are extracted from the public key
     /// as usual.
+    ///
+    /// The URS vector must be independent of the public key's CRS: rows
+    /// shared between the two vectors are rejected before any key material is
+    /// produced.
     ///
     /// # Arguments
     /// * `sk` - The secret key for key generation.
@@ -920,6 +1003,16 @@ impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
                 "ksk_s_to_r has mismatched c0/c1 dimensions".to_string(),
             ));
         }
+
+        // Reference-string gate: the shared URS `d1` rows (ksk_r_to_s.c1) and
+        // CRS `a` rows (ksk_s_to_r.c1) must be distinct within each vector and
+        // disjoint across the two vectors. A serialized key built from reused
+        // reference-string randomness is rejected instead of being published.
+        crate::reference_string::validate_reference_string_pair(
+            &ksk_r_to_s.ctx_ksk,
+            &ksk_s_to_r.c1,
+            &ksk_r_to_s.c1,
+        )?;
 
         // --- b_vec validation ---
         let expected_b_vec_len = params
@@ -1314,6 +1407,336 @@ mod tests {
             result.is_err(),
             "Seeded RLK path must reject a PK whose concrete a_j contradict its stored seed"
         );
+
+        Ok(())
+    }
+
+    /// The seeded URS/CRS path must reject identical seeds — the two reference
+    /// strings must be generated independently.
+    #[test]
+    fn rlk_generation_rejects_identical_urs_and_crs_seeds() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let same_seed: <ChaCha8Rng as SeedableRng>::Seed = [91u8; 32];
+
+        // Direct component generation rejects identical seeds.
+        assert!(matches!(
+            LBFVRelinearizationKey::generate_components_with_seed(
+                &sk, same_seed, same_seed, 0, 0, &mut rng
+            ),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::IdenticalReferenceStringSeeds
+            ))
+        ));
+
+        // So does the public constructor when the public key's CRS seed equals
+        // the caller-supplied URS seed.
+        let pk = LBFVPublicKey::new_with_seed(&sk, same_seed, &mut rng)?;
+        assert!(matches!(
+            LBFVRelinearizationKey::new(&sk, &pk, Some(same_seed), &mut rng),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::IdenticalReferenceStringSeeds
+            ))
+        ));
+
+        // Control: distinct seeds are accepted.
+        let pk_ok = LBFVRelinearizationKey::new(&sk, &pk, Some([92u8; 32]), &mut rng)?;
+        assert_eq!(pk_ok.ciphertext_level(), 0);
+        Ok(())
+    }
+
+    /// The explicit-polynomial path must reject URS rows that repeat within
+    /// the vector or collide with CRS rows at any index pairing.
+    #[test]
+    fn rlk_explicit_path_rejects_reused_and_repeated_rows() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx0 = params.context_at_level(0)?;
+
+        // Seedless public key with explicit CRS rows.
+        let seeded = LBFVPublicKey::new_with_seed(&sk, [51u8; 32], &mut rng)?;
+        let a_polys: Vec<Poly<Ntt>> = seeded
+            .c
+            .iter()
+            .map(|ciphertext| ciphertext.c.get(1).cloned())
+            .collect::<Option<_>>()
+            .ok_or("missing public-key a polynomial")?;
+        let seedless = LBFVPublicKey::from_crs(&sk, &a_polys, None, &mut rng)?;
+
+        let mut d1_polys = KeySwitchingKey::c1_from_seed(ctx0, [61u8; 32], params.moduli().len());
+
+        // Control: the independent vectors are accepted.
+        let control = LBFVRelinearizationKey::new_leveled_with_polys(
+            &sk,
+            &seedless,
+            d1_polys.clone(),
+            0,
+            0,
+            &mut rng,
+        )?;
+        assert_eq!(control.d1_components().len(), d1_polys.len());
+
+        // Cross-index collision: URS row 2 equals CRS row 1.
+        let mut colliding = d1_polys.clone();
+        colliding[2] = a_polys[1].clone().into_ntt_shoup();
+        assert!(matches!(
+            LBFVRelinearizationKey::new_leveled_with_polys(
+                &sk, &seedless, colliding, 0, 0, &mut rng
+            ),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::OverlappingReferenceStringRows {
+                    crs_index: 1,
+                    urs_index: 2,
+                }
+            ))
+        ));
+
+        // Repeated row inside the URS vector.
+        d1_polys[2] = d1_polys[0].clone();
+        assert!(matches!(
+            LBFVRelinearizationKey::new_leveled_with_polys(
+                &sk, &seedless, d1_polys, 0, 0, &mut rng
+            ),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::RepeatedReferenceStringRow {
+                    role: crate::ReferenceStringRole::Urs,
+                    first_index: 0,
+                    second_index: 2,
+                }
+            ))
+        ));
+
+        Ok(())
+    }
+
+    /// Public-API regressions: the URS CRP supplied to `new_leveled_with_crp`
+    /// / `new_with_crp` must not be the same vector as the public key's CRS
+    /// CRP, in both the seeded and seedless CRP forms, with independent-input
+    /// controls.
+    #[test]
+    fn crp_paths_reject_urs_equal_to_pk_crs() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+
+        // Seeded CRP form: the URS vector is the PK's CRS vector (same master
+        // seed, hence identical concrete rows).
+        let crs_seed: <ChaCha8Rng as SeedableRng>::Seed = [81u8; 32];
+        let crp_crs = CommonRandomPolyVec::from_seed(&params, crs_seed)?;
+        let pk_seeded = LBFVPublicKey::new_with_crp(&sk, &crp_crs, &mut rng)?;
+        assert_eq!(pk_seeded.seed, Some(crs_seed));
+
+        let crp_urs_same = CommonRandomPolyVec::from_seed(&params, crs_seed)?;
+        assert!(matches!(
+            LBFVRelinearizationKey::new_leveled_with_crp(
+                &sk,
+                &pk_seeded,
+                &crp_urs_same,
+                0,
+                0,
+                &mut rng
+            ),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::OverlappingReferenceStringRows {
+                    crs_index: 0,
+                    urs_index: 0,
+                }
+            ))
+        ));
+        assert!(matches!(
+            LBFVRelinearizationKey::new_with_crp(&sk, &pk_seeded, &crp_urs_same, &mut rng),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::OverlappingReferenceStringRows {
+                    crs_index: 0,
+                    urs_index: 0,
+                }
+            ))
+        ));
+
+        // Seedless CRP form: same concrete rows, no seed metadata.
+        let crp_crs_seedless = CommonRandomPolyVec::from_polys(&params, crp_crs.to_polys(), None)?;
+        let pk_seedless = LBFVPublicKey::new_with_crp(&sk, &crp_crs_seedless, &mut rng)?;
+        assert!(pk_seedless.seed.is_none());
+        let crp_urs_seedless = CommonRandomPolyVec::from_polys(
+            &params,
+            pk_seedless
+                .c
+                .iter()
+                .map(|ct| ct.c.get(1).cloned())
+                .collect::<Option<_>>()
+                .ok_or("missing public-key a polynomial")?,
+            None,
+        )?;
+        assert!(matches!(
+            LBFVRelinearizationKey::new_leveled_with_crp(
+                &sk,
+                &pk_seedless,
+                &crp_urs_seedless,
+                0,
+                0,
+                &mut rng
+            ),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::OverlappingReferenceStringRows {
+                    crs_index: 0,
+                    urs_index: 0,
+                }
+            ))
+        ));
+
+        // Control: an independent URS CRP is accepted against both PK forms.
+        let urs_seed: <ChaCha8Rng as SeedableRng>::Seed = [82u8; 32];
+        let crp_urs_independent = CommonRandomPolyVec::from_seed(&params, urs_seed)?;
+        assert!(
+            LBFVRelinearizationKey::new_leveled_with_crp(
+                &sk,
+                &pk_seeded,
+                &crp_urs_independent,
+                0,
+                0,
+                &mut rng
+            )
+            .is_ok()
+        );
+        assert!(
+            LBFVRelinearizationKey::new_with_crp(&sk, &pk_seedless, &crp_urs_independent, &mut rng)
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    /// `new_leveled` with a seedless public key whose CRS rows coincide with
+    /// the concrete rows the caller-supplied URS seed derives must be
+    /// rejected; an independent seed is accepted.
+    #[test]
+    fn new_leveled_seedless_pk_rejects_d1_seed_deriving_matching_crs_rows()
+    -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx0 = params.context_at_level(0)?;
+
+        let colliding_seed: <ChaCha8Rng as SeedableRng>::Seed = [61u8; 32];
+        let derived = KeySwitchingKey::c1_from_seed(ctx0, colliding_seed, params.moduli().len());
+        let a_rows: Vec<Poly<Ntt>> = derived.into_iter().map(|poly| poly.into_ntt()).collect();
+
+        // Seedless public key whose CRS rows are exactly the rows the seed
+        // derives.
+        let pk = LBFVPublicKey::from_crs(&sk, &a_rows, None, &mut rng)?;
+        assert!(pk.seed.is_none());
+
+        assert!(matches!(
+            LBFVRelinearizationKey::new_leveled(&sk, &pk, Some(colliding_seed), 0, 0, &mut rng),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::OverlappingReferenceStringRows {
+                    crs_index: 0,
+                    urs_index: 0,
+                }
+            ))
+        ));
+
+        // Control: an independent URS seed is accepted.
+        let independent_seed: <ChaCha8Rng as SeedableRng>::Seed = [62u8; 32];
+        assert!(
+            LBFVRelinearizationKey::new_leveled(&sk, &pk, Some(independent_seed), 0, 0, &mut rng)
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    /// The seeded path enforces reference-string separation at a nonzero
+    /// ciphertext level too, with an independent-input control.
+    #[test]
+    fn seeded_path_enforces_reference_strings_at_nonzero_ciphertext_level()
+    -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let crs_seed: <ChaCha8Rng as SeedableRng>::Seed = [83u8; 32];
+        let pk = LBFVPublicKey::new_with_seed(&sk, crs_seed, &mut rng)?;
+
+        // Negative: identical URS and CRS seeds at ciphertext level 1.
+        assert!(matches!(
+            LBFVRelinearizationKey::new_leveled(&sk, &pk, Some(crs_seed), 1, 0, &mut rng),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::IdenticalReferenceStringSeeds
+            ))
+        ));
+
+        // Control: independent seeds at ciphertext level 1 succeed.
+        let d1_seed: <ChaCha8Rng as SeedableRng>::Seed = [84u8; 32];
+        let key = LBFVRelinearizationKey::new_leveled(&sk, &pk, Some(d1_seed), 1, 0, &mut rng)?;
+        assert_eq!(key.ciphertext_level(), 1);
+        Ok(())
+    }
+
+    /// A serialized relinearization key whose URS/CRS rows are reused or
+    /// repeated must be rejected at deserialization time.
+    #[test]
+    fn serialized_rlk_with_reused_reference_string_rows_rejected() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx0 = params.context_at_level(0)?;
+
+        let seeded = LBFVPublicKey::new_with_seed(&sk, [51u8; 32], &mut rng)?;
+        let a_polys: Vec<Poly<Ntt>> = seeded
+            .c
+            .iter()
+            .map(|ciphertext| ciphertext.c.get(1).cloned())
+            .collect::<Option<_>>()
+            .ok_or("missing public-key a polynomial")?;
+        let seedless = LBFVPublicKey::from_crs(&sk, &a_polys, None, &mut rng)?;
+        let d1_polys = KeySwitchingKey::c1_from_seed(ctx0, [61u8; 32], params.moduli().len());
+        let key = LBFVRelinearizationKey::new_leveled_with_polys(
+            &sk, &seedless, d1_polys, 0, 0, &mut rng,
+        )?;
+
+        // Control: the honest payload round-trips.
+        let roundtripped = LBFVRelinearizationKey::from_bytes(&key.to_bytes(), &params)?;
+        assert_eq!(roundtripped, key);
+
+        // Tamper: URS row 0 becomes a copy of CRS row 0.
+        let mut overlapping: LBFVRelinearizationKeyProto =
+            LBFVRelinearizationKeyProto::decode(key.to_bytes().as_slice())?;
+        let crs_row0 = overlapping
+            .ksk_s_to_r
+            .as_ref()
+            .ok_or("missing ksk_s_to_r")?
+            .c1[0]
+            .clone();
+        if let Some(urs) = overlapping.ksk_r_to_s.as_mut() {
+            urs.c1[0] = crs_row0;
+        }
+        assert!(matches!(
+            LBFVRelinearizationKey::from_bytes(&overlapping.encode_to_vec(), &params),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::OverlappingReferenceStringRows {
+                    crs_index: 0,
+                    urs_index: 0,
+                }
+            ))
+        ));
+
+        // Tamper: repeat a row within the URS vector.
+        let mut repeated: LBFVRelinearizationKeyProto =
+            LBFVRelinearizationKeyProto::decode(key.to_bytes().as_slice())?;
+        if let Some(urs) = repeated.ksk_r_to_s.as_mut() {
+            urs.c1[2] = urs.c1[0].clone();
+        }
+        assert!(matches!(
+            LBFVRelinearizationKey::from_bytes(&repeated.encode_to_vec(), &params),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::RepeatedReferenceStringRow {
+                    role: crate::ReferenceStringRole::Urs,
+                    first_index: 0,
+                    second_index: 2,
+                }
+            ))
+        ));
 
         Ok(())
     }
