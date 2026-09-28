@@ -5,11 +5,13 @@ use crate::Error;
 use crate::bfv::BfvParameters;
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_math::zq::Modulus;
-use ndarray::Array2;
+use ndarray::{Array2, ArrayViewMut1};
 use num_bigint::BigUint;
 use rand::{CryptoRng, RngCore};
 use std::fmt;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Smudging noise generator using exact centered uniform sampling.
@@ -30,6 +32,10 @@ pub struct SmudgingNoiseGenerator {
     /// noise is bound to it.
     parties: usize,
     smudging_bound: BigUint,
+    /// Test-only observation hook for the guarded sampling matrix; never set
+    /// outside unit tests.
+    #[cfg(test)]
+    wipe_observer: Option<Arc<SamplingWipeObserver>>,
 }
 
 impl SmudgingNoiseGenerator {
@@ -180,6 +186,8 @@ impl SmudgingNoiseGenerator {
             params: config.params,
             parties: config.n,
             smudging_bound: b_sm,
+            #[cfg(test)]
+            wipe_observer: None,
         })
     }
 }
@@ -311,6 +319,96 @@ impl fmt::Debug for SmudgingNoise {
     }
 }
 
+/// Test-only wipe evidence for [`GuardedMatrix`]: whether the guarded matrix
+/// held nonzero (secret-dependent) residues at a release or drop boundary,
+/// and whether the drop left every element zero.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct SamplingWipeObserver {
+    secret_data_seen: AtomicBool,
+    wiped_to_zero: AtomicBool,
+}
+
+#[cfg(test)]
+impl SamplingWipeObserver {
+    /// Records (sticky) that secret-dependent data was present when the
+    /// guard released or dropped it.
+    fn record_secret_data(&self, present: bool) {
+        self.secret_data_seen.fetch_or(present, Ordering::SeqCst);
+    }
+
+    /// Records (sticky) whether a completed wipe left every element zero.
+    fn record_wipe(&self, all_zero: bool) {
+        self.wiped_to_zero.fetch_or(all_zero, Ordering::SeqCst);
+    }
+}
+
+/// Wipe-on-drop guard for the sampled smudging matrix.
+///
+/// The matrix holds secret-dependent residues from the first written cell,
+/// so it is guarded from the moment it is allocated. Dropping the guard while
+/// it owns the matrix (including an unwind mid-sampling) zeroizes each element,
+/// even for non-standard layouts. On success, the matrix is transferred into
+/// a guarded noise polynomial instead; the empty guard then drops.
+struct GuardedMatrix {
+    values: Array2<u64>,
+    #[cfg(test)]
+    wipe_observer: Option<Arc<SamplingWipeObserver>>,
+}
+
+impl GuardedMatrix {
+    fn zeros(shape: (usize, usize)) -> Self {
+        Self {
+            values: Array2::zeros(shape),
+            #[cfg(test)]
+            wipe_observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn attach_wipe_observer(&mut self, wipe_observer: Option<Arc<SamplingWipeObserver>>) {
+        self.wipe_observer = wipe_observer;
+    }
+
+    /// One RNS column of the matrix, for writing one coefficient's residues.
+    fn column_mut(&mut self, column: usize) -> ArrayViewMut1<'_, u64> {
+        self.values.column_mut(column)
+    }
+
+    /// Transfers the completed matrix into `Poly::set_coefficients`.
+    ///
+    /// Callee ownership semantics: on success the coefficients move into the
+    /// polynomial, which the caller keeps under a zeroizing owner; on a
+    /// validation rejection the callee zeroizes every element of the rejected
+    /// matrix before it is dropped. The by-value move below is the only
+    /// instant the matrix is outside this guard. Honest limitation: a panic
+    /// raised by the callee itself between receiving the matrix and running
+    /// its validation zeroization would drop the matrix unwiped; no such
+    /// panic source is known, but this transfer cannot promise safety
+    /// against one.
+    fn release_for_install(&mut self) -> Array2<u64> {
+        #[cfg(test)]
+        if let Some(observer) = &self.wipe_observer {
+            observer.record_secret_data(self.values.iter().any(|&value| value != 0));
+        }
+        std::mem::take(&mut self.values)
+    }
+}
+
+impl Drop for GuardedMatrix {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(observer) = &self.wipe_observer {
+            observer.record_secret_data(self.values.iter().any(|&value| value != 0));
+        }
+        self.values.iter_mut().for_each(|value| value.zeroize());
+        #[cfg(test)]
+        if let Some(observer) = &self.wipe_observer {
+            observer.record_wipe(self.values.iter().all(|&value| value == 0));
+        }
+    }
+}
+
 impl SmudgingNoiseGenerator {
     /// Generate smudging noise using the calculated bound.
     ///
@@ -367,8 +465,12 @@ impl SmudgingNoiseGenerator {
             .map(|qi| limbs_mod(&bound_limbs, qi))
             .collect();
 
-        // An aborted sampling run never publishes or reuses this matrix.
-        let mut matrix = Array2::zeros((moduli.len(), degree));
+        // An aborted sampling run never publishes or reuses this matrix: it
+        // is guarded from allocation, so a panic unwind mid-sampling wipes
+        // every already-written cell.
+        let mut matrix = GuardedMatrix::zeros((moduli.len(), degree));
+        #[cfg(test)]
+        matrix.attach_wipe_observer(self.wipe_observer.clone());
         let mut candidate = Zeroizing::new(vec![0u64; nlimbs]);
         for col in 0..degree {
             // Exact rejection sampling of u in [0, M): candidates are uniform
@@ -403,13 +505,18 @@ impl SmudgingNoiseGenerator {
             candidate.as_mut_slice().zeroize();
         }
         // Build the noise polynomial directly rather than through
-        // `from_coeffs_matrix`.
-        let mut poly = Poly::<PowerBasis>::zero(ctx);
-        poly.set_coefficients(matrix)?;
+        // `from_coeffs_matrix`. The polynomial is guarded before the secret
+        // matrix is installed, and this guard itself is transferred into the
+        // returned noise owner, so a failure after installation cannot drop
+        // the secret polynomial unguarded. The matrix moves out of its guard
+        // only for this call (see `release_for_install`).
+        let mut poly = Zeroizing::new(Poly::<PowerBasis>::zero(ctx));
+        poly.as_mut()
+            .set_coefficients(matrix.release_for_install())?;
         Ok(SmudgingNoise {
             parties: self.parties,
             params: Arc::clone(&self.params),
-            poly: Zeroizing::new(poly),
+            poly,
         })
     }
 
@@ -423,7 +530,8 @@ impl SmudgingNoiseGenerator {
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
-    reason = "tests use fixed validated dimensions"
+    clippy::panic,
+    reason = "tests use fixed validated dimensions and simulate RNG failures"
 )]
 mod tests {
     use super::*;
@@ -450,6 +558,23 @@ mod tests {
             params,
             parties: 1,
             smudging_bound: bound,
+            #[cfg(test)]
+            wipe_observer: None,
+        }
+    }
+
+    /// A generator whose guarded sampling matrix reports to `observer`.
+    fn generator_with_wipe_observer(
+        params: Arc<BfvParameters>,
+        bound: BigUint,
+        observer: Arc<SamplingWipeObserver>,
+    ) -> SmudgingNoiseGenerator {
+        SmudgingNoiseGenerator {
+            params,
+            parties: 1,
+            smudging_bound: bound,
+            #[cfg(test)]
+            wipe_observer: Some(observer),
         }
     }
 
@@ -677,6 +802,116 @@ mod tests {
         let generator = generator_with_bound(params.clone(), BigUint::zero());
         let poly = generator.generate(&mut rng).unwrap().into_poly();
         assert!(poly.coefficients().iter().all(|&c| c == 0));
+    }
+
+    /// An RNG that returns a fixed nonzero candidate limb and panics after a
+    /// fixed number of draws, simulating a mid-sampling RNG failure.
+    struct PanickingAfterDraws {
+        draws: usize,
+        fail_after: usize,
+    }
+
+    impl RngCore for PanickingAfterDraws {
+        fn next_u32(&mut self) -> u32 {
+            self.next_u64() as u32
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.draws += 1;
+            #[expect(
+                clippy::panic,
+                reason = "test-only RNG simulating a mid-sampling RNG failure"
+            )]
+            if self.draws > self.fail_after {
+                panic!("simulated RNG failure after earlier matrix columns were sampled");
+            }
+            // With the small bound used below, each accepted candidate is one
+            // limb, so every written residue derives from this fixed value
+            // and is nonzero (1729 - 1000 = 729 modulo each modulus).
+            1729
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for chunk in dest.chunks_mut(8) {
+                let bytes = self.next_u64().to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+        }
+    }
+
+    impl CryptoRng for PanickingAfterDraws {}
+
+    #[test]
+    fn generation_wipes_the_partial_matrix_on_rng_panic() {
+        let params = small_params(&[62, 62, 62]);
+        let observer = Arc::new(SamplingWipeObserver::default());
+        let generator =
+            generator_with_wipe_observer(params, BigUint::from(1000u64), Arc::clone(&observer));
+
+        // With bound 1000 the range is M = 2001 and every accepted candidate
+        // is a single limb: draws 1-3 fully sample columns 0-2, each writing
+        // the nonzero residue 729 in every RNS row; draw 4 panics while
+        // sampling column 3, so the guarded matrix is partially filled when
+        // the unwind drops it.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut failing = PanickingAfterDraws {
+                draws: 0,
+                fail_after: 3,
+            };
+            generator.generate(&mut failing)
+        }));
+        assert!(result.is_err(), "the panicking RNG must abort generation");
+        // Pre-wipe: the guard still held the sampled, nonzero residues when
+        // the unwind dropped it — this is the control that would detect an
+        // unwiped buffer (without reading freed memory).
+        assert!(
+            observer.secret_data_seen.load(Ordering::SeqCst),
+            "the unwound matrix guard must have held nonzero sampled data"
+        );
+        // Post-wipe: the unwind drop zeroized every element before the
+        // storage was released.
+        assert!(
+            observer.wiped_to_zero.load(Ordering::SeqCst),
+            "the unwind drop must leave every matrix element zero"
+        );
+    }
+
+    #[test]
+    fn generation_releases_the_sampled_matrix_through_its_guard() {
+        let params = small_params(&[62, 62, 62]);
+        let observer = Arc::new(SamplingWipeObserver::default());
+        let generator = generator_with_wipe_observer(
+            params.clone(),
+            BigUint::from(1000u64),
+            Arc::clone(&observer),
+        );
+        let mut rng = ChaCha8Rng::seed_from_u64(172_109);
+
+        let noise = generator.generate(&mut rng).unwrap();
+
+        // Pre-release: the guard handed the fully sampled, nonzero matrix to
+        // the noise polynomial — no unguarded copy or early drop happened on
+        // the success path.
+        assert!(
+            observer.secret_data_seen.load(Ordering::SeqCst),
+            "the sampled matrix must hold nonzero data right up to the install"
+        );
+        // Post-drop: the guard itself was left holding only the emptied
+        // shell, which wiped to zero.
+        assert!(
+            observer.wiped_to_zero.load(Ordering::SeqCst),
+            "the guard's own drop must see only zeroed storage"
+        );
+        // The noise itself was installed intact and stays in bound.
+        let poly = noise.into_poly();
+        assert_eq!(
+            poly.coefficients().dim(),
+            (params.moduli().len(), params.degree())
+        );
+        assert!(
+            poly.coefficients().iter().any(|&value| value != 0),
+            "sampled smudging noise must not be all zero"
+        );
     }
 
     #[test]

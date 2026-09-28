@@ -27,7 +27,9 @@ use rand::{CryptoRng, RngCore};
 use rayon::prelude::*;
 use std::convert::TryFrom;
 use std::sync::Arc;
-use zeroize::Zeroizing;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Manager for threshold BFV share operations.
 ///
@@ -68,6 +70,10 @@ pub struct ShareManager {
     threshold: usize,
     /// BFV parameters (degree, moduli, etc.)
     params: Arc<BfvParameters>,
+    /// Test-only observation hook for the guarded decryption intermediates;
+    /// never set outside unit tests.
+    #[cfg(test)]
+    decryption_wipe_observer: Option<Arc<DecryptionWipeObserver>>,
 }
 
 impl ShareManager {
@@ -103,6 +109,8 @@ impl ShareManager {
             n,
             threshold,
             params,
+            #[cfg(test)]
+            decryption_wipe_observer: None,
         })
     }
 
@@ -122,6 +130,109 @@ impl ShareManager {
     #[must_use]
     pub fn params(&self) -> &Arc<BfvParameters> {
         &self.params
+    }
+}
+
+/// Test-only wipe evidence for [`GuardedDecryptionSum`]: whether the guarded
+/// polynomial held nonzero (secret-dependent) coefficients at a release or
+/// drop boundary, and whether the drop left every coefficient zero.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct DecryptionWipeObserver {
+    secret_data_seen: AtomicBool,
+    wiped_to_zero: AtomicBool,
+}
+
+#[cfg(test)]
+impl DecryptionWipeObserver {
+    /// Records (sticky) that secret-dependent data was present when the
+    /// guard released or dropped it.
+    fn record_secret_data(&self, present: bool) {
+        self.secret_data_seen.fetch_or(present, Ordering::SeqCst);
+    }
+
+    /// Records (sticky) whether a completed wipe left every coefficient zero.
+    fn record_wipe(&self, all_zero: bool) {
+        self.wiped_to_zero.fetch_or(all_zero, Ordering::SeqCst);
+    }
+}
+
+/// Wipe-on-drop owner of the accumulated decryption-share phase.
+///
+/// [`ShareManager::decryption_share`] computes `c0 + c1 * s_i + smudging`.
+/// The decryption product `c1 * s_i` and every partial sum containing it are
+/// secret-dependent. The product is multiplied in place under its own
+/// `Zeroizing` owner before conversion (see `decryption_share`); this owner
+/// then holds it through the phase accumulation, whose additions run in
+/// place (`AddAssign` borrows its operand and allocates nothing), so no
+/// secret-dependent by-value intermediate is created or dropped. Only the
+/// finished share is moved out — transferred into the returned polynomial,
+/// not wiped; once in this owner, a panic unwind between the in-place steps
+/// zeroizes the polynomial storage. The move-based inverse transform before
+/// this owner is constructed remains an exception (documented below).
+struct GuardedDecryptionSum {
+    poly: Poly<PowerBasis>,
+    #[cfg(test)]
+    wipe_observer: Option<Arc<DecryptionWipeObserver>>,
+}
+
+impl GuardedDecryptionSum {
+    fn new(poly: Poly<PowerBasis>) -> Self {
+        Self {
+            poly,
+            #[cfg(test)]
+            wipe_observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_wipe_observer(
+        poly: Poly<PowerBasis>,
+        wipe_observer: Arc<DecryptionWipeObserver>,
+    ) -> Self {
+        Self {
+            poly,
+            #[cfg(test)]
+            wipe_observer: Some(wipe_observer),
+        }
+    }
+
+    #[cfg(test)]
+    fn attach_wipe_observer(&mut self, wipe_observer: Option<Arc<DecryptionWipeObserver>>) {
+        self.wipe_observer = wipe_observer;
+    }
+
+    /// Extends the sum in place. The operand is borrowed, so secret data is
+    /// never copied out of its own owner.
+    fn add_in_place(&mut self, operand: &Poly<PowerBasis>) {
+        self.poly += operand;
+    }
+
+    /// Moves the finished share out for return, leaving a zero polynomial
+    /// behind for the owner to drop. The share is transferred into the
+    /// returned polynomial — the caller owns that allocation from then on —
+    /// so only the zero replacement is wiped by this owner's drop.
+    fn release_for_return(mut self) -> Poly<PowerBasis> {
+        #[cfg(test)]
+        if let Some(observer) = &self.wipe_observer {
+            observer.record_secret_data(self.poly.coefficients().iter().any(|&value| value != 0));
+        }
+        let replacement = Poly::zero(self.poly.ctx());
+        std::mem::replace(&mut self.poly, replacement)
+    }
+}
+
+impl Drop for GuardedDecryptionSum {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(observer) = &self.wipe_observer {
+            observer.record_secret_data(self.poly.coefficients().iter().any(|&value| value != 0));
+        }
+        self.poly.zeroize();
+        #[cfg(test)]
+        if let Some(observer) = &self.wipe_observer {
+            observer.record_wipe(self.poly.coefficients().iter().all(|&value| value == 0));
+        }
     }
 }
 
@@ -389,6 +500,19 @@ impl ShareManager {
     ///
     /// # Returns
     /// A decryption share polynomial that contributes to the final decryption
+    ///
+    /// # Secret handling
+    /// The decryption product `c1 * s_i` and the decryption phase
+    /// `c0 + c1 * s_i` accumulated on top of it are secret-dependent. The
+    /// ciphertext clone is guarded before the secret key is multiplied into
+    /// it in place, and the phase is kept in a wipe-on-drop owner until it is
+    /// moved into the returned share; the additions accumulate in place, so
+    /// no secret-dependent by-value intermediate is created or dropped. Two
+    /// narrow move-based windows remain, consistent with the rest of this
+    /// crate: the inverse-NTT conversion of the product (see the inline
+    /// comment) and the transfer of the finished share into the returned
+    /// polynomial, whose allocation the caller owns from then on. The
+    /// consumed smudging owner wipes its noise when this function returns.
     #[allow(clippy::indexing_slicing)] // BFV ciphertext always has exactly 2 components
     pub fn decryption_share(
         &self,
@@ -411,17 +535,35 @@ impl ShareManager {
                 right: crate::ParameterSource::Ciphertext,
             });
         }
-        let ciphertext_times_secret_key = (&c1 * secret_key).into_power_basis();
-        // Move the consumed noise into the returned share while leaving a
-        // zero polynomial behind for the zeroizing owner to drop. The
-        // zeroize crate's `Zeroizing` wrapper intentionally has no
-        // `into_inner`; replacing it avoids an unsafe extraction that would
-        // bypass the wipe-on-drop guarantee.
-        let ctx = smudging.ctx().clone();
-        let replacement = Poly::zero(&ctx);
-        let smudging = std::mem::replace(&mut *smudging, replacement);
-        let decryption_share = c0 + ciphertext_times_secret_key + smudging;
-        Ok(decryption_share)
+        // The decryption product becomes secret-dependent as soon as the
+        // secret key is multiplied in: guard the ciphertext clone first, then
+        // run the multiplication in place inside the guard, so a partial
+        // multiplication unwinds into the guard's wipe-on-drop.
+        let mut product = Zeroizing::new(c1);
+        product.disallow_variable_time_computations();
+        *product.as_mut() *= secret_key;
+        // Move the multiplied product out of its guard for the inverse
+        // transform, leaving a zero polynomial behind for the guard to drop.
+        // Honest limitation: the moved value is unguarded while
+        // `into_power_basis` performs the inverse NTT in place — a brief
+        // move-based gap. The transform has no known panic source on
+        // standard-layout coefficients, but an unwind through the transform
+        // itself is not covered by a guard here.
+        let replacement = Poly::zero(product.ctx());
+        let product = std::mem::replace(product.as_mut(), replacement).into_power_basis();
+        // The phase accumulated on top of the product stays in a wipe-on-drop
+        // owner until it is moved into the returned share.
+        let mut phase = GuardedDecryptionSum::new(product);
+        #[cfg(test)]
+        phase.attach_wipe_observer(self.decryption_wipe_observer.clone());
+        // In-place additions only: `AddAssign` borrows the operands, so no
+        // separate `c0 + c1 * s_i` intermediate is created. Every operand
+        // disallowed variable-time computations above, so the additions use
+        // the constant-time path. The smudging owner keeps its noise until
+        // this function returns, then wipes it.
+        phase.add_in_place(&c0);
+        phase.add_in_place(&smudging);
+        Ok(phase.release_for_return())
     }
 
     /// Decrypt ciphertext from collected decryption shares.
@@ -638,6 +780,7 @@ mod tests {
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use crate::support::presets::{insecure, insecure_128, secure8192};
     use crate::trbfv::smudging::{MAX_LAMBDA, SmudgingConfig, SmudgingNoiseGenerator};
+    use fhe_math::rq::Ntt;
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
 
@@ -1211,6 +1354,172 @@ mod tests {
                 max_level: 0,
             })
         );
+    }
+
+    #[test]
+    fn decryption_share_transfers_phase_without_unguarded_intermediate() {
+        let mut rng = crate::support::presets::rng(245);
+        let params = insecure().unwrap().parameters;
+        let mut manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let observer = Arc::new(DecryptionWipeObserver::default());
+        // Test-only hook into the guard `decryption_share` keeps its
+        // decryption phase in.
+        manager.decryption_wipe_observer = Some(observer.clone());
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let mut plaintext_data = vec![42u64, 10, 40];
+        plaintext_data.resize(params.degree(), 0);
+        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
+        let ct: Arc<Ciphertext> = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
+
+        let secret_key_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_key_poly).clone());
+        let smudging = AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(
+            params.context_at_level(0).unwrap(),
+        ));
+
+        let share = manager.decryption_share(&ct, &key_share, smudging).unwrap();
+        assert!(!share.allows_variable_time_computations());
+
+        // Pre-release: the guarded phase (decryption product plus the
+        // in-place accumulated sum) held nonzero secret-dependent data right
+        // up to the release point. This observes that no separate secret
+        // intermediate was created or dropped along the accumulation — at
+        // release the phase allocation is transferred into the returned
+        // share, not wiped: the returned share is the caller's output.
+        assert!(
+            observer.secret_data_seen.load(Ordering::SeqCst),
+            "the guarded phase must hold the secret data up to the transfer into the returned \
+             share"
+        );
+        // Post-drop: the owner was left with the zero replacement, so its
+        // drop saw all-zero storage. This does not observe a wipe of the
+        // returned share itself.
+        assert!(
+            observer.wiped_to_zero.load(Ordering::SeqCst),
+            "the owner's drop must see only the zero replacement"
+        );
+    }
+
+    /// Exercise the unwind path of [`GuardedDecryptionSum`], the owner
+    /// `decryption_share` keeps its decryption phase in. The decryption
+    /// product itself is multiplied in place under its own `Zeroizing` guard
+    /// before conversion; that guard's unwind behavior is covered separately
+    /// by [`decryption_product_guard_wipes_on_forced_unwind`].
+    ///
+    /// Limitation, stated honestly: `decryption_share` itself has no
+    /// injectable panic point (inputs are validated up front and every step
+    /// after the checks is panic-free modular arithmetic), so the unwind
+    /// cannot be triggered inside the real function without unsafe or
+    /// process-global hooks. This test reproduces the function's exact
+    /// ownership sequence — phase guarded at creation, extended by in-place
+    /// additions — and unwinds mid-accumulation; the normal-path test above
+    /// drives the real function through the same guard.
+    #[test]
+    fn decryption_intermediates_wipe_on_forced_unwind() {
+        let params = insecure().unwrap().parameters;
+        let ctx = params.context_at_level(0).unwrap();
+        let mut rng = crate::support::presets::rng(245);
+        let public_c0 = Poly::<PowerBasis>::random(ctx, &mut rng);
+        let observer = Arc::new(DecryptionWipeObserver::default());
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Same guard and in-place accumulation as decryption_share: the
+            // converted product is wrapped at creation, then extended in
+            // place.
+            let mut phase = GuardedDecryptionSum::with_wipe_observer(
+                Poly::<PowerBasis>::random(ctx, &mut rng),
+                Arc::clone(&observer),
+            );
+            phase.add_in_place(&public_c0);
+            panic!("simulated unwind between the in-place accumulation steps");
+        }));
+        assert!(result.is_err());
+        // Pre-wipe: the guard still held nonzero secret data when the unwind
+        // dropped it — this is the control that would detect an unwiped
+        // buffer (without reading freed memory).
+        assert!(
+            observer.secret_data_seen.load(Ordering::SeqCst),
+            "the unwound guard must have held nonzero secret data before its wipe"
+        );
+        // Post-wipe: every coefficient was zeroed before the storage was
+        // released during the unwind.
+        assert!(
+            observer.wiped_to_zero.load(Ordering::SeqCst),
+            "the unwind drop must leave every coefficient zero"
+        );
+    }
+
+    /// Test-only probe recording that its guard ran `Zeroize::zeroize` on it.
+    struct DropProbe(Arc<AtomicBool>);
+
+    impl Zeroize for DropProbe {
+        fn zeroize(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Mechanism test for the guarded decryption product. `decryption_share`
+    /// keeps the ciphertext clone in a `Zeroizing` owner while the secret key
+    /// is multiplied into it in place, so a multiplication that unwinds
+    /// partway is wiped by the owner's drop. A real panic cannot be injected
+    /// inside `MulAssign` (it exposes no panic source), so the mechanism is
+    /// established in two safe parts, without reading freed memory:
+    /// (1) a `Zeroizing` guard's unwind drop runs `Zeroize::zeroize` on its
+    /// contents, and
+    /// (2) `Poly::zeroize` — that same drop action on a polynomial — erases
+    /// every coefficient of a populated polynomial.
+    #[test]
+    fn decryption_product_guard_wipes_on_forced_unwind() {
+        let params = insecure().unwrap().parameters;
+        let ctx = params.context_at_level(0).unwrap();
+        let mut rng = crate::support::presets::rng(245);
+
+        // (2) The drop action erases a populated polynomial.
+        let mut poly = Poly::<Ntt>::random(ctx, &mut rng);
+        assert!(poly.coefficients().iter().any(|&value| value != 0));
+        poly.zeroize();
+        assert!(poly.coefficients().iter().all(|&value| value == 0));
+
+        // (1) The guard's drop runs `Zeroize::zeroize` during an unwind.
+        let zeroized = Arc::new(AtomicBool::new(false));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = Zeroizing::new(DropProbe(Arc::clone(&zeroized)));
+            panic!("simulated unwind during the in-place product multiplication");
+        }));
+        assert!(result.is_err());
+        assert!(zeroized.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn decryption_share_rejects_mismatched_smudging_context() {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let ct = pk.try_encrypt(&plaintext, &mut rng).unwrap();
+
+        let secret_key_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_key_poly).clone());
+
+        // Smudging built over a different ring level is rejected before any
+        // secret product exists; the consumed smudging owner is then wiped by
+        // its zeroizing drop.
+        let other_context = params.context_at_level(1).unwrap();
+        let smudging = AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(other_context));
+        let result = manager.decryption_share(&ct, &key_share, smudging);
+
+        assert!(matches!(
+            result,
+            Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::Ciphertext,
+            })
+        ));
     }
 
     #[test]
