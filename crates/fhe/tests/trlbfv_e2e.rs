@@ -11,13 +11,12 @@
 
 use std::sync::Arc;
 
-use fhe::aggregate::AggregateIter;
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, SecretKey};
 use fhe::trbfv::{
     AggregatedSecretKeyShare, AggregatedSmudgingShare, SecretKeyShare, ShareManager,
     SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
 };
-use fhe::trlbfv::{LBFVPublicKey, PublicKeyShare, RelinKeyShare, aggregate_relinearization_key};
+use fhe::trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_key_pair};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2};
@@ -52,30 +51,29 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
         .map(|_| SecretKey::random(&params, &mut rng))
         .collect();
 
-    // ── Distributed l-BFV public key ╌─────────────────────────────────
-    let pk_contributions: Vec<PublicKeyShare> = sk_shares
+    // ── Distributed l-BFV public key + relinearization key ╌────────────
+    // Each party submits ONE paired (PK, RLK) contribution; the paired
+    // entry point consumes the single selected set of pairs, so the public
+    // key and the relinearization key are built from the same submissions.
+    // Pairing renders an accidental separate-collection mismatch
+    // unrepresentable; it is a caller discipline, not authentication —
+    // binding each pair's halves to one authenticated contributor remains a
+    // protocol responsibility.
+    let key_pairs: Vec<(PublicKeyShare, RelinKeyShare)> = sk_shares
         .iter()
-        .map(|sk_i| PublicKeyShare::contribute_with_seed(sk_i, crs_seed, &mut rng))
-        .collect::<Result<Vec<_>, _>>()
-        .expect("PK contribution generation");
-    let pk = pk_contributions
-        .into_iter()
-        .aggregate::<LBFVPublicKey>()
-        .expect("PK aggregation");
-
-    // ── Distributed l-BFV relinearization key ╌────────────────────────
-    let rlk_shares: Vec<RelinKeyShare> = sk_shares
-        .iter()
-        .map(|sk_i| {
-            RelinKeyShare::contribute_with_seed(
-                sk_i, urs_seed, crs_seed, 0, // ciphertext_level
-                0, // key_level
-                &mut rng,
-            )
+        .map(|sk_i| -> fhe::Result<(PublicKeyShare, RelinKeyShare)> {
+            Ok((
+                PublicKeyShare::contribute_with_seed(sk_i, crs_seed, &mut rng)?,
+                RelinKeyShare::contribute_with_seed(
+                    sk_i, urs_seed, crs_seed, 0, // ciphertext_level
+                    0, // key_level
+                    &mut rng,
+                )?,
+            ))
         })
         .collect::<Result<Vec<_>, _>>()
-        .expect("RLK share generation");
-    let aggregated_rlk = aggregate_relinearization_key(&rlk_shares, &pk).expect("RLK aggregation");
+        .expect("paired PK/RLK contribution generation");
+    let (pk, aggregated_rlk) = aggregate_key_pair(key_pairs).expect("paired PK/RLK aggregation");
 
     // ── Smudging noise (pre-shared, one‑time per party) ╌─────────────
     // Each party samples one noise owner; dealing below consumes it
