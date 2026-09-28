@@ -256,6 +256,27 @@ impl KeySwitchingKey {
     /// `c0[i] = eᵢ − c1[i]·sk + gᵢ·from` (paper notation: `d0ᵢ = eᵢ − sk·d1ᵢ + gᵢ·r`).  The errors are returned in
     /// `NttShoup` form for consistency with `c0`.  They are needed by ZK
     /// witness-generation routines that must prove knowledge of the noise.
+    ///
+    /// The errors are secret-dependent, so each row is handed to the caller
+    /// as a wipe-on-drop [`Zeroizing`] owner: ownership is transferred to the
+    /// caller, every row keeps variable-time computations disabled (the
+    /// error sampling and conversion run in constant time), and dropping a
+    /// row — normally, on an early error, or during an unwind — wipes its
+    /// coefficients and Shoup tables. The public `c0` rows of the returned
+    /// key keep their public time policy.
+    ///
+    /// # Keeping the witness rows guarded
+    ///
+    /// Keep every error row inside its [`Zeroizing`] owner. Cloning a row
+    /// yields a new guarded copy, but moving the inner polynomial out of a
+    /// guard (for example with [`std::mem::replace`]) creates an unguarded
+    /// secret copy that Rust will drop without wiping; zeroize any extracted
+    /// value before it drops.
+    ///
+    /// Wiping coverage inside this constructor is likewise not absolute: the
+    /// sampler's internal partial buffer (for example when the RNG panics
+    /// mid-sample) and the brief move-based conversion intervals are not
+    /// guaranteed wiped without `fhe-math` changes.
     pub fn new_with_c1_extended<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         from: &Poly<PowerBasis>,
@@ -263,7 +284,7 @@ impl KeySwitchingKey {
         ciphertext_level: usize,
         ksk_level: usize,
         rng: &mut R,
-    ) -> Result<(Self, Vec<Poly<NttShoup>>)> {
+    ) -> Result<(Self, Vec<Zeroizing<Poly<NttShoup>>>)> {
         if ciphertext_level < ksk_level {
             return Err(crate::EvaluationKeyError::InvalidLevelOrder {
                 ciphertext_level,
@@ -493,13 +514,21 @@ impl KeySwitchingKey {
 
     /// Like [`generate_c0`](Self::generate_c0) but also returns the per-row
     /// error polynomials `eᵢ` captured before they are folded into `c0`.
+    ///
+    /// The errors are secret-dependent: each row is placed under a
+    /// [`Zeroizing`] guard immediately after sampling, keeps variable-time
+    /// computations disabled, and is wiped whenever its guard is dropped.
+    /// Wiping coverage is not absolute: the sampler's internal partial
+    /// buffer and the brief move-based conversion intervals (clone into a
+    /// guard, guard release) are not guaranteed wiped without `fhe-math`
+    /// changes.
     #[allow(clippy::type_complexity)]
     fn generate_c0_with_errors<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         from: &Poly<PowerBasis>,
         c1: &[Poly<NttShoup>],
         rng: &mut R,
-    ) -> Result<(Vec<Poly<NttShoup>>, Vec<Poly<NttShoup>>)> {
+    ) -> Result<(Vec<Poly<NttShoup>>, Vec<Zeroizing<Poly<NttShoup>>>)> {
         let ctx0 = c1
             .first()
             .ok_or(crate::EvaluationKeyError::EmptyKeySwitchingComponents)?
@@ -516,7 +545,7 @@ impl KeySwitchingKey {
         )?;
         let rns = RnsContext::new(moduli_slice)?;
 
-        let pairs: Vec<(Poly<NttShoup>, Poly<NttShoup>)> = c1
+        let pairs: Vec<(Poly<NttShoup>, Zeroizing<Poly<NttShoup>>)> = c1
             .iter()
             .enumerate()
             .map(|(i, c1i)| {
@@ -527,26 +556,43 @@ impl KeySwitchingKey {
                 let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
                 let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis());
 
-                let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
+                // The freshly sampled error is secret: guard it before any
+                // fallible operation, so an early error or unwind cannot drop
+                // it un-wiped.
+                let mut b = Zeroizing::new(Poly::<PowerBasis>::small(
+                    a_s_pb.ctx(),
+                    sk.params.variance,
+                    rng,
+                )?);
 
-                let mut error_i = b.clone();
-                error_i.allow_variable_time_computations(fhe_traits::VariableTime::new(
-                    fhe_traits::PublicData::assert_public(),
-                ));
-                let error_ntt = error_i.into_ntt_shoup();
+                // Capture the error row before it is folded into `c0`. The
+                // clone lives under its own `Zeroizing` guard, and the row
+                // keeps its variable-time flag false; dropping a guard —
+                // normally, on an early error, or during an unwind — wipes
+                // the row.
+                let mut error_i = Zeroizing::new(b.as_ref().clone());
+                let error_ctx = error_i.ctx().clone();
+                let error_ntt = Zeroizing::new(
+                    std::mem::replace(error_i.as_mut(), Poly::<PowerBasis>::zero(&error_ctx))
+                        .into_ntt_shoup(),
+                );
 
-                b -= a_s_pb.as_ref();
+                *b.as_mut() -= a_s_pb.as_ref();
 
                 let gi = rns
                     .get_garner(i)
                     .ok_or(crate::EvaluationKeyError::MissingGarnerCoefficient { index: i })?;
                 let g_i_from = Zeroizing::new(gi * from);
-                b += &g_i_from;
+                *b.as_mut() += g_i_from.as_ref();
 
+                // The row is now the public `c0` component: mark it public
+                // and only then release it from its guard.
                 b.allow_variable_time_computations(fhe_traits::VariableTime::new(
                     fhe_traits::PublicData::assert_public(),
                 ));
-                Ok((b.into_ntt_shoup(), error_ntt))
+                let b_ctx = b.ctx().clone();
+                let b_inner = std::mem::replace(b.as_mut(), Poly::<PowerBasis>::zero(&b_ctx));
+                Ok((b_inner.into_ntt_shoup(), error_ntt))
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -555,6 +601,14 @@ impl KeySwitchingKey {
 
     /// Like [`generate_c0_decomposition`](Self::generate_c0_decomposition) but
     /// also returns per-row errors.
+    ///
+    /// The errors are secret-dependent: each row is placed under a
+    /// [`Zeroizing`] guard immediately after sampling, keeps variable-time
+    /// computations disabled, and is wiped whenever its guard is dropped.
+    /// Wiping coverage is not absolute: the sampler's internal partial
+    /// buffer and the brief move-based conversion intervals (clone into a
+    /// guard, guard release) are not guaranteed wiped without `fhe-math`
+    /// changes.
     #[allow(clippy::type_complexity)]
     fn generate_c0_decomposition_with_errors<R: RngCore + CryptoRng>(
         sk: &SecretKey,
@@ -562,7 +616,7 @@ impl KeySwitchingKey {
         c1: &[Poly<NttShoup>],
         rng: &mut R,
         log_base: usize,
-    ) -> Result<(Vec<Poly<NttShoup>>, Vec<Poly<NttShoup>>)> {
+    ) -> Result<(Vec<Poly<NttShoup>>, Vec<Zeroizing<Poly<NttShoup>>>)> {
         let ctx0 = c1
             .first()
             .ok_or(crate::EvaluationKeyError::EmptyKeySwitchingComponents)?
@@ -571,7 +625,7 @@ impl KeySwitchingKey {
             Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
         );
 
-        let pairs: Vec<(Poly<NttShoup>, Poly<NttShoup>)> = c1
+        let pairs: Vec<(Poly<NttShoup>, Zeroizing<Poly<NttShoup>>)> = c1
             .iter()
             .enumerate()
             .map(|(i, c1i)| {
@@ -582,24 +636,41 @@ impl KeySwitchingKey {
                 let a_s_inner = std::mem::replace(a_s.as_mut(), Poly::<Ntt>::zero(&ctx));
                 let a_s_pb = Zeroizing::new(a_s_inner.into_power_basis());
 
-                let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
+                // The freshly sampled error is secret: guard it before any
+                // fallible operation, so an early error or unwind cannot drop
+                // it un-wiped.
+                let mut b = Zeroizing::new(Poly::<PowerBasis>::small(
+                    a_s_pb.ctx(),
+                    sk.params.variance,
+                    rng,
+                )?);
 
-                let mut error_i = b.clone();
-                error_i.allow_variable_time_computations(fhe_traits::VariableTime::new(
-                    fhe_traits::PublicData::assert_public(),
-                ));
-                let error_ntt = error_i.into_ntt_shoup();
+                // Capture the error row before it is folded into `c0`. The
+                // clone lives under its own `Zeroizing` guard, and the row
+                // keeps its variable-time flag false; dropping a guard —
+                // normally, on an early error, or during an unwind — wipes
+                // the row.
+                let mut error_i = Zeroizing::new(b.as_ref().clone());
+                let error_ctx = error_i.ctx().clone();
+                let error_ntt = Zeroizing::new(
+                    std::mem::replace(error_i.as_mut(), Poly::<PowerBasis>::zero(&error_ctx))
+                        .into_ntt_shoup(),
+                );
 
-                b -= a_s_pb.as_ref();
+                *b.as_mut() -= a_s_pb.as_ref();
 
                 let power = BigUint::from(1u64 << (i * log_base));
                 let from_power = Zeroizing::new(from * &power);
-                b += from_power.as_ref();
+                *b.as_mut() += from_power.as_ref();
 
+                // The row is now the public `c0` component: mark it public
+                // and only then release it from its guard.
                 b.allow_variable_time_computations(fhe_traits::VariableTime::new(
                     fhe_traits::PublicData::assert_public(),
                 ));
-                Ok((b.into_ntt_shoup(), error_ntt))
+                let b_ctx = b.ctx().clone();
+                let b_inner = std::mem::replace(b.as_mut(), Poly::<PowerBasis>::zero(&b_ctx));
+                Ok((b_inner.into_ntt_shoup(), error_ntt))
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -881,8 +952,11 @@ mod tests {
     };
     use fhe_traits::Serialize;
     use num_bigint::BigUint;
-    use rand::rng;
+    use rand::{CryptoRng, RngCore, rng};
     use std::error::Error;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use zeroize::{Zeroize, Zeroizing};
 
     #[test]
     fn constructor() -> Result<(), Box<dyn Error>> {
@@ -1080,7 +1154,8 @@ mod tests {
         Ok(())
     }
 
-    /// Verify `c0[i] + c1[i]·sk = eᵢ + gᵢ·from` (paper: `d0ᵢ = eᵢ − sk·d1ᵢ + gᵢ·r`).
+    /// Verify `c0[i] + c1[i]·sk = eᵢ + gᵢ·from` (paper: `d0ᵢ = eᵢ − sk·d1ᵢ + gᵢ·r`)
+    /// on the multi-modulus path, with the exported errors guarded and secret.
     #[test]
     fn new_with_c1_extended_witness_equations() -> Result<(), Box<dyn Error>> {
         use fhe_math::rns::RnsContext;
@@ -1092,6 +1167,10 @@ mod tests {
 
         let c1 = KeySwitchingKey::c1_from_seed(ctx, [42u8; 32], params.moduli().len());
         let (ksk, errors) = KeySwitchingKey::new_with_c1_extended(&sk, &from, c1, 0, 0, &mut rng)?;
+
+        // The exported error rows are wipe-on-drop owners.
+        let errors: &Vec<Zeroizing<Poly<NttShoup>>> = &errors;
+        assert_eq!(errors.len(), ksk.c0.len());
 
         let sk_ntt = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)
             .map_err(crate::Error::MathError)?
@@ -1108,10 +1187,279 @@ mod tests {
             let lhs = (&c0_i.clone().into_ntt() + &(&c1_i.clone().into_ntt() * &sk_ntt))
                 .into_power_basis();
             let gi = rns.get_garner(i).expect("garner");
-            let rhs = (&e_i.clone().into_ntt() + &(gi * &from).into_ntt()).into_power_basis();
+            let rhs =
+                (&e_i.as_ref().clone().into_ntt() + &(gi * &from).into_ntt()).into_power_basis();
             assert_eq!(lhs, rhs, "witness equation failed at row {i}");
         }
         Ok(())
+    }
+
+    /// Same witness equations on the single-modulus decomposition path:
+    /// `c0[i] + c1[i]·sk = eᵢ + from·2^(i·log_base)`, with the exported
+    /// errors guarded and secret.
+    #[test]
+    fn new_with_c1_extended_witness_equations_decomposition() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        assert_eq!(ctx.moduli().len(), 1);
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+
+        let modulus = ctx.moduli().first().expect("single modulus");
+        let log_modulus = modulus.next_power_of_two().ilog2() as usize;
+        let log_base = log_modulus / 2;
+        let expected_len = log_modulus.div_ceil(log_base);
+
+        let c1 = KeySwitchingKey::c1_from_seed(ctx, [42u8; 32], expected_len);
+        let (ksk, errors) = KeySwitchingKey::new_with_c1_extended(&sk, &from, c1, 0, 0, &mut rng)?;
+
+        // The exported error rows are wipe-on-drop owners.
+        let errors: &Vec<Zeroizing<Poly<NttShoup>>> = &errors;
+        assert_eq!(errors.len(), expected_len);
+
+        let sk_ntt = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)
+            .map_err(crate::Error::MathError)?
+            .into_ntt();
+
+        for (i, ((c0_i, c1_i), e_i)) in ksk
+            .c0
+            .iter()
+            .zip(ksk.c1.iter())
+            .zip(errors.iter())
+            .enumerate()
+        {
+            let lhs = (&c0_i.clone().into_ntt() + &(&c1_i.clone().into_ntt() * &sk_ntt))
+                .into_power_basis();
+            let power = BigUint::from(1u64 << (i * log_base));
+            let rhs = (&e_i.as_ref().clone().into_ntt() + &(&from * &power).into_ntt())
+                .into_power_basis();
+            assert_eq!(lhs, rhs, "witness equation failed at row {i}");
+        }
+        Ok(())
+    }
+
+    /// Witness error rows must stay secret in time policy (no variable-time
+    /// computations) on both error-generation branches, while the public key
+    /// components keep their public marking.
+    #[test]
+    fn extended_witness_errors_stay_secret_and_public_components_public()
+    -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+
+        // Multi-modulus path (generate_c0_with_errors).
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+        let c1 = KeySwitchingKey::c1_from_seed(ctx, [42u8; 32], params.moduli().len());
+        let (ksk, errors) = KeySwitchingKey::new_with_c1_extended(&sk, &from, c1, 0, 0, &mut rng)?;
+        assert!(
+            errors
+                .iter()
+                .all(|e| !e.allows_variable_time_computations())
+        );
+        assert!(
+            ksk.c0
+                .iter()
+                .chain(ksk.c1.iter())
+                .all(Poly::allows_variable_time_computations)
+        );
+
+        // Single-modulus decomposition path
+        // (generate_c0_decomposition_with_errors).
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+        let modulus = ctx.moduli().first().expect("single modulus");
+        let log_modulus = modulus.next_power_of_two().ilog2() as usize;
+        let expected_len = log_modulus.div_ceil(log_modulus / 2);
+        let c1 = KeySwitchingKey::c1_from_seed(ctx, [42u8; 32], expected_len);
+        let (ksk, errors) = KeySwitchingKey::new_with_c1_extended(&sk, &from, c1, 0, 0, &mut rng)?;
+        assert!(
+            errors
+                .iter()
+                .all(|e| !e.allows_variable_time_computations())
+        );
+        assert!(
+            ksk.c0
+                .iter()
+                .chain(ksk.c1.iter())
+                .all(Poly::allows_variable_time_computations)
+        );
+        Ok(())
+    }
+
+    /// `Poly::zeroize` — the implementation `Zeroizing` invokes on drop —
+    /// must erase the coefficient table (the Shoup table is erased by the
+    /// same element-wise pass inside `fhe-math`). This checks the zeroize
+    /// implementation on a live value; the drop-time behavior of the guard
+    /// itself is observed by [`zeroizing_drops_zeroize_the_guarded_value`],
+    /// and the guarded error-row types make reading freed memory impossible.
+    #[test]
+    fn poly_zeroize_erases_coefficients() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let ctx = params.context_at_level(0)?;
+
+        let mut poly = Poly::<NttShoup>::random(ctx, &mut rng);
+        assert!(poly.coefficients().iter().any(|&c| c != 0));
+        poly.zeroize();
+        assert!(poly.coefficients().iter().all(|&c| c == 0));
+
+        // The exported error rows are `Zeroizing` owners holding non-zero
+        // rows, so dropping them (normally, on an early error, or during an
+        // unwind) runs the zeroization verified above.
+        let sk = SecretKey::random(&params, &mut rng);
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+        let c1 = KeySwitchingKey::c1_from_seed(ctx, [42u8; 32], params.moduli().len());
+        let (_ksk, errors) = KeySwitchingKey::new_with_c1_extended(&sk, &from, c1, 0, 0, &mut rng)?;
+        for e in errors {
+            assert!(e.as_ref().coefficients().iter().any(|&c| c != 0));
+            drop(e);
+        }
+        Ok(())
+    }
+
+    /// Test-only probe recording that its guard ran `Zeroize::zeroize` on it.
+    struct WipeProbe(Arc<AtomicBool>);
+
+    impl Zeroize for WipeProbe {
+        fn zeroize(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Drop a guarded probe through an unwind.
+    #[expect(clippy::panic, reason = "test-only unwind probe")]
+    fn unwind_with_guarded_probe(probe: Zeroizing<WipeProbe>) {
+        let _probe = probe;
+        panic!("probe unwind");
+    }
+
+    /// Safe drop-time observation of the guard mechanism the witness error
+    /// rows rely on: `Zeroizing` runs `Zeroize::zeroize` on its contents when
+    /// dropped, on both the ordinary and the unwind path. The production rows
+    /// cannot be instrumented from outside the constructor, so this probe
+    /// substitutes for a direct observation; combined with
+    /// [`poly_zeroize_erases_coefficients`] (what `Poly::zeroize` erases) and
+    /// the guarded return/field types, it establishes — without reading freed
+    /// memory — that dropped error rows are wiped.
+    #[test]
+    fn zeroizing_drops_zeroize_the_guarded_value() {
+        // Ordinary drop.
+        let wiped = Arc::new(AtomicBool::new(false));
+        let probe = Zeroizing::new(WipeProbe(Arc::clone(&wiped)));
+        assert!(!wiped.load(Ordering::SeqCst));
+        drop(probe);
+        assert!(wiped.load(Ordering::SeqCst));
+
+        // Drop during an unwind.
+        let wiped = Arc::new(AtomicBool::new(false));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            unwind_with_guarded_probe(Zeroizing::new(WipeProbe(Arc::clone(&wiped))));
+        }));
+        assert!(result.is_err());
+        assert!(wiped.load(Ordering::SeqCst));
+    }
+
+    /// An RNG that succeeds for a fixed number of draws and then panics,
+    /// simulating a mid-generation RNG failure after earlier error rows were
+    /// already sampled.
+    struct PanickingAfterDraws {
+        draws: usize,
+        fail_after: usize,
+    }
+
+    impl RngCore for PanickingAfterDraws {
+        fn next_u32(&mut self) -> u32 {
+            self.next_u64() as u32
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.draws += 1;
+            #[expect(
+                clippy::panic,
+                reason = "test-only RNG simulating a mid-generation RNG failure"
+            )]
+            if self.draws > self.fail_after {
+                panic!("simulated RNG failure after earlier error rows were sampled");
+            }
+            u64::from_le_bytes([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef])
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for chunk in dest.chunks_mut(8) {
+                let bytes = self.next_u64().to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+        }
+    }
+
+    impl CryptoRng for PanickingAfterDraws {}
+
+    /// A failing RNG that unwinds mid-generation after row 0 was fully
+    /// sampled. This test exercises the unwind path and proves unwind safety;
+    /// it cannot directly observe the dropped rows (the rows live inside the
+    /// constructor, so their guards cannot be instrumented from here).
+    /// Wiping follows indirectly: the rows under construction are
+    /// `Vec<Zeroizing<Poly<NttShoup>>>` (pinned at compile time by the return
+    /// type), and [`zeroizing_drops_zeroize_the_guarded_value`] shows a
+    /// `Zeroizing` guard zeroizes its contents when dropped during an unwind.
+    #[test]
+    fn extended_ksk_rng_failure_after_sampled_rows_unwinds_safely() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0).unwrap();
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng).unwrap();
+        let c1 = KeySwitchingKey::c1_from_seed(ctx, [42u8; 32], params.moduli().len());
+
+        // Variance 10 uses the CBD sampler, which bit-packs draws: a
+        // degree-8 row consumes 6 draws, so failing after 9 draws means row 0
+        // completed and row 1 was mid-sampling when the RNG failed.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut failing = PanickingAfterDraws {
+                draws: 0,
+                fail_after: 9,
+            };
+            KeySwitchingKey::new_with_c1_extended(&sk, &from, c1, 0, 0, &mut failing)
+        }));
+
+        let payload = result.expect_err("generation must unwind when the RNG fails");
+        assert_eq!(
+            payload.downcast_ref::<&'static str>().copied(),
+            Some("simulated RNG failure after earlier error rows were sampled")
+        );
+    }
+
+    /// Same unwind-safety property on the single-modulus decomposition path,
+    /// with the same limits on what this test can directly observe.
+    #[test]
+    fn extended_ksk_rng_failure_decomposition_unwinds_safely() {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0).unwrap();
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng).unwrap();
+        let modulus = ctx.moduli().first().unwrap();
+        let log_modulus = modulus.next_power_of_two().ilog2() as usize;
+        let expected_len = log_modulus.div_ceil(log_modulus / 2);
+        let c1 = KeySwitchingKey::c1_from_seed(ctx, [42u8; 32], expected_len);
+
+        // A degree-8, variance-10 CBD row consumes 6 draws, so failing after
+        // 9 draws lands inside row 1 with row 0 fully sampled.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut failing = PanickingAfterDraws {
+                draws: 0,
+                fail_after: 9,
+            };
+            KeySwitchingKey::new_with_c1_extended(&sk, &from, c1, 0, 0, &mut failing)
+        }));
+
+        let payload = result.expect_err("generation must unwind when the RNG fails");
+        assert!(payload.downcast_ref::<&'static str>().is_some());
     }
 
     #[test]
