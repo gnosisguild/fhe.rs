@@ -59,9 +59,7 @@ fn decrypt_one(
                 .unwrap(),
         );
     }
-    let plaintext = manager
-        .decrypt_from_shares(&shares, reconstructing, ciphertext)
-        .unwrap();
+    let plaintext = manager.decrypt_from_shares(&shares, ciphertext).unwrap();
     Vec::<u64>::try_decode(&plaintext, Encoding::poly()).unwrap()[0]
 }
 

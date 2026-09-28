@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::trbfv::{SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
-use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::Array2;
 
@@ -83,7 +82,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     let generator = SmudgingNoiseGenerator::new(config).expect("smudging generator");
 
     let reconstructing = vec![1, 2];
-    let decryption_shares: Vec<Poly<PowerBasis>> = reconstructing
+    let decryption_shares: Vec<_> = reconstructing
         .iter()
         .map(|&party_id| {
             let index = party_id - 1;
@@ -102,17 +101,13 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
 
     assert!(
         manager
-            .decrypt_from_shares(
-                std::slice::from_ref(&decryption_shares[0]),
-                &[reconstructing[0]],
-                &ciphertext,
-            )
+            .decrypt_from_shares(std::slice::from_ref(&decryption_shares[0]), &ciphertext)
             .is_err(),
         "one share must not decrypt"
     );
 
     let plaintext = manager
-        .decrypt_from_shares(&decryption_shares, &reconstructing, &ciphertext)
+        .decrypt_from_shares(&decryption_shares, &ciphertext)
         .expect("threshold decryption with t+1 shares");
     let decoded = Vec::<u64>::try_decode(&plaintext, Encoding::poly()).expect("decode plaintext");
     assert_eq!(decoded[0], 5);

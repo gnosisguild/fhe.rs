@@ -8,7 +8,6 @@ mod support;
 use fhe::bfv::Ciphertext;
 use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe::{Error, ThresholdError};
-use fhe_math::rq::{Poly, PowerBasis};
 use num_traits::Zero;
 use std::sync::Arc;
 use support::presets::Preset;
@@ -95,41 +94,14 @@ fn reconstruction_rejects_invalid_public_inputs() {
         profile.parameters.clone(),
     )
     .unwrap();
-    let ctx = profile.parameters.context_at_level(0).unwrap();
-    let share = || Poly::<PowerBasis>::zero(ctx);
     let ciphertext = Arc::new(Ciphertext::zero(&profile.parameters));
 
-    let too_few = manager
-        .decrypt_from_shares(&[share()], &[1], &ciphertext)
-        .unwrap_err();
+    let too_few = manager.decrypt_from_shares(&[], &ciphertext).unwrap_err();
     assert!(matches!(
         too_few,
         Error::Threshold(ThresholdError::ShareCountMismatch {
-            actual: 1,
+            actual: 0,
             expected
         }) if expected == profile.threshold + 1
-    ));
-
-    let share_count = profile.threshold + 1;
-    let shares: Vec<_> = (0..share_count).map(|_| share()).collect();
-    let duplicate_parties: Vec<_> = (0..share_count)
-        .map(|index| if index == 1 { 1 } else { index + 1 })
-        .collect();
-    let duplicate = manager
-        .decrypt_from_shares(&shares, &duplicate_parties, &ciphertext)
-        .unwrap_err();
-    assert!(matches!(
-        duplicate,
-        Error::Threshold(ThresholdError::DuplicatePartyId { party_id: 1 })
-    ));
-
-    let zero_id_parties: Vec<_> = (0..share_count)
-        .map(|index| if index == 0 { 0 } else { index + 1 })
-        .collect();
-    let zero_id = manager.decrypt_from_shares(&shares, &zero_id_parties, &ciphertext);
-    assert!(matches!(
-        zero_id.unwrap_err(),
-        Error::Threshold(ThresholdError::InvalidPartyId { party_id: 0, n })
-            if n == profile.num_parties
     ));
 }

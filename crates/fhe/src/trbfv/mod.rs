@@ -21,6 +21,8 @@ pub mod shares;
 pub mod smudging;
 
 // Re-export main types for convenience
-pub use prf::{PartyPrfKeys, PrfKey};
-pub use shares::{AggregatedSecretKeyShare, DealtSecretKeyShares, SecretKeyShare, ShareManager};
+pub use prf::{PartyPrfKeyMaterial, PartyPrfKeys, PrfKey};
+pub use shares::{
+    AggregatedSecretKeyShare, DealtSecretKeyShares, DecryptionShare, SecretKeyShare, ShareManager,
+};
 pub use smudging::{SmudgingConfig, SmudgingNoise, SmudgingNoiseGenerator};

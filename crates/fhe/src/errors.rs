@@ -212,6 +212,25 @@ pub enum ThresholdError {
         reason: String,
     },
 
+    /// Smudging noise was sampled under a different committee or lambda than
+    /// the share manager that consumes it.
+    #[error(
+        "smudging noise was sampled for n = {actual_n}, lambda = {actual_lambda}, but the manager has n = {expected_n}"
+    )]
+    SmudgingPolicyMismatch {
+        /// Party count stamped on the noise
+        actual_n: usize,
+        /// Statistical-security parameter stamped on the noise
+        actual_lambda: usize,
+        /// Party count of the share manager
+        expected_n: usize,
+    },
+
+    /// Partial decryptions were produced for different designated sets or
+    /// ciphertexts.
+    #[error("decryption shares were produced for inconsistent designated sets or ciphertexts")]
+    InconsistentDecryptionShares,
+
     /// The number of parties is too large for the modulus chain.
     #[error(
         "n {n} is not smaller than the smallest modulus {min_modulus}; the MPC protocol \

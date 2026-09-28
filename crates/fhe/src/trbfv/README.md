@@ -40,7 +40,8 @@ The public `ShareManager` flow is:
 1. Create a `ShareManager` instance with BFV parameters.
 2. Generate and distribute Shamir shares for each party's secret contribution.
 3. Sample committee PRF keys (`ShareManager::generate_prf_keys`) and give each
-   party its `2n` keys.
+   party its `2n` keys. Applications that move keys across a transport boundary
+   use `PartyPrfKeys::into_transport` / `from_transport`.
 4. Aggregate the received secret-key contributions for the same externally
    agreed party set.
 5. For a designated decryptor set `S` of size `threshold + 1`, each party in
@@ -258,7 +259,7 @@ Basic usage pattern:
 
 ```rust
 use fhe::trbfv::{
-    SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
+    PartyPrfKeys, SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
 };
 
 // Setup threshold scheme; each party holds its own manager instance
@@ -270,7 +271,12 @@ let secret_key_dealt = share_manager.generate_secret_key_shares(secret_key_poly,
 let secret_key_dealt = secret_key_dealt.into_transport();
 
 // Committee: sample PRF keys once and give party i its 2n keys.
+// Setup is external; this only samples and, at an application boundary,
+// transports already-sampled keys.
 let prf_keys = share_manager.generate_prf_keys(&mut rng)?;
+let prf_keys_i = PartyPrfKeys::from_transport(
+    prf_keys[party_index].clone().into_transport(),
+)?;
 
 // Each party: aggregate the share matrices received from the other parties
 // into its share of the joint secret key
@@ -294,20 +300,21 @@ let decryption_share = share_manager.decryption_share(
     party_id,
     &reconstructing_parties,
     es_noise,
-    &prf_keys[party_index],
+    &prf_keys_i,
 )?;
 
-// Combine exactly threshold + 1 decryption shares; reconstructing_parties
-// holds the 1-based indices of the parties the shares came from
+// Combine exactly threshold + 1 typed decryption shares. Each share is bound
+// to its party, designated set S, and H(S, ct); FinDec rejects mixed sets.
 let plaintext =
-    share_manager.decrypt_from_shares(&decryption_shares, &reconstructing_parties, &ciphertext)?;
+    share_manager.decrypt_from_shares(&decryption_shares, &ciphertext)?;
 ```
 
 `decryption_share` borrows the ciphertext and aggregated secret-key share
-but consumes the one-time `SmudgingNoise`. `decrypt_from_shares` borrows
-the ciphertext, decryption shares, and party indices; callers with owned
-`Vec`s or `Arc<Ciphertext>` should pass references rather than cloning or
-transferring them.
+but consumes the one-time `SmudgingNoise`. It returns a `DecryptionShare`
+bound to the party, designated set, and ciphertext. `decrypt_from_shares`
+borrows those shares and the ciphertext; callers with owned `Vec`s or
+`Arc<Ciphertext>` should pass references rather than cloning or transferring
+them.
 
 ## Security Considerations
 

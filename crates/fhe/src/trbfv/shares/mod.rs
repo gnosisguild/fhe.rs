@@ -69,6 +69,53 @@ pub struct ShareManager {
     params: Arc<BfvParameters>,
 }
 
+/// A partial decryption bound to one party, designated set `S`, and ciphertext.
+///
+/// Created only by [`ShareManager::decryption_share`]. FinDec rejects a slice
+/// whose members were produced for different sets or ciphertexts.
+#[derive(Clone)]
+pub struct DecryptionShare {
+    poly: Poly<PowerBasis>,
+    party_id: usize,
+    decryptors: Vec<usize>,
+    digest: super::prf::ContextDigest,
+}
+
+impl std::fmt::Debug for DecryptionShare {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DecryptionShare")
+            .field("party_id", &self.party_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+impl DecryptionShare {
+    fn from_test_parts(
+        poly: Poly<PowerBasis>,
+        party_id: usize,
+        decryptors: Vec<usize>,
+        ciphertext: &Ciphertext,
+    ) -> Result<Self, Error> {
+        let digest = super::prf::context_digest(&decryptors, ciphertext)?;
+        Ok(Self {
+            poly,
+            party_id,
+            decryptors,
+            digest,
+        })
+    }
+
+    fn allows_variable_time_computations(&self) -> bool {
+        self.poly.allows_variable_time_computations()
+    }
+
+    fn coefficients(&self) -> ndarray::ArrayView2<'_, u64> {
+        self.poly.coefficients()
+    }
+}
+
 impl ShareManager {
     /// Create a new share manager.
     ///
@@ -351,7 +398,8 @@ impl ShareManager {
     /// - `party_id`: 1-based identity of this party; must belong to `S`
     /// - `reconstructing_parties`: The designated set `S`, 1-based, size
     ///   `threshold + 1`
-    /// - `noise`: Fresh local smudging noise, consumed here
+    /// - `noise`: Fresh local smudging sampled for this manager's `n` and
+    ///   parameters; consumed here
     /// - `prf_keys`: This party's `2n` committee PRF keys
     #[allow(clippy::indexing_slicing)] // BFV ciphertext always has exactly 2 components
     pub fn decryption_share(
@@ -362,8 +410,15 @@ impl ShareManager {
         reconstructing_parties: &[usize],
         noise: SmudgingNoise,
         prf_keys: &PartyPrfKeys,
-    ) -> Result<Poly<PowerBasis>, Error> {
+    ) -> Result<DecryptionShare, Error> {
         self.validate_ciphertext(ciphertext)?;
+        if !noise.matches_manager(self.n, &self.params) {
+            return Err(Error::smudging_policy_mismatch(
+                noise.policy_n(),
+                noise.policy_lambda(),
+                self.n,
+            ));
+        }
         if prf_keys.party_count() != self.n {
             return Err(Error::invalid_party_count(prf_keys.party_count(), self.n));
         }
@@ -412,7 +467,14 @@ impl ShareManager {
         let mut d_share_poly = c1sk;
         d_share_poly += es_i.as_ref();
         d_share_poly += &mask;
-        Ok(d_share_poly)
+        let decryptors = super::prf::canonical_decryptors(reconstructing_parties);
+        let digest = super::prf::context_digest(&decryptors, ciphertext)?;
+        Ok(DecryptionShare {
+            poly: d_share_poly,
+            party_id,
+            decryptors,
+            digest,
+        })
     }
 
     /// Combine partial decryptions for a designated set `S`.
@@ -420,14 +482,11 @@ impl ShareManager {
     /// Implements FinDec of Colin de Verdière–Passelègue–Stehlé 2026:
     /// `b + Σ_{i∈S} p_i`. Lagrange interpolation is already applied in
     /// [`ShareManager::decryption_share`]; this step only sums the shares
-    /// and adds the second ciphertext component. The shares, party indices,
-    /// and ciphertext are borrowed and can be held by the calling protocol
-    /// throughout reconstruction.
+    /// and adds the second ciphertext component. Every share must have been
+    /// produced for the same designated set and ciphertext.
     ///
     /// # Arguments
     /// - `decryption_shares`: Exactly `threshold + 1` decryption shares
-    /// - `reconstructing_parties`: The 1-based party indices the shares came from, in
-    ///   the same order as `decryption_shares`; indices must be distinct and in `1..=n`
     /// - `ciphertext`: The original ciphertext being decrypted
     ///
     /// # Returns
@@ -436,46 +495,55 @@ impl ShareManager {
     #[allow(clippy::indexing_slicing)]
     pub fn decrypt_from_shares(
         &self,
-        decryption_shares: &[Poly<PowerBasis>],
-        reconstructing_parties: &[usize],
+        decryption_shares: &[DecryptionShare],
         ciphertext: &Ciphertext,
     ) -> Result<Plaintext, Error> {
-        self.validate_ciphertext_parameters(ciphertext)?;
-        let ctx = self.params.context_at_level(0)?;
-        for decryption_share in decryption_shares {
-            if decryption_share.ctx().as_ref() != ctx.as_ref() {
-                return Err(Error::ParameterMismatch {
-                    left: crate::ParameterSource::Polynomial,
-                    right: crate::ParameterSource::Parameters,
-                });
-            }
-        }
-        if decryption_shares.len() != reconstructing_parties.len() {
+        if decryption_shares.len() != self.threshold + 1 {
             return Err(Error::share_count_mismatch(
-                reconstructing_parties.len(),
                 decryption_shares.len(),
+                self.threshold + 1,
             ));
         }
+        self.validate_ciphertext(ciphertext)?;
+        let Some(first) = decryption_shares.first() else {
+            return Err(Error::share_count_mismatch(0, self.threshold + 1));
+        };
+        let expected_digest = super::prf::context_digest(&first.decryptors, ciphertext)?;
+        if first.digest != expected_digest {
+            return Err(Error::inconsistent_decryption_shares());
+        }
         let shamir = self.rns_shamir()?;
-        shamir.validate_decryptor_set(reconstructing_parties)?;
-        for (d_share_poly, &party_id) in decryption_shares.iter().zip(reconstructing_parties) {
-            if d_share_poly.ctx().as_ref() != ctx.as_ref() {
+        shamir.validate_decryptor_set(&first.decryptors)?;
+        let ctx = self.params.context_at_level(0)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for share in decryption_shares {
+            if share.decryptors != first.decryptors || share.digest != expected_digest {
+                return Err(Error::inconsistent_decryption_shares());
+            }
+            if !share.decryptors.contains(&share.party_id) {
+                return Err(Error::invalid_party_id(share.party_id, self.n));
+            }
+            if !seen.insert(share.party_id) {
+                return Err(Error::duplicate_party_id(share.party_id));
+            }
+            if share.poly.ctx().as_ref() != ctx.as_ref() {
                 return Err(Error::ParameterMismatch {
                     left: crate::ParameterSource::Polynomial,
                     right: crate::ParameterSource::Parameters,
                 });
             }
-            shamir.validate_matrix(d_share_poly.coefficients(), party_id, "share")?;
+            shamir.validate_matrix(share.poly.coefficients(), share.party_id, "share")?;
         }
-        self.validate_ciphertext_shape(ciphertext)?;
+        if seen.len() != first.decryptors.len()
+            || first.decryptors.iter().any(|id| !seen.contains(id))
+        {
+            return Err(Error::inconsistent_decryption_shares());
+        }
 
-        let mut result_poly = decryption_shares
-            .first()
-            .cloned()
-            .ok_or_else(|| Error::share_count_mismatch(0, self.threshold + 1))?;
+        let mut result_poly = first.poly.clone();
         result_poly.disallow_variable_time_computations();
         for share in decryption_shares.iter().skip(1) {
-            result_poly += share;
+            result_poly += &share.poly;
         }
 
         let mut c0 = ciphertext.c[0].clone();
@@ -649,9 +717,14 @@ mod tests {
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
 
-    fn zero_smudging(params: &Arc<BfvParameters>) -> SmudgingNoise {
+    fn zero_smudging(params: &Arc<BfvParameters>, n: usize) -> SmudgingNoise {
         let ctx = params.context_at_level(0).unwrap();
-        SmudgingNoise::from_poly(Zeroizing::new(Poly::<PowerBasis>::zero(ctx)))
+        SmudgingNoise::from_poly(
+            Zeroizing::new(Poly::<PowerBasis>::zero(ctx)),
+            n,
+            0,
+            params.clone(),
+        )
     }
 
     fn part_dec(
@@ -662,14 +735,14 @@ mod tests {
         reconstructing: &[usize],
         prf_keys: &PartyPrfKeys,
         params: &Arc<BfvParameters>,
-    ) -> Poly<PowerBasis> {
+    ) -> DecryptionShare {
         manager
             .decryption_share(
                 ciphertext,
                 secret_key,
                 party_id,
                 reconstructing,
-                zero_smudging(params),
+                zero_smudging(params, manager.n()),
                 prf_keys,
             )
             .unwrap()
@@ -920,14 +993,10 @@ mod tests {
         // same value needed for plaintext recovery.
         let shares = vec![decryption_share, second_decryption_share];
 
-        // Parties are 1-based; reconstruction needs threshold + 1 = 2 shares.
-        let reconstructing = vec![1, 2];
-        let result = manager.decrypt_from_shares(&shares, &reconstructing, &ct);
+        let result = manager.decrypt_from_shares(&shares, &ct);
         let plaintext_found = result.expect("Failed to decrypt from shares");
         assert_eq!(
-            manager
-                .decrypt_from_shares(&shares, &reconstructing, &ct)
-                .unwrap(),
+            manager.decrypt_from_shares(&shares, &ct).unwrap(),
             plaintext_found
         );
 
@@ -951,27 +1020,25 @@ mod tests {
         let secret_poly = manager
             .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
             .unwrap();
-        let context = params.context_at_level(0).unwrap();
         let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_poly).clone());
         let prf_keys = manager.generate_prf_keys(&mut rng).unwrap();
-        let _ = context;
         let result = manager.decryption_share(
             &ciphertext,
             &key_share,
             1,
             &[1, 2],
-            zero_smudging(&params),
+            zero_smudging(&params, manager.n()),
             &prf_keys[0],
         );
 
-        assert_eq!(
+        assert!(matches!(
             result,
             Err(Error::InvalidLevel {
                 level: 1,
                 min_level: 0,
                 max_level: 0,
             })
-        );
+        ));
     }
 
     #[test]
@@ -985,9 +1052,24 @@ mod tests {
         let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
         ciphertext.switch_down().unwrap();
 
-        let context = params.context_at_level(0).unwrap();
-        let shares = vec![Poly::<PowerBasis>::zero(context)];
-        let result = manager.decrypt_from_shares(&shares, &[1], &ciphertext);
+        let ctx = params.context_at_level(0).unwrap();
+        let shares = vec![
+            DecryptionShare::from_test_parts(
+                Poly::<PowerBasis>::zero(ctx),
+                1,
+                vec![1, 2],
+                &ciphertext,
+            )
+            .unwrap(),
+            DecryptionShare::from_test_parts(
+                Poly::<PowerBasis>::zero(ctx),
+                2,
+                vec![1, 2],
+                &ciphertext,
+            )
+            .unwrap(),
+        ];
+        let result = manager.decrypt_from_shares(&shares, &ciphertext);
 
         assert_eq!(
             result,
@@ -1010,15 +1092,24 @@ mod tests {
         let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
         ciphertext.c.pop();
 
-        let context = params.context_at_level(0).unwrap();
-        let result = manager.decrypt_from_shares(
-            &[
-                Poly::<PowerBasis>::zero(context),
-                Poly::<PowerBasis>::zero(context),
-            ],
-            &[1, 2],
-            &ciphertext,
-        );
+        let ctx = params.context_at_level(0).unwrap();
+        let shares = vec![
+            DecryptionShare::from_test_parts(
+                Poly::<PowerBasis>::zero(ctx),
+                1,
+                vec![1, 2],
+                &ciphertext,
+            )
+            .unwrap(),
+            DecryptionShare::from_test_parts(
+                Poly::<PowerBasis>::zero(ctx),
+                2,
+                vec![1, 2],
+                &ciphertext,
+            )
+            .unwrap(),
+        ];
+        let result = manager.decrypt_from_shares(&shares, &ciphertext);
 
         assert!(matches!(
             result,
@@ -1113,7 +1204,7 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares with parties 1 and 2 reconstructing
-        let result = managers[0].decrypt_from_shares(&decryption_shares, &reconstructing, &ct);
+        let result = managers[0].decrypt_from_shares(&decryption_shares, &ct);
         assert!(result.is_ok());
 
         // Test if we had correct decyption
@@ -1207,7 +1298,7 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares with selected parties
-        let result = managers[0].decrypt_from_shares(&decryption_shares, &reconstructing, &ct);
+        let result = managers[0].decrypt_from_shares(&decryption_shares, &ct);
         assert!(result.is_ok());
 
         // Validate plaintext
@@ -1302,7 +1393,7 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares with selected parties
-        let result = managers[0].decrypt_from_shares(&decryption_shares, &reconstructing, &ct);
+        let result = managers[0].decrypt_from_shares(&decryption_shares, &ct);
         assert!(result.is_ok());
 
         // Validate plaintext
@@ -1393,8 +1484,7 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Decrypt with correct indices -> should succeed and match plaintext
-        let result_ok =
-            managers[0].decrypt_from_shares(&decryption_shares, &reconstructing_correct, &ct);
+        let result_ok = managers[0].decrypt_from_shares(&decryption_shares, &ct);
         assert!(result_ok.is_ok());
         let plaintext_found_ok =
             result_ok.expect("Failed to decrypt from shares with correct indices");
@@ -1416,15 +1506,9 @@ mod tests {
         );
         let mut mixed_shares = decryption_shares.clone();
         mixed_shares[0] = mixed_share;
-        let result_bad =
-            managers[0].decrypt_from_shares(&mixed_shares, &reconstructing_correct, &ct);
-        assert!(result_bad.is_ok());
-        let plaintext_found_bad =
-            result_bad.expect("Decryption unexpectedly failed with mixed designated sets");
-        let decoded_bad: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found_bad, Encoding::poly())
-            .expect("Decoding plaintext failed");
-        assert_ne!(
-            decoded_bad, plaintext_data,
+        let result_bad = managers[0].decrypt_from_shares(&mixed_shares, &ct);
+        assert!(
+            result_bad.is_err(),
             "Partial decryptions from distinct designated sets must not combine"
         );
     }
@@ -1592,37 +1676,88 @@ mod tests {
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
         let ctx = params.context_at_level(0).unwrap();
-        let shares: Vec<Poly<PowerBasis>> = (0..3).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
+        let dummy = |party_id: usize, decryptors: Vec<usize>| {
+            DecryptionShare::from_test_parts(
+                Poly::<PowerBasis>::zero(ctx),
+                party_id,
+                decryptors,
+                &ct,
+            )
+            .unwrap()
+        };
+        let decryptors = vec![1usize, 2, 3];
 
-        // Duplicate index
-        let result = manager.decrypt_from_shares(&shares, &[1, 2, 2], &ct);
+        let shares = vec![
+            dummy(1, decryptors.clone()),
+            dummy(2, decryptors.clone()),
+            dummy(2, decryptors.clone()),
+        ];
+        let result = manager.decrypt_from_shares(&shares, &ct);
         assert!(result.is_err());
 
-        // Index 0 (would evaluate the sharing polynomial at the secret)
-        let result = manager.decrypt_from_shares(&shares, &[0, 1, 2], &ct);
+        let shares = vec![
+            dummy(0, decryptors.clone()),
+            dummy(1, decryptors.clone()),
+            dummy(2, decryptors.clone()),
+        ];
+        let result = manager.decrypt_from_shares(&shares, &ct);
         assert!(result.is_err());
 
-        // Index > n
-        let result = manager.decrypt_from_shares(&shares, &[1, 2, 6], &ct);
+        let shares = vec![
+            dummy(1, decryptors.clone()),
+            dummy(2, decryptors.clone()),
+            dummy(6, decryptors.clone()),
+        ];
+        let result = manager.decrypt_from_shares(&shares, &ct);
         assert!(result.is_err());
 
-        // Wrong share count: more than threshold + 1 is rejected
-        let four: Vec<Poly<PowerBasis>> = (0..4).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
-        let result = manager.decrypt_from_shares(&four, &[1, 2, 3, 4], &ct);
+        let four = vec![
+            dummy(1, vec![1, 2, 3, 4]),
+            dummy(2, vec![1, 2, 3, 4]),
+            dummy(3, vec![1, 2, 3, 4]),
+            dummy(4, vec![1, 2, 3, 4]),
+        ];
+        let result = manager.decrypt_from_shares(&four, &ct);
         assert!(result.is_err());
 
-        // Shares from a different RNS level are rejected before reconstruction.
         let level_one = params.context_at_level(1).unwrap();
-        let wrong_context: Vec<Poly<PowerBasis>> = (0..3)
-            .map(|_| Poly::<PowerBasis>::zero(level_one))
+        let wrong_context: Vec<_> = (1..=3)
+            .map(|party_id| {
+                DecryptionShare::from_test_parts(
+                    Poly::<PowerBasis>::zero(level_one),
+                    party_id,
+                    decryptors.clone(),
+                    &ct,
+                )
+                .unwrap()
+            })
             .collect();
-        let result = manager.decrypt_from_shares(&wrong_context, &[1, 2, 3], &ct);
+        let result = manager.decrypt_from_shares(&wrong_context, &ct);
         assert!(matches!(result, Err(Error::ParameterMismatch { .. })));
 
-        // Fewer than threshold + 1 is rejected
-        let two: Vec<Poly<PowerBasis>> = (0..2).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
-        let result = manager.decrypt_from_shares(&two, &[1, 2], &ct);
+        let two = vec![dummy(1, vec![1, 2]), dummy(2, vec![1, 2])];
+        let result = manager.decrypt_from_shares(&two, &ct);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decryption_share_rejects_mismatched_smudging_policy() {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params).unwrap();
+        let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
+        let key_share = AggregatedSecretKeyShare::from_power_basis(
+            (*manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap()).clone(),
+        );
+        let prf_keys = manager.generate_prf_keys(&mut rng).unwrap();
+        let noise = zero_smudging(&params, 1);
+        let err = manager
+            .decryption_share(&ct, &key_share, 1, &[1, 2], noise, &prf_keys[0])
+            .unwrap_err();
+        assert_eq!(err, Error::smudging_policy_mismatch(1, 0, 3));
     }
 
     #[test]
@@ -1709,7 +1844,7 @@ mod tests {
         assert_eq!(decryption_shares.len(), threshold + 1);
 
         // Test decrypt_from_shares with non-increasing party order
-        let result = managers[0].decrypt_from_shares(&decryption_shares, &reconstructing, &ct);
+        let result = managers[0].decrypt_from_shares(&decryption_shares, &ct);
         assert!(result.is_ok());
 
         // Validate plaintext

@@ -15,7 +15,6 @@ use fhe::aggregate::AggregateIter;
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, SecretKey};
 use fhe::trbfv::{SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe::trlbfv::{LBFVPublicKey, PublicKeyShare, RelinKeyShare, aggregate_relinearization_key};
-use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2};
 
@@ -153,7 +152,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     let reconstructing: Vec<usize> = vec![1, 2];
     assert_eq!(reconstructing.len(), THRESHOLD + 1);
 
-    let decryption_shares: Vec<Poly<PowerBasis>> = reconstructing
+    let decryption_shares: Vec<_> = reconstructing
         .iter()
         .map(|&party_id| {
             let party = &parties[party_id - 1];
@@ -173,11 +172,8 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
         })
         .collect();
 
-    let one_share_result = manager.decrypt_from_shares(
-        std::slice::from_ref(&decryption_shares[0]),
-        &[reconstructing[0]],
-        &tally,
-    );
+    let one_share_result =
+        manager.decrypt_from_shares(std::slice::from_ref(&decryption_shares[0]), &tally);
     assert!(
         one_share_result.is_err(),
         "single share must not decrypt (threshold requires {} shares)",
@@ -185,7 +181,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     );
 
     let decrypted = manager
-        .decrypt_from_shares(&decryption_shares, &reconstructing, &tally)
+        .decrypt_from_shares(&decryption_shares, &tally)
         .expect("threshold decryption with t+1 shares");
     let result_vec =
         Vec::<u64>::try_decode(&decrypted, Encoding::poly()).expect("decode decryption result");

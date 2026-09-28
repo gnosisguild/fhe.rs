@@ -16,10 +16,8 @@ use std::{env, error::Error, sync::Arc};
 use fhe::{
     bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{PartyPrfKeys, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{DecryptionShare, PartyPrfKeys, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
 };
-
-use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
@@ -80,7 +78,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     struct Party {
         pk_share: PublicKeyShare,
         shares: TrbfvShares,
-        decryption_share: Poly<PowerBasis>,
+        decryption_share: Option<DecryptionShare>,
         prf_keys: PartyPrfKeys,
     }
 
@@ -119,13 +117,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap()
                     .into_transport();
 
-                let ctx = params.context_at_level(0).unwrap();
-                let decryption_share = Poly::<PowerBasis>::zero(ctx);
-
                 Party {
                     pk_share,
                     shares: TrbfvShares::new(secret_key_shares_transport),
-                    decryption_share,
+                    decryption_share: None,
                     prf_keys: committee_prf_keys[party_index].clone(),
                 }
             })
@@ -200,16 +195,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             let mut rng = rand::rng();
             let secret_key = party.shares.secret_key().unwrap();
-            party.decryption_share = share_manager
-                .decryption_share(
-                    &tally,
-                    secret_key,
-                    party_index + 1,
-                    &reconstructing_parties,
-                    smudging_generator.generate(&mut rng).unwrap(),
-                    &party.prf_keys,
-                )
-                .unwrap();
+            party.decryption_share = Some(
+                share_manager
+                    .decryption_share(
+                        &tally,
+                        secret_key,
+                        party_index + 1,
+                        &reconstructing_parties,
+                        smudging_generator.generate(&mut rng).unwrap(),
+                        &party.prf_keys,
+                    )
+                    .unwrap(),
+            );
         });
 
     let total_share_generation_time = share_generation_start.elapsed();
@@ -223,18 +220,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  Average time per party: {:.2} ms", avg_time_per_party);
 
     // Gather decryption shares from threshold+1 parties
-    let decryption_shares: Vec<Poly<PowerBasis>> = parties
+    let decryption_shares: Vec<DecryptionShare> = parties
         .iter()
         .take(threshold + 1)
-        .map(|party| party.decryption_share.clone())
+        .map(|party| party.decryption_share.clone().unwrap())
         .collect();
 
     // decrypt result
     let result = timeit!("Threshold decrypt (combine shares)", {
-        // Parties are 1-based for Shamir x-coordinates; we used the first (threshold+1) parties
-        let reconstructing_parties: Vec<usize> = (1..=threshold + 1).collect();
         let open_results = share_manager
-            .decrypt_from_shares(&decryption_shares, &reconstructing_parties, &tally)
+            .decrypt_from_shares(&decryption_shares, &tally)
             .unwrap();
         let result_vec = Vec::<u64>::try_decode(&open_results, Encoding::poly())?;
         Ok::<u64, Box<dyn Error>>(result_vec[0])

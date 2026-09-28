@@ -123,11 +123,7 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
                 bencher.iter(|| {
                     black_box(
                         manager
-                            .decrypt_from_shares(
-                                black_box(&decryption_shares),
-                                black_box(&party_ids),
-                                &ciphertext,
-                            )
+                            .decrypt_from_shares(black_box(&decryption_shares), &ciphertext)
                             .expect("reconstruction must succeed"),
                     )
                 });

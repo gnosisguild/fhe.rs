@@ -26,6 +26,7 @@ use zeroize_derive::{Zeroize as ZeroizeFields, ZeroizeOnDrop};
 const KEY_LEN: usize = 32;
 const SAFE_LENGTH_MASK: u32 = 0x7FFF_FFFF;
 const DIGEST_LEN: usize = 2;
+pub(crate) type ContextDigest = [Field; DIGEST_LEN];
 const CTX_DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2/ctx";
 const EVAL_DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2/eval";
 
@@ -169,10 +170,74 @@ impl PartyPrfKeys {
         digest.zeroize();
         Ok(acc)
     }
+
+    /// Consume these keys at an explicit application transport boundary.
+    ///
+    /// Key generation itself remains external; this only moves already-sampled
+    /// keys across the application's transport.
+    #[must_use]
+    pub fn into_transport(mut self) -> PartyPrfKeyMaterial {
+        let party_id = self.party_id;
+        let party_count = self.party_count;
+        let outgoing = take_key_bytes(&mut self.outgoing);
+        let incoming = take_key_bytes(&mut self.incoming);
+        PartyPrfKeyMaterial {
+            party_id,
+            party_count,
+            outgoing,
+            incoming,
+        }
+    }
+
+    /// Rehydrate one party's keys after application transport.
+    pub fn from_transport(material: PartyPrfKeyMaterial) -> Result<Self, Error> {
+        if material.party_count == 0 {
+            return Err(Error::invalid_party_count(0, 1));
+        }
+        if material.party_id == 0 || material.party_id > material.party_count {
+            return Err(Error::invalid_party_id(
+                material.party_id,
+                material.party_count,
+            ));
+        }
+        if material.outgoing.len() != material.party_count
+            || material.incoming.len() != material.party_count
+        {
+            return Err(Error::malformed_shares(
+                material.party_id,
+                "PRF key vectors must have length n".to_string(),
+            ));
+        }
+        Ok(Self {
+            party_id: material.party_id,
+            party_count: material.party_count,
+            outgoing: material.outgoing.into_iter().map(PrfKey).collect(),
+            incoming: material.incoming.into_iter().map(PrfKey).collect(),
+        })
+    }
+}
+
+/// One party's committee PRF keys after leaving the in-memory owner.
+pub struct PartyPrfKeyMaterial {
+    party_id: usize,
+    party_count: usize,
+    outgoing: Vec<[u8; KEY_LEN]>,
+    incoming: Vec<[u8; KEY_LEN]>,
+}
+
+fn take_key_bytes(keys: &mut Vec<PrfKey>) -> Vec<[u8; KEY_LEN]> {
+    std::mem::take(keys)
+        .into_iter()
+        .map(|mut key| {
+            let bytes = key.0;
+            key.0.zeroize();
+            bytes
+        })
+        .collect()
 }
 
 /// Canonicalize `S` so every party evaluates `F_k` on the same domain.
-fn canonical_decryptors(decryptors: &[usize]) -> Vec<usize> {
+pub(crate) fn canonical_decryptors(decryptors: &[usize]) -> Vec<usize> {
     let mut decryptors = decryptors.to_vec();
     decryptors.sort_unstable();
     decryptors.dedup();
@@ -209,16 +274,24 @@ fn field_from_usize(value: usize) -> Result<Field, Error> {
     Ok(Field::from(value))
 }
 
+pub(crate) fn context_digest(
+    decryptors: &[usize],
+    ciphertext: &Ciphertext,
+) -> Result<ContextDigest, Error> {
+    hash_context(&canonical_decryptors(decryptors), ciphertext)
+}
+
 fn sponge_absorb_squeeze(
     domain_label: &[u8],
-    input: Vec<Field>,
+    mut input: Zeroizing<Vec<Field>>,
     squeeze_len: usize,
 ) -> Result<Zeroizing<Vec<Field>>, Error> {
     let absorb_len = encode_length(input.len(), "absorb")?;
     let squeeze_encoded = encode_length(squeeze_len, "squeeze")?;
     let io_pattern = [ABSORB_FLAG | absorb_len, SQUEEZE_FLAG | squeeze_encoded];
     let mut sponge = SafeSponge::start(io_pattern, domain_separator(domain_label));
-    sponge.absorb(input);
+    let owned = std::mem::take(&mut *input);
+    sponge.absorb(owned);
     let squeezed = Zeroizing::new(sponge.squeeze());
     sponge.finish();
     if squeezed.len() != squeeze_len {
@@ -231,11 +304,8 @@ fn sponge_absorb_squeeze(
 }
 
 /// Unkeyed Poseidon2 digest of the designated set and ciphertext.
-fn hash_context(
-    decryptors: &[usize],
-    ciphertext: &Ciphertext,
-) -> Result<[Field; DIGEST_LEN], Error> {
-    let input = context_absorb_input(decryptors, ciphertext)?;
+fn hash_context(decryptors: &[usize], ciphertext: &Ciphertext) -> Result<ContextDigest, Error> {
+    let input = Zeroizing::new(context_absorb_input(decryptors, ciphertext)?);
     let squeezed = sponge_absorb_squeeze(CTX_DOMAIN_SEPARATOR_LABEL, input, DIGEST_LEN)?;
     let mut digest = [Field::zero(); DIGEST_LEN];
     for (index, slot) in digest.iter_mut().enumerate() {
@@ -264,11 +334,7 @@ fn evaluate(
     let mut input = Zeroizing::new(Vec::with_capacity(1 + DIGEST_LEN));
     input.push(Field::from_le_bytes_mod_order(&key.0));
     input.extend_from_slice(digest);
-    let squeezed = sponge_absorb_squeeze(
-        EVAL_DOMAIN_SEPARATOR_LABEL,
-        input.to_vec(),
-        coefficient_count,
-    )?;
+    let squeezed = sponge_absorb_squeeze(EVAL_DOMAIN_SEPARATOR_LABEL, input, coefficient_count)?;
 
     let mut coefficients = ndarray::Array2::zeros((moduli.len(), degree));
     for (row_index, modulus) in moduli.iter().enumerate() {
@@ -450,5 +516,26 @@ mod tests {
         let first = keys[0].mask(&[1, 2], &first_ct).unwrap();
         let second = keys[0].mask(&[1, 2], &second_ct).unwrap();
         assert_ne!(first.coefficients(), second.coefficients());
+    }
+
+    #[test]
+    fn transport_roundtrip_preserves_masks() {
+        let mut rng = rng();
+        let ct = test_ciphertext(&mut rng);
+        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let decryptors = [1usize, 2];
+        let original = keys[0].mask(&decryptors, &ct).unwrap();
+        let restored = PartyPrfKeys::from_transport(keys[0].clone().into_transport()).unwrap();
+        let roundtrip = restored.mask(&decryptors, &ct).unwrap();
+        assert_eq!(original.coefficients(), roundtrip.coefficients());
+        assert!(
+            PartyPrfKeys::from_transport(PartyPrfKeyMaterial {
+                party_id: 0,
+                party_count: 3,
+                outgoing: vec![[0u8; KEY_LEN]; 3],
+                incoming: vec![[0u8; KEY_LEN]; 3],
+            })
+            .is_err()
+        );
     }
 }

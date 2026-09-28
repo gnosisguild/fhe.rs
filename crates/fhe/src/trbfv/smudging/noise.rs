@@ -23,6 +23,8 @@ use zeroize::{Zeroize, Zeroizing};
 #[derive(Debug)]
 pub struct SmudgingNoiseGenerator {
     params: Arc<BfvParameters>,
+    n: usize,
+    lambda: usize,
     smudging_bound: BigUint,
 }
 
@@ -172,6 +174,8 @@ impl SmudgingNoiseGenerator {
 
         Ok(Self {
             params: config.params,
+            n: config.n,
+            lambda: config.lambda,
             smudging_bound: b_sm,
         })
     }
@@ -230,6 +234,9 @@ fn limbs_mod(limbs: &[u64], qi: &Modulus) -> u64 {
 /// ```
 pub struct SmudgingNoise {
     poly: Zeroizing<Poly<PowerBasis>>,
+    n: usize,
+    lambda: usize,
+    params: Arc<BfvParameters>,
 }
 
 impl SmudgingNoise {
@@ -241,11 +248,33 @@ impl SmudgingNoise {
         self.poly
     }
 
+    pub(crate) fn matches_manager(&self, n: usize, params: &Arc<BfvParameters>) -> bool {
+        self.n == n && self.params.as_ref() == params.as_ref()
+    }
+
+    pub(crate) fn policy_n(&self) -> usize {
+        self.n
+    }
+
+    pub(crate) fn policy_lambda(&self) -> usize {
+        self.lambda
+    }
+
     /// Wrap an already-constructed polynomial. Used by tests that exercise
     /// the algebraic path with zero noise.
     #[cfg(test)]
-    pub(crate) fn from_poly(poly: Zeroizing<Poly<PowerBasis>>) -> Self {
-        Self { poly }
+    pub(crate) fn from_poly(
+        poly: Zeroizing<Poly<PowerBasis>>,
+        n: usize,
+        lambda: usize,
+        params: Arc<BfvParameters>,
+    ) -> Self {
+        Self {
+            poly,
+            n,
+            lambda,
+            params,
+        }
     }
 }
 
@@ -286,6 +315,9 @@ impl SmudgingNoiseGenerator {
         if self.smudging_bound == BigUint::from(0u64) {
             return Ok(SmudgingNoise {
                 poly: Zeroizing::new(Poly::<PowerBasis>::zero(ctx)),
+                n: self.n,
+                lambda: self.lambda,
+                params: self.params.clone(),
             });
         }
 
@@ -350,6 +382,9 @@ impl SmudgingNoiseGenerator {
         poly.set_coefficients(matrix)?;
         Ok(SmudgingNoise {
             poly: Zeroizing::new(poly),
+            n: self.n,
+            lambda: self.lambda,
+            params: self.params.clone(),
         })
     }
 
@@ -388,6 +423,8 @@ mod tests {
     fn generator_with_bound(params: Arc<BfvParameters>, bound: BigUint) -> SmudgingNoiseGenerator {
         SmudgingNoiseGenerator {
             params,
+            n: 1,
+            lambda: 0,
             smudging_bound: bound,
         }
     }

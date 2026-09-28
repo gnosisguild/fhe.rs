@@ -66,6 +66,26 @@ impl Error {
         })
     }
 
+    /// Create a smudging-policy mismatch error.
+    #[must_use]
+    pub fn smudging_policy_mismatch(
+        actual_n: usize,
+        actual_lambda: usize,
+        expected_n: usize,
+    ) -> Self {
+        Error::Threshold(ThresholdError::SmudgingPolicyMismatch {
+            actual_n,
+            actual_lambda,
+            expected_n,
+        })
+    }
+
+    /// Create an inconsistent-decryption-share error.
+    #[must_use]
+    pub fn inconsistent_decryption_shares() -> Self {
+        Error::Threshold(ThresholdError::InconsistentDecryptionShares)
+    }
+
     /// Create a party-count-exceeds-modulus error.
     #[must_use]
     pub fn party_count_exceeds_modulus(n: usize, min_modulus: u64) -> Self {
@@ -144,6 +164,22 @@ mod tests {
         assert!(matches!(
             error,
             Error::Threshold(ThresholdError::SmudgingBoundInfeasible { .. })
+        ));
+
+        let error = Error::smudging_policy_mismatch(1, 0, 3);
+        assert!(matches!(
+            error,
+            Error::Threshold(ThresholdError::SmudgingPolicyMismatch {
+                actual_n: 1,
+                actual_lambda: 0,
+                expected_n: 3
+            })
+        ));
+
+        let error = Error::inconsistent_decryption_shares();
+        assert!(matches!(
+            error,
+            Error::Threshold(ThresholdError::InconsistentDecryptionShares)
         ));
 
         let error = Error::party_count_exceeds_modulus(70000, 65537);
