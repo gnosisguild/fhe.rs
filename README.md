@@ -58,19 +58,15 @@ Pull-request CI runs the workspace integration tests with
 `cargo test --workspace --release --tests`, in both the
 `--no-default-features` and `--all-features` configurations. The `--tests`
 flag auto-discovers `tests/*.rs` targets, so newly added integration tests
-gate merges without a hand-maintained `--test` list. This includes the
-threshold BFV and distributed l-BFV end-to-end tests and the parameter
-profile checks; the `secure8192` profile check pins an exact smudging bound
+gate merges without a hand-maintained `--test` list (unless a Cargo manifest
+explicitly opts a target out). This includes the threshold BFV and distributed
+l-BFV end-to-end tests and the parameter profile checks; the `secure8192`
+profile check pins an exact smudging bound
 while the `secure16384` profile check covers feasibility. Test targets that
-require features are exercised by the `--all-features` leg.
-`./scripts/check-ci-test-targets.sh` is a CI contract check. It verifies
-that every `tests/*.rs` file is a runnable test target selected by at least
-one matrix leg (matching exact source paths, so same-named files in
-different crates cannot be confused), that the required integration targets
-exist, and that a workflow still runs the auto-discovered matrix; it checks
-only these properties. The heavy threshold stress run remains an additional
-post-`main` job in `.github/workflows/stress.yml`. Examples and criterion
-benchmarks are never executed as tests.
+require features are exercised by the `--all-features` leg. The heavy threshold
+stress run remains an additional post-`main` job in
+`.github/workflows/stress.yml`. Examples and criterion benchmarks are never
+executed as tests.
 
 Protobuf schemas and their generated Rust sources are checked in. Normal builds
 compile the checked-in Rust sources and do not require `protoc`. A schema change

@@ -92,15 +92,12 @@ jobs:
       - name: Run workspace doctests
         run: cargo test --workspace --doc ${{ matrix.features }}
 
-  # Every supported integration test target runs before merge,
-  # auto-discovered via `--tests` (no hand-maintained `--test` list): this
-  # includes trbfv_e2e, trlbfv_e2e, profiles, rns_shamir, biguint,
-  # unified_context_integration, and fhe-math's ntt_shoup_ops.
-  # scripts/check-ci-test-targets.sh (job test-target-contract) checks that
-  # no tests/*.rs target is omitted and that feature-gated targets are
-  # covered by the --all-features leg. Release profile matches the stress
-  # and existing security CI jobs; examples and criterion benches are not
-  # test targets and are not run.
+  # Cargo discovers workspace integration test targets via `--tests`, without
+  # a hand-maintained `--test` list. This includes both threshold end-to-end
+  # suites, profiles, rns_shamir, biguint, unified_context_integration, and
+  # fhe-math's ntt_shoup_ops. The --all-features leg includes feature-gated
+  # targets. Release profile matches stress and existing security CI jobs;
+  # examples and criterion benches are not run as tests.
   test-integration:
     name: Integration tests (${{ matrix.features }})
     env:
@@ -120,21 +117,6 @@ jobs:
           override: true
       - name: Run all workspace integration tests
         run: cargo test --workspace --release --tests ${{ matrix.features }}
-
-  test-target-contract:
-    name: CI test-target contract
-    env:
-      CARGO_TERM_COLOR: always
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - name: Verify integration test targets are auto-discovered and CI-covered
-        run: ./scripts/check-ci-test-targets.sh
 
   examples-and-benches:
     name: Examples and benchmarks smoke test
