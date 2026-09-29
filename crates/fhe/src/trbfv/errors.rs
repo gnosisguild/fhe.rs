@@ -172,7 +172,7 @@ mod tests {
             Error::Threshold(ThresholdError::SmudgingPolicyMismatch {
                 actual_n: 1,
                 actual_lambda: 0,
-                expected_n: 3
+                expected_n: 3,
             })
         ));
 

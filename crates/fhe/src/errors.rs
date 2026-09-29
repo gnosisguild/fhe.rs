@@ -212,8 +212,8 @@ pub enum ThresholdError {
         reason: String,
     },
 
-    /// Smudging noise was sampled under a different committee or lambda than
-    /// the share manager that consumes it.
+    /// Smudging noise was sampled under a different committee or parameters
+    /// than the share manager that consumes it.
     #[error(
         "smudging noise was sampled for n = {actual_n}, lambda = {actual_lambda}, but the manager has n = {expected_n}"
     )]

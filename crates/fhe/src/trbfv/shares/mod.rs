@@ -71,7 +71,8 @@ pub struct ShareManager {
 
 /// A partial decryption bound to one party, designated set `S`, and ciphertext.
 ///
-/// Created only by [`ShareManager::decryption_share`]. FinDec rejects a slice
+/// Created by [`ShareManager::decryption_share`] or reconstructed after
+/// transport with [`DecryptionShare::from_parts`]. FinDec rejects a slice
 /// whose members were produced for different sets or ciphertexts.
 #[derive(Clone)]
 pub struct DecryptionShare {
@@ -90,9 +91,13 @@ impl std::fmt::Debug for DecryptionShare {
     }
 }
 
-#[cfg(test)]
 impl DecryptionShare {
-    fn from_test_parts(
+    /// Rehydrate a partial decryption after application transport.
+    ///
+    /// The digest `H(S, ct)` is recomputed from `decryptors` and `ciphertext`.
+    /// Authentication of the polynomial remains the application's
+    /// responsibility.
+    pub fn from_parts(
         poly: Poly<PowerBasis>,
         party_id: usize,
         decryptors: Vec<usize>,
@@ -107,6 +112,16 @@ impl DecryptionShare {
         })
     }
 
+    /// Consume the share into transport parts: polynomial, 1-based party id,
+    /// and designated set `S`.
+    #[must_use]
+    pub fn into_parts(self) -> (Poly<PowerBasis>, usize, Vec<usize>) {
+        (self.poly, self.party_id, self.decryptors)
+    }
+}
+
+#[cfg(test)]
+impl DecryptionShare {
     fn allows_variable_time_computations(&self) -> bool {
         self.poly.allows_variable_time_computations()
     }
@@ -858,6 +873,9 @@ mod tests {
         let params = insecure().unwrap().parameters;
         let n = 5;
         let threshold = 2;
+        let generator =
+            SmudgingNoiseGenerator::new(SmudgingConfig::new(params.clone(), n, 1, 0).unwrap())
+                .unwrap();
         let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
         let mut rng = rng();
         let sk = SecretKey::random(&params, &mut rng);
@@ -869,9 +887,6 @@ mod tests {
         );
         let prf_keys = manager.generate_prf_keys(&mut rng).unwrap();
         let reconstructing = vec![1usize, 2, 3];
-        let generator =
-            SmudgingNoiseGenerator::new(SmudgingConfig::new(params.clone(), n, 1, 0).unwrap())
-                .unwrap();
         let noise = generator.generate(&mut rng).unwrap();
         assert!(
             manager
@@ -884,10 +899,10 @@ mod tests {
     fn local_smudging_at_secure_bound_is_nonzero() {
         let params = secure8192().unwrap().parameters;
         let n = 3;
-        let manager = ShareManager::new(n, 1, params.clone()).unwrap();
         let mut rng = rng();
         let config = SmudgingConfig::new(params.clone(), n, 1, 45).unwrap();
         let generator = SmudgingNoiseGenerator::new(config).unwrap();
+        let manager = ShareManager::new(n, 1, params.clone()).unwrap();
         let noise = generator.generate(&mut rng).unwrap();
         let sk = SecretKey::random(&params, &mut rng);
         let pk = PublicKey::new(&sk, &mut rng);
@@ -1054,20 +1069,10 @@ mod tests {
 
         let ctx = params.context_at_level(0).unwrap();
         let shares = vec![
-            DecryptionShare::from_test_parts(
-                Poly::<PowerBasis>::zero(ctx),
-                1,
-                vec![1, 2],
-                &ciphertext,
-            )
-            .unwrap(),
-            DecryptionShare::from_test_parts(
-                Poly::<PowerBasis>::zero(ctx),
-                2,
-                vec![1, 2],
-                &ciphertext,
-            )
-            .unwrap(),
+            DecryptionShare::from_parts(Poly::<PowerBasis>::zero(ctx), 1, vec![1, 2], &ciphertext)
+                .unwrap(),
+            DecryptionShare::from_parts(Poly::<PowerBasis>::zero(ctx), 2, vec![1, 2], &ciphertext)
+                .unwrap(),
         ];
         let result = manager.decrypt_from_shares(&shares, &ciphertext);
 
@@ -1094,20 +1099,10 @@ mod tests {
 
         let ctx = params.context_at_level(0).unwrap();
         let shares = vec![
-            DecryptionShare::from_test_parts(
-                Poly::<PowerBasis>::zero(ctx),
-                1,
-                vec![1, 2],
-                &ciphertext,
-            )
-            .unwrap(),
-            DecryptionShare::from_test_parts(
-                Poly::<PowerBasis>::zero(ctx),
-                2,
-                vec![1, 2],
-                &ciphertext,
-            )
-            .unwrap(),
+            DecryptionShare::from_parts(Poly::<PowerBasis>::zero(ctx), 1, vec![1, 2], &ciphertext)
+                .unwrap(),
+            DecryptionShare::from_parts(Poly::<PowerBasis>::zero(ctx), 2, vec![1, 2], &ciphertext)
+                .unwrap(),
         ];
         let result = manager.decrypt_from_shares(&shares, &ciphertext);
 
@@ -1677,13 +1672,8 @@ mod tests {
 
         let ctx = params.context_at_level(0).unwrap();
         let dummy = |party_id: usize, decryptors: Vec<usize>| {
-            DecryptionShare::from_test_parts(
-                Poly::<PowerBasis>::zero(ctx),
-                party_id,
-                decryptors,
-                &ct,
-            )
-            .unwrap()
+            DecryptionShare::from_parts(Poly::<PowerBasis>::zero(ctx), party_id, decryptors, &ct)
+                .unwrap()
         };
         let decryptors = vec![1usize, 2, 3];
 
@@ -1723,7 +1713,7 @@ mod tests {
         let level_one = params.context_at_level(1).unwrap();
         let wrong_context: Vec<_> = (1..=3)
             .map(|party_id| {
-                DecryptionShare::from_test_parts(
+                DecryptionShare::from_parts(
                     Poly::<PowerBasis>::zero(level_one),
                     party_id,
                     decryptors.clone(),
@@ -1753,11 +1743,59 @@ mod tests {
             (*manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap()).clone(),
         );
         let prf_keys = manager.generate_prf_keys(&mut rng).unwrap();
-        let noise = zero_smudging(&params, 1);
+
         let err = manager
-            .decryption_share(&ct, &key_share, 1, &[1, 2], noise, &prf_keys[0])
+            .decryption_share(
+                &ct,
+                &key_share,
+                1,
+                &[1, 2],
+                zero_smudging(&params, 1),
+                &prf_keys[0],
+            )
             .unwrap_err();
         assert_eq!(err, Error::smudging_policy_mismatch(1, 0, 3));
+    }
+
+    #[test]
+    fn decryption_share_roundtrips_through_parts() {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let pt = Plaintext::try_encode(&[7u64], Encoding::poly(), &params).unwrap();
+        let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
+        let key_share = AggregatedSecretKeyShare::from_power_basis(
+            (*manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap()).clone(),
+        );
+        let prf_keys = manager.generate_prf_keys(&mut rng).unwrap();
+        let reconstructing = [1usize, 2];
+        let original = part_dec(
+            &manager,
+            &ct,
+            &key_share,
+            1,
+            &reconstructing,
+            &prf_keys[0],
+            &params,
+        );
+        let (poly, party_id, decryptors) = original.clone().into_parts();
+        let restored = DecryptionShare::from_parts(poly, party_id, decryptors, &ct).unwrap();
+        let other = part_dec(
+            &manager,
+            &ct,
+            &key_share,
+            2,
+            &reconstructing,
+            &prf_keys[1],
+            &params,
+        );
+        let plaintext = manager
+            .decrypt_from_shares(&[restored, other], &ct)
+            .unwrap();
+        let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext, Encoding::poly()).unwrap();
+        assert_eq!(decoded[0], 7);
     }
 
     #[test]

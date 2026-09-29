@@ -259,7 +259,8 @@ Basic usage pattern:
 
 ```rust
 use fhe::trbfv::{
-    PartyPrfKeys, SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
+    PartyPrfKeyMaterial, PartyPrfKeys, SecretKeyShare, ShareManager, SmudgingConfig,
+    SmudgingNoiseGenerator,
 };
 
 // Setup threshold scheme; each party holds its own manager instance
@@ -274,9 +275,13 @@ let secret_key_dealt = secret_key_dealt.into_transport();
 // Setup is external; this only samples and, at an application boundary,
 // transports already-sampled keys.
 let prf_keys = share_manager.generate_prf_keys(&mut rng)?;
-let prf_keys_i = PartyPrfKeys::from_transport(
-    prf_keys[party_index].clone().into_transport(),
-)?;
+let transported = prf_keys[party_index].clone().into_transport();
+let prf_keys_i = PartyPrfKeys::from_transport(PartyPrfKeyMaterial::new(
+    transported.party_id(),
+    transported.party_count(),
+    transported.outgoing().to_vec(),
+    transported.incoming().to_vec(),
+)?)?;
 
 // Each party: aggregate the share matrices received from the other parties
 // into its share of the joint secret key
@@ -311,10 +316,9 @@ let plaintext =
 
 `decryption_share` borrows the ciphertext and aggregated secret-key share
 but consumes the one-time `SmudgingNoise`. It returns a `DecryptionShare`
-bound to the party, designated set, and ciphertext. `decrypt_from_shares`
-borrows those shares and the ciphertext; callers with owned `Vec`s or
-`Arc<Ciphertext>` should pass references rather than cloning or transferring
-them.
+bound to the party, designated set, and ciphertext. After transport, rebuild
+the share with `DecryptionShare::from_parts` (the digest is recomputed from
+`S` and `ct`). `decrypt_from_shares` borrows those shares and the ciphertext.
 
 ## Security Considerations
 

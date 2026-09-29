@@ -24,6 +24,8 @@ use zeroize::{Zeroize, Zeroizing};
 use zeroize_derive::{Zeroize as ZeroizeFields, ZeroizeOnDrop};
 
 const KEY_LEN: usize = 32;
+/// Length in bytes of one committee PRF key.
+pub const PRF_KEY_LEN: usize = KEY_LEN;
 const SAFE_LENGTH_MASK: u32 = 0x7FFF_FFFF;
 const DIGEST_LEN: usize = 2;
 pub(crate) type ContextDigest = [Field; DIGEST_LEN];
@@ -190,39 +192,101 @@ impl PartyPrfKeys {
     }
 
     /// Rehydrate one party's keys after application transport.
-    pub fn from_transport(material: PartyPrfKeyMaterial) -> Result<Self, Error> {
-        if material.party_count == 0 {
-            return Err(Error::invalid_party_count(0, 1));
-        }
-        if material.party_id == 0 || material.party_id > material.party_count {
-            return Err(Error::invalid_party_id(
-                material.party_id,
-                material.party_count,
-            ));
-        }
-        if material.outgoing.len() != material.party_count
-            || material.incoming.len() != material.party_count
-        {
-            return Err(Error::malformed_shares(
-                material.party_id,
-                "PRF key vectors must have length n".to_string(),
-            ));
-        }
+    pub fn from_transport(mut material: PartyPrfKeyMaterial) -> Result<Self, Error> {
+        let validated = PartyPrfKeyMaterial::new(
+            material.party_id,
+            material.party_count,
+            std::mem::take(&mut material.outgoing),
+            std::mem::take(&mut material.incoming),
+        )?;
+        let mut validated = std::mem::ManuallyDrop::new(validated);
         Ok(Self {
-            party_id: material.party_id,
-            party_count: material.party_count,
-            outgoing: material.outgoing.into_iter().map(PrfKey).collect(),
-            incoming: material.incoming.into_iter().map(PrfKey).collect(),
+            party_id: validated.party_id,
+            party_count: validated.party_count,
+            outgoing: std::mem::take(&mut validated.outgoing)
+                .into_iter()
+                .map(PrfKey)
+                .collect(),
+            incoming: std::mem::take(&mut validated.incoming)
+                .into_iter()
+                .map(PrfKey)
+                .collect(),
         })
     }
 }
 
 /// One party's committee PRF keys after leaving the in-memory owner.
+#[derive(ZeroizeFields, ZeroizeOnDrop)]
 pub struct PartyPrfKeyMaterial {
     party_id: usize,
     party_count: usize,
-    outgoing: Vec<[u8; KEY_LEN]>,
-    incoming: Vec<[u8; KEY_LEN]>,
+    outgoing: Vec<[u8; PRF_KEY_LEN]>,
+    incoming: Vec<[u8; PRF_KEY_LEN]>,
+}
+
+impl fmt::Debug for PartyPrfKeyMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PartyPrfKeyMaterial")
+            .field("party_id", &self.party_id)
+            .field("party_count", &self.party_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartyPrfKeyMaterial {
+    /// Build transport material from raw key bytes received at the application
+    /// boundary.
+    pub fn new(
+        party_id: usize,
+        party_count: usize,
+        outgoing: Vec<[u8; PRF_KEY_LEN]>,
+        incoming: Vec<[u8; PRF_KEY_LEN]>,
+    ) -> Result<Self, Error> {
+        let material = Self {
+            party_id,
+            party_count,
+            outgoing,
+            incoming,
+        };
+        if party_count == 0 {
+            return Err(Error::invalid_party_count(0, 1));
+        }
+        if party_id == 0 || party_id > party_count {
+            return Err(Error::invalid_party_id(party_id, party_count));
+        }
+        if material.outgoing.len() != party_count || material.incoming.len() != party_count {
+            return Err(Error::malformed_shares(
+                party_id,
+                "PRF key vectors must have length n".to_string(),
+            ));
+        }
+        Ok(material)
+    }
+
+    /// 1-based identity of the party that holds these keys.
+    #[must_use]
+    pub fn party_id(&self) -> usize {
+        self.party_id
+    }
+
+    /// Number of parties in the committee that sampled these keys.
+    #[must_use]
+    pub fn party_count(&self) -> usize {
+        self.party_count
+    }
+
+    /// Outgoing keys `k_{i,j}` for every `j ∈ [n]`.
+    #[must_use]
+    pub fn outgoing(&self) -> &[[u8; PRF_KEY_LEN]] {
+        &self.outgoing
+    }
+
+    /// Incoming keys `k_{j,i}` for every `j ∈ [n]`.
+    #[must_use]
+    pub fn incoming(&self) -> &[[u8; PRF_KEY_LEN]] {
+        &self.incoming
+    }
 }
 
 fn take_key_bytes(keys: &mut Vec<PrfKey>) -> Vec<[u8; KEY_LEN]> {
@@ -290,8 +354,7 @@ fn sponge_absorb_squeeze(
     let squeeze_encoded = encode_length(squeeze_len, "squeeze")?;
     let io_pattern = [ABSORB_FLAG | absorb_len, SQUEEZE_FLAG | squeeze_encoded];
     let mut sponge = SafeSponge::start(io_pattern, domain_separator(domain_label));
-    let owned = std::mem::take(&mut *input);
-    sponge.absorb(owned);
+    sponge.absorb(std::mem::take(&mut *input));
     let squeezed = Zeroizing::new(sponge.squeeze());
     sponge.finish();
     if squeezed.len() != squeeze_len {
@@ -528,14 +591,29 @@ mod tests {
         let restored = PartyPrfKeys::from_transport(keys[0].clone().into_transport()).unwrap();
         let roundtrip = restored.mask(&decryptors, &ct).unwrap();
         assert_eq!(original.coefficients(), roundtrip.coefficients());
+        let material = keys[1].clone().into_transport();
+        assert_eq!(material.party_id(), 2);
+        assert_eq!(material.party_count(), 3);
+        assert_eq!(material.outgoing().len(), 3);
+        assert_eq!(material.incoming().len(), 3);
+        let rebuilt = PartyPrfKeyMaterial::new(
+            material.party_id(),
+            material.party_count(),
+            material.outgoing().to_vec(),
+            material.incoming().to_vec(),
+        )
+        .unwrap();
+        let restored_from_parts = PartyPrfKeys::from_transport(rebuilt).unwrap();
+        assert_eq!(
+            keys[1].mask(&decryptors, &ct).unwrap().coefficients(),
+            restored_from_parts
+                .mask(&decryptors, &ct)
+                .unwrap()
+                .coefficients()
+        );
         assert!(
-            PartyPrfKeys::from_transport(PartyPrfKeyMaterial {
-                party_id: 0,
-                party_count: 3,
-                outgoing: vec![[0u8; KEY_LEN]; 3],
-                incoming: vec![[0u8; KEY_LEN]; 3],
-            })
-            .is_err()
+            PartyPrfKeyMaterial::new(0, 3, vec![[0u8; KEY_LEN]; 3], vec![[0u8; KEY_LEN]; 3])
+                .is_err()
         );
     }
 }
