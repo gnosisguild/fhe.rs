@@ -53,8 +53,9 @@ identity/session binding at their protocol boundary.
 The module follows a modular design with clear separation of concerns:
 
 - `../rns_shamir.rs` - crate-private direct RNS Shamir arithmetic shared by threshold schemes
-- `smudging.rs` - Smudging noise generation with optimal variance calculation using arbitrary precision arithmetic  
-- `shares.rs` - Share aggregation and decryption operations management
+- `smudging/bound.rs` - smudging-bound configuration and arithmetic, with optimal variance calculation using arbitrary precision arithmetic
+- `smudging/noise.rs` - one-time smudging noise sampling and single-use ownership
+- `shares/mod.rs` - share aggregation and decryption operations management (with the single-use owners in `shares/secret_key.rs` and `shares/smudging.rs`)
 - `config.rs` - Parameter validation
 - `errors.rs` - Threshold-specific error types
 
@@ -82,7 +83,9 @@ layout.
 ## Noise and Correctness Formulas (Urban–Rambaud 2024)
 
 This section summarises the formulas implemented in
-[`smudging.rs`](smudging.rs).  See the paper for full derivations.
+[`smudging/bound.rs`](smudging/bound.rs) (bound arithmetic) and
+[`smudging/noise.rs`](smudging/noise.rs) (sampling). See the paper for full
+derivations.
 
 ### Delta and the strict correctness inequality
 
@@ -105,9 +108,29 @@ not guarantee correct decryption.
 Let `mult_depth` be the number of multiplication levels.
 
 - **Initial bound:** `B&#x1d9c;&sup0;` = `m &middot; (B_fresh + Q mod t)`
+  where `m` is the caller-chosen circuit size: an upper bound on the number
+  of *fresh* ciphertexts summed together **before** the modelled circuit
+  (the worst pre-multiplication addition fan-in). It is not the number of
+  output ciphertexts and not the number of independent decryptions.
   `B_fresh` itself is derived from the encryption-noise and key-norm bounds,
   using the sampler-specific `B_enc` (see below) and the caller-selected
   fresh-noise model (see below).
+
+  Choosing `m`:
+  - Additive circuit `ct_a + ct_b + ct_c`: three fresh ciphertexts are
+    summed before decryption, so `m = 3`.
+  - Pure multiplication of fresh inputs with no pre-sum, e.g.
+    `ct_a * ct_b * ct_c`: each multiplication branch carries one fresh
+    ciphertext's noise, so `m = 1` even though several input ciphertexts
+    feed the multiplication.
+  - Mixed circuit `(ct_a + ct_b) * ct_c`: the left branch is a two-input
+    sum, so the worst pre-multiplication fan-in is `m = 2`.
+
+  Additions of evaluated results *after* a multiplication are not modelled by
+  this formula: analyze such circuits and supply a conservative
+  circuit-specific `m`; the library makes no generic circuit-size guarantee.
+  A larger `m` only inflates `B_C` and `B_sm`, so an explicit conservative
+  overprovision stays correct and safe at a feasibility cost.
 
 - **Recursion** (Prop.&nbsp;20 of Urban–Rambaud 2024):
 
@@ -122,15 +145,34 @@ Let `mult_depth` be the number of multiplication levels.
     than all `n` relinearization contributions are aggregated.
 
 - **Smudging bound:** `B&#x209b;&#x2098; = 2^(lambda + 1) &middot; d &middot; B&#x1d9c;` where
-  `lambda` is the statistical security parameter and `d` is the polynomial
-  ring degree. The extra
-  factor `2 &middot; d` is the whole-transcript policy (issue #108): a single
-  decryption reveals all `d` coefficients of the smudging noise at once, so a
-  union bound over the coefficients adds a factor `d`, and `2^(lambda + 1)`
-  keeps the constant-`2` convention of the correctness inequality. The older
-  `B&#x209b;&#x2098; = 2^lambda &middot; B&#x1d9c;` form only bounds the statistical distance for
-  a *single* coefficient and is not what [`smudging.rs`](smudging.rs)
-  implements.
+  `lambda` is the caller-selected statistical security parameter and `d` is
+  the polynomial ring degree.
+
+  *Statistical-distance argument (issue #108).* Let the integer smudging
+  noise `U` be uniform on `[-B_sm, B_sm]`, and let `x`, `y` be honest noise
+  shifts with `|x|, |y| <= B_C`. For one coefficient, the total variation
+  distance between `U + x` and `U + y` is at most
+  `min(1, |x - y| / (2*B_sm + 1)) <= min(1, 2*B_C / (2*B_sm + 1))`; when
+  comparing against the unshifted distribution, use `|x| <= B_C`. One
+  threshold decryption reveals all `d` coefficients of the smudging noise at
+  once, so a union/hybrid bound over the coefficients bounds the whole
+  transcript by `min(1, 2*d*B_C / (2*B_sm + 1))`: the degree factor `d`
+  comes from revealing every coefficient. The remaining factor `2` in
+  `2^(lambda + 1)` is conservative slack in the policy — it does **not**
+  come from the leading `2` of the correctness inequality
+  `2*(B_C + n*B_sm) < Delta`. For `B_C > 0` and
+  `B_sm = 2^(lambda + 1) * d * B_C`, this idealized single-transcript bound
+  is numerically below `2^-(lambda + 1)`.
+
+  *Scope and assumptions.* This is a one-transcript argument that relies on
+  the modelled assumptions: one independent honest noise contribution whose
+  bound `B_C` actually holds. Post-processing such as the RNS residue
+  projection cannot increase total variation distance. `lambda` is the
+  deployment's own policy (see
+  [below](#lambda-is-a-caller-chosen-policy)); the library does not claim a
+  stronger global statistical-hiding level than the chosen `lambda`, and
+  composition across multiple independent decryptions is external analysis.
+  This bound is what [`smudging/noise.rs`](smudging/noise.rs) implements.
 
 ### Sampler-specific `B_enc`
 
@@ -173,7 +215,8 @@ ciphertext, so the bound must be derived from the actual key-generation and
 encryption procedure, and an understated bound silently invalidates the
 smudging guarantee. A zero `Custom` bound is rejected.
 
-`SmudgingConfig::new` is fallible: it rejects zero parties, zero ciphertexts,
+`SmudgingConfig::new` is fallible: it rejects zero parties, a zero
+summed-fresh-ciphertext count `m`,
 unsupported lambda values, and zero `Custom` bounds. Its fields are private;
 use accessors to inspect
 them and `.with_mult_depth(depth)` before passing the config to
@@ -245,9 +288,9 @@ validate against their own policy.
 
 For a complete working example demonstrating multi-party setup, share distribution, and threshold decryption, see [`examples/trbfv_add.rs`](../../examples/trbfv_add.rs). A variant that transports the Shamir shares encrypted under per-party BFV keys is in [`examples/trbfv_add_bfv_share.rs`](../../examples/trbfv_add_bfv_share.rs). A multiplicative example using distributed *l*-BFV relinearization keys is in [`examples/trbfv_mul_bfv_share.rs`](../../examples/trbfv_mul_bfv_share.rs).
 
-The example can be run with configurable parameters (threshold must equal `(num_parties - 1) / 2`):
+The example can be run with configurable parameters (threshold must equal `(num_parties - 1) / 2`); it is feature-gated, so build with `-p fhe --features experimental-mbfv`:
 ```bash
-cargo run --release --example trbfv_add -- --num_parties=10 --threshold=4
+cargo run --release -p fhe --features experimental-mbfv --example trbfv_add -- --num_parties=10 --threshold=4
 ```
 
 Basic usage pattern:
@@ -270,8 +313,11 @@ let secret_key_dealt = secret_key_dealt.into_transport();
 // it immediately; the noise owner is one-time material consumed by the
 // dealing operation and the intermediate noise polynomial is never exposed.
 // The fresh-noise model must match how `ciphertext` was encrypted.
+// `max_summed_fresh_inputs` is the circuit size `m`: an upper bound on the
+// fresh ciphertexts summed together before the modelled circuit (the worst
+// pre-multiplication fan-in), not a count of outputs or decryptions.
 let config = SmudgingConfig::new(
-    params.clone(), n_parties, num_ciphertexts, lambda,
+    params.clone(), n_parties, max_summed_fresh_inputs, lambda,
     FreshNoiseModel::BfvPublicKey,
 )?.with_mult_depth(mult_depth);
 let generator = SmudgingNoiseGenerator::new(config)?;
