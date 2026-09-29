@@ -139,7 +139,7 @@ impl PublicKey {
         rng: &mut R,
     ) -> Result<(Self, PublicKeyGenerationIntermediates)> {
         let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
-        let zero_poly = Zeroizing::new(zero.to_poly());
+        let zero_poly = Zeroizing::new(zero.to_poly()?);
 
         let (mut c, a, e) = sk.encrypt_poly_extended(zero_poly.as_ref(), rng)?;
 
@@ -201,7 +201,7 @@ impl PublicKey {
             rng,
         )?);
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
 
         let mut c0 = u.as_ref() * &ct[0];
         c0 += e1.as_ref();
@@ -290,7 +290,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
             rng,
         )?);
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         let mut c0 = u.as_ref() * &ct[0];
         c0 += e1.as_ref();
         c0 += &m;

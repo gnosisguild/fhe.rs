@@ -71,7 +71,7 @@ impl PlaintextVec {
         if encoding.encoding == EncodingEnum::Simd && params.ntt_operator.is_none() {
             return Err(crate::EncodingError::SimdUnavailable.into());
         }
-        params.context_at_level(encoding.level)?;
+        params.validate_plaintext_level(encoding.level)?;
         for plaintext in &plaintexts {
             plaintext.validate_for(params)?;
             if plaintext.level() != encoding.level {
@@ -142,6 +142,7 @@ impl PlaintextVec {
             return Err(crate::EncodingError::SimdUnavailable.into());
         }
 
+        params.validate_plaintext_level(encoding.level)?;
         let ctx = params.context_at_level(encoding.level)?;
         let num_plaintexts = value.len().div_ceil(params.degree()).max(1);
         let plaintexts = (0..num_plaintexts)

@@ -484,7 +484,7 @@ impl LBFVPublicKey {
         )?);
         let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         let b = ct
             .c
             .first()
@@ -667,7 +667,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         )?);
         let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         let b = ct
             .c
             .first()
@@ -1043,7 +1043,7 @@ mod tests {
 
         let b = pk.c[0].c[0].clone();
         let a = pk.c[0].c[1].clone();
-        let m = pt.to_poly();
+        let m = pt.to_poly()?;
 
         let mut expected_c0 = u * &b;
         expected_c0 += e1;

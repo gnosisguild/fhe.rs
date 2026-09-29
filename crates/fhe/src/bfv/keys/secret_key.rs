@@ -82,7 +82,7 @@ impl SecretKey {
     /// noise.
     pub unsafe fn measure_noise(&self, ct: &Ciphertext) -> Result<usize> {
         let plaintext = Zeroizing::new(self.try_decrypt(ct)?);
-        let m = Zeroizing::new(plaintext.to_poly());
+        let m = Zeroizing::new(plaintext.to_poly()?);
 
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), ct[0].ctx(), false)?
@@ -227,8 +227,8 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        assert_eq!(self.params, pt.params);
-        let m = Zeroizing::new(pt.to_poly());
+        pt.validate_for(&self.params)?;
+        let m = Zeroizing::new(pt.to_poly()?);
         self.encrypt_poly_with_seed(m.as_ref(), seed, rng)
     }
 }
@@ -283,7 +283,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for SecretKey {
         rng: &mut R,
     ) -> Result<Ciphertext> {
         pt.validate_for(&self.params)?;
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         self.encrypt_poly(m.as_ref(), rng)
     }
 }
@@ -293,6 +293,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
 
     fn try_decrypt(&self, ct: &Ciphertext) -> Result<Plaintext> {
         ct.validate_for(&self.params)?;
+        self.params.validate_plaintext_level(ct.level)?;
         // Let's create a secret key with the ciphertext context
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), ct[0].ctx(), false)?
@@ -321,7 +322,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
         let d = Zeroizing::new(c_pb.as_ref().scale(&ctx_lvl.cipher_plain_context.scaler)?);
 
         let poly = match self.params.plaintext.small() {
-            Some(plaintext_modulus) => {
+            Some(plaintext_modulus) if self.params.u64_decrypt_fast_path_is_exact() => {
                 let mut v = Vec::<u64>::try_from(d.as_ref())?;
                 v.iter_mut().for_each(|vi| *vi += **plaintext_modulus);
                 let mut w = v[..self.params.degree()].to_vec();
@@ -331,7 +332,11 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
                 plaintext_modulus.reduce_vec(&mut w);
                 Poly::<PowerBasis>::try_convert_from(w.as_slice(), ct[0].ctx(), false)?.into_ntt()
             }
-            None => {
+            _ => {
+                // Reducing through q_0 is only exact for 2t <= q_0. Otherwise
+                // (a small t above q_0 / 2 at a valid multi-modulus level)
+                // reducing through q_0 loses information; lift through the
+                // full plaintext context before reducing mod t.
                 let v: Vec<BigUint> = Vec::<BigUint>::try_from(d.as_ref())?
                     .into_iter()
                     .map(|vi| vi + self.params.plaintext_big())
@@ -359,9 +364,14 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
 #[cfg(test)]
 mod tests {
     use super::SecretKey;
-    use crate::bfv::{Encoding, Plaintext, parameters::BfvParameters};
+    use crate::bfv::{
+        Ciphertext, Encoding, Plaintext, PublicKey,
+        parameters::{BfvParameters, BfvParametersBuilder},
+    };
     use crate::proto::bfv::SecretKey as SecretKeyProto;
-    use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
+    use fhe_traits::{
+        DeserializeParametrized, FheDecoder, FheDecrypter, FheEncoder, FheEncrypter, Serialize,
+    };
     use prost::Message;
     use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
@@ -369,12 +379,59 @@ mod tests {
     use zeroize::Zeroize;
 
     #[test]
+    fn decrypt_lifts_through_plaintext_context_when_q0_below_2t() -> Result<(), Box<dyn Error>> {
+        let mut rng = crate::support::presets::rng(239);
+
+        // q0 = 1153 lies in (t, 2t) for t = 769: plaintext values near t wrap
+        // when the scaled phase is reduced through q0 alone, so decryption must
+        // lift through the plaintext context. The boundary complement keeps
+        // 2t <= q0 and exercises the u64 fast path with a value near t.
+        let wrap_params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(769)
+            .set_moduli(&[1153, 12289])
+            .build_arc()?;
+        assert!(!wrap_params.u64_decrypt_fast_path_is_exact());
+        let fast_params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(521)
+            .set_moduli(&[1153, 12289])
+            .build_arc()?;
+        assert!(fast_params.u64_decrypt_fast_path_is_exact());
+        // Common parameter shapes keep the fast path.
+        assert!(BfvParameters::default_arc(1, 16).u64_decrypt_fast_path_is_exact());
+        assert!(BfvParameters::default_arc(6, 16).u64_decrypt_fast_path_is_exact());
+
+        for (params, values) in [
+            (&wrap_params, vec![768u64; wrap_params.degree()]),
+            (&fast_params, vec![520u64; fast_params.degree()]),
+        ] {
+            let sk = SecretKey::random(params, &mut rng);
+            let pk = PublicKey::new(&sk, &mut rng);
+            let pt = Plaintext::try_encode(&values, Encoding::poly(), params)?;
+            let sk_ct: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
+            assert_eq!(sk_ct.level, 0);
+            assert_eq!(
+                Vec::<u64>::try_decode(&sk.try_decrypt(&sk_ct)?, Encoding::poly())?,
+                values
+            );
+            let pk_ct = pk.try_encrypt(&pt, &mut rng)?;
+            assert_eq!(
+                Vec::<u64>::try_decode(&sk.try_decrypt(&pk_ct)?, Encoding::poly())?,
+                values
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn extended_encryption_returns_zeroizing_intermediates() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
         let sk = SecretKey::random(&params, &mut rng);
         let plaintext = Plaintext::zero(Encoding::poly(), &params)?;
-        let (ct, mut a, mut e) = sk.encrypt_poly_extended(&plaintext.to_poly(), &mut rng)?;
+        let (ct, mut a, mut e) = sk.encrypt_poly_extended(&plaintext.to_poly()?, &mut rng)?;
 
         assert_eq!(ct[1].coefficients(), a.coefficients());
         a.zeroize();

@@ -275,6 +275,15 @@ pub enum PlaintextError {
     #[error("Polynomial context does not match plaintext level {level}")]
     PolynomialContextMismatch { level: usize },
 
+    #[error(
+        "Ciphertext modulus {ciphertext_modulus} at level {level} must exceed plaintext modulus {plaintext_modulus}"
+    )]
+    UnsupportedCiphertextLevel {
+        level: usize,
+        ciphertext_modulus: BigUint,
+        plaintext_modulus: BigUint,
+    },
+
     #[error("No plaintext encoding was specified")]
     MissingEncoding,
 
@@ -745,8 +754,9 @@ impl ParametersError {
 mod tests {
     use super::{
         Error, EvaluationKeyError, EvaluationOperation, MultipartyError, ParameterSource,
-        ParametersError, ReferenceStringRole, SerializationError, SerializedObject,
+        ParametersError, PlaintextError, ReferenceStringRole, SerializationError, SerializedObject,
     };
+    use num_bigint::BigUint;
 
     #[test]
     fn error_strings() {
@@ -809,6 +819,15 @@ mod tests {
             })
             .to_string(),
             "Multiparty protocol error: Reference strings are not independent: CRS row 1 equals URS row 2"
+        );
+        assert_eq!(
+            Error::Plaintext(PlaintextError::UnsupportedCiphertextLevel {
+                level: 1,
+                ciphertext_modulus: BigUint::from(1153u64),
+                plaintext_modulus: BigUint::from(4099u64),
+            })
+            .to_string(),
+            "Plaintext error: Ciphertext modulus 1153 at level 1 must exceed plaintext modulus 4099"
         );
     }
 }

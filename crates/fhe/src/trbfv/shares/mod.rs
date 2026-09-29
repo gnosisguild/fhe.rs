@@ -15,16 +15,12 @@ use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::smudging::SmudgingNoise;
 use fhe_math::rq::traits::TryConvertFrom;
+use fhe_math::rq::{Context, Poly, PowerBasis};
 use fhe_math::zq::Modulus;
-use fhe_math::{
-    rns::{RnsContext, ScalingFactor},
-    rq::{Context, Poly, PowerBasis, scaler::Scaler},
-};
 use itertools::Itertools;
 use ndarray::{Array2, ArrayView2};
 use num_bigint::BigUint;
 use rand::{CryptoRng, RngCore};
-use rayon::prelude::*;
 use std::convert::TryFrom;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -481,6 +477,9 @@ impl ShareManager {
         ciphertext: &Ciphertext,
     ) -> Result<Plaintext, Error> {
         self.validate_ciphertext_parameters(ciphertext)?;
+        // Reject a level whose ciphertext modulus cannot encode plaintexts
+        // before reconstructing or converting anything.
+        self.params.validate_plaintext_level(ciphertext.level)?;
         let ctx = self.params.context_at_level(0)?;
         for decryption_share in decryption_shares {
             if decryption_share.ctx().as_ref() != ctx.as_ref() {
@@ -508,29 +507,6 @@ impl ShareManager {
         let mut result_poly = Poly::<PowerBasis>::zero(ctx);
         result_poly.set_coefficients(arr_matrix)?;
 
-        let plaintext_ctx = Context::new_arc(&self.params.moduli()[..1], self.params.degree())
-            .map_err(Error::MathError)?;
-
-        let scalers: Result<Vec<_>, Error> = (0..self.params.moduli().len())
-            .into_par_iter()
-            .map(|i| {
-                let rns = RnsContext::new(&self.params.moduli()[..self.params.moduli().len() - i])
-                    .map_err(Error::MathError)?;
-                let ctx_i = Context::new_arc(
-                    &self.params.moduli()[..self.params.moduli().len() - i],
-                    self.params.degree(),
-                )
-                .map_err(Error::MathError)?;
-                Scaler::new(
-                    &ctx_i,
-                    &plaintext_ctx,
-                    ScalingFactor::new(&BigUint::from(self.params.plaintext()), rns.modulus())?,
-                )
-                .map_err(Error::MathError)
-            })
-            .collect();
-        let scalers = scalers?;
-
         let par = ciphertext.params.clone();
         let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
             Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
@@ -539,27 +515,48 @@ impl ShareManager {
             })
         })?;
 
+        // Scale the reconstructed phase by t/Q with the precomputed bridge for
+        // the ciphertext level. Its plaintext context has enough moduli for
+        // full-precision lifting when q_0 cannot represent plaintexts.
+        let ctx_lvl = self.params.context_level_at(ciphertext.level)?;
         let d = Zeroizing::new(
             result_poly
-                .scale(&scalers[ciphertext.level])
+                .scale(&ctx_lvl.cipher_plain_context.scaler)
                 .map_err(Error::MathError)?,
         );
-        let v = Zeroizing::new(
-            Vec::<u64>::try_from(d.as_ref())
+
+        let poly = if self.params.u64_decrypt_fast_path_is_exact() {
+            // 2t <= q_0: reducing through q_0 preserves every plaintext value.
+            let v = Zeroizing::new(
+                Vec::<u64>::try_from(d.as_ref())
+                    .map_err(Error::from)?
+                    .into_iter()
+                    .map(|vi| vi + ptxt_u64)
+                    .collect_vec(),
+            );
+            let mut w = v[..par.degree()].to_vec();
+            let q = Modulus::new(par.moduli()[0]).map_err(Error::MathError)?;
+            q.reduce_vec(&mut w);
+            Modulus::new(ptxt_u64)
+                .map_err(Error::MathError)?
+                .reduce_vec(&mut w);
+            Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt()
+        } else {
+            // q_0 < 2t (in particular q_0 < t): reducing through q_0 alone
+            // loses values near t, so lift through the plaintext-context
+            // modulus before reducing, as in secret-key decryption.
+            let v: Vec<BigUint> = Vec::<BigUint>::try_from(d.as_ref())
                 .map_err(Error::from)?
                 .into_iter()
-                .map(|vi| vi + ptxt_u64)
-                .collect_vec(),
-        );
-        let mut w = v[..par.degree()].to_vec();
-        let q = Modulus::new(par.moduli()[0]).map_err(Error::MathError)?;
-        q.reduce_vec(&mut w);
-        Modulus::new(ptxt_u64)
-            .map_err(Error::MathError)?
-            .reduce_vec(&mut w);
-
-        let poly =
-            Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt();
+                .map(|vi| vi + BigUint::from(ptxt_u64))
+                .collect_vec();
+            let mut w = v[..par.degree()].to_vec();
+            let q_poly = d.as_ref().ctx().modulus();
+            w.iter_mut().for_each(|wi| *wi %= q_poly);
+            par.plaintext.reduce_vec(&mut w);
+            Poly::<PowerBasis>::try_convert_from(w.as_slice(), ciphertext.c[0].ctx(), false)?
+                .into_ntt()
+        };
 
         let pt = Plaintext {
             params: par.clone(),
@@ -1218,6 +1215,43 @@ mod tests {
             .expect("Decoding plaintext failed");
 
         assert_eq!(decoded, plaintext_data);
+    }
+
+    #[test]
+    fn decrypt_from_shares_lifts_through_plaintext_context_when_q0_below_t() {
+        // q0 = 1153 < t = 4099 < Q = 1153 * 12289 keeps level 0 valid, but the
+        // legacy one-modulus reduction silently truncated coefficients in
+        // [q0, t). Reconstruction must lift through the plaintext context.
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(4099)
+            .set_moduli(&[1153, 12289])
+            .build_arc()
+            .unwrap();
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let values = vec![4098u64; params.degree()];
+        let pt = Plaintext::try_encode(&values, Encoding::poly(), &params).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
+
+        // Constant Shamir control: every share carries the full phase
+        // c0 = encode(m) with c1 = 0, so threshold reconstruction returns it
+        // unchanged regardless of the party subset.
+        let phase = Zeroizing::new(pt.to_poly().unwrap());
+        let shares = vec![
+            phase.as_ref().clone().into_power_basis(),
+            phase.as_ref().clone().into_power_basis(),
+        ];
+        let ct = Ciphertext::new(
+            vec![phase.as_ref().clone(), Poly::<Ntt>::zero(ctx)],
+            &params,
+        )
+        .unwrap();
+
+        let plaintext = manager.decrypt_from_shares(&shares, &[1, 2], &ct).unwrap();
+        assert_eq!(
+            Vec::<u64>::try_decode(&plaintext, Encoding::poly()).unwrap(),
+            values
+        );
     }
 
     #[test]
