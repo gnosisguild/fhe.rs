@@ -93,12 +93,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let threshold = cli.threshold;
     let lambda = cli.lambda;
 
-    if threshold != (num_parties - 1) / 2 {
-        print_notice_and_exit(Some(
-            "Threshold must be exactly (num_parties - 1) / 2: maximal corruption tolerance with honest-majority reconstruction".to_string(),
-        ))
-    }
-
     // Lambda is caller-chosen policy: larger values give a stronger
     // statistical-hiding guarantee, bounded above by smudging's MAX_LAMBDA.
 

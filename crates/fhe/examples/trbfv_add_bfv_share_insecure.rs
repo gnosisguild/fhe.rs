@@ -93,12 +93,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let threshold = cli.threshold;
     let lambda = cli.lambda;
 
-    if threshold != (num_parties - 1) / 2 {
-        print_notice_and_exit(Some(
-            "Threshold must be exactly (num_parties - 1) / 2: maximal corruption tolerance with honest-majority reconstruction".to_string(),
-        ))
-    }
-
     println!("# Addition with trBFV (with encrypted share transmission)");
     println!("\tnum_summed = {num_summed}");
     println!("\tnum_parties = {num_parties}");

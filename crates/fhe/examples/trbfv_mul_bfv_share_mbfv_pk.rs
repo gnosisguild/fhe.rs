@@ -46,7 +46,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use support::examples::trbfv::{TrbfvShares, parse_cli, print_notice_and_exit};
+use support::examples::trbfv::{TrbfvShares, parse_cli, print_notice_without_num_summed};
 use support::examples::util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -100,12 +100,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── CLI argument parsing ──────────────────────────────────────────────────
     let args: Vec<String> = env::args().skip(1).collect();
     if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
-        print_notice_and_exit(None)
+        print_notice_without_num_summed(None)
     }
 
     let cli = match parse_cli(&args, 3, 1, preset.lambda, None) {
         Ok(cli) => cli,
-        Err(error) => print_notice_and_exit(Some(error)),
+        Err(error) => print_notice_without_num_summed(Some(error)),
     };
     let num_parties = cli.num_parties;
     let threshold = cli.threshold;
