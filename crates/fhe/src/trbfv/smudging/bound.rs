@@ -23,6 +23,19 @@ pub const MAX_LAMBDA: usize = 256;
 /// [`crate::trbfv::smudging::SmudgingNoiseGenerator`] is created.
 /// Configuration inputs validated by [`Self::new`] cannot be changed directly.
 ///
+/// # Caller responsibilities
+///
+/// The circuit size `m`, the multiplicative depth, and `lambda` are caller
+/// choices. Together they determine the bound: `m` and the depth drive the
+/// ciphertext-noise bound `B_C` and whether the strict correctness
+/// inequality is feasible at all, while `lambda` scales the resulting
+/// smudging bound `B_sm`. A dealing manager
+/// ([`crate::trbfv::ShareManager::generate_smudging_shares`]) verifies a
+/// noise owner's party count and complete BFV parameter set, but
+/// deliberately does not verify `m`, depth, or `lambda`; callers must
+/// configure them for the circuits they evaluate. (Full circuit-size
+/// semantics are out of scope for this API surface.)
+///
 /// ```compile_fail
 /// # use fhe::trbfv::smudging::SmudgingConfig;
 /// fn change_party_count(config: &mut SmudgingConfig) {
