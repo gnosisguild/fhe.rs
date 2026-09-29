@@ -11,7 +11,9 @@ use fhe::bfv::{
 };
 use fhe::lbfv::{LBFVPublicKey, LBFVRelinearizationKey};
 use fhe::trlbfv::{PublicKeyShare, RelinKeyShare};
-use fhe_traits::{Deserialize, DeserializeParametrized, FheEncoder, FheEncrypter, Serialize};
+use fhe_traits::{
+    Deserialize, DeserializeParametrized, FheEncoder, FheEncrypter, MAX_SERIALIZED_BYTES, Serialize,
+};
 
 #[test]
 fn representative_objects_round_trip_through_protobuf() {
@@ -208,4 +210,70 @@ fn ciphertext_deserialization_rejects_truncation_and_parameter_mismatch() {
     let truncated_ciphertext = &bytes[..bytes.len() / 2];
     assert!(Ciphertext::from_bytes(truncated_ciphertext, &params).is_err());
     assert!(Ciphertext::from_bytes(&[0xff], &params).is_err());
+}
+
+#[test]
+fn evaluation_keys_roundtrip_through_the_default_and_bounded_routes() {
+    use fhe::bfv::{EvaluationKey, EvaluationKeyBuilder};
+
+    let params = support::presets::insecure().unwrap().parameters;
+    let mut rng = support::presets::rng(71);
+    let sk = SecretKey::random(&params, &mut rng);
+    let evaluation_key = EvaluationKeyBuilder::new_leveled(&sk, 0, 0)
+        .unwrap()
+        .enable_inner_sum()
+        .unwrap()
+        .build(&mut rng)
+        .unwrap();
+    let bytes = evaluation_key.to_bytes();
+
+    assert_eq!(
+        EvaluationKey::from_bytes(&bytes, &params).unwrap(),
+        evaluation_key
+    );
+    assert_eq!(
+        EvaluationKey::from_bytes_with_limit(&bytes, &params, usize::MAX).unwrap(),
+        evaluation_key
+    );
+    assert_eq!(
+        EvaluationKey::from_bytes_with_limit(&bytes, &params, bytes.len()).unwrap(),
+        evaluation_key
+    );
+
+    // The caller-supplied bound applies before any decoding work.
+    let error = EvaluationKey::from_bytes_with_limit(&bytes, &params, bytes.len() - 1).unwrap_err();
+    assert!(matches!(
+        error,
+        fhe::Error::SerializationError(fhe::SerializationError::PayloadTooLarge { .. })
+    ));
+    assert!(matches!(
+        EvaluationKey::from_bytes_with_limit(&bytes, &params, 0).unwrap_err(),
+        fhe::Error::SerializationError(fhe::SerializationError::PayloadTooLarge { .. })
+    ));
+}
+
+/// The default deserialize route must keep the global 256 MiB cap, while the
+/// bounded opt-in route admits the same length under its hard ceiling. The
+/// oversized buffer is lazily backed by zero pages, so this check verifies
+/// the size policy without committing that memory; the end-to-end roundtrip
+/// of the real ~309 MB key is an ignored unit test on
+/// `EvaluationKey` (`oversized_evaluation_key_roundtrips_through_the_opt_in_route`).
+#[test]
+fn default_cap_rejects_large_evaluation_keys_and_the_opt_in_ceiling_admits_the_length() {
+    use fhe::bfv::EvaluationKey;
+
+    let params = support::presets::insecure().unwrap().parameters;
+    let oversized = vec![0u8; MAX_SERIALIZED_BYTES + 1];
+
+    let error = EvaluationKey::from_bytes(&oversized, &params).unwrap_err();
+    assert!(matches!(
+        error,
+        fhe::Error::SerializationError(fhe::SerializationError::PayloadTooLarge { .. })
+    ));
+
+    let error = EvaluationKey::from_bytes_with_limit(&oversized, &params, usize::MAX).unwrap_err();
+    assert!(!matches!(
+        error,
+        fhe::Error::SerializationError(fhe::SerializationError::PayloadTooLarge { .. })
+    ));
 }

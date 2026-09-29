@@ -46,9 +46,41 @@ Some API limits are resource policies, not security guarantees and not budgets
 on total construction work: `BfvParameters::MAX_CIPHERTEXT_MODULI` bounds how
 many ciphertext moduli one parameter set may hold (each accepted modulus costs
 a context and scaler per modulus-switching level), and
-`fhe_traits::MAX_SERIALIZED_BYTES` bounds decoder work. Applications
+`fhe_traits::MAX_SERIALIZED_BYTES` bounds default decoder work. Applications
 constructing or deserializing parameters from untrusted sources must still
 bound the polynomial degree and validate parameters before use.
+
+### Serialization limits
+
+By default, Protobuf-backed deserializers apply a global pre-decode cap of
+`MAX_SERIALIZED_BYTES` (256 MiB, from `fhe-traits`) and reject larger
+payloads with `SerializationError::PayloadTooLarge`. Very large parameter
+sets can produce *legitimate* objects above that cap: the evaluation key of a
+degree-32768 BFV scheme with nine 62-bit moduli and inner-sum support encodes
+to roughly 309 MB.
+
+For authenticated large keys, `EvaluationKey::from_bytes_with_limit(bytes,
+params, max_bytes)` is an explicit opt-in route that accepts a caller-supplied
+encoded-payload budget instead of the 256 MiB default:
+
+* **Authentication is the caller's responsibility.** The limit is a
+  denial-of-service guard, not an authenticity check. Use this route only for
+  keys delivered over a trusted, authenticated channel whose size you have
+  budgeted for.
+* **A finite hard ceiling applies regardless of the caller.** The requested
+  bound is clamped to `EvaluationKey::MAX_DESERIALIZATION_BYTES` (1 GiB), so
+  even `usize::MAX` cannot disable it.
+* **Peak memory exceeds the encoded size.** Decoding holds the encoded
+  buffer, the decoded Protobuf representation, and the in-memory key at the
+  same time, so callers must budget several times the encoded payload:
+  roughly 1.5 GiB to decode a 309 MB key, and more if the original key
+  stays in memory.
+* **Decoder work stays bounded.** Before `prost` materializes the message, a
+  zero-copy wire preflight with a bounded set of normalized exponents enforces
+  the parameter-implied shape (key-switching row counts and row lengths, level
+  consistency, seed placement) and rejects duplicate Galois-key exponents,
+  so malformed payloads fail with typed errors before significant memory is
+  committed.
 
 ## Verification
 

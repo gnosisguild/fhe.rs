@@ -465,6 +465,13 @@ pub enum SerializationError {
     #[error("Missing required field {field:?}")]
     MissingField { field: SerializedField },
 
+    /// A serialized evaluation key carries two Galois keys for the same
+    /// substitution exponent (compared after normalizing modulo `2 * degree`).
+    /// No constructor can produce that, and decoding used to silently keep
+    /// only the last key, so the payload is rejected.
+    #[error("Serialized evaluation key contains a duplicate Galois key exponent {exponent}")]
+    DuplicateGaloisExponent { exponent: usize },
+
     /// A serialized polynomial collection has the wrong length.
     #[error("{component:?} has {actual} polynomials; expected {expected}")]
     WrongPolynomialCount {

@@ -865,79 +865,123 @@ impl From<&KeySwitchingKey> for KeySwitchingKeyProto {
     }
 }
 
+/// Parameter-implied shape of a serialized key-switching key.
+pub(crate) struct KeySwitchingKeyWireShape {
+    /// Number of `c0` rows (and of `c1` rows when no seed is present) that
+    /// the constructors produce for the declared levels and decomposition
+    /// base.
+    pub(crate) row_count: usize,
+    /// Exact length in bytes of the packed coefficient payload of one row at
+    /// the key-switching key context.
+    pub(crate) row_bytes: usize,
+}
+
+/// Compute the shape the [`KeySwitchingKey`] constructors produce for a
+/// serialized key-switching key with the declared levels and decomposition
+/// base.
+///
+/// This is the single source of truth shared by
+/// [`KeySwitchingKey::try_convert_from`] (post-decode validation) and the
+/// evaluation-key wire preflight, so both reject the same malformed shapes
+/// with the same typed errors, in the same precedence order.
+pub(crate) fn expected_wire_shape(
+    params: &Arc<BfvParameters>,
+    ciphertext_level: usize,
+    ksk_level: usize,
+    log_base: usize,
+) -> Result<KeySwitchingKeyWireShape> {
+    // The constructors reject an inverted level ordering before any key
+    // material is produced, so the decoder must reject it too instead of
+    // deferring the failure to `key_switch`.
+    if ciphertext_level < ksk_level {
+        return Err(Error::SerializationError(
+            SerializationError::InvalidKeySwitchingLevelOrder {
+                ciphertext_level,
+                key_level: ksk_level,
+            },
+        ));
+    }
+
+    let ctx_ksk = params.context_at_level(ksk_level)?;
+    let ctx_ciphertext = params.context_at_level(ciphertext_level)?;
+
+    // The decomposition base must match what the constructors produce for
+    // this key context: the standard RNS decomposition (`log_base = 0`) over
+    // a multi-modulus key context, or the base-2^(log_modulus/2)
+    // decomposition over a single-modulus key context (which the
+    // constructors only produce at the maximal ciphertext and key levels).
+    let single_modulus_key_context = ctx_ksk.moduli().len() == 1;
+    let expected_log_base = if single_modulus_key_context {
+        ctx_ksk
+            .moduli()
+            .first()
+            .ok_or(fhe_math::Error::EmptyModuli)?
+            .next_power_of_two()
+            .ilog2() as usize
+            / 2
+    } else {
+        0
+    };
+    if log_base != expected_log_base || (single_modulus_key_context && log_base == 0) {
+        return Err(Error::SerializationError(
+            SerializationError::InvalidKeySwitchingLogBase {
+                log_base,
+                expected_log_base,
+            },
+        ));
+    }
+
+    let row_count = if log_base == 0 {
+        ctx_ciphertext.moduli().len()
+    } else {
+        if ksk_level != params.max_level() || ciphertext_level != params.max_level() {
+            return Err(Error::SerializationError(
+                SerializationError::InvalidKeySwitchingDecompositionLevels {
+                    ciphertext_level,
+                    key_level: ksk_level,
+                    expected: params.max_level(),
+                },
+            ));
+        }
+        let log_modulus: usize = ctx_ksk
+            .moduli()
+            .first()
+            .ok_or(fhe_math::Error::EmptyModuli)?
+            .next_power_of_two()
+            .ilog2() as usize;
+        log_modulus.div_ceil(log_base)
+    };
+
+    let mut row_bytes = 0;
+    for &qi in ctx_ksk.moduli() {
+        row_bytes += fhe_math::zq::Modulus::new(qi)?.serialization_length(params.degree());
+    }
+
+    Ok(KeySwitchingKeyWireShape {
+        row_count,
+        row_bytes,
+    })
+}
+
 impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
     fn try_convert_from(value: &KeySwitchingKeyProto, params: &Arc<BfvParameters>) -> Result<Self> {
         let ciphertext_level = value.ciphertext_level as usize;
         let ksk_level = value.ksk_level as usize;
 
-        // The constructors reject an inverted level ordering before any key
-        // material is produced, so the decoder must reject it too instead of
-        // deferring the failure to `key_switch`.
-        if ciphertext_level < ksk_level {
-            return Err(Error::SerializationError(
-                SerializationError::InvalidKeySwitchingLevelOrder {
-                    ciphertext_level,
-                    key_level: ksk_level,
-                },
-            ));
-        }
+        // The decomposition base and the row count must match what the
+        // constructors produce for this key context; the shared helper applies
+        // the same checks, in the same order, as the wire preflight.
+        let shape =
+            expected_wire_shape(params, ciphertext_level, ksk_level, value.log_base as usize)?;
 
         let ctx_ksk = params.context_at_level(ksk_level)?.clone();
         let ctx_ciphertext = params.context_at_level(ciphertext_level)?.clone();
 
-        // The decomposition base and the row count must match what the
-        // constructors produce for this key context: the standard RNS
-        // decomposition (`log_base = 0`) over a multi-modulus key context, or
-        // the base-2^(log_modulus/2) decomposition over a single-modulus key
-        // context (which the constructors only produce at the maximal
-        // ciphertext and key levels).
-        let log_base = value.log_base as usize;
-        let single_modulus_key_context = ctx_ksk.moduli().len() == 1;
-        let expected_log_base = if single_modulus_key_context {
-            ctx_ksk
-                .moduli()
-                .first()
-                .ok_or(fhe_math::Error::EmptyModuli)?
-                .next_power_of_two()
-                .ilog2() as usize
-                / 2
-        } else {
-            0
-        };
-        if log_base != expected_log_base || (single_modulus_key_context && log_base == 0) {
-            return Err(Error::SerializationError(
-                SerializationError::InvalidKeySwitchingLogBase {
-                    log_base,
-                    expected_log_base,
-                },
-            ));
-        }
-
-        let c0_size: usize = if log_base == 0 {
-            ctx_ciphertext.moduli().len()
-        } else {
-            if ksk_level != params.max_level() || ciphertext_level != params.max_level() {
-                return Err(Error::SerializationError(
-                    SerializationError::InvalidKeySwitchingDecompositionLevels {
-                        ciphertext_level,
-                        key_level: ksk_level,
-                        expected: params.max_level(),
-                    },
-                ));
-            }
-            let log_modulus: usize = ctx_ksk
-                .moduli()
-                .first()
-                .ok_or(fhe_math::Error::EmptyModuli)?
-                .next_power_of_two()
-                .ilog2() as usize;
-            log_modulus.div_ceil(log_base)
-        };
-        if value.c0.len() != c0_size {
+        if value.c0.len() != shape.row_count {
             return Err(Error::SerializationError(
                 SerializationError::WrongPolynomialCount {
                     component: crate::SerializedPolynomialComponent::KeySwitchingKeyC0,
-                    expected: c0_size,
+                    expected: shape.row_count,
                     actual: value.c0.len(),
                 },
             ));
@@ -954,11 +998,11 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
         }
 
         let seed = if value.seed.is_empty() {
-            if value.c1.len() != c0_size {
+            if value.c1.len() != shape.row_count {
                 return Err(Error::SerializationError(
                     SerializationError::WrongPolynomialCount {
                         component: crate::SerializedPolynomialComponent::KeySwitchingKeyC1,
-                        expected: c0_size,
+                        expected: shape.row_count,
                         actual: value.c1.len(),
                     },
                 ));
