@@ -1,16 +1,41 @@
 //! Implementation of operations over polynomials.
 
-use super::{Ntt, NttShoup, Poly, PowerBasis};
+use super::{Context, Ntt, NttShoup, Poly, PowerBasis};
 use crate::{Error, Result};
 use itertools::{Itertools, izip};
 use ndarray::Array2;
 use num_bigint::BigUint;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use std::sync::Arc;
+
+/// Panics when the two operand contexts are not interchangeable.
+///
+/// These infallible operators cannot return an error, so incompatible contexts
+/// surface as a panic in both debug and release builds instead of silently
+/// combining polynomials with different degrees or moduli. Operands usually
+/// share the same `Arc<Context>`, so pointer equality is checked first and
+/// value-equal contexts held in distinct `Arc`s remain compatible through the
+/// equality fallback.
+#[inline]
+fn assert_same_context(left: &Arc<Context>, right: &Arc<Context>) {
+    if Arc::ptr_eq(left, right) {
+        return;
+    }
+    let (left, right) = (left.as_ref(), right.as_ref());
+    assert!(
+        left == right,
+        "Incompatible contexts: left (degree {}, moduli {:?}) != right (degree {}, moduli {:?})",
+        left.degree,
+        left.moduli,
+        right.degree,
+        right.moduli
+    );
+}
 
 impl AddAssign<&Poly<PowerBasis>> for Poly<PowerBasis> {
     fn add_assign(&mut self, p: &Poly<PowerBasis>) {
         assert!(!self.has_lazy_coefficients && !p.has_lazy_coefficients);
-        debug_assert_eq!(self.ctx, p.ctx, "Incompatible contexts");
+        assert_same_context(&self.ctx, &p.ctx);
 
         self.allow_variable_time_computations &= p.allow_variable_time_computations;
         if self.allow_variable_time_computations {
@@ -55,7 +80,7 @@ impl Add for Poly<PowerBasis> {
 impl SubAssign<&Poly<PowerBasis>> for Poly<PowerBasis> {
     fn sub_assign(&mut self, p: &Poly<PowerBasis>) {
         assert!(!self.has_lazy_coefficients && !p.has_lazy_coefficients);
-        debug_assert_eq!(self.ctx, p.ctx, "Incompatible contexts");
+        assert_same_context(&self.ctx, &p.ctx);
 
         self.allow_variable_time_computations &= p.allow_variable_time_computations;
         if self.allow_variable_time_computations {
@@ -92,7 +117,7 @@ impl Sub<&Poly<PowerBasis>> for &Poly<PowerBasis> {
 impl AddAssign<&Poly<Ntt>> for Poly<Ntt> {
     fn add_assign(&mut self, p: &Poly<Ntt>) {
         assert!(!self.has_lazy_coefficients && !p.has_lazy_coefficients);
-        debug_assert_eq!(self.ctx, p.ctx, "Incompatible contexts");
+        assert_same_context(&self.ctx, &p.ctx);
 
         self.allow_variable_time_computations &= p.allow_variable_time_computations;
         if self.allow_variable_time_computations {
@@ -137,7 +162,7 @@ impl Add for Poly<Ntt> {
 impl SubAssign<&Poly<Ntt>> for Poly<Ntt> {
     fn sub_assign(&mut self, p: &Poly<Ntt>) {
         assert!(!self.has_lazy_coefficients && !p.has_lazy_coefficients);
-        debug_assert_eq!(self.ctx, p.ctx, "Incompatible contexts");
+        assert_same_context(&self.ctx, &p.ctx);
 
         self.allow_variable_time_computations &= p.allow_variable_time_computations;
         if self.allow_variable_time_computations {
@@ -178,7 +203,7 @@ impl MulAssign<&Poly<Ntt>> for Poly<Ntt> {
             !self.has_lazy_coefficients,
             "Cannot multiply lazy coefficients by an Ntt polynomial"
         );
-        debug_assert_eq!(self.ctx, p.ctx, "Incompatible contexts");
+        assert_same_context(&self.ctx, &p.ctx);
         self.allow_variable_time_computations &= p.allow_variable_time_computations;
 
         if self.allow_variable_time_computations {
@@ -208,7 +233,7 @@ impl MulAssign<&Poly<Ntt>> for Poly<Ntt> {
 impl MulAssign<&Poly<NttShoup>> for Poly<Ntt> {
     fn mul_assign(&mut self, p: &Poly<NttShoup>) {
         assert!(!p.has_lazy_coefficients);
-        debug_assert_eq!(self.ctx, p.ctx, "Incompatible contexts");
+        assert_same_context(&self.ctx, &p.ctx);
         self.allow_variable_time_computations &= p.allow_variable_time_computations;
 
         if self.allow_variable_time_computations {
@@ -936,5 +961,164 @@ mod tests {
 
         p_ntt *= &scalar;
         assert_eq!(p_ntt_scaled, p_ntt);
+    }
+
+    /// Runs `operation` and asserts that it panics, proving incompatible
+    /// contexts are rejected in debug and release builds alike.
+    fn assert_misuse_panic(kind: &str, operation: &str, f: impl FnOnce()) {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err(),
+            "{kind}: {operation} must panic when operand contexts are incompatible"
+        );
+    }
+
+    #[test]
+    fn incompatible_contexts_panic_before_mutation() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        // Contexts that differ in exactly one invariant per pair: polynomial
+        // degree, prime modulus, or number of RNS rows.
+        let degree_ctx = (
+            Arc::new(Context::new(&[MODULI[0]], 16)?),
+            Arc::new(Context::new(&[MODULI[0]], 32)?),
+        );
+        let modulus_ctx = (
+            Arc::new(Context::new(&[MODULI[0]], 16)?),
+            Arc::new(Context::new(&[MODULI[1]], 16)?),
+        );
+        let row_ctx = (
+            Arc::new(Context::new(MODULI, 16)?),
+            Arc::new(Context::new(&MODULI[..1], 16)?),
+        );
+        let mismatched = [
+            ("degree", (&degree_ctx.0, &degree_ctx.1)),
+            ("modulus", (&modulus_ctx.0, &modulus_ctx.1)),
+            ("rows", (&row_ctx.0, &row_ctx.1)),
+        ];
+
+        for (kind, (left, right)) in mismatched {
+            let mut p_pb = Poly::<PowerBasis>::random(left, &mut rng);
+            let q_pb = Poly::<PowerBasis>::random(right, &mut rng);
+            let p_pb_untouched = p_pb.clone();
+            // The guard must run before the variable-time policy is merged
+            // from the operand, so grant it on the destination first.
+            p_pb.allow_variable_time_computations(fhe_traits::VariableTime::new(
+                fhe_traits::PublicData::assert_public(),
+            ));
+
+            assert_misuse_panic(kind, "in-place PowerBasis add", || {
+                p_pb += &q_pb;
+            });
+            assert!(
+                p_pb == p_pb_untouched,
+                "{kind}: coefficients were mutated before the context check rejected the addition"
+            );
+            assert!(
+                p_pb.allow_variable_time_computations,
+                "{kind}: variable-time policy applied before the context check"
+            );
+
+            assert_misuse_panic(kind, "borrowed PowerBasis add", || {
+                std::mem::drop(&p_pb + &q_pb);
+            });
+            assert_misuse_panic(kind, "owned PowerBasis add", || {
+                std::mem::drop(p_pb.clone() + q_pb.clone());
+            });
+            assert_misuse_panic(kind, "in-place PowerBasis sub", || {
+                p_pb -= &q_pb;
+            });
+            assert_misuse_panic(kind, "borrowed PowerBasis sub", || {
+                std::mem::drop(&p_pb - &q_pb);
+            });
+
+            let mut p_ntt = Poly::<Ntt>::random(left, &mut rng);
+            let q_ntt = Poly::<Ntt>::random(right, &mut rng);
+            let q_shoup = Poly::<NttShoup>::random(right, &mut rng);
+
+            assert_misuse_panic(kind, "borrowed Ntt add", || {
+                std::mem::drop(&p_ntt + &q_ntt);
+            });
+            assert_misuse_panic(kind, "owned Ntt add", || {
+                std::mem::drop(p_ntt.clone() + q_ntt.clone());
+            });
+            assert_misuse_panic(kind, "in-place Ntt add", || {
+                p_ntt += &q_ntt;
+            });
+            assert_misuse_panic(kind, "borrowed Ntt sub", || {
+                std::mem::drop(&p_ntt - &q_ntt);
+            });
+            assert_misuse_panic(kind, "in-place Ntt sub", || {
+                p_ntt -= &q_ntt;
+            });
+            assert_misuse_panic(kind, "in-place Ntt mul", || {
+                p_ntt *= &q_ntt;
+            });
+            assert_misuse_panic(kind, "borrowed Ntt mul", || {
+                std::mem::drop(&p_ntt * &q_ntt);
+            });
+            assert_misuse_panic(kind, "in-place Ntt mul by NttShoup", || {
+                p_ntt *= &q_shoup;
+            });
+            assert_misuse_panic(kind, "borrowed Ntt mul by NttShoup", || {
+                std::mem::drop(&p_ntt * &q_shoup);
+            });
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn equal_value_distinct_arc_contexts_compose() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        // Two separately created contexts with identical parameters are
+        // value-equal but pointer-distinct; arithmetic must still accept them
+        // through the value-equality fallback.
+        let ctx_a = Arc::new(Context::new(&[MODULI[0]], 16)?);
+        let ctx_b = Arc::new(Context::new(&[MODULI[0]], 16)?);
+        assert_eq!(ctx_a, ctx_b);
+        assert!(!Arc::ptr_eq(&ctx_a, &ctx_b));
+
+        let m = Modulus::new(MODULI[0]).unwrap();
+
+        let p_pb = Poly::<PowerBasis>::random(&ctx_a, &mut rng);
+        let q_pb = Poly::<PowerBasis>::random(&ctx_b, &mut rng);
+        let mut expected = Vec::<u64>::try_from(&p_pb).unwrap();
+        m.add_vec(&mut expected, &Vec::<u64>::try_from(&q_pb).unwrap());
+        let pb_add = &p_pb + &q_pb;
+        assert_eq!(Vec::<u64>::try_from(&pb_add).unwrap(), expected);
+        assert_eq!(p_pb.clone() + q_pb.clone(), pb_add);
+
+        let mut expected = Vec::<u64>::try_from(&p_pb).unwrap();
+        m.sub_vec(&mut expected, &Vec::<u64>::try_from(&q_pb).unwrap());
+        let pb_sub = &p_pb - &q_pb;
+        assert_eq!(Vec::<u64>::try_from(&pb_sub).unwrap(), expected);
+
+        let p_ntt = Poly::<Ntt>::random(&ctx_a, &mut rng);
+        let q_ntt = Poly::<Ntt>::random(&ctx_b, &mut rng);
+        let mut expected = Vec::<u64>::try_from(&p_ntt).unwrap();
+        m.add_vec(&mut expected, &Vec::<u64>::try_from(&q_ntt).unwrap());
+        let ntt_add = &p_ntt + &q_ntt;
+        assert_eq!(Vec::<u64>::try_from(&ntt_add).unwrap(), expected);
+        assert_eq!(p_ntt.clone() + q_ntt.clone(), ntt_add);
+
+        let mut expected = Vec::<u64>::try_from(&p_ntt).unwrap();
+        m.sub_vec(&mut expected, &Vec::<u64>::try_from(&q_ntt).unwrap());
+        let ntt_sub = &p_ntt - &q_ntt;
+        assert_eq!(Vec::<u64>::try_from(&ntt_sub).unwrap(), expected);
+
+        let mut expected = Vec::<u64>::try_from(&p_ntt).unwrap();
+        m.mul_vec(&mut expected, &Vec::<u64>::try_from(&q_ntt).unwrap());
+        let ntt_mul = &p_ntt * &q_ntt;
+        assert_eq!(Vec::<u64>::try_from(&ntt_mul).unwrap(), expected);
+
+        let q_shoup = Poly::<NttShoup>::random(&ctx_b, &mut rng);
+        let mut expected = Vec::<u64>::try_from(&p_ntt).unwrap();
+        m.mul_vec(&mut expected, &Vec::<u64>::try_from(&q_shoup).unwrap());
+        let ntt_shoup_mul = &p_ntt * &q_shoup;
+        assert_eq!(Vec::<u64>::try_from(&ntt_shoup_mul).unwrap(), expected);
+
+        let mut ntt_shoup_mul_in_place = p_ntt.clone();
+        ntt_shoup_mul_in_place *= &q_shoup;
+        assert_eq!(ntt_shoup_mul_in_place, ntt_shoup_mul);
+
+        Ok(())
     }
 }
