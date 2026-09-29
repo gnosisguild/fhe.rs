@@ -12,7 +12,8 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::trbfv::{
-    SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
+    FreshNoiseModel, SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
+    SmudgingShare,
 };
 use fhe_traits::{FheEncoder, FheEncrypter};
 use ndarray::Array2;
@@ -69,8 +70,14 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
             })
             .collect();
 
-        let smudging_config = SmudgingConfig::new(params.clone(), party_count, 1, 0)
-            .expect("zero-security smudging configuration must be valid");
+        let smudging_config = SmudgingConfig::new(
+            params.clone(),
+            party_count,
+            1,
+            0,
+            FreshNoiseModel::BfvPublicKey,
+        )
+        .expect("zero-security smudging configuration must be valid");
         let smudging_noise = SmudgingNoiseGenerator::new(smudging_config)
             .expect("smudging generator must be valid")
             .generate(&mut setup_rng)

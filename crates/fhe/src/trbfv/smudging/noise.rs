@@ -1,6 +1,6 @@
 //! Smudging-noise ownership and sampling.
 
-use super::bound::{MAX_LAMBDA, SmudgingConfig, compute_b_enc, compute_delta, modulus_product};
+use super::bound::{MAX_LAMBDA, SmudgingConfig, compute_delta, modulus_product};
 use crate::Error;
 use crate::bfv::BfvParameters;
 use fhe_math::rq::{Poly, PowerBasis};
@@ -42,6 +42,13 @@ impl SmudgingNoiseGenerator {
     /// coefficients a single decryption reveals — see issue #108) subject to
     /// the strict correctness constraint `2 * (B_C + n * B_sm) < Delta` where
     /// `Delta = floor(Q / t)`.
+    ///
+    /// The initial ciphertext-noise bound `B_C^(0) = m * (B_fresh + Q mod t)`
+    /// uses the fresh-ciphertext noise bound `B_fresh` selected by the
+    /// configuration's [`FreshNoiseModel`](super::FreshNoiseModel): the model
+    /// must describe the encryption path that actually produced the input
+    /// ciphertexts (issue #250). Multiplicative depth then grows `B_C` with
+    /// the Prop. 20 recursion, independently of the model.
     ///
     /// # Errors
     /// Returns error if:
@@ -88,14 +95,15 @@ impl SmudgingNoiseGenerator {
 
         // --- Core computation ---
         let d = BigUint::from(config.params.degree());
-        let b_enc = compute_b_enc(error1_var)?;
         let variance = config.params.variance();
         let b_e = BigUint::from((2 * variance) as u64);
-        let e_norm = BigUint::from((config.n as u64) * (2 * variance) as u64);
-        let sk_norm = BigUint::from(config.n as u64);
 
-        // B_fresh = d·||e_ek||_∞ + B_enc + d·B_e·||sk||_∞
-        let b_fresh = &d * &e_norm + b_enc + &d * &b_e * &sk_norm;
+        // B_fresh from the caller-selected fresh-noise model:
+        // BfvPublicKey:       d·1·‖e_ek‖ + B_enc + d·B_e·‖sk‖
+        // LbfvPublicKey:      d·(2·variance)·‖e_ek‖ + B_enc + d·B_e·‖sk‖
+        // BfvSecretKey:       B_e (no randomness u, single small error)
+        // Custom:             the caller-justified bound itself
+        let b_fresh = config.fresh_noise_bound()?;
 
         // Q = product of all moduli
         let q_full = modulus_product(moduli);
@@ -498,7 +506,8 @@ impl SmudgingNoiseGenerator {
 mod tests {
     use super::*;
     use crate::bfv::BfvParametersBuilder;
-    use crate::support::presets::secure8192;
+    use crate::support::presets::{insecure, secure8192};
+    use crate::trbfv::smudging::{FreshNoiseModel, bound::compute_b_enc};
     use num_bigint::BigInt;
     use num_traits::{ToPrimitive, Zero};
     use rand::{RngCore, SeedableRng, rng};
@@ -601,30 +610,73 @@ mod tests {
     #[test]
     fn config_validates_basic_inputs() {
         let params = secure8192().unwrap().parameters;
-        assert!(SmudgingConfig::new(params.clone(), 0, 1, 2).is_err());
-        assert!(SmudgingConfig::new(params.clone(), 1, 0, 2).is_err());
-        assert!(SmudgingConfig::new(params.clone(), 1, 1, MAX_LAMBDA + 1).is_err());
+        assert!(
+            SmudgingConfig::new(params.clone(), 0, 1, 2, FreshNoiseModel::BfvPublicKey).is_err()
+        );
+        assert!(
+            SmudgingConfig::new(params.clone(), 1, 0, 2, FreshNoiseModel::BfvPublicKey).is_err()
+        );
+        assert!(
+            SmudgingConfig::new(
+                params.clone(),
+                1,
+                1,
+                MAX_LAMBDA + 1,
+                FreshNoiseModel::BfvPublicKey
+            )
+            .is_err()
+        );
+        assert!(
+            SmudgingConfig::new(
+                params.clone(),
+                1,
+                1,
+                2,
+                FreshNoiseModel::Custom(BigUint::from(0_u64))
+            )
+            .is_err()
+        );
 
-        let config = SmudgingConfig::new(params.clone(), 3, 2, 40)
+        let config = SmudgingConfig::new(params.clone(), 3, 2, 40, FreshNoiseModel::BfvPublicKey)
             .unwrap()
             .with_mult_depth(1);
         assert!(Arc::ptr_eq(config.params(), &params));
         assert_eq!((config.n(), config.m(), config.lambda()), (3, 2, 40));
         assert_eq!(config.mult_depth(), 1);
+        assert_eq!(config.model(), &FreshNoiseModel::BfvPublicKey);
     }
 
     #[test]
     fn generator_revalidates_internally_corrupted_config() {
         let params = secure8192().unwrap().parameters;
-        let mut config = SmudgingConfig::new(params.clone(), 1, 1, 2).unwrap();
+        let mut config =
+            SmudgingConfig::new(params.clone(), 1, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap();
         config.n = 0;
         assert!(SmudgingNoiseGenerator::new(config).is_err());
 
-        let mut config = SmudgingConfig::new(params, 1, 1, 2).unwrap();
+        let mut config =
+            SmudgingConfig::new(params.clone(), 1, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap();
         config.m = 0;
         assert!(SmudgingNoiseGenerator::new(config).is_err());
-    }
 
+        // A zero custom bound invalidated after construction is rejected the
+        // same way, so corruption cannot sneak an empty fresh-noise bound in.
+        let mut config = SmudgingConfig::new(
+            params,
+            1,
+            1,
+            2,
+            FreshNoiseModel::Custom(BigUint::from(1234_u64)),
+        )
+        .unwrap();
+        config.model = FreshNoiseModel::Custom(BigUint::from(0_u64));
+        assert!(matches!(
+            SmudgingNoiseGenerator::new(config),
+            Err(Error::Threshold(
+                crate::ThresholdError::SmudgingBoundInfeasible { .. }
+            ))
+        ));
+    }
     #[test]
     fn delta_is_q_div_t_floor() {
         let params = secure8192().unwrap().parameters;
@@ -644,15 +696,21 @@ mod tests {
             .set_error1_variance_usize(1)
             .build_arc()
             .unwrap();
-        let config = SmudgingConfig::new(params, 1, 1, 5).unwrap();
+        let config = SmudgingConfig::new(params, 1, 1, 5, FreshNoiseModel::BfvPublicKey).unwrap();
         let error = SmudgingNoiseGenerator::new(config).unwrap_err();
         assert!(error.to_string().contains("strict inequality"));
     }
 
     #[test]
     fn lambda_at_max_is_not_truncated() {
-        let config =
-            SmudgingConfig::new(secure8192().unwrap().parameters, 1, 1, MAX_LAMBDA).unwrap();
+        let config = SmudgingConfig::new(
+            secure8192().unwrap().parameters,
+            1,
+            1,
+            MAX_LAMBDA,
+            FreshNoiseModel::BfvPublicKey,
+        )
+        .unwrap();
         if let Ok(generator) = SmudgingNoiseGenerator::new(config) {
             assert!(generator.smudging_bound().bits() as usize > MAX_LAMBDA);
         }
@@ -661,7 +719,8 @@ mod tests {
     #[test]
     fn test_smudging_noise_generator_creation() {
         let params = secure8192().unwrap().parameters;
-        let config = SmudgingConfig::new(params.clone(), 3, 1, 35).unwrap();
+        let config =
+            SmudgingConfig::new(params.clone(), 3, 1, 35, FreshNoiseModel::BfvPublicKey).unwrap();
         let generator = SmudgingNoiseGenerator::new(config).unwrap();
         assert_eq!(generator.params, params);
         assert_eq!(generator.parties, 3);
@@ -674,9 +733,10 @@ mod tests {
         let params = secure8192().unwrap().parameters;
 
         // The ordinary sampled-bound branch records the configuration.
-        let generator =
-            SmudgingNoiseGenerator::new(SmudgingConfig::new(params.clone(), 3, 1, 2).unwrap())
-                .unwrap();
+        let generator = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), 3, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap();
         let noise = generator.generate(&mut rng).unwrap();
         assert_eq!(noise.parties, 3);
         assert!(Arc::ptr_eq(&noise.params, &params));
@@ -925,7 +985,8 @@ mod tests {
             .set_moduli_sizes(&[62, 62, 62, 62, 62, 62])
             .build_arc()
             .unwrap();
-        let additive = SmudgingConfig::new(params.clone(), 3, 1, 2).unwrap();
+        let additive =
+            SmudgingConfig::new(params.clone(), 3, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap();
         let depth_one = additive.clone().with_mult_depth(1);
         let bound_add = SmudgingNoiseGenerator::new(additive)
             .unwrap()
@@ -941,7 +1002,8 @@ mod tests {
     #[test]
     fn infeasible_depth_returns_before_unbounded_recursion() {
         let params = small_params(&[62, 62, 62]);
-        let config = SmudgingConfig::new(params.clone(), 3, 1, 2).unwrap();
+        let config =
+            SmudgingConfig::new(params.clone(), 3, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap();
         assert!(SmudgingNoiseGenerator::new(config.clone().with_mult_depth(1)).is_ok());
 
         let error = SmudgingNoiseGenerator::new(config.with_mult_depth(u32::MAX)).unwrap_err();
@@ -951,7 +1013,8 @@ mod tests {
                 if reason.contains(">= Delta")
         ));
 
-        let additive_infeasible = SmudgingConfig::new(params, 3, usize::MAX, 2).unwrap();
+        let additive_infeasible =
+            SmudgingConfig::new(params, 3, usize::MAX, 2, FreshNoiseModel::BfvPublicKey).unwrap();
         assert!(matches!(
             SmudgingNoiseGenerator::new(additive_infeasible.with_mult_depth(u32::MAX)),
             Err(Error::Threshold(
@@ -963,19 +1026,338 @@ mod tests {
     #[test]
     fn smudging_bound_monotonicity() {
         let params = secure8192().unwrap().parameters;
-        let b1 = SmudgingNoiseGenerator::new(SmudgingConfig::new(params.clone(), 3, 1, 2).unwrap())
-            .unwrap()
-            .smudging_bound()
-            .clone();
-        let b2 = SmudgingNoiseGenerator::new(SmudgingConfig::new(params.clone(), 3, 2, 2).unwrap())
-            .unwrap()
-            .smudging_bound()
-            .clone();
-        let b3 = SmudgingNoiseGenerator::new(SmudgingConfig::new(params, 3, 1, 10).unwrap())
-            .unwrap()
-            .smudging_bound()
-            .clone();
+        let b1 = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), 3, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap()
+        .smudging_bound()
+        .clone();
+        let b2 = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), 3, 2, 2, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap()
+        .smudging_bound()
+        .clone();
+        let b3 = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params, 3, 1, 10, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap()
+        .smudging_bound()
+        .clone();
         assert!(b2 >= b1);
         assert!(b3 > b1);
+    }
+
+    /// Independently derive the smudging bound for a model from the documented
+    /// per-path formula `B_fresh = d·u·e_pk + B_enc + d·B_e·‖sk‖` and the
+    /// `B_C`/`B_sm` pipeline, for use as a regression oracle.
+    fn expected_bound(
+        params: &Arc<BfvParameters>,
+        n: usize,
+        m: usize,
+        lambda: usize,
+        u_bound: &BigUint,
+    ) -> BigUint {
+        let d = BigUint::from(params.degree());
+        let b_e = BigUint::from((2 * params.variance()) as u64);
+        let b_enc = compute_b_enc(params.get_error1_variance()).unwrap();
+        let e_pk = BigUint::from(n) * &b_e;
+        let sk_bound = BigUint::from(n);
+        let b_fresh = &d * u_bound * &e_pk + b_enc + &d * &b_e * &sk_bound;
+        let q = modulus_product(params.moduli());
+        let t = BigUint::from(params.plaintext());
+        let b_c = BigUint::from(m) * (&b_fresh + &q % &t);
+        (BigUint::from(1_u64) << (lambda + 1)) * &d * &b_c
+    }
+
+    /// Issue #250 at depth zero: the l-BFV public-key path samples `u` with
+    /// `Poly::small(variance)` (support `2 * variance`), so its bound must be
+    /// strictly larger than the ternary BFV public-key bound, and both must
+    /// match the documented formula exactly.
+    #[test]
+    fn bfv_vs_lbfv_public_key_depth0_bound_difference() {
+        let preset = insecure().unwrap();
+        let params = preset.parameters;
+        let (n, m, lambda) = (preset.num_parties, preset.max_ciphertexts, preset.lambda);
+
+        let bound_bfv = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), n, m, lambda, FreshNoiseModel::BfvPublicKey)
+                .unwrap(),
+        )
+        .unwrap()
+        .smudging_bound()
+        .clone();
+        let bound_lbfv = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), n, m, lambda, FreshNoiseModel::LbfvPublicKey)
+                .unwrap(),
+        )
+        .unwrap()
+        .smudging_bound()
+        .clone();
+
+        let ternary = BigUint::from(1_u64);
+        let cbd = BigUint::from((2 * params.variance()) as u64);
+        assert_eq!(bound_bfv, expected_bound(&params, n, m, lambda, &ternary));
+        assert_eq!(bound_lbfv, expected_bound(&params, n, m, lambda, &cbd));
+
+        // The u-support difference alone is material at depth 0 for this
+        // preset's arithmetic: the review of issue #250 estimated a ~2.9x
+        // fresh-bound underestimate.
+        assert!(
+            bound_lbfv > BigUint::from(2_u32) * &bound_bfv,
+            "l-BFV bound {bound_lbfv} must exceed 2x the BFV bound {bound_bfv}"
+        );
+    }
+
+    /// At depth > 0 the model difference propagates through the Prop. 20
+    /// recursion: because the recursion is affine, the gap between the two
+    /// models' bounds grows by exactly the recursion coefficient per level.
+    #[test]
+    fn depth_recursion_amplifies_model_difference() {
+        let preset = insecure().unwrap();
+        let params = preset.parameters;
+        let (n, m, lambda) = (preset.num_parties, preset.max_ciphertexts, preset.lambda);
+
+        let bound = |depth: u32, model: FreshNoiseModel| {
+            SmudgingNoiseGenerator::new(
+                SmudgingConfig::new(params.clone(), n, m, lambda, model)
+                    .unwrap()
+                    .with_mult_depth(depth),
+            )
+            .unwrap()
+            .smudging_bound()
+            .clone()
+        };
+        let bound0_bfv = bound(0, FreshNoiseModel::BfvPublicKey);
+        let bound0_lbfv = bound(0, FreshNoiseModel::LbfvPublicKey);
+        let bound1_bfv = bound(1, FreshNoiseModel::BfvPublicKey);
+        let bound1_lbfv = bound(1, FreshNoiseModel::LbfvPublicKey);
+
+        let diff0 = &bound0_lbfv - &bound0_bfv;
+        let diff1 = &bound1_lbfv - &bound1_bfv;
+        assert!(diff0 > BigUint::zero());
+        assert!(diff1 > diff0, "depth must amplify the model difference");
+
+        // Prop. 20: B_C^{i+1} = 2·t·d²·n·B_C^{i} + B_relin, and B_sm = 2^(lambda+1)·d·B_C
+        // with a model-independent constant, so differences scale exactly by
+        // the recursion coefficient.
+        let coeff = BigUint::from(2_u32)
+            * BigUint::from(params.plaintext())
+            * BigUint::from(params.degree())
+            * BigUint::from(params.degree())
+            * BigUint::from(n as u64);
+        assert_eq!(diff1, &coeff * &diff0);
+    }
+
+    /// The `Custom` model is used verbatim: the library neither widens nor
+    /// shrinks a caller-justified bound, so an understated bound silently
+    /// shrinks `B_sm` (the caller owns the justification).
+    #[test]
+    fn custom_bound_is_used_verbatim() {
+        let params = small_params(&[62, 62, 62]);
+        let (n, m, lambda) = (2usize, 1usize, 1usize);
+        let custom = BigUint::from(123_456_u64);
+
+        let config = SmudgingConfig::new(
+            params.clone(),
+            n,
+            m,
+            lambda,
+            FreshNoiseModel::Custom(custom.clone()),
+        )
+        .unwrap();
+        assert_eq!(config.model(), &FreshNoiseModel::Custom(custom.clone()));
+        let bound = SmudgingNoiseGenerator::new(config)
+            .unwrap()
+            .smudging_bound()
+            .clone();
+
+        let d = BigUint::from(params.degree());
+        let q = modulus_product(params.moduli());
+        let t = BigUint::from(params.plaintext());
+        let b_c = BigUint::from(m) * (&custom + &q % &t);
+        assert_eq!(bound, (BigUint::from(1_u64) << (lambda + 1)) * &d * &b_c);
+
+        // A small custom bound is honored even when every library path would
+        // produce a larger fresh-noise bound: there is no silent widening.
+        let small = BigUint::from(64_u64);
+        let bound_small = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), n, m, lambda, FreshNoiseModel::Custom(small))
+                .unwrap(),
+        )
+        .unwrap()
+        .smudging_bound()
+        .clone();
+        let ternary = BigUint::from(1_u64);
+        let bfv_bound = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), n, m, lambda, FreshNoiseModel::BfvPublicKey)
+                .unwrap(),
+        )
+        .unwrap()
+        .smudging_bound()
+        .clone();
+        assert!(bound_small < bfv_bound);
+        assert_eq!(bfv_bound, expected_bound(&params, n, m, lambda, &ternary));
+    }
+
+    /// A zero custom bound cannot hide any real ciphertext's noise and is
+    /// rejected at configuration time.
+    #[test]
+    fn custom_zero_bound_is_rejected() {
+        let params = small_params(&[62, 62, 62]);
+        let error = SmudgingConfig::new(
+            params,
+            1,
+            1,
+            2,
+            FreshNoiseModel::Custom(BigUint::from(0_u64)),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("custom fresh-noise bound must be positive")
+        );
+    }
+
+    /// Secret-key encryption samples no randomness `u`: the fresh phase noise
+    /// is the single small error, so `B_fresh = 2 * variance` and the bound is
+    /// strictly smaller than either public-key model at the same parameters.
+    #[test]
+    fn secret_key_model_uses_direct_small_error() {
+        let params = small_params(&[62, 62, 62]);
+        let (n, m, lambda) = (3usize, 1usize, 1usize);
+        let variance = params.variance() as u64;
+
+        let bound_sk = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), n, m, lambda, FreshNoiseModel::BfvSecretKey)
+                .unwrap(),
+        )
+        .unwrap()
+        .smudging_bound()
+        .clone();
+
+        // B_sm = 2^(lambda+1) · d · m · (2·variance + Q mod t)
+        let d = BigUint::from(params.degree());
+        let q = modulus_product(params.moduli());
+        let t = BigUint::from(params.plaintext());
+        let b_fresh = BigUint::from(2 * variance);
+        let b_c = BigUint::from(m) * (&b_fresh + &q % &t);
+        assert_eq!(bound_sk, (BigUint::from(1_u64) << (lambda + 1)) * &d * &b_c);
+
+        let bound_bfv = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), n, m, lambda, FreshNoiseModel::BfvPublicKey)
+                .unwrap(),
+        )
+        .unwrap()
+        .smudging_bound()
+        .clone();
+        let bound_lbfv = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params, n, m, lambda, FreshNoiseModel::LbfvPublicKey).unwrap(),
+        )
+        .unwrap()
+        .smudging_bound()
+        .clone();
+        assert!(bound_sk < bound_bfv);
+        assert!(bound_bfv < bound_lbfv);
+    }
+
+    /// Largest lambda accepted by the generator for a model. `B_sm` grows
+    /// monotonically with lambda, so the strict correctness inequality fails
+    /// from the first infeasible lambda on.
+    fn max_feasible_lambda(
+        params: &Arc<BfvParameters>,
+        n: usize,
+        m: usize,
+        model: FreshNoiseModel,
+    ) -> usize {
+        let mut feasible = None;
+        for lambda in 0..=MAX_LAMBDA {
+            match SmudgingNoiseGenerator::new(
+                SmudgingConfig::new(params.clone(), n, m, lambda, model.clone()).unwrap(),
+            ) {
+                Ok(_) => feasible = Some(lambda),
+                Err(_) => break,
+            }
+        }
+        match feasible {
+            Some(lambda) => lambda,
+            None => panic!("boundary tests need a model feasible at lambda 0"),
+        }
+    }
+
+    /// The feasibility boundary itself depends on the model: with a tiny
+    /// correctness budget, the lambda at which `2*(B_C + n*B_sm) < Delta`
+    /// stops holding is lower for the wider l-BFV `u` support and higher for
+    /// the direct-error secret-key path.
+    #[test]
+    fn feasibility_boundary_depends_on_model() {
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[62])
+            .set_variance(32)
+            .set_error1_variance_usize(1)
+            .build_arc()
+            .unwrap();
+        let (n, m) = (1usize, 1usize);
+
+        let bfv_max = max_feasible_lambda(&params, n, m, FreshNoiseModel::BfvPublicKey);
+        let lbfv_max = max_feasible_lambda(&params, n, m, FreshNoiseModel::LbfvPublicKey);
+        let sk_max = max_feasible_lambda(&params, n, m, FreshNoiseModel::BfvSecretKey);
+
+        assert!(
+            lbfv_max < bfv_max,
+            "wider u support must bound feasibility earlier"
+        );
+        assert!(
+            bfv_max <= sk_max,
+            "direct-error path must not be less feasible"
+        );
+        assert!(bfv_max > 0);
+
+        // At the BFV model's boundary lambda the l-BFV model is already
+        // excluded by the strict correctness inequality.
+        let error = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params, n, m, bfv_max, FreshNoiseModel::LbfvPublicKey).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("strict inequality"));
+    }
+
+    /// A party count large enough to overflow a naive u64 product of
+    /// `n * (2 * variance)` must neither panic nor wrap into an understated
+    /// public-key error bound: the bound is computed as a BigUint product, so
+    /// the huge configuration is rejected by the feasibility checks with a
+    /// typed error instead (both public-key models, issue #250 review).
+    #[test]
+    fn huge_party_count_does_not_truncate_public_key_error() {
+        let params = small_params(&[62]);
+        let (n, m, lambda) = (usize::MAX, 1usize, 2usize);
+        let d = BigUint::from(params.degree());
+        let b_e = BigUint::from((2 * params.variance()) as u64);
+        let b_enc = compute_b_enc(params.get_error1_variance()).unwrap();
+        let sk_bound = BigUint::from(n);
+        let e_pk = &BigUint::from(n) * &b_e;
+
+        for (model, u_bound) in [
+            (FreshNoiseModel::BfvPublicKey, BigUint::from(1_u64)),
+            (FreshNoiseModel::LbfvPublicKey, b_e.clone()),
+        ] {
+            let config = SmudgingConfig::new(params.clone(), n, m, lambda, model.clone()).unwrap();
+
+            // The fresh bound equals the exact BigUint product `n · (2·variance)`
+            // in the e_pk term: any u64 truncation would fail this comparison.
+            let expected_fresh = &d * &u_bound * &e_pk + &b_enc + &d * &b_e * &sk_bound;
+            assert_eq!(config.fresh_noise_bound().unwrap(), expected_fresh);
+
+            // The generator then rejects the astronomic bound as infeasible
+            // with the typed error instead of panicking on overflow.
+            let error = SmudgingNoiseGenerator::new(config).unwrap_err();
+            assert!(matches!(
+                error,
+                Error::Threshold(crate::ThresholdError::SmudgingBoundInfeasible { .. })
+            ));
+        }
     }
 }

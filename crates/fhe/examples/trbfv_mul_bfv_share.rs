@@ -36,7 +36,7 @@ use fhe::{
     aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
-    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{FreshNoiseModel, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
@@ -155,10 +155,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .into_transport();
 
                 // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications,
-                // accepted l-BFV participant count = num_parties).
-                let config = SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda)
-                    .unwrap()
-                    .with_mult_depth(preset.multiplicative_depth.unwrap());
+                // accepted l-BFV participant count = num_parties). The multiplied
+                // ciphertexts are encrypted with the aggregated l-BFV public key,
+                // whose `Poly::small(variance)` encryption randomness the
+                // LbfvPublicKey model assumes (issue #250).
+                let config = SmudgingConfig::new(
+                    params_trbfv.clone(),
+                    num_parties,
+                    3,
+                    lambda,
+                    FreshNoiseModel::LbfvPublicKey,
+                )
+                .unwrap()
+                .with_mult_depth(preset.multiplicative_depth.unwrap());
                 let generator = SmudgingNoiseGenerator::new(config).unwrap();
                 let smudging_noise = generator.generate(&mut rng).unwrap();
                 let smudging_shares_transport = share_manager

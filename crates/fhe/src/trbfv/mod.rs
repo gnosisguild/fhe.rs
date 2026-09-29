@@ -17,4 +17,4 @@ pub use shares::{
     AggregatedSecretKeyShare, AggregatedSmudgingShare, DealtSecretKeyShares, DealtSmudgingShares,
     SecretKeyShare, ShareManager, SmudgingShare,
 };
-pub use smudging::{SmudgingConfig, SmudgingNoise, SmudgingNoiseGenerator};
+pub use smudging::{FreshNoiseModel, SmudgingConfig, SmudgingNoise, SmudgingNoiseGenerator};

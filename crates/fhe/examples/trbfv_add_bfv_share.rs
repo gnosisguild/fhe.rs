@@ -14,7 +14,7 @@ use std::{env, error::Error, sync::Arc};
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{FreshNoiseModel, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -130,10 +130,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let decryption_share = Poly::<PowerBasis>::zero(ctx);
 
                 // Smudging noise shares: compute the bound with the smudging
-                // machinery, sample the noise, and deal it immediately.
-                let config =
-                    SmudgingConfig::new(params_trbfv.clone(), num_parties, num_summed, lambda)
-                        .unwrap();
+                // machinery, sample the noise, and deal it immediately. The
+                // summed ciphertexts are encrypted under the MBFV-aggregated
+                // BFV public key, so the fresh-noise model is BfvPublicKey.
+                let config = SmudgingConfig::new(
+                    params_trbfv.clone(),
+                    num_parties,
+                    num_summed,
+                    lambda,
+                    FreshNoiseModel::BfvPublicKey,
+                )
+                .unwrap();
                 let generator = SmudgingNoiseGenerator::new(config).unwrap();
                 let smudging_noise = generator.generate(&mut rng).unwrap();
                 let smudging_shares_transport = share_manager
