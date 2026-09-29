@@ -225,6 +225,40 @@ impl BfvParameters {
             })
     }
 
+    /// BFV requires a nonzero plaintext scaling factor at the selected level.
+    /// A parameter set can be valid at level zero but lose this property after
+    /// modulus switching, even though that level still has a polynomial context.
+    pub(crate) fn validate_plaintext_level(&self, level: usize) -> Result<()> {
+        let ciphertext_modulus = self.context_at_level(level)?.modulus();
+        let plaintext_modulus = self.plaintext_big();
+        if ciphertext_modulus <= plaintext_modulus {
+            return Err(crate::PlaintextError::UnsupportedCiphertextLevel {
+                level,
+                ciphertext_modulus: ciphertext_modulus.clone(),
+                plaintext_modulus: plaintext_modulus.clone(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Returns whether the u64 decryption fast path is exact for these
+    /// parameters.
+    ///
+    /// The fast path reduces the scaled phase through the first ciphertext
+    /// modulus `q_0` (`moduli[0]`), which preserves every plaintext value only
+    /// while `2t <= q_0`: values near `t` otherwise wrap in `q_0` (and every
+    /// value is lost outright when `t > q_0`). Callers must fall back to the
+    /// full-context reduction when this returns `false`. The comparison uses
+    /// checked arithmetic so large plaintext moduli cannot overflow.
+    pub(crate) fn u64_decrypt_fast_path_is_exact(&self) -> bool {
+        self.plaintext.as_u64().is_some_and(|plaintext_modulus| {
+            plaintext_modulus
+                .checked_mul(2)
+                .is_some_and(|two_t| two_t <= self.moduli[0])
+        })
+    }
+
     /// Iterator over default parameters providing about 128 bits of security.
     /// Filters out parameters where the modulus product bitlength is smaller
     /// than the plaintext modulus bitlength.
