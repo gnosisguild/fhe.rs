@@ -103,7 +103,7 @@ impl CommonRandomPoly {
 /// the associated [`BfvParameters`]. This is the common random material used by:
 ///
 /// - **MBFV** relinearization key generation (Protocol 2, <https://eprint.iacr.org/2020/304>),
-///   where the CRP vector is passed to [`RelinKeyGenerator`](crate::aggregate::RelinKeyGenerator).
+///   where the CRP vector is passed to [`RelinKeyGenerator`](crate::mbfv::RelinKeyGenerator).
 /// - **l-BFV** public-key and relinearization-key generation, where two
 ///   independent vectors (the CRS `a` and the URS `d1`) serve as the shared
 ///   polynomials `a_j` and `d1_j` in the linear-key protocol
