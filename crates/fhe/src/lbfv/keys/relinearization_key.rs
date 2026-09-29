@@ -268,6 +268,20 @@ impl LBFVRelinearizationKey {
             ));
         }
 
+        // The key-switching constructors below accept exactly one URS/CRS row
+        // per ciphertext-context modulus. Reject other counts here — before
+        // the reference-string validation and any secret-dependent work —
+        // with a message that names the required count.
+        let expected_rows = ctx_ciphertext.moduli().len();
+        if d1_polys.len() != expected_rows || a_polys.len() != expected_rows {
+            return Err(Error::DefaultError(format!(
+                "Ciphertext level {ciphertext_level} requires {expected_rows} URS/CRS rows \
+                 (one per ciphertext-context modulus), got {} URS and {} CRS rows",
+                d1_polys.len(),
+                a_polys.len()
+            )));
+        }
+
         // Validate the reference-string rows (context, row uniqueness, and
         // CRS/URS separation) before sampling the ephemeral key `r`.
         crate::reference_string::validate_reference_string_pair(
@@ -365,6 +379,20 @@ impl LBFVRelinearizationKey {
             return Err(Error::DefaultError(
                 "These parameters do not support key switching".to_string(),
             ));
+        }
+
+        // The key-switching constructors below accept exactly one URS/CRS row
+        // per ciphertext-context modulus. Reject other counts here — before
+        // the reference-string validation and any secret-dependent work —
+        // with a message that names the required count.
+        let expected_rows = ctx_ciphertext.moduli().len();
+        if d1_polys.len() != expected_rows || a_polys.len() != expected_rows {
+            return Err(Error::DefaultError(format!(
+                "Ciphertext level {ciphertext_level} requires {expected_rows} URS/CRS rows \
+                 (one per ciphertext-context modulus), got {} URS and {} CRS rows",
+                d1_polys.len(),
+                a_polys.len()
+            )));
         }
 
         // Validate the reference-string rows before sampling the ephemeral key.
@@ -603,7 +631,9 @@ impl LBFVRelinearizationKey {
     /// * `a_seed` - The seed for the key switching key from s to r
     /// * `d1_seed` - The seed for the key switching key from r to s
     /// * `ciphertext_level` - The level of the ciphertext to relinearize
-    /// * `key_level` - The level of the key to use for relinearization
+    /// * `key_level` - The level of the key to use for relinearization; must
+    ///   be 0 (the public-key CRS/b extraction contract is level-0), rejected
+    ///   before any key material is produced otherwise
     /// * `rng` - The random number generator to use for key generation
     ///
     /// # Reference-string validation
@@ -630,6 +660,17 @@ impl LBFVRelinearizationKey {
                 max_level: sk.params.max_level(),
             });
         }
+        // The public-key CRS/b extraction contract is level-0, so reject any
+        // other key level here — before the URS seed is drawn or any key
+        // material is produced. (`extract_b_polynomials` would reject it only
+        // after generation.)
+        if key_level != 0 {
+            return Err(Error::InvalidLevel {
+                level: key_level,
+                min_level: 0,
+                max_level: 0,
+            });
+        }
         if sk.params.context_at_level(key_level)?.moduli().len() == 1
             || sk.params.context_at_level(ciphertext_level)?.moduli().len() == 1
         {
@@ -645,27 +686,14 @@ impl LBFVRelinearizationKey {
         let (ksk_r_to_s, ksk_s_to_r) = match pk.seed {
             Some(a_seed) => {
                 // Validate that the concrete a_j stored in the PK actually
-                // match the seed. A tampered PK (c[1] changed but seed left
-                // alone) must be rejected immediately, not silently fixed.
-                let ctx0 = pk.params.context_at_level(key_level)?;
-                let mut seed_rng = ChaCha8Rng::from_seed(a_seed);
+                // match the seed for every row this key will consume. A
+                // tampered PK (c[1] changed but seed left alone) must be
+                // rejected immediately, not silently fixed.
                 let new_l = pk.l.checked_sub(ciphertext_level).ok_or_else(|| {
                     Error::DefaultError("ciphertext_level exceeds public-key l".to_string())
                 })?;
-                for j in 0..new_l {
-                    let mut seed_j = <ChaCha8Rng as SeedableRng>::Seed::default();
-                    seed_rng.fill(&mut seed_j);
-                    let expected_a = Poly::<Ntt>::random_from_seed(ctx0, seed_j);
-                    let actual_a = pk.c.get(j).and_then(|ct| ct.c.get(1)).ok_or_else(|| {
-                        Error::DefaultError("Public key is missing its a_j polynomial".to_string())
-                    })?;
-                    if expected_a != *actual_a {
-                        return Err(Error::DefaultError(format!(
-                            "Public-key a_j at index {j} does not match its stored seed"
-                        )));
-                    }
-                }
-                // Seed matches — use the fast seed-only path.
+                pk.verify_crs_seed(a_seed, new_l)?;
+                // Seed matches every consumed row — use the fast seed-only path.
                 Self::generate_components_with_seed(
                     sk,
                     d1_seed,
@@ -719,9 +747,23 @@ impl LBFVRelinearizationKey {
     /// * `sk` - The secret key to use for key generation.
     /// * `pk` - The l-BFV public key whose concrete `a` polynomials are used as
     ///   CRS material.
-    /// * `d1_polys` - The explicit URS `d1` polynomials (in `NttShoup` form).
-    /// * `ciphertext_level` / `key_level` - Levels (currently restricted to 0).
+    /// * `d1_polys` - The explicit URS `d1` polynomials (in `NttShoup` form):
+    ///   exactly `#moduli − ciphertext_level` rows, the rows this level
+    ///   consumes. Any other count is rejected before any secret-dependent
+    ///   computation runs.
+    /// * `ciphertext_level` - The ciphertext level to relinearize at;
+    ///   supported levels are those whose context retains at least two
+    ///   moduli (`ciphertext_level < max_level`); the maximal level's
+    ///   single-modulus ciphertext context is rejected before construction.
+    /// * `key_level` - Must be 0: the public-key CRS/b extraction contract is
+    ///   level-0, and a nonzero key level is rejected before construction.
     /// * `rng` - RNG for ephemeral `r` and the errors.
+    ///
+    /// The key is always built from the concrete rows, and this constructor
+    /// attaches no seed metadata: both key-switching keys serialize with
+    /// explicit `c1` rows even when the public key carries a CRS seed. Use
+    /// [`new_leveled_with_crp`](Self::new_leveled_with_crp) or
+    /// [`new_leveled`](Self::new_leveled) for the seed-preserving paths.
     pub fn new_leveled_with_polys<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         pk: &LBFVPublicKey,
@@ -748,20 +790,44 @@ impl LBFVRelinearizationKey {
     /// for the URS `d1` polynomials.
     ///
     /// This is the CRP-vector variant of [`new_leveled_with_polys`](Self::new_leveled_with_polys).
-    /// The `d1` polynomials are extracted from `crp_d1` and converted to
-    /// `NttShoup`; the `a` (CRS) polynomials are extracted from the public key
-    /// as usual.
+    /// The key consumes exactly the first `#moduli − ciphertext_level` rows of
+    /// `crp_d1` — the same prefix convention as the public-key CRS/b
+    /// extraction — converts them to `NttShoup`, and extracts the CRS `a`
+    /// polynomials from the public key as usual. Supported ciphertext levels
+    /// are those whose context retains at least two moduli
+    /// (`ciphertext_level < max_level`), with `key_level == 0`; unsupported
+    /// level combinations — a nonzero key level, or the maximal level's
+    /// single-modulus ciphertext context — are rejected before construction,
+    /// matching the public-key extraction contract.
+    ///
+    /// # Seed metadata policy
+    ///
+    /// The URS vector's optional master seed is preserved on the URS
+    /// key-switching key, and the public key's optional CRS seed is preserved
+    /// on the CRS key-switching key, only after the seed expansion is verified
+    /// against **every consumed concrete row**; a seed that contradicts any
+    /// row is rejected instead of silently accepted. Seedless CRP vectors and
+    /// seedless public keys remain fully explicit, and the concrete rows are
+    /// always authoritative: untrusted seed metadata never substitutes for
+    /// polynomial validation.
+    ///
+    /// # Reference-string validation
     ///
     /// The URS vector must be independent of the public key's CRS: rows
-    /// shared between the two vectors are rejected before any key material is
-    /// produced.
+    /// shared between the two reference strings are rejected before any key
+    /// material is produced.
     ///
     /// # Arguments
     /// * `sk` - The secret key for key generation.
     /// * `pk` - The l-BFV public key whose concrete `a` polynomials are used as
     ///   CRS material.
     /// * `crp_d1` - A [`CommonRandomPolyVec`] providing the URS `d1` polynomials.
-    /// * `ciphertext_level` / `key_level` - Levels (currently restricted to 0).
+    /// * `ciphertext_level` - The ciphertext level to relinearize at;
+    ///   supported levels are those whose context retains at least two
+    ///   moduli (`ciphertext_level < max_level`); the maximal level's
+    ///   single-modulus ciphertext context is rejected before construction.
+    /// * `key_level` - Must be 0 (the CRP rows and the public-key extraction
+    ///   contract live at the level-0 context).
     /// * `rng` - RNG for ephemeral `r` and the errors.
     pub fn new_leveled_with_crp<R: RngCore + CryptoRng>(
         sk: &SecretKey,
@@ -771,12 +837,49 @@ impl LBFVRelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
+        // Validate the level combination and the URS row count before any
+        // RNG or secret-dependent work. The explicit-polynomial public-key
+        // CRS extraction contract supports any ciphertext level with
+        // key_level == 0; the same contract applies here.
+        if ciphertext_level > sk.params.max_level() {
+            return Err(Error::InvalidLevel {
+                level: ciphertext_level,
+                min_level: 0,
+                max_level: sk.params.max_level(),
+            });
+        }
+        let required_rows = sk.params.moduli().len() - ciphertext_level;
+        if crp_d1.len() < required_rows {
+            return Err(Error::DefaultError(format!(
+                "URS CRP vector has {} rows but ciphertext level {ciphertext_level} requires {required_rows}",
+                crp_d1.len()
+            )));
+        }
+
+        // Consume exactly the required prefix of the shared URS vector; the
+        // remaining rows belong to lower ciphertext levels.
         let d1_polys: Vec<Poly<NttShoup>> = crp_d1
-            .to_polys()
-            .into_iter()
-            .map(|p| p.into_ntt_shoup())
+            .as_slice()
+            .iter()
+            .take(required_rows)
+            .map(|crp| crp.poly().clone().into_ntt_shoup())
             .collect();
-        Self::new_leveled_with_polys(sk, pk, d1_polys, ciphertext_level, key_level, rng)
+        let mut key =
+            Self::new_leveled_with_polys(sk, pk, d1_polys, ciphertext_level, key_level, rng)?;
+
+        // Preserve the URS master seed only after the seed expansion is
+        // checked against every consumed concrete row; a contradictory seed
+        // is an error, never a silent acceptance.
+        if let Some(d1_seed) = crp_d1.seed() {
+            key.ksk_r_to_s.attach_verified_seed(d1_seed)?;
+        }
+        // Same policy for the CRS master seed carried by the public key: it
+        // is attached only after comparing it against the concrete a rows
+        // the key actually consumed.
+        if let Some(a_seed) = pk.seed {
+            key.ksk_s_to_r.attach_verified_seed(a_seed)?;
+        }
+        Ok(key)
     }
 
     /// Generate a new relinearization key using a [`CommonRandomPolyVec`] for the
@@ -2258,6 +2361,360 @@ mod tests {
         };
         LBFVRelinearizationKey::from_components(twin_r, ksk_s_to_r.clone(), b_vec.clone())?;
 
+        Ok(())
+    }
+
+    /// The CRP path must support any ciphertext level with key_level == 0,
+    /// consuming exactly the required prefix of the URS vector, and produce
+    /// the same polynomial material as the explicit-polynomial path on the
+    /// same rows.
+    #[test]
+    fn crp_path_supports_nonzero_ciphertext_level_and_matches_explicit_path()
+    -> Result<(), Box<dyn Error>> {
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut ChaCha8Rng::from_seed([1u8; 32]));
+        let crs_seed: <ChaCha8Rng as SeedableRng>::Seed = [51u8; 32];
+        let urs_seed: <ChaCha8Rng as SeedableRng>::Seed = [61u8; 32];
+        let crp_crs = CommonRandomPolyVec::from_seed(&params, crs_seed)?;
+        let crp_urs = CommonRandomPolyVec::from_seed(&params, urs_seed)?;
+        let pk = LBFVPublicKey::new_with_crp(&sk, &crp_crs, &mut ChaCha8Rng::from_seed([2u8; 32]))?;
+
+        let ciphertext_level = 1;
+        let required = params.moduli().len() - ciphertext_level;
+
+        let mut crp_rng = ChaCha8Rng::from_seed([91u8; 32]);
+        let crp_key = LBFVRelinearizationKey::new_leveled_with_crp(
+            &sk,
+            &pk,
+            &crp_urs,
+            ciphertext_level,
+            0,
+            &mut crp_rng,
+        )?;
+        assert_eq!(crp_key.ciphertext_level(), ciphertext_level);
+        assert_eq!(crp_key.key_level(), 0);
+        assert_eq!(crp_key.d1_components().len(), required);
+        assert_eq!(crp_key.a_components().len(), required);
+        assert_eq!(crp_key.b_components().len(), required);
+        assert_eq!(crp_key.l()?, required);
+        // Verified seed metadata is preserved on both key-switching keys.
+        assert_eq!(crp_key.ksk_r_to_s.seed, Some(urs_seed));
+        assert_eq!(crp_key.ksk_s_to_r.seed, Some(crs_seed));
+
+        // With the same rng stream, the explicit-polynomial path on the same
+        // consumed rows produces identical key material; only the seed
+        // metadata differs.
+        let explicit_urs: Vec<Poly<NttShoup>> = crp_urs
+            .as_slice()
+            .iter()
+            .take(required)
+            .map(|crp| crp.poly().clone().into_ntt_shoup())
+            .collect();
+        let explicit_key = LBFVRelinearizationKey::new_leveled_with_polys(
+            &sk,
+            &pk,
+            explicit_urs,
+            ciphertext_level,
+            0,
+            &mut ChaCha8Rng::from_seed([91u8; 32]),
+        )?;
+        assert_eq!(crp_key.d0_components(), explicit_key.d0_components());
+        assert_eq!(crp_key.d1_components(), explicit_key.d1_components());
+        assert_eq!(crp_key.d2_components(), explicit_key.d2_components());
+        assert_eq!(crp_key.a_components(), explicit_key.a_components());
+        assert_eq!(crp_key.b_components(), explicit_key.b_components());
+        assert!(explicit_key.ksk_r_to_s.seed.is_none());
+        assert!(explicit_key.ksk_s_to_r.seed.is_none());
+
+        // Functional check: a ciphertext squared at this level relinearizes
+        // under the CRP-built key.
+        let plaintext =
+            Plaintext::try_encode(&[3u64], Encoding::poly_at_level(ciphertext_level), &params)?;
+        let ciphertext = pk.try_encrypt(&plaintext, &mut rng())?;
+        let mut square = &ciphertext * &ciphertext;
+        assert_eq!(square.level, ciphertext_level);
+        crp_key.relinearizes(&mut square)?;
+        let decoded = Vec::<u64>::try_decode(&sk.try_decrypt(&square)?, Encoding::poly())?;
+        assert_eq!(decoded.first(), Some(&9));
+        Ok(())
+    }
+
+    /// Seedless CRP vectors and seedless public keys must remain fully
+    /// explicit: the CRP key equals the explicit-polynomial key exactly,
+    /// including the absence of seed metadata.
+    #[test]
+    fn crp_path_with_seedless_inputs_stays_explicit() -> Result<(), Box<dyn Error>> {
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut ChaCha8Rng::from_seed([3u8; 32]));
+        let crp_crs = CommonRandomPolyVec::from_seed(&params, [52u8; 32])?;
+        let seeded_pk =
+            LBFVPublicKey::new_with_crp(&sk, &crp_crs, &mut ChaCha8Rng::from_seed([4u8; 32]))?;
+        let seedless_pk = LBFVPublicKey::from_parts(
+            seeded_pk
+                .rows()
+                .iter()
+                .map(|row| row.first().cloned())
+                .collect::<Option<_>>()
+                .ok_or("missing public-key b polynomial")?,
+            seeded_pk
+                .rows()
+                .iter()
+                .map(|row| row.get(1).cloned())
+                .collect::<Option<_>>()
+                .ok_or("missing public-key a polynomial")?,
+            params.clone(),
+            None,
+        )?;
+        let crp_urs = CommonRandomPolyVec::from_seed(&params, [62u8; 32])?;
+        let crp_urs_seedless = CommonRandomPolyVec::from_polys(&params, crp_urs.to_polys(), None)?;
+        let explicit_urs: Vec<Poly<NttShoup>> = crp_urs_seedless
+            .to_polys()
+            .iter()
+            .map(|p| p.clone().into_ntt_shoup())
+            .collect();
+
+        let crp_key = LBFVRelinearizationKey::new_leveled_with_crp(
+            &sk,
+            &seedless_pk,
+            &crp_urs_seedless,
+            0,
+            0,
+            &mut ChaCha8Rng::from_seed([92u8; 32]),
+        )?;
+        let explicit_key = LBFVRelinearizationKey::new_leveled_with_polys(
+            &sk,
+            &seedless_pk,
+            explicit_urs,
+            0,
+            0,
+            &mut ChaCha8Rng::from_seed([92u8; 32]),
+        )?;
+        assert_eq!(crp_key, explicit_key);
+        assert!(crp_key.ksk_r_to_s.seed.is_none());
+        assert!(crp_key.ksk_s_to_r.seed.is_none());
+        Ok(())
+    }
+
+    /// Seeded CRP-built keys round-trip through serialization with their
+    /// verified seed metadata, and `reconstruct_public_key` reproduces the
+    /// seeded input public key exactly — concrete rows *and* seed metadata.
+    #[test]
+    fn seeded_crp_key_roundtrips_and_reconstructs_seeded_public_key() -> Result<(), Box<dyn Error>>
+    {
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut ChaCha8Rng::from_seed([5u8; 32]));
+        let crs_seed: <ChaCha8Rng as SeedableRng>::Seed = [53u8; 32];
+        let urs_seed: <ChaCha8Rng as SeedableRng>::Seed = [63u8; 32];
+        let crp_crs = CommonRandomPolyVec::from_seed(&params, crs_seed)?;
+        let crp_urs = CommonRandomPolyVec::from_seed(&params, urs_seed)?;
+        let pk = LBFVPublicKey::new_with_crp(&sk, &crp_crs, &mut ChaCha8Rng::from_seed([6u8; 32]))?;
+        assert_eq!(pk.seed, Some(crs_seed));
+
+        let key = LBFVRelinearizationKey::new_leveled_with_crp(
+            &sk,
+            &pk,
+            &crp_urs,
+            0,
+            0,
+            &mut ChaCha8Rng::from_seed([7u8; 32]),
+        )?;
+        assert_eq!(
+            LBFVRelinearizationKey::from_bytes(&key.to_bytes(), &params)?,
+            key
+        );
+        assert_eq!(key.reconstruct_public_key()?, pk);
+
+        // Nonzero ciphertext level: fewer rows, seeds still round-trip.
+        let leveled = LBFVRelinearizationKey::new_leveled_with_crp(
+            &sk,
+            &pk,
+            &crp_urs,
+            1,
+            0,
+            &mut ChaCha8Rng::from_seed([8u8; 32]),
+        )?;
+        assert_eq!(leveled.ciphertext_level(), 1);
+        assert_eq!(
+            LBFVRelinearizationKey::from_bytes(&leveled.to_bytes(), &params)?,
+            leveled
+        );
+        Ok(())
+    }
+
+    /// Tampered seed metadata must be rejected, never silently accepted: a
+    /// public key whose concrete CRS rows contradict its seed, and a seed
+    /// that does not match unchanged rows, both fail the CRP path.
+    #[test]
+    fn crp_path_rejects_tampered_seed_metadata() -> Result<(), Box<dyn Error>> {
+        let params = insecure().unwrap().parameters;
+        let mut rng = rng();
+        let sk = SecretKey::random(&params, &mut rng);
+        let crp_crs = CommonRandomPolyVec::from_seed(&params, [54u8; 32])?;
+        let pk = LBFVPublicKey::new_with_crp(&sk, &crp_crs, &mut rng)?;
+        let crp_urs = CommonRandomPolyVec::from_seed(&params, [64u8; 32])?;
+
+        // Tamper a concrete CRS row but keep the seed metadata.
+        let ctx0 = params.context_at_level(0)?;
+        let mut tampered_rows_pk = pk.clone();
+        tampered_rows_pk.c[0].c[1] = Poly::<Ntt>::small(ctx0, params.variance, &mut rng)?;
+        assert!(
+            LBFVRelinearizationKey::new_leveled_with_crp(
+                &sk,
+                &tampered_rows_pk,
+                &crp_urs,
+                0,
+                0,
+                &mut rng
+            )
+            .is_err(),
+            "a CRS row contradicting the stored seed must be rejected"
+        );
+
+        // Tamper the seed metadata but keep the concrete rows.
+        let mut tampered_seed_pk = pk.clone();
+        tampered_seed_pk.seed = Some([55u8; 32]);
+        assert!(
+            LBFVRelinearizationKey::new_leveled_with_crp(
+                &sk,
+                &tampered_seed_pk,
+                &crp_urs,
+                0,
+                0,
+                &mut rng
+            )
+            .is_err(),
+            "seed metadata contradicting the concrete rows must be rejected"
+        );
+
+        // The honest control still succeeds.
+        assert!(
+            LBFVRelinearizationKey::new_leveled_with_crp(&sk, &pk, &crp_urs, 0, 0, &mut rng)
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    /// Unsupported level combinations are rejected before any key material is
+    /// produced, and the explicit path reports a wrong URS row count up front
+    /// with the required count in the message.
+    #[test]
+    fn crp_and_explicit_paths_reject_unsupported_levels_and_row_counts()
+    -> Result<(), Box<dyn Error>> {
+        let params = insecure().unwrap().parameters;
+        let mut rng = rng();
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+        let crp_d1 = CommonRandomPolyVec::new(&params, &mut rng)?;
+
+        // key_level != 0: the public-key extraction contract is level-0.
+        assert!(
+            LBFVRelinearizationKey::new_leveled_with_crp(&sk, &pk, &crp_d1, 0, 1, &mut rng)
+                .is_err()
+        );
+
+        // Ciphertext level beyond the maximum.
+        let beyond = params.max_level() + 1;
+        assert!(matches!(
+            LBFVRelinearizationKey::new_leveled_with_crp(&sk, &pk, &crp_d1, beyond, 0, &mut rng),
+            Err(crate::Error::InvalidLevel { .. })
+        ));
+
+        // The explicit path at a nonzero level needs exactly
+        // `#moduli - ciphertext_level` rows; the full-length vector is
+        // rejected before any secret-dependent work.
+        let d1_full = KeySwitchingKey::c1_from_seed(
+            params.context_at_level(0)?,
+            [65u8; 32],
+            params.moduli().len(),
+        );
+        let err = LBFVRelinearizationKey::new_leveled_with_polys(&sk, &pk, d1_full, 1, 0, &mut rng)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("requires"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    /// `new_leveled` must reject a nonzero key level before drawing the URS
+    /// seed or producing any key material: with a seeded public key and an
+    /// RNG that panics on use, the typed `InvalidLevel` error is returned
+    /// without the RNG ever being touched.
+    #[test]
+    fn new_leveled_rejects_nonzero_key_level_before_rng() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new_with_seed(&sk, [56u8; 32], &mut rng)?;
+
+        // Ciphertext level 1 keeps the level-order check quiet so the
+        // key-level preflight itself is what rejects.
+        let err = LBFVRelinearizationKey::new_leveled(
+            &sk,
+            &pk,
+            Some([57u8; 32]),
+            1,
+            1,
+            &mut crate::support::PanicOnUseRng,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::InvalidLevel {
+                level: 1,
+                min_level: 0,
+                max_level: 0
+            }
+        ));
+
+        // Control: the same seeded key at key_level 0 is accepted.
+        assert!(
+            LBFVRelinearizationKey::new_leveled(&sk, &pk, Some([57u8; 32]), 1, 0, &mut rng).is_ok()
+        );
+        Ok(())
+    }
+
+    /// The maximal ciphertext level's single-modulus context is rejected
+    /// before any RNG use on the CRP and explicit operational paths. The one
+    /// URS row the maximal level requires is supplied on the explicit path so
+    /// the single-modulus ciphertext context is what rejects.
+    #[test]
+    fn max_level_single_modulus_ciphertext_rejected_before_rng() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new_with_seed(&sk, [58u8; 32], &mut rng)?;
+        let crp_urs = CommonRandomPolyVec::new(&params, &mut rng)?;
+        let max_level = params.max_level();
+
+        // CRP operational path.
+        assert!(matches!(
+            LBFVRelinearizationKey::new_leveled_with_crp(
+                &sk,
+                &pk,
+                &crp_urs,
+                max_level,
+                0,
+                &mut crate::support::PanicOnUseRng,
+            ),
+            Err(crate::Error::DefaultError(message))
+                if message.contains("do not support key switching")
+        ));
+
+        // Explicit-polynomial operational path.
+        let d1_one_row = KeySwitchingKey::c1_from_seed(params.context_at_level(0)?, [66u8; 32], 1);
+        assert!(matches!(
+            LBFVRelinearizationKey::new_leveled_with_polys(
+                &sk,
+                &pk,
+                d1_one_row,
+                max_level,
+                0,
+                &mut crate::support::PanicOnUseRng,
+            ),
+            Err(crate::Error::DefaultError(message))
+                if message.contains("do not support key switching")
+        ));
         Ok(())
     }
 }

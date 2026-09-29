@@ -94,6 +94,9 @@ fn lbfv_keys_round_trip_and_reject_malformed_or_mismatched_inputs() {
             .zip(reconstructed_pk.rows())
             .all(|(left, right)| left.level == right.level && left.iter().eq(right.iter()))
     );
+    // With verified seed metadata preserved, the reconstruction is fully
+    // equal to the input key — concrete rows and seed metadata alike.
+    assert_eq!(reconstructed_pk, pk);
 
     let public_key_share = PublicKeyShare::contribute_with_crp(&sk, &crp_a, &mut rng).unwrap();
     let relin_key_share =
@@ -113,6 +116,76 @@ fn lbfv_keys_round_trip_and_reject_malformed_or_mismatched_inputs() {
     let truncated_public_key = &public_key_bytes[..public_key_bytes.len() / 2];
     assert!(LBFVPublicKey::from_bytes(truncated_public_key, &params).is_err());
     assert!(LBFVRelinearizationKey::from_bytes(&[0xff], &params).is_err());
+}
+
+/// Verified seed metadata must shrink the wire format at level 0: the seeded
+/// CRP-built operational relinearization key omits the concrete URS/CRS rows
+/// the explicit equivalent must carry, for identical polynomial material.
+#[test]
+fn seeded_crp_keys_serialize_smaller_than_explicit_equivalents() {
+    let params = support::presets::insecure().unwrap().parameters;
+    let mut rng = support::presets::rng(67);
+    let sk = SecretKey::random(&params, &mut rng);
+
+    let crp_a = CommonRandomPolyVec::from_seed(&params, support::presets::seed(68)).unwrap();
+    let crp_d1 = CommonRandomPolyVec::from_seed(&params, support::presets::seed(69)).unwrap();
+    // Same concrete rows without seed metadata.
+    let crp_d1_seedless =
+        CommonRandomPolyVec::from_polys(&params, crp_d1.to_polys(), None).unwrap();
+
+    let pk = LBFVPublicKey::new_with_crp(&sk, &crp_a, &mut rng).unwrap();
+    let pk_seedless = LBFVPublicKey::from_parts(
+        pk.rows().iter().map(|row| row[0].clone()).collect(),
+        pk.rows().iter().map(|row| row[1].clone()).collect(),
+        params.clone(),
+        None,
+    )
+    .unwrap();
+
+    // Identical rng streams: any difference between the two keys is then
+    // attributable to the representation, not the randomness.
+    let seeded_key = LBFVRelinearizationKey::new_leveled_with_crp(
+        &sk,
+        &pk,
+        &crp_d1,
+        0,
+        0,
+        &mut support::presets::rng(70),
+    )
+    .unwrap();
+    let explicit_key = LBFVRelinearizationKey::new_leveled_with_crp(
+        &sk,
+        &pk_seedless,
+        &crp_d1_seedless,
+        0,
+        0,
+        &mut support::presets::rng(70),
+    )
+    .unwrap();
+
+    // Same polynomial material, different representation.
+    assert_eq!(seeded_key.d0_components(), explicit_key.d0_components());
+    assert_eq!(seeded_key.d1_components(), explicit_key.d1_components());
+    assert_eq!(seeded_key.a_components(), explicit_key.a_components());
+    assert_eq!(seeded_key.b_components(), explicit_key.b_components());
+    assert_eq!(seeded_key.reconstruct_public_key().unwrap(), pk);
+
+    let seeded_size = seeded_key.to_bytes().len();
+    let explicit_size = explicit_key.to_bytes().len();
+    assert!(
+        seeded_size < explicit_size,
+        "seeded operational RLK ({seeded_size} bytes) must serialize smaller than the explicit equivalent ({explicit_size} bytes)"
+    );
+
+    // Both representations round-trip.
+    assert_eq!(
+        LBFVRelinearizationKey::from_bytes(&seeded_key.to_bytes(), &params).unwrap(),
+        seeded_key
+    );
+    assert_eq!(
+        LBFVRelinearizationKey::from_bytes(&explicit_key.to_bytes(), &params).unwrap(),
+        explicit_key
+    );
 }
 
 #[test]

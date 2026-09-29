@@ -388,6 +388,34 @@ impl KeySwitchingKey {
         Self::generate_c1(ctx, seed, size)
     }
 
+    /// Attach `seed` to this key after verifying the seed expansion against
+    /// the concrete `c1` rows the key carries.
+    ///
+    /// Seed metadata is compression, not authority: serialization omits the
+    /// concrete `c1` rows whenever a seed is present, and deserialization
+    /// regenerates them from the seed, so attaching an unverified seed would
+    /// silently replace the stored rows across a round-trip. The seed is
+    /// stored only when it reproduces every `c1` row; otherwise the first
+    /// mismatching row is reported and the key keeps its explicit, seedless
+    /// representation.
+    pub(crate) fn attach_verified_seed(
+        &mut self,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+    ) -> Result<()> {
+        let expanded = Self::generate_c1(&self.ctx_ksk, seed, self.c1.len());
+        if let Some(index) = expanded
+            .iter()
+            .zip(self.c1.iter())
+            .position(|(expanded, stored)| expanded != stored)
+        {
+            return Err(Error::DefaultError(format!(
+                "Seed metadata does not reproduce key-switching row {index}; refusing to attach an inconsistent seed"
+            )));
+        }
+        self.seed = Some(seed);
+        Ok(())
+    }
+
     /// Generate the c1's from the seed. The context is used to define the
     /// number of RNS moduli that the polynomials are represented by. When key
     /// switching, there is a multiplication between the decomposed polynomial
@@ -1196,6 +1224,44 @@ mod tests {
                 assert_eq!(c1_1, c1_2);
             }
         }
+        Ok(())
+    }
+
+    /// `attach_verified_seed` must reject a master seed that does not expand
+    /// to the stored `c1` rows: the mismatch is an error, the key stays
+    /// seedless, and the rows are untouched. The seed the rows were derived
+    /// from attaches and changes no rows.
+    #[test]
+    fn attach_verified_seed_rejects_mismatched_seed() -> Result<(), Box<dyn Error>> {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+
+        // Seedless key carrying explicit rows derived from `urs_seed`.
+        let urs_seed: <ChaCha8Rng as SeedableRng>::Seed = [42u8; 32];
+        let c1 = KeySwitchingKey::c1_from_seed(ctx, urs_seed, params.moduli().len());
+        let mut ksk = KeySwitchingKey::new_with_c1(&sk, &from, c1, 0, 0, &mut rng)?;
+        assert!(ksk.seed.is_none());
+        let rows_before = ksk.c1.to_vec();
+
+        // A different master seed does not expand to the stored rows.
+        let wrong_seed: <ChaCha8Rng as SeedableRng>::Seed = [43u8; 32];
+        assert!(matches!(
+            ksk.attach_verified_seed(wrong_seed),
+            Err(crate::Error::DefaultError(_))
+        ));
+        assert!(ksk.seed.is_none(), "a rejected seed must not be stored");
+        assert_eq!(ksk.c1.as_ref(), rows_before.as_slice());
+
+        // Control: the master seed the rows were derived from attaches.
+        ksk.attach_verified_seed(urs_seed)?;
+        assert_eq!(ksk.seed, Some(urs_seed));
+        assert_eq!(ksk.c1.as_ref(), rows_before.as_slice());
         Ok(())
     }
 

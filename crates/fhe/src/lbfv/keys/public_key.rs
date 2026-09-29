@@ -368,6 +368,52 @@ impl LBFVPublicKey {
             .collect()
     }
 
+    /// Verify that `seed` deterministically expands to exactly the first
+    /// `count` concrete CRS rows of this public key.
+    ///
+    /// The seed is compression metadata and is never trusted over the
+    /// concrete polynomials: every row a caller is about to consume must
+    /// match its seed-derived value, and a contradiction is rejected instead
+    /// of silently accepted. The rows live at the level-0 context, so the
+    /// expansion is derived there regardless of any key level the caller
+    /// works at.
+    ///
+    /// Exactly `count` rows are verified: a count beyond the parameter
+    /// modulus list (which bounds the seed expansion) or beyond the stored
+    /// row vector is an error, never a partial verification that reports
+    /// success.
+    pub(crate) fn verify_crs_seed(
+        &self,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+        count: usize,
+    ) -> Result<()> {
+        if count > self.params.moduli().len() || count > self.c.len() {
+            return Err(Error::DefaultError(format!(
+                "Cannot verify {count} CRS rows against {} parameter moduli and {} public-key rows",
+                self.params.moduli().len(),
+                self.c.len()
+            )));
+        }
+        let ctx0 = self.params.context_at_level(0)?;
+        for (j, (row_seed, ciphertext)) in Self::derive_crs_row_seeds(&self.params, seed)
+            .into_iter()
+            .zip(self.c.iter())
+            .take(count)
+            .enumerate()
+        {
+            let expected_a = Poly::<Ntt>::random_from_seed(ctx0, row_seed);
+            let actual_a = ciphertext.c.get(1).ok_or_else(|| {
+                Error::DefaultError("Public key is missing its a_j polynomial".to_string())
+            })?;
+            if expected_a != *actual_a {
+                return Err(Error::DefaultError(format!(
+                    "Public-key a_j at index {j} does not match its stored seed"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     // ---------------------------------------------------------------------------
     // Structural validation and safe accessors
     // ---------------------------------------------------------------------------
@@ -1474,6 +1520,46 @@ mod tests {
         let pt = Plaintext::try_encode(&[42u64], Encoding::poly(), &params)?;
         let ct = pk.try_encrypt(&pt, &mut rng)?;
         assert_eq!(sk.try_decrypt(&ct)?, pt);
+
+        Ok(())
+    }
+
+    /// `verify_crs_seed` must verify exactly `count` rows: a count beyond the
+    /// parameter modulus list — which bounds the seed expansion — is an error
+    /// even when the row vector was artificially oversized intra-crate, and a
+    /// count beyond the stored rows is an error too. A partial verification
+    /// must never report success.
+    #[test]
+    fn verify_crs_seed_rejects_counts_beyond_moduli_and_rows()
+    -> std::result::Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let seed: <ChaCha8Rng as SeedableRng>::Seed = [97u8; 32];
+        let pk = LBFVPublicKey::new_with_seed(&sk, seed, &mut rng)?;
+        let l = params.moduli().len();
+
+        // Controls: counts within both bounds verify and succeed.
+        assert!(pk.verify_crs_seed(seed, 1).is_ok());
+        assert!(pk.verify_crs_seed(seed, l).is_ok());
+
+        // A count beyond the parameter moduli is rejected...
+        assert!(pk.verify_crs_seed(seed, l + 1).is_err());
+
+        // ...including when the row vector was artificially oversized so the
+        // count would fit the rows: the seed expansion, not the row vector,
+        // bounds the verification, so an oversized count must not silently
+        // verify fewer rows and return `Ok`.
+        let mut oversized = pk.clone();
+        let extra_row = pk.c[0].clone();
+        oversized.c.push(extra_row);
+        assert_eq!(oversized.c.len(), l + 1);
+        assert!(oversized.verify_crs_seed(seed, l + 1).is_err());
+
+        // A count beyond the actual row count is rejected as well.
+        let mut truncated = pk.clone();
+        truncated.c.pop();
+        assert!(truncated.verify_crs_seed(seed, l).is_err());
 
         Ok(())
     }
