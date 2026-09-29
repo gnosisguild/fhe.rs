@@ -71,6 +71,10 @@ name = "trbfv_shamir"
 harness = false
 
 [[bench]]
+name = "trbfv_decrypt_from_shares"
+harness = false
+
+[[bench]]
 name = "lbfv_serialization"
 harness = false
 

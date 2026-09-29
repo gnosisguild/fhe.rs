@@ -837,13 +837,16 @@ mod tests {
     use super::*;
     use crate::ThresholdError;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
-    use crate::support::presets::{insecure, insecure_128, secure8192};
+    use crate::support::presets::{Preset, insecure, insecure_128, secure8192, secure16384};
     use crate::trbfv::smudging::{
         FreshNoiseModel, MAX_LAMBDA, SmudgingConfig, SmudgingNoiseGenerator,
     };
+    use fhe_math::rns::{RnsContext, ScalingFactor};
+    use fhe_math::rq::scaler::Scaler;
     use fhe_math::rq::{Ntt, RepresentationTag};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
+    use rand_chacha::ChaCha8Rng;
     use std::sync::atomic::{AtomicBool, Ordering};
     use zeroize::Zeroize;
 
@@ -2904,5 +2907,435 @@ mod tests {
         let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
             .expect("Decoding plaintext failed");
         assert_eq!(decoded, plaintext_data);
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #257 regression: `decrypt_from_shares` must stay output-identical
+    // to the former per-call plaintext-context/scaler setup.
+    //
+    // PR #265 replaced the scaling step of `decrypt_from_shares`: the former
+    // implementation (dev snapshot 2ae8203) built a one-modulus plaintext
+    // context and one scaler per modulus-switching level on every call, and
+    // reduced the scaled phase through `q_0` alone. The current implementation
+    // reuses the precomputed level bridge
+    // `params.context_level_at(level)?.cipher_plain_context.scaler` and lifts
+    // through the plaintext context when `q_0 < 2t`. The tests below pin the
+    // current output to a faithful reimplementation of the former path for
+    // every supported profile, several committee sizes, several ciphertexts,
+    // and non-prefix reconstruction subsets, and pin the preserved error
+    // behavior for mismatched inputs.
+    // -------------------------------------------------------------------
+
+    /// Former `decrypt_from_shares` scaling/conversion path (dev snapshot
+    /// 2ae8203, before PR #265), rebuilt from the existing fhe-math APIs.
+    ///
+    /// The Shamir reconstruction step is unchanged by #265 and reuses the same
+    /// [`RnsShamir`] call. The scaling step builds, on every call, the
+    /// one-modulus plaintext context and the per-level scaler the former
+    /// implementation constructed (the former code built the scalers with
+    /// rayon; sequentially built scalers are identical). The final conversion
+    /// mirrors the former single-`q_0` reduction, which is exact only while
+    /// `2t <= q_0` — exactly the supported profiles the parity tests target.
+    fn legacy_decrypt_from_shares(
+        manager: &ShareManager,
+        decryption_shares: &[Poly<PowerBasis>],
+        reconstructing_parties: &[usize],
+        ciphertext: &Ciphertext,
+    ) -> Result<Plaintext, Error> {
+        manager.validate_ciphertext_parameters(ciphertext)?;
+        let ctx = manager.params().context_at_level(0)?;
+        for decryption_share in decryption_shares {
+            if decryption_share.ctx().as_ref() != ctx.as_ref() {
+                return Err(Error::ParameterMismatch {
+                    left: crate::ParameterSource::Polynomial,
+                    right: crate::ParameterSource::Parameters,
+                });
+            }
+        }
+        let share_views: Vec<_> = decryption_shares
+            .iter()
+            .map(|share| share.coefficients())
+            .collect();
+        let arr_matrix = RnsShamir::new(
+            ctx.moduli_operators(),
+            manager.params().degree(),
+            manager.n(),
+            manager.threshold(),
+        )?
+        .reconstruct(&share_views, reconstructing_parties)?
+        .into_matrix();
+        manager.validate_ciphertext_shape(ciphertext)?;
+
+        // Scale the reconstructed polynomial into the plaintext space.
+        let mut result_poly = Poly::<PowerBasis>::zero(ctx);
+        result_poly.set_coefficients(arr_matrix)?;
+
+        // Former per-call setup: a one-modulus plaintext context plus a scaler
+        // built for every modulus-switching level. `params.plaintext_big()`
+        // equals the former `params.plaintext()` for the word-sized plaintext
+        // moduli this reference supports.
+        let plaintext_ctx =
+            Context::new_arc(&manager.params().moduli()[..1], manager.params().degree())
+                .map_err(Error::MathError)?;
+        let scalers: Result<Vec<_>, Error> = (0..manager.params().moduli().len())
+            .map(|i| {
+                let level_moduli =
+                    &manager.params().moduli()[..manager.params().moduli().len() - i];
+                let rns = RnsContext::new(level_moduli).map_err(Error::MathError)?;
+                let ctx_i = Context::new_arc(level_moduli, manager.params().degree())
+                    .map_err(Error::MathError)?;
+                Scaler::new(
+                    &ctx_i,
+                    &plaintext_ctx,
+                    ScalingFactor::new(manager.params().plaintext_big(), rns.modulus())?,
+                )
+                .map_err(Error::MathError)
+            })
+            .collect();
+        let scalers = scalers?;
+
+        let par = ciphertext.params.clone();
+        let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
+            Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
+                reason: "legacy decrypt_from_shares reference requires a u64 plaintext modulus"
+                    .to_string(),
+            })
+        })?;
+
+        let d = Zeroizing::new(
+            result_poly
+                .scale(&scalers[ciphertext.level])
+                .map_err(Error::MathError)?,
+        );
+        let v = Zeroizing::new(
+            Vec::<u64>::try_from(d.as_ref())
+                .map_err(Error::from)?
+                .into_iter()
+                .map(|vi| vi + ptxt_u64)
+                .collect_vec(),
+        );
+        let mut w = v[..par.degree()].to_vec();
+        let q = Modulus::new(par.moduli()[0]).map_err(Error::MathError)?;
+        q.reduce_vec(&mut w);
+        Modulus::new(ptxt_u64)
+            .map_err(Error::MathError)?
+            .reduce_vec(&mut w);
+
+        let poly =
+            Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt();
+
+        Ok(Plaintext {
+            params: par.clone(),
+            encoding: None,
+            poly_ntt: poly,
+        })
+    }
+
+    /// One dealer secret key dealt to `n` parties, aggregated per party, plus
+    /// the public key. Zero smudging is supplied per decryption share, as in
+    /// the other workflow tests.
+    fn parity_committee(
+        params: &Arc<BfvParameters>,
+        n: usize,
+        threshold: usize,
+        rng: &mut ChaCha8Rng,
+    ) -> (ShareManager, Vec<AggregatedSecretKeyShare>, PublicKey) {
+        let manager = ShareManager::new(n, threshold, params.clone())
+            .expect("committee configuration must be valid");
+        let secret_key = SecretKey::random(params, rng);
+        let secret_key_poly = manager
+            .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
+            .expect("secret-key conversion must succeed");
+        let dealt = manager
+            .generate_secret_key_shares(secret_key_poly, rng)
+            .expect("share generation must succeed")
+            .into_transport();
+
+        let aggregates: Vec<_> = (0..n)
+            .map(|party| {
+                let mut rows = Array2::zeros((0, params.degree()));
+                for modulus_shares in dealt.iter().take(params.moduli().len()) {
+                    rows.push_row(ndarray::ArrayView::from(modulus_shares.row(party)))
+                        .expect("row append must succeed");
+                }
+                manager
+                    .aggregate_secret_key_shares(vec![SecretKeyShare::from_transport(rows)])
+                    .expect("share aggregation must succeed")
+            })
+            .collect();
+
+        let public_key = PublicKey::new(&secret_key, rng);
+        (manager, aggregates, public_key)
+    }
+
+    fn encrypt_parity_value(
+        public_key: &PublicKey,
+        value: u64,
+        params: &Arc<BfvParameters>,
+        rng: &mut ChaCha8Rng,
+    ) -> Ciphertext {
+        let mut data = vec![value];
+        data.resize(params.degree(), 0);
+        let plaintext =
+            Plaintext::try_encode(&data, Encoding::poly(), params).expect("encoding must succeed");
+        public_key
+            .try_encrypt(&plaintext, rng)
+            .expect("encryption must succeed")
+    }
+
+    fn decryption_shares_for(
+        manager: &ShareManager,
+        key_aggregates: &[AggregatedSecretKeyShare],
+        parties: &[usize],
+        ciphertext: &Ciphertext,
+    ) -> Vec<Poly<PowerBasis>> {
+        let ctx = manager
+            .params()
+            .context_at_level(0)
+            .expect("level 0 exists");
+        parties
+            .iter()
+            .map(|&party| {
+                manager
+                    .decryption_share(
+                        ciphertext,
+                        &key_aggregates[party - 1],
+                        AggregatedSmudgingShare::new(
+                            Poly::<PowerBasis>::zero(ctx),
+                            manager.params(),
+                        ),
+                    )
+                    .expect("decryption share must succeed")
+            })
+            .collect()
+    }
+
+    /// The current implementation and the legacy reference must return equal
+    /// `Plaintext` values, and the decoded vector must match `expected`.
+    fn assert_decrypt_parity(
+        manager: &ShareManager,
+        shares: &[Poly<PowerBasis>],
+        parties: &[usize],
+        ciphertext: &Ciphertext,
+        expected: &[u64],
+    ) {
+        let current = manager
+            .decrypt_from_shares(shares, parties, ciphertext)
+            .expect("current decrypt_from_shares must succeed");
+        let legacy = legacy_decrypt_from_shares(manager, shares, parties, ciphertext)
+            .expect("legacy reference must succeed");
+        assert_eq!(
+            current, legacy,
+            "decrypt_from_shares diverged from the former per-call scaling path"
+        );
+        let decoded: Vec<u64> =
+            Vec::<u64>::try_decode(&current, Encoding::poly()).expect("decoding must succeed");
+        assert_eq!(decoded, expected);
+    }
+
+    fn padded_value(value: u64, degree: usize) -> Vec<u64> {
+        let mut data = vec![value];
+        data.resize(degree, 0);
+        data
+    }
+
+    fn run_profile_parity(
+        preset: &Preset,
+        committees: &[(usize, usize)],
+        include_shifted_subset: bool,
+    ) {
+        let params = preset.parameters.clone();
+        let degree = params.degree();
+        let t = params
+            .plaintext
+            .as_u64()
+            .expect("parity profiles use word-sized plaintext moduli");
+
+        for (case_index, &(n, threshold)) in committees.iter().enumerate() {
+            let mut rng = crate::support::presets::rng(61 + case_index as u8);
+            let (manager, aggregates, public_key) =
+                parity_committee(&params, n, threshold, &mut rng);
+
+            // Edge plaintexts: 0 and t-1 stress the final rounding and the
+            // `q_0` wrap; their sum stays below t and covers the addition
+            // path of the end-to-end workflows.
+            let ct_zero = encrypt_parity_value(&public_key, 0, &params, &mut rng);
+            let ct_edge = encrypt_parity_value(&public_key, t - 1, &params, &mut rng);
+            let ct_sum = &ct_zero + &ct_edge;
+
+            // The first `threshold + 1` parties, plus a shifted (non-prefix)
+            // subset where cheap: building the legacy reference is the costly
+            // part on the degree-8192/16384 profiles, so the non-prefix
+            // reconstruction subset is exercised on the fast profile only.
+            let mut subsets: Vec<Vec<usize>> = vec![(1..=threshold + 1).collect()];
+            if include_shifted_subset && n > threshold + 2 {
+                subsets.push((2..=threshold + 2).collect());
+            }
+
+            for (ciphertext, value) in [(&ct_zero, 0), (&ct_edge, t - 1), (&ct_sum, t - 1)] {
+                let expected = padded_value(value, degree);
+                for parties in &subsets {
+                    let shares = decryption_shares_for(&manager, &aggregates, parties, ciphertext);
+                    assert_decrypt_parity(&manager, &shares, parties, ciphertext, &expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decrypt_from_shares_matches_legacy_scaling_across_profiles_and_committees() {
+        let insecure_preset = insecure().unwrap();
+        let secure_8192_preset = secure8192().unwrap();
+        let secure_16384_preset = secure16384().unwrap();
+
+        run_profile_parity(&insecure_preset, &[(3, 1), (5, 2), (10, 4)], true);
+        run_profile_parity(&secure_8192_preset, &[(3, 1), (5, 2)], false);
+        run_profile_parity(&secure_16384_preset, &[(3, 1)], false);
+    }
+
+    #[test]
+    fn decrypt_from_shares_matches_legacy_scaling_on_interior_values() {
+        let params = insecure().unwrap().parameters;
+        let degree = params.degree();
+        let t = params
+            .plaintext
+            .as_u64()
+            .expect("insecure profile uses a word-sized plaintext modulus");
+        let mut rng = crate::support::presets::rng(67);
+        let (manager, aggregates, public_key) = parity_committee(&params, 5, 2, &mut rng);
+
+        for value in [1u64, t / 2, t - 2] {
+            let ciphertext = encrypt_parity_value(&public_key, value, &params, &mut rng);
+            // A non-prefix, non-ordered reconstruction subset out of five
+            // parties: Shamir evaluation points {2, 4, 5}.
+            let parties = [2usize, 4, 5];
+            let shares = decryption_shares_for(&manager, &aggregates, &parties, &ciphertext);
+            let expected = padded_value(value, degree);
+            assert_decrypt_parity(&manager, &shares, &parties, &ciphertext, &expected);
+        }
+    }
+
+    #[test]
+    fn decrypt_from_shares_and_legacy_reference_agree_on_rejected_inputs() {
+        let mut rng = rng();
+        let preset = insecure().unwrap();
+        let params = preset.parameters.clone();
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
+        let shares = vec![Poly::<PowerBasis>::zero(ctx), Poly::<PowerBasis>::zero(ctx)];
+
+        // A ciphertext under different parameters is rejected by both paths
+        // with the same parameter-mismatch error.
+        let other_params = preset.share_parameters.unwrap();
+        let other_sk = SecretKey::random(&other_params, &mut rng);
+        let other_pk = PublicKey::new(&other_sk, &mut rng);
+        let other_pt = Plaintext::try_encode(&[7u64], Encoding::poly(), &other_params).unwrap();
+        let foreign_ct = other_pk.try_encrypt(&other_pt, &mut rng).unwrap();
+
+        let current = manager.decrypt_from_shares(&shares, &[1, 2], &foreign_ct);
+        let legacy = legacy_decrypt_from_shares(&manager, &shares, &[1, 2], &foreign_ct);
+        assert_eq!(
+            current, legacy,
+            "parameter mismatch must be reported identically by both paths"
+        );
+        assert!(matches!(
+            current,
+            Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Ciphertext,
+                right: crate::ParameterSource::Parameters,
+            })
+        ));
+
+        // A ciphertext moved off level 0 is rejected by both paths with the
+        // same invalid-level error.
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let pt = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let mut switched = pk.try_encrypt(&pt, &mut rng).unwrap();
+        switched.switch_down().unwrap();
+
+        let current = manager.decrypt_from_shares(&shares, &[1, 2], &switched);
+        let legacy = legacy_decrypt_from_shares(&manager, &shares, &[1, 2], &switched);
+        assert_eq!(
+            current, legacy,
+            "nonzero level must be reported identically by both paths"
+        );
+        assert_eq!(
+            current,
+            Err(Error::InvalidLevel {
+                level: 1,
+                min_level: 0,
+                max_level: 0,
+            })
+        );
+
+        // Shares whose context is not the level-0 context are rejected by
+        // both paths with the same parameter-mismatch error.
+        let fresh = pk.try_encrypt(&pt, &mut rng).unwrap();
+        let wrong_ctx = params.context_at_level(1).unwrap();
+        let bad_shares = vec![
+            Poly::<PowerBasis>::zero(wrong_ctx),
+            Poly::<PowerBasis>::zero(wrong_ctx),
+        ];
+
+        let current = manager.decrypt_from_shares(&bad_shares, &[1, 2], &fresh);
+        let legacy = legacy_decrypt_from_shares(&manager, &bad_shares, &[1, 2], &fresh);
+        assert_eq!(
+            current, legacy,
+            "share context mismatch must be reported identically by both paths"
+        );
+        assert!(matches!(
+            current,
+            Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::Parameters,
+            })
+        ));
+    }
+
+    #[test]
+    fn legacy_reference_reproduces_former_q0_truncation_divergence() {
+        // The parity tests above are only meaningful if the reference is a
+        // faithful oracle for the former implementation. On parameters where
+        // `q_0 < 2t` the former single-modulus reduction truncated plaintext
+        // values in `[q_0, t)` (the defect fixed by PR #265): the reference
+        // must reproduce that divergence while the current implementation
+        // decrypts correctly.
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(4099)
+            .set_moduli(&[1153, 12289])
+            .build_arc()
+            .unwrap();
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let values = vec![4098u64; params.degree()];
+        let pt = Plaintext::try_encode(&values, Encoding::poly(), &params).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
+
+        // Constant Shamir control: every share carries the full phase
+        // c0 = encode(m) with c1 = 0, so reconstruction returns it unchanged.
+        let phase = Zeroizing::new(pt.to_poly().unwrap());
+        let shares = vec![
+            phase.as_ref().clone().into_power_basis(),
+            phase.as_ref().clone().into_power_basis(),
+        ];
+        let ct = Ciphertext::new(
+            vec![phase.as_ref().clone(), Poly::<Ntt>::zero(ctx)],
+            &params,
+        )
+        .unwrap();
+
+        let current = manager.decrypt_from_shares(&shares, &[1, 2], &ct).unwrap();
+        assert_eq!(
+            Vec::<u64>::try_decode(&current, Encoding::poly()).unwrap(),
+            values
+        );
+
+        let legacy = legacy_decrypt_from_shares(&manager, &shares, &[1, 2], &ct).unwrap();
+        let legacy_decoded = Vec::<u64>::try_decode(&legacy, Encoding::poly()).unwrap();
+        assert_ne!(
+            legacy_decoded, values,
+            "the legacy reference must reproduce the former truncation when q_0 < 2t"
+        );
     }
 }
