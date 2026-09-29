@@ -858,6 +858,26 @@ impl Modulus {
         p_nbits * size / 8
     }
 
+    /// Checked variant of [`Self::serialization_length`].
+    ///
+    /// Returns `None` when `size` is not a multiple of 8 (where the unchecked
+    /// variant panics) or when the computation would overflow `usize`,
+    /// instead of wrapping. Equivalent to [`Self::serialization_length`] for
+    /// every `size` where the unchecked computation does not overflow, so
+    /// callers deriving resource bounds from parameter shapes can stay
+    /// overflow-free.
+    #[must_use]
+    pub const fn checked_serialization_length(&self, size: usize) -> Option<usize> {
+        if !size.is_multiple_of(8) {
+            return None;
+        }
+        let p_nbits = 64 - (self.p - 1).leading_zeros() as usize;
+        match p_nbits.checked_mul(size) {
+            Some(bits) => Some(bits / 8),
+            None => None,
+        }
+    }
+
     /// Serialize a vector of elements of length a multiple of 8.
     ///
     /// Panics if the length of the vector is not a multiple of 8.
@@ -893,6 +913,25 @@ mod tests {
     use proptest::prelude::{BoxedStrategy, Just, Strategy, any};
     use rand::{RngCore, SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn checked_serialization_length_matches_the_unchecked_and_overflows_to_none() {
+        let modulus = Modulus::new(0x1fffffffffe00001).unwrap();
+        // Equivalence for valid sizes (multiples of 8, like BFV degrees).
+        for size in [8, 16, 1024, 8 << 20] {
+            assert_eq!(
+                modulus.checked_serialization_length(size),
+                Some(modulus.serialization_length(size)),
+                "checked and unchecked lengths must agree for size {size}"
+            );
+        }
+        // Pure-arithmetic overflow, without allocating any large structure.
+        assert_eq!(modulus.checked_serialization_length(usize::MAX), None);
+        // Invalid sizes (where the unchecked variant panics) yield None,
+        // while size 0 stays equivalent to the unchecked variant.
+        assert_eq!(modulus.checked_serialization_length(7), None);
+        assert_eq!(modulus.checked_serialization_length(0), Some(0));
+    }
 
     // Utility functions for the proptests.
 

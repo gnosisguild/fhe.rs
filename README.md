@@ -46,9 +46,68 @@ Some API limits are resource policies, not security guarantees and not budgets
 on total construction work: `BfvParameters::MAX_CIPHERTEXT_MODULI` bounds how
 many ciphertext moduli one parameter set may hold (each accepted modulus costs
 a context and scaler per modulus-switching level), and
-`fhe_traits::MAX_SERIALIZED_BYTES` bounds decoder work. Applications
+`fhe_traits::MAX_SERIALIZED_BYTES` bounds default decoder work. Applications
 constructing or deserializing parameters from untrusted sources must still
 bound the polynomial degree and validate parameters before use.
+
+### Serialization limits
+
+By default, Protobuf-backed deserializers apply a global pre-decode cap of
+`MAX_SERIALIZED_BYTES` (256 MiB, from `fhe-traits`) and reject larger
+payloads with `SerializationError::PayloadTooLarge`. Very large parameter
+sets can produce *legitimate* objects above that cap: the evaluation key of a
+degree-32768 BFV scheme with nine 62-bit moduli and inner-sum support encodes
+to roughly 309 MB.
+
+For authenticated large keys, `EvaluationKey::from_bytes_with_request(bytes,
+params, &request)` is an explicit opt-in route whose resource bound is
+**derived** rather than negotiated. The application constructs an
+`EvaluationKeyDecodeRequest` *locally* — from its own key configuration, the
+parameters it uses, the levels it operates at, and the operations it intends
+to run — and the decoder enforces an encoded-size bound computed from that
+request and the validated parameters alone:
+
+* **The bound never depends on the payload or the sender.** `wire_bound`
+  multiplies the authorized Galois-key entry count (an exact exponent set or
+  a local count bound) by the parameter-implied key-switching row count and
+  row size, and adds checked allowances for Protobuf tags, length prefixes,
+  scalar fields, and the seed. All arithmetic is checked and overflow is a
+  typed error, so the derivation stays correct on 32-bit platforms. The
+  payload's own length and any size a remote peer claims are never inputs.
+* **The request is not authentication.** It is a shape and resource
+  authorization: it cannot verify who produced the bytes. Use this route
+  only for keys delivered over a trusted, authenticated channel.
+* **Not an application-wide memory guarantee.** A request can legitimately
+  authorize a key that costs many GiB to decode: peak memory reaches
+  several times the encoded size because the encoded buffer, the decoded
+  Protobuf representation, and the in-memory key coexist (the 309 MB
+  reference key peaks around 4 GiB with both keys in memory). Applications
+  with a smaller footprint can check `bytes.len()` against their own policy
+  before calling, or authorize a tighter request.
+* **The opt-in route is schema-pinned.** The preflight rejects the payload
+  unless its levels, Galois-key entries, and key-switching row form
+  (regenerating seed or explicit rows) match the request — for exact
+  requests this means the full authorized exponent set must be present, so
+  a key carrying only a subset is rejected — and unknown Protobuf fields
+  are rejected at the evaluation-key, Galois-key and key-switching-key scopes.
+  Unknown fields inside a polynomial row may be skipped by the decoder, but
+  its encoded length must stay within the row's fixed slack allowance.
+  Requests that authorize more distinct entries than substitution
+  exponents exist for the parameters are themselves rejected when the
+  bound is derived, instead of silently loosening it. The decomposition
+  base and row counts are not caller-controlled: they are derived from the
+  validated parameters and levels, exactly as the constructors produce
+  them. A payload that is valid for the default route may therefore be
+  rejected here, with a typed error, and vice versa.
+* **Decoder work stays bounded.** Before `prost` materializes the message,
+  a zero-copy wire preflight (the scan borrows the payload; its
+  acceptance-path allocations are bounded sets independent of the payload
+  size) enforces the parameter-implied shape (exact key-switching row
+  counts and bounded row lengths, level consistency, seed placement),
+  rejects duplicate Galois-key exponents, repeated scalar fields, and
+  varints wider than the declared `uint32` fields, so malformed payloads
+  fail with typed errors before significant memory is committed.
+  Post-decode validation is unchanged and remains authoritative.
 
 ## Verification
 
