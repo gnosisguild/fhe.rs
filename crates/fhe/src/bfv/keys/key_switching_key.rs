@@ -1,6 +1,7 @@
 //! Key-switching keys for the BFV encryption scheme. Implements the
 //! Brakerski-Vaikuntanathan key switching through decomposition technique
-//! adapted to RNS as described in the HPS optimization paper (https://eprint.iacr.org/2018/117)
+//! adapted to RNS as described in the HPS optimization paper
+//! (<https://eprint.iacr.org/2018/117>)
 
 use crate::bfv::{BfvParameters, SecretKey, traits::TryConvertFrom as BfvTryConvertFrom};
 use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;

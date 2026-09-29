@@ -58,9 +58,10 @@ pub struct LBFVPublicKey {
     /// The public key ciphertexts, one for each RNS modulus
     pub(crate) c: Vec<Ciphertext>,
     /// The decomposition size which is the number of RNS moduli (the l in lBFV).
-    /// Note while l in https://eprint.iacr.org/2024/1285.pdf is equal to the size
+    /// Note while l in <https://eprint.iacr.org/2024/1285.pdf> is equal to the size
     /// chosen of the Gadget vector, here it is equal the number of RNS moduli
-    /// as the library uses the optimization of https://eprint.iacr.org/2018/117.pdf
+    /// as the library uses the optimization of
+    /// <https://eprint.iacr.org/2018/117.pdf>
     pub(crate) l: usize,
     /// Optional compression metadata: the seed that generates the same
     /// concrete `a_j` CRS polynomials as those stored in `c`. When absent
@@ -589,7 +590,7 @@ impl LBFVPublicKey {
 
     /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
     ///
-    /// This method extracts the first l = # moduli - ciphertext level, c[0] components from each ciphertext in the public key,
+    /// This method extracts the first l = # moduli - ciphertext level, c\[0\] components from each ciphertext in the public key,
     /// mod switches them to the key level, and converts them to the specified representation.
     ///
     /// # Arguments

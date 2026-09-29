@@ -130,7 +130,7 @@ impl LBFVRelinearizationKey {
     /// Return the key-switching decomposition base logarithm.
     ///
     /// A value of zero denotes the RNS decomposition used by l-BFV.
-    /// Deserialization and [`from_components`](Self::from_components) only
+    /// Deserialization and `from_components` only
     /// accept constructor-compatible layouts, so for an operational l-BFV
     /// key this is always zero: the single-modulus decomposition
     /// (`log_base != 0`) is rejected because the l-BFV constructors refuse

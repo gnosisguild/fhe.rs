@@ -36,7 +36,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let degree = params_trbfv.degree();
     println!("✓ trBFV parameters built successfully");
 
-    // BFV parameters for share encryption (plaintext must cover trBFV moduli)
+    // BFV parameters for share encryption. Exact transport requires the
+    // share-encryption plaintext modulus to exceed every transported canonical
+    // residue r ∈ [0, q_i), i.e. plaintext ≥ max(trBFV moduli); encoding
+    // reduces coefficients modulo the plaintext modulus, so a residue ≥ the
+    // plaintext modulus would silently wrap in transit.
     println!("\nBuilding BFV parameters for share encryption...");
     let params_bfv: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share encryption BFV)",
@@ -53,6 +57,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         plaintext_modulus_bfv
     );
     println!("  BFV ciphertext moduli: {:?}", params_bfv.moduli());
+
+    // Transport exactness guard: BFV encoding reduces coefficients modulo the
+    // share-encryption plaintext modulus, so it must keep plaintext ≥ max(q_i)
+    // or high canonical residues would silently wrap in transit.
+    let max_computation_modulus = params_trbfv.moduli().iter().copied().max().unwrap();
+    assert!(
+        plaintext_modulus_bfv >= max_computation_modulus,
+        "share-encryption plaintext modulus {plaintext_modulus_bfv} does not cover \
+         the largest computation modulus {max_computation_modulus}; transported \
+         Shamir residues would silently wrap"
+    );
 
     let args: Vec<String> = env::args().skip(1).collect();
 

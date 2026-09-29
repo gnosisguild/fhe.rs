@@ -1,7 +1,7 @@
 //! Error types for threshold BFV operations.
 //!
 //! The matchable variants live in [`crate::ThresholdError`]; the helpers here
-//! construct them wrapped in the crate-level [`Error`].
+//! construct them wrapped in the crate-level [`Error`](crate::Error).
 
 use crate::{Error, ThresholdError};
 

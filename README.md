@@ -52,6 +52,7 @@ cargo check --workspace --all-targets --all-features
 cargo test --release --workspace --all-features
 cargo +nightly fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
 Pull-request CI runs the workspace integration tests with

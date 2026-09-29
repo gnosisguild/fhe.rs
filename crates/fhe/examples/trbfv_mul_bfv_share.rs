@@ -10,10 +10,15 @@
 //
 //   First set  (computation) — n=20, z=3, k=1000, d=16384, 5×51-bit moduli, λ=31.
 //
-//   Second set (share encryption) — k = q[1] of first set ≈ 2^50, d=16384,
-//              2×53-bit moduli. Each Shamir share value lies in [0, q_i) ⊆ [0, k),
-//              so it encodes directly as a BFV plaintext.
-//              BFV decrypt is correct because k ≈ 2^50 < q₀/2 ≈ 2^52.0000  ✓
+//   Second set (share encryption) — k = q[0] of first set = max(q_i) ≈ 2^50,
+//              d=16384, 2×53-bit moduli. Exact share transport requires the
+//              share-encryption plaintext modulus k to exceed every transported
+//              canonical residue r ∈ [0, q_i): BFV encoding reduces coefficients
+//              modulo k, so a residue r ≥ k would silently wrap to r mod k in
+//              transit. This preset satisfies the requirement exactly by
+//              setting k = q[0] = max(q_i), so each share value lies in
+//              [0, q_i) ⊆ [0, k) and encodes directly as a BFV plaintext.
+//              BFV decrypt is correct because k ≈ 2^50 < q₀/2 ≈ 2^51  ✓
 //
 // Protocol:
 //  1. Each party generates: an l-BFV pk share, an l-BFV RLK share, Shamir shares of
@@ -65,8 +70,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // ── Second BFV parameter set (share encryption) ───────────────────────────
-    // The plaintext modulus equals the largest computation modulus, so every
-    // Shamir share fits as a BFV plaintext.
+    // The plaintext modulus equals the largest computation modulus
+    // (k = q[0] = max(q_i)), so every canonical Shamir share residue
+    // r ∈ [0, q_i) is strictly below k and encodes exactly.
     println!("\nBuilding share-encryption parameters (second set)...");
     let params_share_enc: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share enc)",
@@ -82,6 +88,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Vec<_>>()
             .join(", "),
         plaintext_modulus_share_enc
+    );
+
+    // Transport exactness guard: BFV encoding reduces coefficients modulo the
+    // share-encryption plaintext modulus k, so the profile must keep
+    // k ≥ max(q_i); otherwise high canonical residues would silently wrap.
+    let max_computation_modulus = params_trbfv.moduli().iter().copied().max().unwrap();
+    assert!(
+        plaintext_modulus_share_enc >= max_computation_modulus,
+        "share-encryption plaintext modulus {plaintext_modulus_share_enc} does not \
+         cover the largest computation modulus {max_computation_modulus}; \
+         transported Shamir residues would silently wrap"
     );
 
     // ── CLI argument parsing ──────────────────────────────────────────────────
@@ -233,8 +250,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Share encryption and transmission ─────────────────────────────────────
     // Each sender BFV-encrypts the share row it owes to each receiver under that
     // receiver's share-encryption public key (second parameter set). This is safe:
-    //   • k = q[1] ≥ q_i for all i → share values ∈ [0, q_i) ⊆ [0, k)
-    //   • k ≈ 2^57 < q₀/2 ≈ 2^59  → BFV decrypt is algebraically exact
+    //   • k = q[0] = max(q_i) → every canonical share residue r ∈ [0, q_i) is
+    //     strictly below k, so encoding is exact (no silent reduction mod k)
+    //   • k ≈ 2^50 < q₀/2 ≈ 2^51  → BFV decrypt is algebraically exact
     //
     // encrypted_shares[sender][receiver] = (Vec<Ciphertext>, Vec<Ciphertext>)
     //   first  vec: one ciphertext per modulus for the sk share row
