@@ -94,10 +94,10 @@ pub enum FreshNoiseModel {
 ///
 /// # Caller responsibilities
 ///
-/// The circuit size `m`, the multiplicative depth, `lambda`, and the
-/// [`FreshNoiseModel`] are caller choices. Together they determine the bound:
-/// `m` and the depth drive the ciphertext-noise bound `B_C` and whether the
-/// strict correctness inequality is feasible at all, `lambda` scales the
+/// The circuit size `m` (see below), the multiplicative depth, `lambda`, and
+/// the [`FreshNoiseModel`] are caller choices. Together they determine the
+/// bound: `m` and the depth drive the ciphertext-noise bound `B_C` and whether
+/// the strict correctness inequality is feasible at all, `lambda` scales the
 /// resulting smudging bound `B_sm`, and the model supplies the
 /// fresh-ciphertext noise bound `B_fresh` (issue #250). Callers must select
 /// the model that matches the encryption path that actually produced the
@@ -105,8 +105,75 @@ pub enum FreshNoiseModel {
 /// manager ([`crate::trbfv::ShareManager::generate_smudging_shares`]) verifies
 /// a noise owner's party count and complete BFV parameter set, but
 /// deliberately does not verify `m`, depth, `lambda`, or the model; callers
-/// must configure them for the circuits and ciphertexts they evaluate. (Full
-/// circuit-size semantics are out of scope for this API surface.)
+/// must configure them for the circuits and ciphertexts they evaluate. The
+/// circuit-size guidance in the next section is scoped to the bound formula
+/// this API implements; it is not a general analysis of arbitrary circuits.
+///
+/// # Choosing the circuit size `m`
+///
+/// `m` is an upper bound on the number of *fresh* ciphertexts that are summed
+/// together **before** the modelled circuit consumes them. It is not the
+/// number of output ciphertexts, and it is not the number of independent
+/// decryptions: one smudging deal covers one evaluated ciphertext.
+///
+/// - Additive circuit `ct_a + ct_b + ct_c`: three fresh ciphertexts are
+///   summed before decryption, so `m = 3`.
+/// - Pure multiplication of fresh inputs with no pre-sum, e.g.
+///   `ct_a * ct_b * ct_c`: each multiplication branch carries the noise of
+///   one fresh ciphertext, so `m = 1` even though several input ciphertexts
+///   feed the product.
+/// - Mixed circuit `(ct_a + ct_b) * ct_c`: the left branch is a two-input
+///   sum, so the worst pre-multiplication fan-in is `m = 2`.
+///
+/// In general, set `m` to the worst fan-in of additions over fresh
+/// ciphertexts performed *before* any multiplication. If the circuit also
+/// adds evaluated results *after* a multiplication, this bound formula does
+/// not model that growth: analyze the circuit and supply a conservative
+/// circuit-specific `m` (or otherwise refresh the ciphertext); this API makes
+/// no generic circuit-size guarantee. A larger `m` only inflates `B_C` and
+/// `B_sm`, so overprovisioning stays correct and safe at a feasibility cost.
+///
+/// ```
+/// use fhe::bfv::BfvParametersBuilder;
+/// use fhe::trbfv::{FreshNoiseModel, SmudgingConfig};
+/// use std::sync::Arc;
+///
+/// // Small fast parameters; only the circuit-size choice is exercised here.
+/// let params = BfvParametersBuilder::new()
+///     .set_degree(8)
+///     .set_plaintext_modulus(2)
+///     .set_moduli(&[65537])
+///     .build_arc()
+///     .unwrap();
+///
+/// // No pre-sum: a single fresh ciphertext, or a pure product of fresh
+/// // ciphertexts such as `a * b * c`, sums no fresh ciphertexts before the
+/// // circuit, so the worst pre-multiplication fan-in is `m = 1`.
+/// let no_pre_sum = SmudgingConfig::new(
+///     Arc::clone(&params),
+///     3, // parties
+///     1, // m: no fresh ciphertexts are summed before the circuit
+///     2, // lambda (caller-selected policy)
+///     FreshNoiseModel::BfvPublicKey,
+/// )
+/// .unwrap();
+/// assert_eq!(no_pre_sum.m(), 1);
+///
+/// // `(a + b) * c`: the left branch sums two fresh ciphertexts before the
+/// // multiplication, so `m = 2` even though three ciphertexts feed the
+/// // circuit and it has one output.
+/// let mixed = SmudgingConfig::new(
+///     params,
+///     3,
+///     2, // m: worst pre-multiplication fan-in of `(a + b) * c`
+///     2,
+///     FreshNoiseModel::BfvPublicKey,
+/// )
+/// .unwrap();
+/// assert_eq!(mixed.m(), 2);
+/// assert_eq!(mixed.n(), 3);
+/// assert_eq!(mixed.lambda(), 2);
+/// ```
 ///
 /// ```compile_fail
 /// # use fhe::trbfv::smudging::SmudgingConfig;
@@ -121,7 +188,10 @@ pub struct SmudgingConfig {
     pub(super) params: Arc<BfvParameters>,
     /// Number of parties in the threshold scheme
     pub(super) n: usize,
-    /// Number of ciphertexts being processed
+    /// Upper bound on the number of fresh ciphertexts summed before the
+    /// modelled circuit (worst pre-multiplication fan-in); see
+    /// [`Self::new`] and the type-level "Choosing the circuit size `m`"
+    /// section. Not the count of output ciphertexts or decryptions.
     pub(super) m: usize,
     /// Statistical security parameter: the smudging bound grows as
     /// `2^(lambda + 1) * d * B_C`. Larger values give stronger statistical
@@ -174,7 +244,13 @@ impl SmudgingConfig {
         self.n
     }
 
-    /// Return the ciphertext count.
+    /// Return the maximum number of fresh ciphertexts summed before the
+    /// modelled circuit (`m`).
+    ///
+    /// This is the circuit-size input the caller chose: the worst fan-in of
+    /// pre-circuit additions over fresh ciphertexts. It is not the number of
+    /// output ciphertexts or independent decryptions; see
+    /// [`SmudgingConfig`] for how to choose it.
     #[must_use]
     pub fn m(&self) -> usize {
         self.m
@@ -252,7 +328,16 @@ impl SmudgingConfig {
     /// # Arguments
     /// * `params` - BFV parameters
     /// * `n` - Number of parties in threshold scheme
-    /// * `m` - Number of ciphertexts to process
+    /// * `m` - Upper bound on the number of *fresh* ciphertexts summed
+    ///   together before the modelled circuit, i.e. the worst fan-in of
+    ///   pre-circuit additions over fresh ciphertexts. This is not the count
+    ///   of output ciphertexts or independent decryptions: a pure
+    ///   multiplication of fresh inputs with no pre-sum uses `m = 1` per
+    ///   branch, while `(ct_a + ct_b) * ct_c` uses `m = 2` because the left
+    ///   branch sums two fresh ciphertexts. Additions of evaluated results
+    ///   after a multiplication are not modelled by the formula; choose a
+    ///   conservative circuit-specific `m` after analyzing such a circuit.
+    ///   See the type-level "Choosing the circuit size `m`" section.
     /// * `lambda` - Statistical security level
     /// * `model` - Model of the encryption path that produced the input
     ///   ciphertexts. Select [`FreshNoiseModel::BfvPublicKey`],

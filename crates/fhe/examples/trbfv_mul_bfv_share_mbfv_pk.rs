@@ -146,11 +146,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap()
                     .into_transport();
 
-                // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications).
-                // The default accepted set is all n parties. The multiplied
-                // ciphertexts are encrypted with the MBFV-aggregated BFV public
-                // key, whose ternary encryption randomness the BfvPublicKey
-                // model assumes; only the l-BFV relinearization key is used here.
+                // Smudging noise shares (depth=3 multiplications). The
+                // decrypted circuit is the pure product `((a×b)×c)×d` of
+                // four fresh ciphertexts with no pre-sum, so the tight
+                // circuit size is m=1; m=3 is a conservative overprovision
+                // matching the profile design point. The default accepted
+                // set is all n parties. The multiplied ciphertexts are
+                // encrypted with the MBFV-aggregated BFV public key, whose
+                // ternary encryption randomness the BfvPublicKey model
+                // assumes; only the l-BFV relinearization key is used here.
                 let config = SmudgingConfig::new(
                     params_trbfv.clone(),
                     num_parties,

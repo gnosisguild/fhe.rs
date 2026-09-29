@@ -38,13 +38,19 @@ impl SmudgingNoiseGenerator {
     /// Calculate the bound and create a noise generator.
     ///
     /// Implements the trBFV security formula: `B_sm = 2^(lambda + 1) * d * B_C`
-    /// (`d` = polynomial degree, accounting for the union bound over all `d`
-    /// coefficients a single decryption reveals — see issue #108) subject to
-    /// the strict correctness constraint `2 * (B_C + n * B_sm) < Delta` where
-    /// `Delta = floor(Q / t)`.
+    /// (`d` = polynomial degree). The union bound over the `d` coefficients a
+    /// single decryption reveals contributes the degree factor; the remaining
+    /// factor `2` beyond `2^lambda` is conservative slack in the hiding
+    /// policy, not a term of the correctness inequality (see issue #108).
+    /// Subject to the strict correctness constraint
+    /// `2 * (B_C + n * B_sm) < Delta` where `Delta = floor(Q / t)`.
     ///
-    /// The initial ciphertext-noise bound `B_C^(0) = m * (B_fresh + Q mod t)`
-    /// uses the fresh-ciphertext noise bound `B_fresh` selected by the
+    /// The initial ciphertext-noise bound is
+    /// `B_C^(0) = m * (B_fresh + Q mod t)`: the configuration's upper bound
+    /// on fresh ciphertexts added together before the modelled circuit, where
+    /// each of the up-to-`m` summed terms contributes at most its own fresh
+    /// decryption noise plus the plaintext-rounding term `Q mod t`. The
+    /// per-term fresh-ciphertext noise bound `B_fresh` is selected by the
     /// configuration's [`FreshNoiseModel`](super::FreshNoiseModel): the model
     /// must describe the encryption path that actually produced the input
     /// ciphertexts (issue #250). Multiplicative depth then grows `B_C` with
@@ -123,7 +129,8 @@ impl SmudgingNoiseGenerator {
         // Delta = floor(Q / t) — exact plaintext scaling factor.
         let delta = compute_delta(&q_full, &t);
 
-        // B_C^(0): initial ciphertext noise bound (additive).
+        // B_C^(0): noise of the sum of up to `m` fresh ciphertexts, where
+        // `m` is the caller's worst pre-circuit addition fan-in.
         let b_c_additive = BigUint::from(config.m) * (&b_fresh + &q_full % &t);
 
         // B_C grows with multiplicative depth. Once the correctness inequality
@@ -182,10 +189,17 @@ impl SmudgingNoiseGenerator {
 
         // --- Compute B_sm = 2^(lambda + 1) * d * B_C
         //
-        // A single decryption reveals all `d` (= degree) coefficients of the
-        // smudging noise at once. `2^lambda * B_C` alone only bounds the
-        // statistical distance for a single coefficient; the union bound over
-        // the `d` coefficients requires the additional degree factor.
+        // Statistical-hiding argument (issue #108): the integer smudging
+        // noise is uniform on `[-B_sm, B_sm]`, and one decryption reveals all
+        // `d` (= degree) coefficients of that noise at once. Hiding two
+        // honest noise shifts `x`, `y` with `|x|, |y| <= B_C` costs at most
+        // `min(1, 2 * B_C / (2 * B_sm + 1))` total variation distance per
+        // coefficient; the union bound over the `d` revealed coefficients
+        // multiplies this by the degree factor `d`. The remaining factor `2`
+        // beyond `2^lambda` is conservative slack in the policy, not a term
+        // of the correctness inequality. For `B_C > 0` the resulting
+        // single-transcript distance is numerically below `2^-(lambda + 1)`;
+        // `lambda` itself stays a caller-selected policy.
         // Use BigUint shift to avoid usize → u32 truncation.
         // `lambda` was already validated against MAX_LAMBDA above.
         let two_pow_lambda_plus_one = BigUint::from(1_u64) << (lambda + 1);
@@ -619,6 +633,41 @@ mod tests {
             expected += 1u32;
         }
         assert_eq!(compute_b_enc(&variance).unwrap(), expected);
+    }
+
+    /// Issue #255: the circuit size `m` is the worst fan-in of
+    /// fresh-ciphertext additions performed *before* the modelled circuit,
+    /// not a count of outputs or independent decryptions. A circuit with no
+    /// pre-sum (a single fresh ciphertext, or a pure product of fresh
+    /// ciphertexts) uses `m = 1`; the mixed circuit `(a + b) * c` uses
+    /// `m = 2` because its left branch sums two fresh ciphertexts.
+    #[test]
+    fn circuit_size_records_pre_sum_fan_in() {
+        let params = small_params(&[62, 62, 62]);
+
+        // No pre-sum: `a * b * c` feeds three fresh ciphertexts into pure
+        // multiplications, so the tight circuit size is still `m = 1`.
+        let no_pre_sum =
+            SmudgingConfig::new(params.clone(), 3, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap();
+        assert_eq!((no_pre_sum.m(), no_pre_sum.n()), (1, 3));
+
+        // `(a + b) * c`: the left branch sums two fresh ciphertexts, so the
+        // worst pre-multiplication fan-in is `m = 2` even though the circuit
+        // has one output.
+        let mixed = SmudgingConfig::new(params, 3, 2, 2, FreshNoiseModel::BfvPublicKey).unwrap();
+        assert_eq!((mixed.m(), mixed.n(), mixed.lambda()), (2, 3, 2));
+
+        // Overprovisioning `m` only inflates the bound: it never shrinks the
+        // smudging noise, so a conservative choice stays safe.
+        let bound_one = SmudgingNoiseGenerator::new(no_pre_sum)
+            .unwrap()
+            .smudging_bound()
+            .clone();
+        let bound_two = SmudgingNoiseGenerator::new(mixed)
+            .unwrap()
+            .smudging_bound()
+            .clone();
+        assert!(bound_two > bound_one);
     }
 
     #[test]

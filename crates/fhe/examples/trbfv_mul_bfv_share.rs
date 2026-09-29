@@ -154,11 +154,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap()
                     .into_transport();
 
-                // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications,
-                // accepted l-BFV participant count = num_parties). The multiplied
-                // ciphertexts are encrypted with the aggregated l-BFV public key,
-                // whose `Poly::small(variance)` encryption randomness the
-                // LbfvPublicKey model assumes (issue #250).
+                // Smudging noise shares (depth=3 multiplications, accepted
+                // l-BFV participant count = num_parties). The decrypted
+                // circuit is the pure product `((a×b)×c)×d` of four fresh
+                // ciphertexts with no pre-sum, so the tight circuit size is
+                // m=1 (each multiplication branch carries one fresh
+                // ciphertext's noise); m=3 is retained as an explicit
+                // conservative overprovision matching the secure16384 design
+                // point — overprovisioning only inflates the smudging bound.
+                // The multiplied ciphertexts are encrypted with the
+                // aggregated l-BFV public key, whose `Poly::small(variance)`
+                // encryption randomness the LbfvPublicKey model assumes
+                // (issue #250).
                 let config = SmudgingConfig::new(
                     params_trbfv.clone(),
                     num_parties,
