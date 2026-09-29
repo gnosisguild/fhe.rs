@@ -11,6 +11,8 @@ mod rns_shamir;
 pub mod shares;
 /// Smudging abstractions and implementations
 pub mod smudging;
+/// Explicit persistence and proof-witness boundary for threshold owners.
+pub mod transport;
 
 // Re-export main types for convenience
 pub use shares::{
@@ -18,3 +20,4 @@ pub use shares::{
     SecretKeyShare, ShareManager, SmudgingShare,
 };
 pub use smudging::{FreshNoiseModel, SmudgingConfig, SmudgingNoise, SmudgingNoiseGenerator};
+pub use transport::{NoiseWitnessProvenance, SmudgingNoiseWitness};

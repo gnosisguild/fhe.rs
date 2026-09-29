@@ -293,12 +293,12 @@ fn limbs_mod(limbs: &[u64], qi: &Modulus) -> u64 {
 pub struct SmudgingNoise {
     /// Party count of the generator that sampled this noise; a dealer
     /// rejects noise sized for a different committee.
-    parties: usize,
+    pub(crate) parties: usize,
     /// Complete BFV parameter set the noise was sampled under; a dealer
     /// rejects noise whose parameters differ in any value, including the
     /// plaintext modulus, ciphertext moduli, and error variances.
-    params: Arc<BfvParameters>,
-    poly: Zeroizing<Poly<PowerBasis>>,
+    pub(crate) params: Arc<BfvParameters>,
+    pub(crate) poly: Zeroizing<Poly<PowerBasis>>,
 }
 
 impl SmudgingNoise {

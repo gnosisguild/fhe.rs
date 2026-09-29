@@ -10,6 +10,7 @@ pub use secret_key::{AggregatedSecretKeyShare, DealtSecretKeyShares, SecretKeySh
 pub use smudging::{AggregatedSmudgingShare, DealtSmudgingShares, SmudgingShare};
 
 use super::rns_shamir::RnsShamir;
+use super::transport::{NoiseWitnessProvenance, SmudgingNoiseWitness};
 use crate::Error;
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
@@ -186,6 +187,59 @@ impl ShareManager {
             .map(DealtSmudgingShares::new)
     }
 
+    /// Deal smudging shares and also return a proof witness of the dealt
+    /// noise (opt-in).
+    ///
+    /// This is the witness-returning variant of
+    /// [`ShareManager::generate_smudging_shares`]: the standard path is
+    /// unchanged, and callers only pay for the witness when they ask for it.
+    /// It exists so an external proof system can be handed the *exact* noise
+    /// that was dealt, without the library exposing a raw noise accessor or
+    /// leaving the noise owner usable twice.
+    ///
+    /// # Binding checks come first
+    ///
+    /// The dealer-binding check runs before the noise polynomial is read,
+    /// before the witness copy is made, and before any dealing randomness is
+    /// consumed; a rejected owner is dropped unread and wiped. The same holds
+    /// on a dealing failure after the witness copy: both the dealt matrices
+    /// and the witness drop and wipe, so a failed call leaves nothing live.
+    ///
+    /// # Returns
+    /// The dealt shares (as in the standard path) plus a non-cloneable
+    /// [`SmudgingNoiseWitness`] holding a guarded copy of the dealt noise in
+    /// RNS encoding. The witness's only escape is
+    /// [`SmudgingNoiseWitness::into_proof_bytes`]; converting the RNS
+    /// residues into the centered integers a proof system expects, and
+    /// binding the witness to the session and proof statement, are integrator
+    /// responsibilities. The witness has no one-time guarantee once its
+    /// bytes exist.
+    pub fn generate_smudging_shares_with_witness<R: RngCore + CryptoRng>(
+        &self,
+        noise: SmudgingNoise,
+        rng: &mut R,
+    ) -> Result<(DealtSmudgingShares, SmudgingNoiseWitness), Error> {
+        // The binding check runs first: no polynomial extraction, no witness
+        // copy, and no dealing randomness before the noise is known to match
+        // this manager. On failure the owner is dropped here, and `Zeroizing`
+        // wipes the never-read noise.
+        noise.validate_dealer_binding(self.n, &self.params)?;
+        let poly = noise.into_poly();
+        // A guarded copy of the exact noise about to be dealt: the copy is
+        // accumulated in place into a zero polynomial, so it never exists
+        // outside a wipe-on-drop owner. If the dealing below fails, this
+        // witness drops with the call and wipes.
+        let mut witness_poly = Zeroizing::new(Poly::<PowerBasis>::zero(poly.ctx()));
+        *witness_poly.as_mut() += poly.as_ref();
+        let witness = SmudgingNoiseWitness::new(
+            NoiseWitnessProvenance::Dealt,
+            witness_poly,
+            Arc::clone(&self.params),
+        );
+        let dealt = self.deal_poly(poly, rng).map(DealtSmudgingShares::new)?;
+        Ok((dealt, witness))
+    }
+
     /// Aggregate dealt smudging shares into one single-use decryption owner.
     ///
     /// The input shares are consumed.  This operation is intentionally
@@ -199,7 +253,7 @@ impl ShareManager {
         // Keep the matrices under their zeroizing owners while validating and
         // aggregating, including when malformed input returns an error.
         self.aggregate_collected_matrices(shares.iter().map(|share| &share.coefficients))
-            .map(AggregatedSmudgingShare::new)
+            .map(|poly| AggregatedSmudgingShare::new(poly, &self.params))
     }
 
     /// Aggregate collected secret-key shares into a reusable owner.
@@ -216,7 +270,7 @@ impl ShareManager {
         // implementation. The owners are consumed by this method regardless
         // of whether aggregation succeeds.
         self.aggregate_collected_matrices(shares.iter().map(|share| &share.coefficients))
-            .map(AggregatedSecretKeyShare::from_power_basis)
+            .map(|poly| AggregatedSecretKeyShare::from_power_basis(poly, &self.params))
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
@@ -386,6 +440,18 @@ impl ShareManager {
     /// # Returns
     /// A decryption share polynomial that contributes to the final decryption
     ///
+    /// # Parameter binding
+    ///
+    /// After the ciphertext checks, both aggregated owners are bound to this
+    /// manager's *complete* BFV parameter set (pointer-equality fast path,
+    /// then full value comparison): an aggregated key or noise share recorded
+    /// under a different plaintext modulus, modulus chain, degree, or error
+    /// variance is rejected even when its ring context matches the
+    /// ciphertext. The key binding is checked before the smudging binding,
+    /// and both run before the noise is read or any secret-dependent
+    /// arithmetic happens. This full-parameter validation is part of the
+    /// standard decryption path, not only of the witness variant.
+    ///
     /// # Secret handling
     /// The decryption product `c1 * s_i` and the decryption phase
     /// `c0 + c1 * s_i` accumulated on top of it are secret-dependent. The
@@ -398,6 +464,12 @@ impl ShareManager {
     /// comment) and the transfer of the finished share into the returned
     /// polynomial, whose allocation the caller owns from then on. The
     /// consumed smudging owner wipes its noise when this function returns.
+    ///
+    /// Proof-oriented callers that must reference the exact noise used here
+    /// should use
+    /// [`ShareManager::decryption_share_with_witness`], which shares this
+    /// entire code path and additionally returns a
+    /// [`SmudgingNoiseWitness`].
     #[allow(clippy::indexing_slicing)] // BFV ciphertext always has exactly 2 components
     pub fn decryption_share(
         &self,
@@ -405,7 +477,81 @@ impl ShareManager {
         secret_key: &AggregatedSecretKeyShare,
         smudging: AggregatedSmudgingShare,
     ) -> Result<Poly<PowerBasis>, Error> {
+        self.decryption_share_guarded(ciphertext, secret_key, smudging, false)
+            .map(|(share, _witness)| share)
+    }
+
+    /// Compute a decryption share and also return a proof witness of the
+    /// exact noise it used (opt-in).
+    ///
+    /// This is the witness-returning variant of
+    /// [`ShareManager::decryption_share`] and shares its entire code path and
+    /// secret-handling guarantees, including the full-parameter binding
+    /// checks (the owners' recorded parameter sets must equal this manager's
+    /// parameters). The smudging aggregate is consumed the same way, so **no
+    /// second decryption can use the live owner**; on any failure the owner
+    /// is dropped and wiped and no witness is produced. Because the binding
+    /// checks run before the witness copy, a witness is only ever labeled
+    /// with parameters the consumed owners were validated against.
+    ///
+    /// # Returns
+    /// The decryption share (identical to what the standard path computes)
+    /// plus a non-cloneable [`SmudgingNoiseWitness`] holding a guarded copy
+    /// of the noise that entered this decryption share, tagged with the
+    /// [`NoiseWitnessProvenance::Decryption`] provenance. The witness's only
+    /// escape is [`SmudgingNoiseWitness::into_proof_bytes`]; an external
+    /// proof system (for example a C6-style proof of correct decryption) can
+    /// be built against those exact noise values. Converting the RNS
+    /// residues into the proof's centered-integer representation, and binding
+    /// the witness to the ciphertext and decryption domain, are integrator
+    /// responsibilities. The witness has no one-time guarantee once its bytes
+    /// exist.
+    #[allow(clippy::indexing_slicing)] // BFV ciphertext always has exactly 2 components
+    pub fn decryption_share_with_witness(
+        &self,
+        ciphertext: &Ciphertext,
+        secret_key: &AggregatedSecretKeyShare,
+        smudging: AggregatedSmudgingShare,
+    ) -> Result<(Poly<PowerBasis>, SmudgingNoiseWitness), Error> {
+        self.decryption_share_guarded(ciphertext, secret_key, smudging, true)
+            .and_then(|(share, witness)| {
+                witness
+                    .map(|witness| (share, witness))
+                    .ok_or_else(|| Error::DefaultError("witness was not captured".to_string()))
+            })
+    }
+
+    /// Shared core of [`ShareManager::decryption_share`] and
+    /// [`ShareManager::decryption_share_with_witness`].
+    ///
+    /// `capture_witness` selects whether a guarded copy of the smudging noise
+    /// is captured (after all validation, before the noise enters the phase).
+    /// On every error path the consumed smudging owner drops and wipes and no
+    /// witness escapes.
+    ///
+    /// Validation order: ciphertext parameters/level/shape, then the key
+    /// aggregate's recorded-parameter binding, then the smudging aggregate's
+    /// recorded-parameter binding, then the ring-context checks, then the
+    /// witness capture. The binding checks precede every read of the smudging
+    /// polynomial and all secret-dependent arithmetic, and precede the
+    /// witness copy, so a rejected call leaves no witness and a produced
+    /// witness is always labeled with parameters both owners were validated
+    /// against.
+    #[allow(clippy::indexing_slicing)] // BFV ciphertext always has exactly 2 components
+    fn decryption_share_guarded(
+        &self,
+        ciphertext: &Ciphertext,
+        secret_key: &AggregatedSecretKeyShare,
+        smudging: AggregatedSmudgingShare,
+        capture_witness: bool,
+    ) -> Result<(Poly<PowerBasis>, Option<SmudgingNoiseWitness>), Error> {
         self.validate_ciphertext(ciphertext)?;
+        // Full-parameter binding of both owners: the recorded sets must equal
+        // this manager's parameters, so same-ring aggregates recorded under a
+        // different plaintext modulus or error variance are rejected before
+        // the noise is read or any secret-dependent math runs.
+        secret_key.validate_binding(&self.params)?;
+        smudging.validate_binding(&self.params)?;
         let mut c0 = ciphertext.c[0].clone();
         c0.disallow_variable_time_computations();
         let c0 = c0.into_power_basis();
@@ -420,6 +566,22 @@ impl ShareManager {
                 right: crate::ParameterSource::Ciphertext,
             });
         }
+        // Witness capture happens after every validation and before the noise
+        // enters the decryption phase: the copy is accumulated in place into
+        // a zero polynomial, so the witnessed noise never exists outside a
+        // wipe-on-drop owner. Because the parameter bindings above passed,
+        // the witness can safely be labeled with this manager's parameters.
+        // If a later step fails or unwinds, the witness drops with this call
+        // and wipes.
+        let witness = capture_witness.then(|| {
+            let mut copy = Zeroizing::new(Poly::<PowerBasis>::zero(smudging.ctx()));
+            *copy.as_mut() += smudging.as_ref();
+            SmudgingNoiseWitness::new(
+                NoiseWitnessProvenance::Decryption,
+                copy,
+                Arc::clone(&self.params),
+            )
+        });
         // The decryption product becomes secret-dependent as soon as the
         // secret key is multiplied in: guard the ciphertext clone first, then
         // run the multiplication in place inside the guard, so a partial
@@ -447,10 +609,8 @@ impl ShareManager {
         *phase.as_mut() += &c0;
         *phase.as_mut() += smudging.as_ref();
         let ctx = phase.ctx().clone();
-        Ok(std::mem::replace(
-            phase.as_mut(),
-            Poly::<PowerBasis>::zero(&ctx),
-        ))
+        let share = std::mem::replace(phase.as_mut(), Poly::<PowerBasis>::zero(&ctx));
+        Ok((share, witness))
     }
 
     /// Decrypt ciphertext from collected decryption shares.
@@ -819,6 +979,92 @@ mod tests {
             }
         }
         // The one-time owner is moved into the call above and cannot be dealt twice.
+    }
+
+    /// The witness-returning dealing variant must produce a witness holding
+    /// exactly the dealt noise, tagged with the dealt provenance and the
+    /// manager's parameters, and the dealt shares must be usable end to end.
+    #[test]
+    fn dealing_with_witness_witnesses_the_dealt_noise() {
+        let params = insecure().unwrap().parameters;
+        let n = 3;
+        let threshold = 1;
+        let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
+        let mut rng = rng();
+        let generator = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), n, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap();
+
+        let noise = generator.generate(&mut rng).unwrap();
+        // Crate-internal check material: the exact coefficients the witness
+        // must reproduce, read before the owner is consumed by the dealing
+        // call.
+        let expected_coefficients = noise.poly.coefficients().to_owned();
+
+        let (dealt, witness) = manager
+            .generate_smudging_shares_with_witness(noise, &mut rng)
+            .unwrap();
+
+        // The witness carries the exact dealt noise in RNS encoding.
+        assert_eq!(witness.poly.coefficients(), expected_coefficients);
+        assert_eq!(
+            witness.provenance(),
+            crate::trbfv::NoiseWitnessProvenance::Dealt
+        );
+        assert!(Arc::ptr_eq(witness.params(), &params));
+
+        // The witness exports to a validating envelope for its provenance and
+        // is rejected under the other provenance's role tag.
+        let proof_bytes = witness.into_proof_bytes().unwrap();
+        crate::trbfv::SmudgingNoiseWitness::validate_proof_bytes(
+            proof_bytes.as_slice(),
+            &params,
+            crate::trbfv::NoiseWitnessProvenance::Dealt,
+        )
+        .unwrap();
+        assert!(
+            crate::trbfv::SmudgingNoiseWitness::validate_proof_bytes(
+                proof_bytes.as_slice(),
+                &params,
+                crate::trbfv::NoiseWitnessProvenance::Decryption,
+            )
+            .is_err()
+        );
+
+        // The dealt shares still aggregate (same layout as the standard path).
+        let matrices = dealt.into_transport();
+        assert_eq!(matrices.len(), params.moduli().len());
+    }
+
+    /// A rejected dealer binding must happen before the noise is read, the
+    /// witness is copied, or any dealing randomness is consumed.
+    #[test]
+    fn dealing_with_witness_rejects_binding_before_randomness_or_witness() {
+        let params = insecure_threshold_binding_params();
+        let manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        // Noise sampled for a one-party committee.
+        let generator = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params, 1, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap();
+        let mut rng = crate::support::presets::rng(173);
+        let noise = generator.generate(&mut rng).unwrap();
+
+        let rng_snapshot = rng.clone();
+        let result = manager.generate_smudging_shares_with_witness(noise, &mut rng);
+        assert!(matches!(
+            result,
+            Err(Error::Threshold(
+                ThresholdError::SmudgingNoisePartyCountMismatch {
+                    noise_parties: 1,
+                    dealer_parties: 5,
+                }
+            ))
+        ));
+        // Rejected before any dealing randomness was consumed (and hence
+        // before any witness copy was made).
+        assert_eq!(rng, rng_snapshot);
     }
 
     #[test]
@@ -1214,11 +1460,16 @@ mod tests {
         let mut smudging_poly = Poly::<PowerBasis>::zero(ctx);
         smudging_poly.allow_variable_time_computations(variable_time);
         assert!(ct.c[1].allows_variable_time_computations());
-        let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_key_poly).clone());
+        let key_share =
+            AggregatedSecretKeyShare::from_power_basis((*secret_key_poly).clone(), &params);
 
         // Compute decryption share.
         let decryption_share = manager
-            .decryption_share(&ct, &key_share, AggregatedSmudgingShare::new(smudging_poly))
+            .decryption_share(
+                &ct,
+                &key_share,
+                AggregatedSmudgingShare::new(smudging_poly, &params),
+            )
             .unwrap();
         assert!(!decryption_share.allows_variable_time_computations());
         let mut expected = Zeroizing::new((&ct.c[1] * key_share.as_ntt()).into_power_basis());
@@ -1231,9 +1482,10 @@ mod tests {
             .decryption_share(
                 &ct,
                 &key_share,
-                AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(
-                    params.context_at_level(0).unwrap(),
-                )),
+                AggregatedSmudgingShare::new(
+                    Poly::<PowerBasis>::zero(params.context_at_level(0).unwrap()),
+                    &params,
+                ),
             )
             .unwrap();
         assert!(!second_decryption_share.allows_variable_time_computations());
@@ -1312,11 +1564,11 @@ mod tests {
             .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
             .unwrap();
         let context = params.context_at_level(0).unwrap();
-        let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_poly).clone());
+        let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_poly).clone(), &params);
         let result = manager.decryption_share(
             &ciphertext,
             &key_share,
-            AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(context)),
+            AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(context), &params),
         );
 
         assert_eq!(
@@ -1385,13 +1637,15 @@ mod tests {
         let ct = pk.try_encrypt(&plaintext, &mut rng).unwrap();
 
         let secret_key_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
-        let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_key_poly).clone());
+        let key_share =
+            AggregatedSecretKeyShare::from_power_basis((*secret_key_poly).clone(), &params);
 
         // Smudging built over a different ring level is rejected before any
         // secret product exists; the consumed smudging owner is then wiped by
         // its zeroizing drop.
         let other_context = params.context_at_level(1).unwrap();
-        let smudging = AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(other_context));
+        let smudging =
+            AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(other_context), &params);
         let result = manager.decryption_share(&ct, &key_share, smudging);
 
         assert!(matches!(
@@ -1399,6 +1653,486 @@ mod tests {
             Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::Polynomial,
                 right: crate::ParameterSource::Ciphertext,
+            })
+        ));
+    }
+
+    /// The witness-returning decryption variant must compute the same share
+    /// as the standard path and return a decryption-provenance witness of the
+    /// exact noise that entered the share. On failure the noise owner is
+    /// consumed and no witness is produced.
+    #[test]
+    fn decryption_share_with_witness_matches_standard_path() {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let plaintext = Plaintext::try_encode(&[7u64], Encoding::poly(), &params).unwrap();
+        let ct = Arc::new(pk.try_encrypt(&plaintext, &mut rng).unwrap());
+
+        let secret_key_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        let key_share =
+            AggregatedSecretKeyShare::from_power_basis((*secret_key_poly).clone(), &params);
+
+        // Two identical zero-noise aggregates: one for each code path.
+        let ctx = params.context_at_level(0).unwrap();
+        let standard_smudging =
+            AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(ctx), &params);
+        let witness_smudging = AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(ctx), &params);
+
+        let standard_share = manager
+            .decryption_share(&ct, &key_share, standard_smudging)
+            .unwrap();
+        let (witness_share, witness) = manager
+            .decryption_share_with_witness(&ct, &key_share, witness_smudging)
+            .unwrap();
+        assert_eq!(standard_share, witness_share);
+
+        assert_eq!(
+            witness.provenance(),
+            crate::trbfv::NoiseWitnessProvenance::Decryption
+        );
+        assert!(Arc::ptr_eq(witness.params(), &params));
+        let proof_bytes = witness.into_proof_bytes().unwrap();
+        crate::trbfv::SmudgingNoiseWitness::validate_proof_bytes(
+            proof_bytes.as_slice(),
+            &params,
+            crate::trbfv::NoiseWitnessProvenance::Decryption,
+        )
+        .unwrap();
+        // A decryption witness must not validate as a dealing witness, and a
+        // foreign parameter set must be rejected.
+        assert!(
+            crate::trbfv::SmudgingNoiseWitness::validate_proof_bytes(
+                proof_bytes.as_slice(),
+                &params,
+                crate::trbfv::NoiseWitnessProvenance::Dealt,
+            )
+            .is_err()
+        );
+        let other_params = BfvParametersBuilder::new()
+            .set_degree(64)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[40, 40])
+            .build_arc()
+            .unwrap();
+        assert!(
+            crate::trbfv::SmudgingNoiseWitness::validate_proof_bytes(
+                proof_bytes.as_slice(),
+                &other_params,
+                crate::trbfv::NoiseWitnessProvenance::Decryption,
+            )
+            .is_err()
+        );
+
+        // A failing call (wrong smudging context) consumes the owner and
+        // produces no witness: nothing is returned on the error path.
+        let mismatched = AggregatedSmudgingShare::new(
+            Poly::<PowerBasis>::zero(params.context_at_level(1).unwrap()),
+            &params,
+        );
+        assert!(
+            manager
+                .decryption_share_with_witness(&ct, &key_share, mismatched)
+                .is_err()
+        );
+    }
+
+    /// The decryption witness must hold the exact nonzero noise consumed by
+    /// the call, and the returned share must equal the standard path's output
+    /// for an equivalent nonzero aggregate. A zero-only comparison could not
+    /// tell a wrong witness from a correct one.
+    #[test]
+    fn decryption_share_with_witness_witnesses_nonzero_noise() {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let plaintext = Plaintext::try_encode(&[7u64], Encoding::poly(), &params).unwrap();
+        let ct = Arc::new(pk.try_encrypt(&plaintext, &mut rng).unwrap());
+        let secret_key_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        let key_share =
+            AggregatedSecretKeyShare::from_power_basis((*secret_key_poly).clone(), &params);
+
+        // Real nonzero smudging noise through the supported flow, aggregated
+        // for one recipient.
+        let config =
+            SmudgingConfig::new(params.clone(), 3, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap();
+        let noise = SmudgingNoiseGenerator::new(config)
+            .unwrap()
+            .generate(&mut rng)
+            .unwrap();
+        let dealt = manager
+            .generate_smudging_shares(noise, &mut rng)
+            .unwrap()
+            .into_transport();
+        let mut rows = Array2::zeros((0, params.degree()));
+        for matrix in dealt.iter().take(params.moduli().len()) {
+            rows.push_row(ndarray::ArrayView::from(matrix.row(0)))
+                .unwrap();
+        }
+        let aggregate = manager
+            .aggregate_smudging_shares(vec![SmudgingShare::from_transport(rows)])
+            .unwrap();
+
+        let noise_coefficients = aggregate.poly.coefficients().to_owned();
+        assert!(
+            noise_coefficients.iter().any(|&value| value != 0),
+            "the test requires nonzero noise"
+        );
+
+        let (share, witness) = manager
+            .decryption_share_with_witness(&ct, &key_share, aggregate)
+            .unwrap();
+
+        // The witness holds the exact nonzero noise that entered the share.
+        assert_eq!(witness.poly.coefficients(), noise_coefficients);
+
+        // Standard path with an equivalent nonzero aggregate: identical
+        // share. The twin is rebuilt from the same canonical coefficients, so
+        // any witness/noise divergence would show here.
+        let mut twin_poly = Poly::<PowerBasis>::zero(params.context_at_level(0).unwrap());
+        twin_poly
+            .set_coefficients(noise_coefficients.clone())
+            .unwrap();
+        let standard_share = manager
+            .decryption_share(
+                &ct,
+                &key_share,
+                AggregatedSmudgingShare::new(twin_poly, &params),
+            )
+            .unwrap();
+        assert_eq!(standard_share, share);
+    }
+
+    /// Both decryption variants bind the aggregated owners to the manager's
+    /// *full* parameter set before the noise is read, the witness is copied,
+    /// or any secret-dependent arithmetic runs: a same-ring parameter set
+    /// that differs in the plaintext modulus or either error variance is
+    /// rejected, while independently built but equivalent parameters are
+    /// accepted.
+    #[test]
+    fn decryption_share_binds_owners_to_full_parameters() {
+        let manager_params = insecure_threshold_binding_params();
+        let manager = ShareManager::new(5, 2, manager_params.clone()).unwrap();
+        let mut rng = rng();
+
+        let sk = SecretKey::random(&manager_params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &manager_params).unwrap();
+        let ct = pk.try_encrypt(&plaintext, &mut rng).unwrap();
+        let key_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        let ctx = manager_params.context_at_level(0).unwrap();
+
+        // Same degree, moduli, and ring context; exactly one scalar field
+        // differs in each variant.
+        let other_plaintext = binding_params(
+            101,
+            insecure_128::threshold::MODULI,
+            insecure_128::threshold::VARIANCE,
+            insecure_128::threshold::ERROR1_VARIANCE,
+        );
+        let other_variance = binding_params(
+            insecure_128::threshold::PLAINTEXT_MODULUS,
+            insecure_128::threshold::MODULI,
+            insecure_128::threshold::VARIANCE - 1,
+            insecure_128::threshold::ERROR1_VARIANCE,
+        );
+        let mut other_error1 = insecure_128::threshold::ERROR1_VARIANCE.to_string();
+        other_error1.pop();
+        other_error1.push('1');
+        let other_error1 = binding_params(
+            insecure_128::threshold::PLAINTEXT_MODULUS,
+            insecure_128::threshold::MODULI,
+            insecure_128::threshold::VARIANCE,
+            &other_error1,
+        );
+        let foreign_params = [&other_plaintext, &other_variance, &other_error1];
+
+        // A foreign key aggregate is rejected by both variants with the
+        // key-attributed mismatch, and no witness is produced on the error
+        // path (the owners are consumed by the failed call).
+        for foreign in foreign_params {
+            let foreign_key =
+                AggregatedSecretKeyShare::from_power_basis((*key_poly).clone(), foreign);
+            assert!(matches!(
+                manager.decryption_share(
+                    &ct,
+                    &foreign_key,
+                    AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(ctx), &manager_params),
+                ),
+                Err(Error::ParameterMismatch {
+                    left: crate::ParameterSource::SecretKey,
+                    right: crate::ParameterSource::Parameters,
+                })
+            ));
+            let foreign_key =
+                AggregatedSecretKeyShare::from_power_basis((*key_poly).clone(), foreign);
+            assert!(
+                manager
+                    .decryption_share_with_witness(
+                        &ct,
+                        &foreign_key,
+                        AggregatedSmudgingShare::new(
+                            Poly::<PowerBasis>::zero(ctx),
+                            &manager_params
+                        ),
+                    )
+                    .is_err()
+            );
+        }
+
+        // A foreign smudging aggregate is likewise rejected before any
+        // secret-dependent math, with the smudging-attributed mismatch.
+        let matching_key = key_poly_as_aggregate(&manager, &sk);
+        for foreign in foreign_params {
+            let foreign_smudging =
+                AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(ctx), foreign);
+            assert!(matches!(
+                manager.decryption_share(&ct, &matching_key, foreign_smudging),
+                Err(Error::ParameterMismatch {
+                    left: crate::ParameterSource::AggregatedSmudgingShare,
+                    right: crate::ParameterSource::Parameters,
+                })
+            ));
+            let foreign_smudging =
+                AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(ctx), foreign);
+            assert!(
+                manager
+                    .decryption_share_with_witness(&ct, &matching_key, foreign_smudging)
+                    .is_err()
+            );
+        }
+
+        // Independently built but equivalent parameters are accepted by both
+        // variants, and the produced witness is labeled with the parameters
+        // the owners were validated against.
+        let rebuilt = insecure_threshold_binding_params();
+        assert!(!Arc::ptr_eq(&manager_params, &rebuilt));
+        let rebuilt_key = AggregatedSecretKeyShare::from_power_basis((*key_poly).clone(), &rebuilt);
+        manager
+            .decryption_share(
+                &ct,
+                &rebuilt_key,
+                AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(ctx), &rebuilt),
+            )
+            .unwrap();
+        let (_, witness) = manager
+            .decryption_share_with_witness(
+                &ct,
+                &rebuilt_key,
+                AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(ctx), &rebuilt),
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(witness.params(), &manager_params));
+    }
+
+    /// Helper for the binding test: build a manager-matching aggregated key
+    /// from the secret key.
+    fn key_poly_as_aggregate(manager: &ShareManager, sk: &SecretKey) -> AggregatedSecretKeyShare {
+        let poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        AggregatedSecretKeyShare::from_power_basis((*poly).clone(), manager.params())
+    }
+
+    /// Both aggregate owners round-trip through the consuming persistence
+    /// boundary: the restored owners carry the same polynomial, the imported
+    /// key stays reusable, the imported noise owner stays single-use, and a
+    /// copied envelope can be imported twice (the documented, unpreventable
+    /// replay).
+    #[test]
+    fn aggregate_persistence_round_trip_and_role_separation() {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+
+        // Aggregated key from a real dealing.
+        let sk = SecretKey::random(&params, &mut rng);
+        let secret_key_poly = manager
+            .coeffs_to_poly_level0(sk.coeffs.clone().as_ref())
+            .unwrap();
+        let dealt = manager
+            .generate_secret_key_shares(secret_key_poly, &mut rng)
+            .unwrap();
+        let mut rows = Array2::zeros((0, params.degree()));
+        for matrix in dealt.into_transport() {
+            rows.push_row(ndarray::ArrayView::from(matrix.row(0)))
+                .unwrap();
+        }
+        let key_aggregate = manager
+            .aggregate_secret_key_shares(vec![SecretKeyShare::from_transport(rows)])
+            .unwrap();
+
+        // Aggregated noise (zero for determinism).
+        let ctx = params.context_at_level(0).unwrap();
+        let noise_aggregate = AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(ctx), &params);
+
+        // Export consumes both owners.
+        let key_bytes = key_aggregate.into_persisted_bytes().unwrap();
+        let noise_bytes = noise_aggregate.into_persisted_bytes().unwrap();
+
+        // Role separation: neither payload can be imported as the other type.
+        assert!(
+            AggregatedSmudgingShare::from_persisted_bytes(
+                Zeroizing::new(key_bytes.as_slice().to_vec()),
+                &params
+            )
+            .is_err()
+        );
+        assert!(
+            AggregatedSecretKeyShare::from_persisted_bytes(
+                Zeroizing::new(noise_bytes.as_slice().to_vec()),
+                &params
+            )
+            .is_err()
+        );
+
+        // The key round-trips and the restored owner matches the original.
+        let restored_key = AggregatedSecretKeyShare::from_persisted_bytes(
+            Zeroizing::new(key_bytes.as_slice().to_vec()),
+            &params,
+        )
+        .unwrap();
+        assert_eq!(restored_key.poly, {
+            let original = AggregatedSecretKeyShare::from_persisted_bytes(
+                Zeroizing::new(key_bytes.as_slice().to_vec()),
+                &params,
+            )
+            .unwrap();
+            original.poly
+        });
+
+        // The restored key is reusable across two decryptions.
+        let pk = PublicKey::new(&sk, &mut rng);
+        let plaintext = Plaintext::try_encode(&[5u64], Encoding::poly(), &params).unwrap();
+        let ct = Arc::new(pk.try_encrypt(&plaintext, &mut rng).unwrap());
+        manager
+            .decryption_share(
+                &ct,
+                &restored_key,
+                AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(ctx), &params),
+            )
+            .unwrap();
+        manager
+            .decryption_share(
+                &ct,
+                &restored_key,
+                AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(ctx), &params),
+            )
+            .unwrap();
+
+        // The noise owner round-trips into a single-use owner.
+        let restored_noise = AggregatedSmudgingShare::from_persisted_bytes(
+            Zeroizing::new(noise_bytes.as_slice().to_vec()),
+            &params,
+        )
+        .unwrap();
+        manager
+            .decryption_share(&ct, &restored_key, restored_noise)
+            .unwrap();
+
+        // Copying the envelope cannot be prevented: the same noise bytes can
+        // be imported a second time, producing a second independent
+        // single-use owner. This is the documented replay the application
+        // must prevent; the library cannot.
+        let replayed_noise = AggregatedSmudgingShare::from_persisted_bytes(
+            Zeroizing::new(noise_bytes.as_slice().to_vec()),
+            &params,
+        )
+        .unwrap();
+        manager
+            .decryption_share(&ct, &restored_key, replayed_noise)
+            .unwrap();
+    }
+
+    /// Malformed, truncated, corrupted, oversized, and foreign-parameter
+    /// persistence payloads are all rejected before an owner is produced.
+    #[test]
+    fn aggregate_persistence_rejects_malformed_payloads() {
+        let params = insecure().unwrap().parameters;
+        let ctx = params.context_at_level(0).unwrap();
+        let aggregate = AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(ctx), &params);
+        let envelope = aggregate.into_persisted_bytes().unwrap();
+        let bytes = envelope.as_slice();
+
+        // Empty and truncated payloads.
+        assert!(
+            AggregatedSmudgingShare::from_persisted_bytes(Zeroizing::new(Vec::new()), &params)
+                .is_err()
+        );
+        assert!(
+            AggregatedSmudgingShare::from_persisted_bytes(
+                Zeroizing::new(bytes[..bytes.len() / 2].to_vec()),
+                &params
+            )
+            .is_err()
+        );
+        assert!(
+            AggregatedSmudgingShare::from_persisted_bytes(
+                Zeroizing::new(bytes[..13].to_vec()),
+                &params
+            )
+            .is_err()
+        );
+
+        // Trailing garbage.
+        let mut trailing = bytes.to_vec();
+        trailing.push(0);
+        assert!(
+            AggregatedSmudgingShare::from_persisted_bytes(Zeroizing::new(trailing), &params)
+                .is_err()
+        );
+
+        // Wrong magic.
+        let mut magic = bytes.to_vec();
+        magic[0] = b'!';
+        assert!(
+            AggregatedSmudgingShare::from_persisted_bytes(Zeroizing::new(magic), &params).is_err()
+        );
+
+        // Oversized declared section length (bounded before decoding).
+        let mut oversized = bytes.to_vec();
+        oversized[10..14].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(
+            AggregatedSmudgingShare::from_persisted_bytes(Zeroizing::new(oversized), &params)
+                .is_err()
+        );
+
+        // Polynomial section truncated (with the declared length adjusted so
+        // the header accounting still passes): the protobuf payload no longer
+        // decodes.
+        let mut truncated_poly = bytes.to_vec();
+        let poly_len = u32::from_le_bytes(truncated_poly[10..14].try_into().expect("length field"));
+        truncated_poly[10..14].copy_from_slice(&(poly_len - 1).to_le_bytes());
+        truncated_poly.pop();
+        assert!(
+            AggregatedSmudgingShare::from_persisted_bytes(Zeroizing::new(truncated_poly), &params)
+                .is_err()
+        );
+        // Note: a *canonical-looking* corrupted payload (for example a single
+        // flipped coefficient byte that stays below the modulus) decodes as
+        // different-but-valid material. The envelope has no integrity tag;
+        // authentication is an integrator responsibility (see the README
+        // threat model).
+
+        // Wrong parameter binding on import.
+        let other_params = BfvParametersBuilder::new()
+            .set_degree(64)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[40, 40])
+            .build_arc()
+            .unwrap();
+        assert!(matches!(
+            AggregatedSmudgingShare::from_persisted_bytes(
+                Zeroizing::new(bytes.to_vec()),
+                &other_params
+            ),
+            Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::PersistedShare,
+                right: crate::ParameterSource::Parameters,
             })
         ));
     }
@@ -1532,7 +2266,7 @@ mod tests {
                 .decryption_share(
                     &ct,
                     secret_key_aggregates[i].as_ref().unwrap(),
-                    AggregatedSmudgingShare::new(smudging_poly),
+                    AggregatedSmudgingShare::new(smudging_poly, &params),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -1626,7 +2360,7 @@ mod tests {
                 .decryption_share(
                     &ct,
                     secret_key_aggregates[i].as_ref().unwrap(),
-                    AggregatedSmudgingShare::new(smudging_poly),
+                    AggregatedSmudgingShare::new(smudging_poly, &params),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -1720,7 +2454,7 @@ mod tests {
                 .decryption_share(
                     &ct,
                     secret_key_aggregates[i].as_ref().unwrap(),
-                    AggregatedSmudgingShare::new(smudging_poly),
+                    AggregatedSmudgingShare::new(smudging_poly, &params),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -1810,7 +2544,7 @@ mod tests {
                 .decryption_share(
                     &ct,
                     secret_key_aggregates[i].as_ref().unwrap(),
-                    AggregatedSmudgingShare::new(smudging_poly),
+                    AggregatedSmudgingShare::new(smudging_poly, &params),
                 )
                 .unwrap();
             decryption_shares.push(share);
@@ -2152,7 +2886,7 @@ mod tests {
                 .decryption_share(
                     &ct,
                     secret_key_aggregates[i].as_ref().unwrap(),
-                    AggregatedSmudgingShare::new(smudging_poly),
+                    AggregatedSmudgingShare::new(smudging_poly, &params),
                 )
                 .unwrap();
             decryption_shares.push(share);

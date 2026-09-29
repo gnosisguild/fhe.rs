@@ -4,9 +4,16 @@
 //! share-layer material created from that noise and consumed by threshold
 //! decryption.
 
+use std::sync::Arc;
+
 use fhe_math::rq::{Poly, PowerBasis};
+use fhe_traits::{DeserializeWithContext, Serialize};
 use ndarray::Array2;
 use zeroize::{Zeroize, Zeroizing};
+
+use super::super::transport::{TransportRole, decode_envelope, encode_envelope};
+use crate::Error;
+use crate::bfv::BfvParameters;
 
 /// The result of dealing one smudging polynomial.
 ///
@@ -103,9 +110,27 @@ impl std::fmt::Debug for SmudgingShare {
 
 /// One aggregate smudging share for one decryption.
 ///
-/// The owner is consumed by [`super::ShareManager::decryption_share`]. It is
-/// not serializable by this type: applications that need transport must use
-/// an explicit consuming adapter at their protocol boundary.
+/// The owner is consumed by [`super::ShareManager::decryption_share`] (and by
+/// the witness-returning
+/// [`decryption_share_with_witness`](super::ShareManager::decryption_share_with_witness)
+/// variant), so safe Rust cannot use one live owner in two decryptions.
+///
+/// # Persistence boundary
+///
+/// There is no generic serializer, no `Clone`, and no raw polynomial
+/// accessor. Applications that must persist the aggregate across a restart
+/// use the explicit consuming boundary:
+/// [`into_persisted_bytes`](Self::into_persisted_bytes) consumes the owner
+/// and returns a versioned, parameter-bound
+/// [`Zeroizing<Vec<u8>>`] envelope, and
+/// [`from_persisted_bytes`](Self::from_persisted_bytes) consumes such an
+/// envelope and restores a fresh single-use owner. The one-live-owner
+/// guarantee covers the live values on both sides of that boundary; it does
+/// **not** cover the bytes themselves. A copied envelope can be imported
+/// twice, yielding two independent one-use owners, and no in-memory Rust type
+/// can prevent that: durable replay prevention, ciphertext/decryption-domain
+/// binding, authentication, and storage encryption remain integrator
+/// responsibilities.
 ///
 /// ```compile_fail
 /// # use fhe::trbfv::AggregatedSmudgingShare;
@@ -131,17 +156,123 @@ impl std::fmt::Debug for SmudgingShare {
 /// ```
 pub struct AggregatedSmudgingShare {
     pub(crate) poly: Zeroizing<Poly<PowerBasis>>,
+    /// Parameter set this aggregate was aggregated (or imported) under; the
+    /// transport envelope embeds it as the import-time binding.
+    pub(crate) params: Arc<BfvParameters>,
 }
 
 impl AggregatedSmudgingShare {
-    pub(crate) fn new(poly: Poly<PowerBasis>) -> Self {
+    pub(crate) fn new(poly: Poly<PowerBasis>, params: &Arc<BfvParameters>) -> Self {
         Self {
             poly: Zeroizing::new(poly),
+            params: Arc::clone(params),
         }
     }
 
     pub(crate) fn into_poly(self) -> Zeroizing<Poly<PowerBasis>> {
         self.poly
+    }
+
+    /// Verify this owner was aggregated (or imported) under the manager's
+    /// exact BFV parameters.
+    ///
+    /// Crate-private so the decryption operations can run it before the noise
+    /// is read or copied into a witness. Parameters take the `Arc`
+    /// pointer-equality fast path and then compare by full value, so
+    /// independently built but equivalent configurations are accepted while
+    /// any differing field — including the plaintext modulus and the error
+    /// variances, which ring contexts cannot distinguish — is rejected.
+    pub(crate) fn validate_binding(
+        &self,
+        manager_params: &Arc<BfvParameters>,
+    ) -> Result<(), Error> {
+        if !Arc::ptr_eq(&self.params, manager_params) && self.params != *manager_params {
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::AggregatedSmudgingShare,
+                right: crate::ParameterSource::Parameters,
+            });
+        }
+        Ok(())
+    }
+
+    /// Consume the single-use owner into a versioned, parameter-bound
+    /// persistence envelope.
+    ///
+    /// This is the supported way for an aggregated noise share to survive an
+    /// application restart (for example when the decryption proof workflow
+    /// is resumed after a crash). The envelope layout is documented in the
+    /// [transport module](super::super::transport). The owner is consumed;
+    /// the noise polynomial is serialized in its canonical PowerBasis RNS
+    /// encoding, and every secret-bearing buffer this side of the boundary
+    /// owns — the owner polynomial, the exported polynomial copy, and the
+    /// envelope — is wiped on drop. The serialized parameter section is
+    /// public data and is intentionally kept in an ordinary, unwiped buffer.
+    ///
+    /// The returned envelope **may be cloned after this boundary**. Exported
+    /// bytes have no one-time semantics: importing the same bytes twice
+    /// yields two independent single-use owners, which is exactly the
+    /// replay a durable application must prevent itself. Integrators own the
+    /// binding of an imported owner to one ciphertext and decryption domain.
+    ///
+    /// # Memory limits
+    ///
+    /// The envelope and the exported polynomial copy are wipe-on-drop, but
+    /// the underlying `Poly::to_bytes` serializer also builds short-lived
+    /// internal buffers that the math crate does not wipe; see the trBFV
+    /// README's documented library limits for transient serializer
+    /// allocations.
+    pub fn into_persisted_bytes(self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let poly_bytes = Zeroizing::new(self.poly.to_bytes());
+        encode_envelope(
+            TransportRole::AggregatedSmudgingShare,
+            &self.params,
+            &poly_bytes,
+        )
+    }
+
+    /// Restore the single-use owner from persistence bytes produced by
+    /// [`into_persisted_bytes`](Self::into_persisted_bytes).
+    ///
+    /// The envelope is consumed and wiped when this call returns — on success
+    /// and on every rejection. The payload must carry the smudging-aggregate
+    /// role tag (a persisted key share cannot be imported as noise), an
+    /// implemented format version, a parameter set equal to `params` by full
+    /// value, and a PowerBasis polynomial that decodes at level 0 with
+    /// canonical RNS residues.
+    ///
+    /// The restored owner is single-use exactly like an aggregated owner:
+    /// one call to
+    /// [`ShareManager::decryption_share`](super::ShareManager::decryption_share)
+    /// consumes it. Importing the same envelope twice creates two such
+    /// owners; the library cannot prevent that copy, so durable replay
+    /// prevention stays with the application.
+    ///
+    /// # Errors
+    /// Returns [`Error::SerializationError`] for malformed, truncated,
+    /// oversized, wrong-role, or wrong-version payloads,
+    /// [`Error::ParameterMismatch`] with
+    /// [`ParameterSource::PersistedShare`](crate::ParameterSource::PersistedShare)
+    /// when the embedded parameter set does not match `params`, and
+    /// [`Error::MathError`] when the polynomial payload violates the
+    /// parameter set's context, shape, or canonical-residue invariants.
+    pub fn from_persisted_bytes(
+        bytes: Zeroizing<Vec<u8>>,
+        params: &Arc<BfvParameters>,
+    ) -> Result<Self, Error> {
+        let poly_bytes = decode_envelope(
+            bytes.as_slice(),
+            TransportRole::AggregatedSmudgingShare,
+            params,
+        )?;
+        let ctx = params.context_at_level(0)?;
+        let mut poly = Poly::<PowerBasis>::from_bytes(poly_bytes, ctx)?;
+        poly.disallow_variable_time_computations();
+        // `bytes` (the consumed envelope) is dropped — and wiped — when this
+        // function returns, on success and on every error path above.
+        Ok(Self {
+            poly: Zeroizing::new(poly),
+            params: Arc::clone(params),
+        })
     }
 }
 

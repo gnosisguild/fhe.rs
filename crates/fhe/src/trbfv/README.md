@@ -25,7 +25,7 @@ the paper. The following table is the boundary for callers and integrators:
 | DKG, PVSS, FLSS, and GURS | Must be supplied externally. |
 | Authenticated transport, broadcast, retries, and identifiable aborts | Must be supplied externally. |
 | Committee membership, accepted-party policy, and application lifecycle | Must be supplied externally. |
-| ZK proofs and application wire formats | Must be supplied externally. |
+| ZK proofs and application wire formats | Must be supplied externally. `SmudgingNoiseWitness::into_proof_bytes` exports the exact RNS-encoded noise a proof can be built against, but the proof system itself is external. |
 
 The public `ShareManager` flow is:
 
@@ -56,6 +56,7 @@ The module follows a modular design with clear separation of concerns:
 - `smudging/bound.rs` - smudging-bound configuration and arithmetic, with optimal variance calculation using arbitrary precision arithmetic
 - `smudging/noise.rs` - one-time smudging noise sampling and single-use ownership
 - `shares/mod.rs` - share aggregation and decryption operations management (with the single-use owners in `shares/secret_key.rs` and `shares/smudging.rs`)
+- `transport.rs` - the explicit versioned transport envelope, the opt-in proof-witness API, and the consuming persistence boundary for the aggregate owners
 - `config.rs` - Parameter validation
 - `errors.rs` - Threshold-specific error types
 
@@ -234,6 +235,9 @@ aggregate. Consequently, safe Rust cannot use one live aggregate in two
 decryption calls. The guarantee ends at the explicit transport boundary:
 serialized or copied share matrices can be replayed, so authenticated
 transport and durable replay prevention remain the integrator's responsibility.
+The opt-in persistence and witness APIs documented in
+[Proof Witnesses and the Persistence Boundary](#proof-witnesses-and-the-persistence-boundary)
+are that explicit boundary; they do not extend one-time semantics to bytes.
 
 Secret-key share material follows a separate reusable-owner path. Dealing
 returns a non-cloneable `DealtSecretKeyShares`; applications explicitly convert
@@ -283,6 +287,141 @@ policy minimum are accepted and are simply weaker. Since achievability
 depends on the full parameter set (degree, moduli, plaintext modulus,
 circuit depth), the library does not impose a universal minimum; callers
 validate against their own policy.
+
+## Proof Witnesses and the Persistence Boundary
+
+Some applications must persist threshold owners across a restart, or hand an
+external zero-knowledge proof system (for example a C6-style proof of correct
+decryption) the exact noise behind one dealing or one decryption. The library
+supports both behind an explicit, opt-in boundary. Every existing owner stays
+non-cloneable with private fields and no raw polynomial accessor; the boundary
+adds consuming operations only:
+
+| Operation | Consumes | Returns |
+| --------- | -------- | ------- |
+| `ShareManager::generate_smudging_shares_with_witness` | the sampled `SmudgingNoise` | dealt shares plus a `SmudgingNoiseWitness` of the exact dealt noise |
+| `ShareManager::decryption_share_with_witness` | one `AggregatedSmudgingShare` (so no second decryption can use the live owner) | the decryption share plus a `SmudgingNoiseWitness` of the exact noise used |
+| `AggregatedSecretKeyShare::into_persisted_bytes` / `from_persisted_bytes` | the key owner / the envelope bytes | `Zeroizing<Vec<u8>>` / a restored reusable owner |
+| `AggregatedSmudgingShare::into_persisted_bytes` / `from_persisted_bytes` | the noise owner / the envelope bytes | `Zeroizing<Vec<u8>>` / a restored single-use owner |
+| `SmudgingNoiseWitness::into_proof_bytes` / `validate_proof_bytes` | the witness / borrowed bytes | `Zeroizing<Vec<u8>>` / validation only |
+
+Both witness call sites run their binding checks before reading the noise or
+consuming RNG (dealing), or before any secret-dependent arithmetic
+(decryption); a failed call consumes and wipes the owners and produces no
+witness. For decryption this means both aggregated owners must have been
+aggregated (or imported) under the manager's exact parameter set — an owner
+recorded under a same-ring parameter set with a different plaintext modulus
+or error variance is rejected before the witness copy, so a witness is only
+ever labeled with parameters its owners were validated against. Witnesses
+stay in RNS residue encoding: converting them into the
+centered integers a specific proof system expects is an integrator
+responsibility, as is binding a witness to the ciphertext, decryption domain,
+and proof statement it supports. There is no raw noise accessor — the only
+escape from a witness is its consuming export.
+
+### Envelope format
+
+Every payload produced by `into_persisted_bytes` / `into_proof_bytes` is a
+versioned, role-tagged envelope reusing the existing serialization formats:
+
+```text
+offset 0..4    magic "FTRS"
+offset 4       role tag (1 key aggregate, 2 noise aggregate,
+               3 dealt-noise witness, 4 decryption-noise witness)
+offset 5       format version (currently 1)
+offset 6..10   parameter-section length, u32 little-endian
+offset 10..14  polynomial-section length, u32 little-endian
+offset 14..    serialized BFV parameters, then the serialized RNS
+               polynomial (the existing Poly protobuf encoding)
+```
+
+Import and validation proceed in three phases, in the actual order:
+
+1. *Envelope-level checks*, on lengths and headers alone: the whole input is
+   within the common serialization bound, the header is complete, the magic
+   matches, the role tag is known and matches the imported type (a key
+   payload cannot be imported as noise or read as a witness), the format
+   version is implemented, both declared section lengths are within the
+   common bound, both sections are fully present (no truncation), and there
+   is no trailing data. Declared lengths are bounds-checked against the
+   actual input before any section is sliced or decoded.
+2. *Parameter section*: decoded — which fully validates it — and compared by
+   value against the importing parameters. Full value equality binds the
+   payload to every parameter field (plaintext modulus, moduli, degree, error
+   variances), a stronger check than ring-context equality.
+3. *Polynomial payload*: decoded at level 0; this decode itself validates the
+   polynomial's representation, shape, and canonical RNS residues.
+
+### Threat model
+
+The boundary separates what the library can enforce from what it cannot.
+
+Guaranteed by the library:
+
+- Live owners are unique: non-cloneable types with private fields, no raw
+  noise accessor, no generic `Serialize`/`Deserialize` on owners.
+- Export and import are consuming: an exported owner cannot be exported twice
+  without passing through an import, and decryption consumes the noise
+  aggregate even in the witness-returning variant.
+- Every *secret-bearing* buffer the boundary owns is wiped — the owner
+  polynomials, the envelope buffer, the exported polynomial copy, a consumed
+  import envelope (on success and on every rejection), and a successfully
+  decoded proof polynomial. The serialized parameter section is public data
+  and is intentionally kept in an ordinary, unwiped buffer. The one exception
+  class for secret material is the serializer-internal transients described
+  under *Known memory limits* below, which the boundary does not own and
+  cannot erase.
+- Payloads are role-, version-, and parameter-bound. Envelope-level bounds
+  and header checks run before any section is decoded; the embedded
+  parameters are then decoded and compared, and the polynomial payload is
+  decoded and validated (representation, shape, canonical residues) in turn.
+  Both decryption variants additionally bind the aggregated owners to the
+  manager's full parameter set before any secret-dependent arithmetic, so
+  same-ring owners recorded under a different plaintext modulus or error
+  variance are rejected even if they never crossed the transport boundary.
+
+Ends at the boundary (integrator responsibilities):
+
+- Copyability of bytes. A `Zeroizing<Vec<u8>>` envelope may be cloned *after*
+  the boundary, and any copy made before an import is outside library control.
+  No in-memory Rust type can prevent copying, and the library does not try.
+- One-time semantics. They are a property of live values only: importing the
+  same noise-aggregate bytes twice yields two independent single-use owners.
+  The library cannot detect that replay; the application must bind each
+  imported owner to one ciphertext and decryption domain and durably prevent
+  duplicate use across restarts and retries.
+- Authentication and confidentiality of stored bytes. The envelope is
+  unauthenticated plaintext: *validation is not authentication*, and any party
+  can craft a payload that passes every check. Corrupting a payload byte can
+  also yield different-but-valid material rather than an error. Encrypt and
+  authenticate persisted bytes at the application layer.
+- Witness identity and proof semantics. The library cannot tell which
+  ciphertext, decryption domain, session, or proof statement a witness (or a
+  restored owner) belongs to; integrators own that binding, the conversion to
+  proof-specific centered integers, and the retry/replay policy.
+
+Known memory limits: `Poly::to_bytes`/`Poly::from_bytes` (in `fhe-math`) build
+transient internal buffers that the math crate does not wipe, including on a
+failed import's error path. The transport boundary wipes every secret-bearing
+buffer it owns — the envelope, the exported polynomial copy, the consumed
+input, and a successfully decoded proof polynomial; the public parameter
+serialization is intentionally left unwiped — but it cannot erase those
+serializer-internal transients. This is an honest limitation of the current
+serialization path, not a property of the envelope format.
+
+### Ownership table
+
+| Concern | Owner |
+| ------- | ----- |
+| Envelope format, role/version tags, parameter-set binding | `fhe.rs` |
+| Bounded decoding, representation/shape/canonical-residue validation | `fhe.rs` |
+| Zeroizing of secret-bearing owner-controlled storage (owner polynomials, envelopes, consumed import input, decoded proof polynomials) | `fhe.rs` |
+| One-live-owner guarantees for live values (end at export or witness creation) | `fhe.rs` |
+| Copying, authentication, and encryption-at-rest of exported bytes | Integrator |
+| Ciphertext/decryption-domain/session identity of witnesses and restored owners | Integrator |
+| One-time semantics and durable replay prevention across restarts | Integrator |
+| RNS-to-centered-integer conversion for proof systems | Integrator |
+| Retries, duplicate detection, and replay of previous results | Integrator |
 
 ## Usage
 
@@ -352,7 +491,21 @@ let plaintext =
 `decryption_share` borrows the ciphertext but consumes the one-time smudging
 aggregate. `decrypt_from_shares` borrows the ciphertext, decryption shares, and
 party indices; callers with owned `Vec`s or `Arc<Ciphertext>` should pass
-references rather than cloning or transferring them.
+references rather than cloning or transferring them. Both decryption-share
+variants now validate the *full* recorded parameter set of the aggregated
+owners against the manager's parameters — after the ciphertext checks, before
+any secret-dependent arithmetic — so same-ring owners recorded under a
+different plaintext modulus or error variance are rejected; previously only
+the ring context was checked. Aggregates built by `aggregate_secret_key_shares`
+and `aggregate_smudging_shares` always record the manager's own parameters, so
+the supported flows are unaffected.
+
+The opt-in witness and persistence variants are documented in
+[Proof Witnesses and the Persistence Boundary](#proof-witnesses-and-the-persistence-boundary):
+`generate_smudging_shares_with_witness` and `decryption_share_with_witness`
+return the same results plus a `SmudgingNoiseWitness` of the exact noise, and
+`into_persisted_bytes`/`from_persisted_bytes` on the two aggregate types carry
+an owner across an application restart.
 
 ## Security Considerations
 
@@ -363,6 +516,11 @@ The security of the threshold scheme relies on:
 - Secure distribution of shares among parties
 - Protection of individual secret key shares
 - Appropriate smudging noise generation
+
+Exported persistence bytes and exported witnesses are as sensitive as the
+owners they came from, have no one-time semantics, and are unauthenticated;
+see [Proof Witnesses and the Persistence Boundary](#proof-witnesses-and-the-persistence-boundary)
+for the boundary's threat model and the integrator-owned responsibilities.
 
 Shamir secret sharing operates directly on canonical RNS residues. Operations
 on secret coefficients use the constant-time `Modulus` arithmetic; Lagrange

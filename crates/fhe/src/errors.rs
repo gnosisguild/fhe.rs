@@ -91,6 +91,12 @@ pub enum ParameterSource {
     /// A one-time smudging noise owner's recorded binding: the party count
     /// and complete BFV parameter set captured when the noise was sampled.
     SmudgingNoise,
+    /// An aggregated smudging share's recorded binding: the complete BFV
+    /// parameter set captured when the shares were aggregated (or imported).
+    AggregatedSmudgingShare,
+    /// A persisted threshold-share payload's embedded parameter binding,
+    /// decoded from the versioned transport envelope at the import boundary.
+    PersistedShare,
     KeySwitchingKey,
     RelinearizationKey,
     Multiplicator,
@@ -566,6 +572,9 @@ pub enum SerializedObject {
     RgswCiphertext,
     SecretKey,
     TrlbfvPublicKeyShare,
+    TrbfvAggregatedSecretKeyShare,
+    TrbfvAggregatedSmudgingShare,
+    TrbfvSmudgingNoiseWitness,
 }
 
 /// Required field in a protobuf object.
