@@ -141,6 +141,22 @@ impl LBFVPublicKey {
             c.push(ct);
         }
 
+        // The CRS rows are seed-derived, but the no-repeat reference-string
+        // invariant is enforced unconditionally before the key is returned.
+        // Rows are borrowed, not cloned.
+        let a_rows: Vec<&Poly<Ntt>> = c
+            .iter()
+            .map(|ct| {
+                ct.c.get(1).ok_or_else(|| {
+                    Error::DefaultError("Public-key ciphertext is missing a component".to_string())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        crate::reference_string::validate_no_repeated_rows(
+            crate::ReferenceStringRole::Crs,
+            a_rows,
+        )?;
+
         Ok(Self {
             params: sk.params.clone(),
             c,
@@ -166,10 +182,18 @@ impl LBFVPublicKey {
     ///
     /// # Arguments
     /// * `sk` - The secret key.
-    /// * `a_polynomials` - The `l` shared CRS polynomials `a_j`.
+    /// * `a_polynomials` - The `l` shared CRS polynomials `a_j`. The rows must
+    ///   be pairwise distinct: the CRS is one reference string of the l-BFV
+    ///   key generation, and repeated rows are rejected before any
+    ///   secret-dependent computation runs.
     /// * `seed` - Optional compression metadata seed. When `None`, the key
     ///   carries no seed.
     /// * `rng` - RNG for sampling the error polynomials `e_j`.
+    ///
+    /// The CRS must also be generated independently of any URS `d1` used for
+    /// relinearization-key generation; key-generation entry points reject
+    /// shared rows, but they cannot certify independence of deliberately
+    /// correlated yet unequal randomness.
     pub(crate) fn from_crs<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         a_polynomials: &[Poly<Ntt>],
@@ -191,6 +215,12 @@ impl LBFVPublicKey {
                 a_polynomials.len()
             )));
         }
+
+        // Reject repeated CRS rows before any secret-dependent operation.
+        crate::reference_string::validate_no_repeated_rows(
+            crate::ReferenceStringRole::Crs,
+            a_polynomials,
+        )?;
 
         let ctx = sk.params.context_at_level(0)?;
         let s = Zeroizing::new(
@@ -242,7 +272,8 @@ impl LBFVPublicKey {
     ///   These are the *concrete* shared-input polynomials whose equality must
     ///   be verifiable across all contributions and between the public key and
     ///   the relinearization key. Must be at the same context as the
-    ///   `b_polynomials`.
+    ///   `b_polynomials`, and must be pairwise distinct: repeated CRS rows are
+    ///   rejected.
     /// * `seed` - Optional CRS seed for backwards compatibility. When `None`,
     ///   the key carries no seed and polynomial-level comparisons are the sole
     ///   consistency check.
@@ -264,6 +295,13 @@ impl LBFVPublicKey {
                 params.moduli().len()
             )));
         }
+
+        // The CRS rows form one reference string of the l-BFV key generation;
+        // reject repeated concrete rows before building any key material.
+        crate::reference_string::validate_no_repeated_rows(
+            crate::ReferenceStringRole::Crs,
+            &a_polynomials,
+        )?;
 
         let ctx0 = params.context_at_level(0)?;
         let mut c: Vec<Ciphertext> = Vec::with_capacity(l);
@@ -793,6 +831,24 @@ impl LBFVPublicKey {
             ciphertexts.push(ciphertext);
         }
 
+        // The explicit rows carry the concrete CRS; a row missing its `a`
+        // component is malformed and must not be silently skipped by the
+        // duplicate check below. Rows are borrowed, not cloned.
+        let a_rows: Vec<&Poly<Ntt>> = ciphertexts
+            .iter()
+            .map(|ciphertext| {
+                ciphertext.c.get(1).ok_or_else(|| {
+                    Error::SerializationError(SerializationError::InvalidFormat {
+                        reason: "LBFV public-key ciphertext is missing its a component".to_string(),
+                    })
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        crate::reference_string::validate_no_repeated_rows(
+            crate::ReferenceStringRole::Crs,
+            a_rows,
+        )?;
+
         let key = Self {
             params: params.clone(),
             c: ciphertexts,
@@ -1179,6 +1235,82 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    /// A public key whose CRS vector contains the same concrete row twice must
+    /// be rejected: the CRS rows must be pairwise distinct.
+    #[test]
+    fn from_parts_rejects_repeated_crs_rows() -> std::result::Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let pk_seeded = LBFVPublicKey::new(&sk, &mut rng)?;
+        let b_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[0].clone()).collect();
+        let a_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[1].clone()).collect();
+
+        // Control: the distinct rows are accepted (checked in
+        // `test_from_parts_roundtrip`); duplicating one row is not.
+        let mut repeated_a = a_polys.clone();
+        repeated_a[1] = repeated_a[0].clone();
+        assert!(matches!(
+            LBFVPublicKey::from_parts(b_polys.clone(), repeated_a, params.clone(), None),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::RepeatedReferenceStringRow {
+                    role: crate::ReferenceStringRole::Crs,
+                    first_index: 0,
+                    second_index: 1,
+                }
+            ))
+        ));
+
+        // The explicit-CRS constructor must reject the same input before any
+        // secret-dependent computation runs.
+        let mut repeated_from_crs = a_polys.clone();
+        repeated_from_crs[params.moduli().len() - 1] = repeated_from_crs[0].clone();
+        assert!(matches!(
+            LBFVPublicKey::from_crs(&sk, &repeated_from_crs, None, &mut rng),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::RepeatedReferenceStringRow {
+                    role: crate::ReferenceStringRole::Crs,
+                    first_index: 0,
+                    second_index: _,
+                }
+            ))
+        ));
+        Ok(())
+    }
+
+    /// A serialized explicit public key whose CRS rows contain a duplicate is
+    /// rejected at deserialization time.
+    #[test]
+    fn explicit_serialized_pk_with_repeated_crs_rows_rejected()
+    -> std::result::Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let seeded = LBFVPublicKey::new(&sk, &mut rng)?;
+
+        let explicit = LBFVPublicKey::from_parts(
+            seeded.c.iter().map(|ct| ct.c[0].clone()).collect(),
+            seeded.c.iter().map(|ct| ct.c[1].clone()).collect(),
+            params.clone(),
+            None,
+        )?;
+        let mut proto = LBFVPublicKeyProto::from(&explicit);
+        let Some(rows) = proto
+            .explicit
+            .as_mut()
+            .map(|representation| &mut representation.c)
+        else {
+            return Err("expected explicit public-key representation".into());
+        };
+        // Copy row 0's concrete `a` bytes into row 1.
+        let a_bytes = rows[0].c[1].clone();
+        rows[1].c[1] = a_bytes;
+
+        assert!(LBFVPublicKey::from_bytes(&proto.encode_to_vec(), &params).is_err());
         Ok(())
     }
 

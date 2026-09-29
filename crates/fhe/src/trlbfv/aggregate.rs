@@ -183,6 +183,12 @@ fn sum_ksk_c0<'a>(
 /// The caller is responsible for selecting and authenticating contributions
 /// and for preventing duplicate inclusion. This function validates arithmetic
 /// structure, shared URS/CRS values, and consistency with `public_key`.
+/// The shared URS `d1` and CRS `a` rows must also form independent reference
+/// strings: identical rows across the two vectors and repeated rows within
+/// either vector are rejected, so no aggregated key built from observably
+/// reused randomness is returned. As elsewhere, these equality checks cannot
+/// certify independence of deliberately correlated but unequal randomness;
+/// generating the two strings independently remains a protocol responsibility.
 ///
 /// The aggregate error grows with the number of summed contributions. Callers
 /// must ensure that `shares.len()` is supported by their parameter set's noise
@@ -312,6 +318,17 @@ pub fn aggregate_relinearization_key(
         }
     }
 
+    // Reference-string gate on the shared rows: every share carries the same
+    // URS `d1` and CRS `a` vectors (checked above), so validating the first
+    // share's rows validates the assembled key. Repeated rows within either
+    // vector and rows shared between the URS and CRS are rejected before the
+    // aggregated key is built or published.
+    crate::reference_string::validate_reference_string_pair(
+        &first.ksk_r_to_s.ctx_ksk,
+        &first.ksk_s_to_r.c1,
+        &first.ksk_r_to_s.c1,
+    )?;
+
     // Determine whether all input KSKs share the same seeds.
     let seeds_match = shares
         .iter()
@@ -440,6 +457,120 @@ mod tests {
             Some(&9)
         );
 
+        Ok(())
+    }
+
+    /// Build a relinearization-key share from explicit URS/CRS rows without
+    /// going through the validating contribution constructors, so the
+    /// aggregation boundary can be exercised directly.
+    fn crafted_share<R: rand::RngCore + rand::CryptoRng>(
+        sk: &SecretKey,
+        crs: &[Poly<NttShoup>],
+        urs: &[Poly<NttShoup>],
+        rng: &mut R,
+    ) -> Result<RelinKeyShare> {
+        use fhe_math::rq::{PowerBasis, traits::TryConvertFrom as TryConvertFromPoly};
+
+        let ctx = sk.params.context_at_level(0)?;
+        let sk_pb = Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)?;
+        Ok(RelinKeyShare {
+            ksk_r_to_s: KeySwitchingKey::new_with_c1(sk, &sk_pb, urs.to_vec(), 0, 0, rng)?,
+            ksk_s_to_r: KeySwitchingKey::new_with_c1(sk, &sk_pb, crs.to_vec(), 0, 0, rng)?,
+        })
+    }
+
+    /// Aggregation must refuse to publish a key whose URS rows collide with
+    /// its CRS rows, even when every share is internally consistent.
+    #[test]
+    fn aggregation_rejects_urs_row_equal_to_crs_row() -> Result<()> {
+        let mut rng = rand::rng();
+        let params = insecure().unwrap().parameters;
+        let sks: Vec<SecretKey> = (0..2)
+            .map(|_| SecretKey::random(&params, &mut rng))
+            .collect();
+        let ctx0 = params.context_at_level(0)?;
+
+        // Concrete CRS rows shared by the public key and the RLK shares.
+        let a_ntt: Vec<Poly<Ntt>> = (0..params.moduli().len())
+            .map(|_| Poly::<Ntt>::random(ctx0, &mut rng))
+            .collect();
+        let crs: Vec<Poly<NttShoup>> = a_ntt.iter().map(|p| p.clone().into_ntt_shoup()).collect();
+
+        let pk_shares: Vec<PublicKeyShare> = sks
+            .iter()
+            .map(|sk| PublicKeyShare::contribute_with_polys(sk, &a_ntt, &mut rng))
+            .collect::<Result<Vec<_>>>()?;
+        let public_key: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
+
+        // URS rows colliding with CRS row 1 at a cross-index position.
+        let mut urs = KeySwitchingKey::c1_from_seed(ctx0, [31u8; 32], params.moduli().len());
+        urs[2] = crs[1].clone();
+
+        let shares: Vec<RelinKeyShare> = sks
+            .iter()
+            .map(|sk| crafted_share(sk, &crs, &urs, &mut rng))
+            .collect::<Result<Vec<_>>>()?;
+
+        assert!(matches!(
+            aggregate_relinearization_key(&shares, &public_key),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::OverlappingReferenceStringRows {
+                    crs_index: 1,
+                    urs_index: 2,
+                }
+            ))
+        ));
+
+        // Control: fully independent URS rows aggregate successfully.
+        let independent = KeySwitchingKey::c1_from_seed(ctx0, [32u8; 32], params.moduli().len());
+        let shares: Vec<RelinKeyShare> = sks
+            .iter()
+            .map(|sk| crafted_share(sk, &crs, &independent, &mut rng))
+            .collect::<Result<Vec<_>>>()?;
+        aggregate_relinearization_key(&shares, &public_key)?;
+        Ok(())
+    }
+
+    /// Aggregation must refuse to publish a key whose URS vector repeats a
+    /// row.
+    #[test]
+    fn aggregation_rejects_repeated_urs_rows() -> Result<()> {
+        let mut rng = rand::rng();
+        let params = insecure().unwrap().parameters;
+        let sks: Vec<SecretKey> = (0..2)
+            .map(|_| SecretKey::random(&params, &mut rng))
+            .collect();
+        let ctx0 = params.context_at_level(0)?;
+
+        let a_ntt: Vec<Poly<Ntt>> = (0..params.moduli().len())
+            .map(|_| Poly::<Ntt>::random(ctx0, &mut rng))
+            .collect();
+        let crs: Vec<Poly<NttShoup>> = a_ntt.iter().map(|p| p.clone().into_ntt_shoup()).collect();
+
+        let pk_shares: Vec<PublicKeyShare> = sks
+            .iter()
+            .map(|sk| PublicKeyShare::contribute_with_polys(sk, &a_ntt, &mut rng))
+            .collect::<Result<Vec<_>>>()?;
+        let public_key: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
+
+        let mut urs = KeySwitchingKey::c1_from_seed(ctx0, [41u8; 32], params.moduli().len());
+        urs[2] = urs[0].clone();
+
+        let shares: Vec<RelinKeyShare> = sks
+            .iter()
+            .map(|sk| crafted_share(sk, &crs, &urs, &mut rng))
+            .collect::<Result<Vec<_>>>()?;
+
+        assert!(matches!(
+            aggregate_relinearization_key(&shares, &public_key),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::RepeatedReferenceStringRow {
+                    role: crate::ReferenceStringRole::Urs,
+                    first_index: 0,
+                    second_index: 2,
+                }
+            ))
+        ));
         Ok(())
     }
 }
