@@ -30,7 +30,7 @@ use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
-    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{FreshNoiseModel, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
@@ -147,10 +147,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .into_transport();
 
                 // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications).
-                // The default accepted set is all n parties.
-                let config = SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda)
-                    .unwrap()
-                    .with_mult_depth(preset.multiplicative_depth.unwrap());
+                // The default accepted set is all n parties. The multiplied
+                // ciphertexts are encrypted with the MBFV-aggregated BFV public
+                // key, whose ternary encryption randomness the BfvPublicKey
+                // model assumes; only the l-BFV relinearization key is used here.
+                let config = SmudgingConfig::new(
+                    params_trbfv.clone(),
+                    num_parties,
+                    3,
+                    lambda,
+                    FreshNoiseModel::BfvPublicKey,
+                )
+                .unwrap()
+                .with_mult_depth(preset.multiplicative_depth.unwrap());
                 let generator = SmudgingNoiseGenerator::new(config).unwrap();
                 let smudging_noise = generator.generate(&mut rng).unwrap();
                 let smudging_shares_transport = share_manager

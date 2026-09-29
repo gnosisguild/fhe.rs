@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, SecretKey};
 use fhe::trbfv::{
-    AggregatedSecretKeyShare, AggregatedSmudgingShare, SecretKeyShare, ShareManager,
-    SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
+    AggregatedSecretKeyShare, AggregatedSmudgingShare, FreshNoiseModel, SecretKeyShare,
+    ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
 };
 use fhe::trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_key_pair};
 use fhe_math::rq::{Poly, PowerBasis};
@@ -80,9 +80,18 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
     // straight into Shamir shares without exposing the polynomial.
     let mut smudging_noises = (0..N)
         .map(|_| {
-            let config = SmudgingConfig::new(params.clone(), N, 1, LAMBDA_VALUE)
-                .expect("smudging config")
-                .with_mult_depth(MULT_DEPTH);
+            // The multiplied ciphertexts are encrypted with the aggregated
+            // l-BFV public key, whose `Poly::small(variance)` encryption
+            // randomness the LbfvPublicKey model assumes (issue #250).
+            let config = SmudgingConfig::new(
+                params.clone(),
+                N,
+                1,
+                LAMBDA_VALUE,
+                FreshNoiseModel::LbfvPublicKey,
+            )
+            .expect("smudging config")
+            .with_mult_depth(MULT_DEPTH);
             // Use n as the conservative aggregate RLK contribution count.
             SmudgingNoiseGenerator::new(config)
                 .expect("smudging generator")

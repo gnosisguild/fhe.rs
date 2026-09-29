@@ -3,7 +3,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
-use fhe::trbfv::{SmudgingConfig, SmudgingNoiseGenerator};
+use fhe::trbfv::{FreshNoiseModel, SmudgingConfig, SmudgingNoiseGenerator};
 use num_bigint::BigUint;
 
 #[test]
@@ -57,11 +57,14 @@ fn secure8192_profile_is_feasible_and_covers_share_moduli() {
     assert_eq!(preset.lambda, 45);
     assert_eq!(preset.multiplicative_depth, None);
 
+    // The profile check pins the exact bound of the BFV public-key model,
+    // the library path the threshold profile's ciphertexts use.
     let config = SmudgingConfig::new(
         preset.parameters.clone(),
         preset.num_parties,
         preset.max_ciphertexts,
         preset.lambda,
+        FreshNoiseModel::BfvPublicKey,
     )
     .unwrap();
     let bound = SmudgingNoiseGenerator::new(config)
@@ -71,6 +74,31 @@ fn secure8192_profile_is_feasible_and_covers_share_moduli() {
     assert_eq!(
         bound,
         BigUint::parse_bytes(b"132922799578495921427264261134328266752000000", 10).unwrap()
+    );
+
+    // The l-BFV public-key model widens the encryption-randomness support to
+    // 2 * variance (issue #250), which is still feasible for this profile and
+    // pins the model-dependent arithmetic exactly.
+    let lbfv_bound = SmudgingNoiseGenerator::new(
+        SmudgingConfig::new(
+            preset.parameters.clone(),
+            preset.num_parties,
+            preset.max_ciphertexts,
+            preset.lambda,
+            FreshNoiseModel::LbfvPublicKey,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .smudging_bound()
+    .clone();
+    assert_eq!(
+        lbfv_bound,
+        BigUint::parse_bytes(b"132922799578531811412534070437952356352000000", 10).unwrap()
+    );
+    assert!(
+        lbfv_bound > bound,
+        "l-BFV model must widen the smudging bound"
     );
 
     assert!(
@@ -106,19 +134,29 @@ fn secure16384_profile_is_feasible_and_covers_share_moduli() {
     assert_eq!(preset.lambda, 31);
     assert_eq!(preset.multiplicative_depth, Some(3));
 
-    let config = SmudgingConfig::new(
-        preset.parameters.clone(),
-        preset.num_parties,
-        preset.max_ciphertexts,
-        preset.lambda,
-    )
-    .unwrap()
-    .with_mult_depth(preset.multiplicative_depth.unwrap());
-    let bound = SmudgingNoiseGenerator::new(config)
+    // This profile backs both multiplication examples: depth-1+ circuits
+    // encrypted with the MBFV-aggregated BFV public key and with the
+    // distributed l-BFV public key. Both fresh-noise models must stay
+    // feasible at the profile's depth (issue #250).
+    for model in [
+        FreshNoiseModel::BfvPublicKey,
+        FreshNoiseModel::LbfvPublicKey,
+    ] {
+        let config = SmudgingConfig::new(
+            preset.parameters.clone(),
+            preset.num_parties,
+            preset.max_ciphertexts,
+            preset.lambda,
+            model,
+        )
         .unwrap()
-        .smudging_bound()
-        .clone();
-    assert!(bound > BigUint::from(0_u64));
+        .with_mult_depth(preset.multiplicative_depth.unwrap());
+        let bound = SmudgingNoiseGenerator::new(config)
+            .unwrap()
+            .smudging_bound()
+            .clone();
+        assert!(bound > BigUint::from(0_u64));
+    }
 
     assert!(
         preset

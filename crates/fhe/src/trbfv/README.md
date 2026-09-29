@@ -68,7 +68,9 @@ layout.
 > `ShareManager` is the single public trBFV type (`ShareManager::
 > decrypt_from_shares` is the former `TRBFV::decrypt`). Smudging noise is
 > generated directly with the smudging module's public machinery:
-> `SmudgingConfig::new` (chain `.with_mult_depth(depth)` when needed) →
+> `SmudgingConfig::new` (pass the [`FreshNoiseModel`](smudging/bound.rs) that
+> matches the encryption path of the input ciphertexts, and chain
+> `.with_mult_depth(depth)` when needed) →
 > `SmudgingNoiseGenerator::new` → `generate`. Sampled noise remains a non-cloneable
 > `SmudgingNoise` owner that must be dealt with
 > `ShareManager::generate_smudging_shares`, which consumes
@@ -104,7 +106,8 @@ Let `mult_depth` be the number of multiplication levels.
 
 - **Initial bound:** `B&#x1d9c;&sup0;` = `m &middot; (B_fresh + Q mod t)`
   `B_fresh` itself is derived from the encryption-noise and key-norm bounds,
-  using the sampler-specific `B_enc` (see below).
+  using the sampler-specific `B_enc` (see below) and the caller-selected
+  fresh-noise model (see below).
 
 - **Recursion** (Prop.&nbsp;20 of Urban–Rambaud 2024):
 
@@ -136,8 +139,43 @@ Let `mult_depth` be the number of multiplication levels.
 selects the same CBD or uniform sampler as `Poly::conditional_error`, so the
 smudging bound tracks the encryption sampler's actual coefficient bound.
 
+### Fresh-noise model selection (issue #250)
+
+The fresh-ciphertext decryption-noise bound is
+
+> `B_fresh = d &middot; u_bound &middot; e_pk + B_enc + d &middot; e2 &middot; sk`
+
+where `d` is the ring degree, `e_pk = n &middot; (2 &middot; variance)` bounds
+the aggregated public-key error (each share contributes `2 &middot; variance`,
+so a single-party key is bounded by `2 &middot; variance`), `e2 = 2 &middot;
+variance` bounds the second encryption error, and `sk = n` bounds the
+aggregated ternary secret key. `SmudgingConfig::new` takes an explicit
+`FreshNoiseModel` that supplies `u_bound`, the actual coefficient support of
+the encryption randomness `u`; there is **no silent default**, because the
+paths differ in their samplers:
+
+| Model | Encryption path | `u` support (`u_bound`) |
+| ----- | --------------- | ----------------------- |
+| `FreshNoiseModel::BfvPublicKey` | `bfv::PublicKey::try_encrypt` (including MBFV-aggregated keys) | `1` (ternary CBD, `sample_vec_cbd_f32` with variance `0.5`) |
+| `FreshNoiseModel::LbfvPublicKey` | `lbfv::LBFVPublicKey::try_encrypt` (including aggregated l-BFV key shares) | `2 &middot; variance` (`Poly::small(params.variance)`) |
+| `FreshNoiseModel::BfvSecretKey` | `bfv::SecretKey::try_encrypt` | no `u`: the fresh phase noise is one small error, so `B_fresh = 2 &middot; variance` |
+| `FreshNoiseModel::Custom(bound)` | imported ciphertexts, external key generators, nonstandard samplers | caller-supplied `B_fresh` |
+
+Selecting the wrong model understates the bound: at depth zero on the
+`insecure` profile parameters, the ternary assumption applied to l-BFV
+ciphertexts underestimates `B_sm` by roughly 2.9&times;. When the ciphertexts
+fed to one decryption come from several of these paths, use the model with the
+largest `B_fresh` (for `Custom`, the maximum of the individual bounds).
+
+`Custom` is a caller-justified trust decision, not a checked input: this
+library cannot verify the noise distribution of an externally supplied key or
+ciphertext, so the bound must be derived from the actual key-generation and
+encryption procedure, and an understated bound silently invalidates the
+smudging guarantee. A zero `Custom` bound is rejected.
+
 `SmudgingConfig::new` is fallible: it rejects zero parties, zero ciphertexts,
-and unsupported lambda values. Its fields are private; use accessors to inspect
+unsupported lambda values, and zero `Custom` bounds. Its fields are private;
+use accessors to inspect
 them and `.with_mult_depth(depth)` before passing the config to
 `SmudgingNoiseGenerator::new`. The generator checks feasibility, including
 during the multiplicative-depth recursion.
@@ -206,7 +244,8 @@ Basic usage pattern:
 
 ```rust
 use fhe::trbfv::{
-    SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
+    FreshNoiseModel, SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
+    SmudgingShare,
 };
 
 // Setup threshold scheme; each party holds its own manager instance
@@ -220,8 +259,10 @@ let secret_key_dealt = secret_key_dealt.into_transport();
 // Each party: sample smudging noise with the smudging machinery, then deal
 // it immediately; the noise owner is one-time material consumed by the
 // dealing operation and the intermediate noise polynomial is never exposed.
+// The fresh-noise model must match how `ciphertext` was encrypted.
 let config = SmudgingConfig::new(
     params.clone(), n_parties, num_ciphertexts, lambda,
+    FreshNoiseModel::BfvPublicKey,
 )?.with_mult_depth(mult_depth);
 let generator = SmudgingNoiseGenerator::new(config)?;
 let smudging_noise = generator.generate(&mut rng)?;

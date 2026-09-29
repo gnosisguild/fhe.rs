@@ -667,7 +667,9 @@ mod tests {
     use crate::ThresholdError;
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use crate::support::presets::{insecure, insecure_128, secure8192};
-    use crate::trbfv::smudging::{MAX_LAMBDA, SmudgingConfig, SmudgingNoiseGenerator};
+    use crate::trbfv::smudging::{
+        FreshNoiseModel, MAX_LAMBDA, SmudgingConfig, SmudgingNoiseGenerator,
+    };
     use fhe_math::rq::{Ntt, RepresentationTag};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
@@ -787,9 +789,10 @@ mod tests {
         let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
         let mut rng = rng();
 
-        let generator =
-            SmudgingNoiseGenerator::new(SmudgingConfig::new(params.clone(), n, 1, 0).unwrap())
-                .unwrap();
+        let generator = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), n, 1, 0, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap();
         let noise = generator.generate(&mut rng).unwrap();
         let shares = manager
             .generate_smudging_shares(noise, &mut rng)
@@ -817,7 +820,8 @@ mod tests {
 
         // The supported flow: compute the bound with the smudging machinery,
         // sample the noise, and deal it into Shamir shares immediately.
-        let config = SmudgingConfig::new(params.clone(), n, 1, 45).unwrap();
+        let config =
+            SmudgingConfig::new(params.clone(), n, 1, 45, FreshNoiseModel::BfvPublicKey).unwrap();
         let generator = SmudgingNoiseGenerator::new(config).unwrap();
         let noise = generator.generate(&mut rng).unwrap();
         let shares = manager
@@ -873,9 +877,10 @@ mod tests {
         generator_params: Arc<BfvParameters>,
     ) {
         let manager = ShareManager::new(5, 2, manager_params).unwrap();
-        let generator =
-            SmudgingNoiseGenerator::new(SmudgingConfig::new(generator_params, 5, 1, 2).unwrap())
-                .unwrap();
+        let generator = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(generator_params, 5, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap();
         let mut rng = crate::support::presets::rng(172);
         let noise = generator.generate(&mut rng).unwrap();
 
@@ -896,8 +901,10 @@ mod tests {
     fn smudging_dealing_accepts_matched_binding() {
         let params = insecure_threshold_binding_params();
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
-        let generator =
-            SmudgingNoiseGenerator::new(SmudgingConfig::new(params, 5, 1, 2).unwrap()).unwrap();
+        let generator = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params, 5, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap();
         let mut rng = rng();
         let noise = generator.generate(&mut rng).unwrap();
         assert!(manager.generate_smudging_shares(noise, &mut rng).is_ok());
@@ -912,9 +919,10 @@ mod tests {
         let generator_params = insecure_threshold_binding_params();
         assert_ne!(Arc::as_ptr(&manager_params), Arc::as_ptr(&generator_params));
         let manager = ShareManager::new(5, 2, manager_params).unwrap();
-        let generator =
-            SmudgingNoiseGenerator::new(SmudgingConfig::new(generator_params, 5, 1, 2).unwrap())
-                .unwrap();
+        let generator = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(generator_params, 5, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap();
         let mut rng = rng();
         let noise = generator.generate(&mut rng).unwrap();
         assert!(manager.generate_smudging_shares(noise, &mut rng).is_ok());
@@ -926,8 +934,10 @@ mod tests {
         let manager = ShareManager::new(5, 2, params.clone()).unwrap();
         // The review reproducer configuration: noise sized for one party,
         // dealt by a five-party manager.
-        let generator =
-            SmudgingNoiseGenerator::new(SmudgingConfig::new(params, 1, 1, 2).unwrap()).unwrap();
+        let generator = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params, 1, 1, 2, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap();
         let mut rng = crate::support::presets::rng(172);
         let noise = generator.generate(&mut rng).unwrap();
 
@@ -1010,7 +1020,8 @@ mod tests {
         let mut feasible = 0;
         for lambda in 0..=MAX_LAMBDA {
             match SmudgingNoiseGenerator::new(
-                SmudgingConfig::new(params.clone(), n, m, lambda).unwrap(),
+                SmudgingConfig::new(params.clone(), n, m, lambda, FreshNoiseModel::BfvPublicKey)
+                    .unwrap(),
             ) {
                 Ok(_) => feasible = lambda,
                 Err(_) => break,
@@ -1060,7 +1071,14 @@ mod tests {
             "recorded review lambda 71 must remain feasible for the reported configuration"
         );
         let noise = SmudgingNoiseGenerator::new(
-            SmudgingConfig::new(manager_params.clone(), 1, 1, parties_lambda).unwrap(),
+            SmudgingConfig::new(
+                manager_params.clone(),
+                1,
+                1,
+                parties_lambda,
+                FreshNoiseModel::BfvPublicKey,
+            )
+            .unwrap(),
         )
         .unwrap()
         .generate(&mut rng)
@@ -1086,7 +1104,14 @@ mod tests {
             "recorded review lambda 88 must remain feasible for the reported configuration"
         );
         let noise = SmudgingNoiseGenerator::new(
-            SmudgingConfig::new(same_ring_params, 5, 1, plaintext_lambda).unwrap(),
+            SmudgingConfig::new(
+                same_ring_params,
+                5,
+                1,
+                plaintext_lambda,
+                FreshNoiseModel::BfvPublicKey,
+            )
+            .unwrap(),
         )
         .unwrap()
         .generate(&mut rng)
@@ -1110,7 +1135,14 @@ mod tests {
             "recorded review lambda 69 must remain feasible for the matched configuration"
         );
         let noise = SmudgingNoiseGenerator::new(
-            SmudgingConfig::new(manager_params.clone(), 5, 1, matched_lambda).unwrap(),
+            SmudgingConfig::new(
+                manager_params.clone(),
+                5,
+                1,
+                matched_lambda,
+                FreshNoiseModel::BfvPublicKey,
+            )
+            .unwrap(),
         )
         .unwrap()
         .generate(&mut rng)

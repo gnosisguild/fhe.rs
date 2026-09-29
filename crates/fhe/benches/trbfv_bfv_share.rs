@@ -5,7 +5,7 @@ mod support;
 use fhe::bfv::CommonRandomPoly;
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::PublicKeyShare;
-use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
+use fhe::trbfv::{FreshNoiseModel, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
 
@@ -76,8 +76,16 @@ fn bench_data_sizes(c: &mut Criterion) {
 
         // Generate smudging noise shares: compute the bound with the
         // smudging machinery, sample the noise, and deal it immediately.
-        let config =
-            SmudgingConfig::new(params_trbfv.clone(), num_parties, 100, preset.lambda).unwrap();
+        // Ciphertexts are encrypted under a BFV public key, so the
+        // fresh-noise model is BfvPublicKey.
+        let config = SmudgingConfig::new(
+            params_trbfv.clone(),
+            num_parties,
+            100,
+            preset.lambda,
+            FreshNoiseModel::BfvPublicKey,
+        )
+        .unwrap();
         let generator = SmudgingNoiseGenerator::new(config).unwrap();
         let smudging_noise = generator.generate(&mut rng).unwrap();
         let smudging_shares_transport = share_manager

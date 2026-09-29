@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::trbfv::{
-    AggregatedSecretKeyShare, AggregatedSmudgingShare, SecretKeyShare, ShareManager,
-    SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
+    AggregatedSecretKeyShare, AggregatedSmudgingShare, FreshNoiseModel, SecretKeyShare,
+    ShareManager, SmudgingConfig, SmudgingNoiseGenerator, SmudgingShare,
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
@@ -44,9 +44,17 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
 
     let smudging_shares_transport: Vec<Vec<Array2<u64>>> = (0..N)
         .map(|_| {
-            // The evaluated ciphertext below is the sum of two fresh encryptions.
-            let config =
-                SmudgingConfig::new(params.clone(), N, 2, LAMBDA_VALUE).expect("smudging config");
+            // The evaluated ciphertext below is the sum of two fresh encryptions
+            // under the BFV public key, whose ternary encryption randomness the
+            // BfvPublicKey model assumes.
+            let config = SmudgingConfig::new(
+                params.clone(),
+                N,
+                2,
+                LAMBDA_VALUE,
+                FreshNoiseModel::BfvPublicKey,
+            )
+            .expect("smudging config");
             let generator = SmudgingNoiseGenerator::new(config).expect("smudging generator");
             let noise = generator
                 .generate(&mut rng)
