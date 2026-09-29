@@ -491,6 +491,26 @@ pub enum SerializationError {
         expected: usize,
     },
 
+    /// A serialized key-switching key has a ciphertext level below its key
+    /// level, which no constructor can produce.
+    #[error(
+        "Serialized key-switching key has ciphertext level {ciphertext_level} below key level {key_level}"
+    )]
+    InvalidKeySwitchingLevelOrder {
+        ciphertext_level: usize,
+        key_level: usize,
+    },
+
+    /// A serialized key-switching key encodes a decomposition base the
+    /// constructors cannot produce for its key context.
+    #[error(
+        "Serialized key-switching key has log_base {log_base}; the decomposition base supported for its key context is {expected_log_base}"
+    )]
+    InvalidKeySwitchingLogBase {
+        log_base: usize,
+        expected_log_base: usize,
+    },
+
     /// A serialized key-switching seed has the wrong length.
     #[error("Serialized key-switching seed has {actual} bytes; expected {expected}")]
     InvalidKeySwitchingSeedLength { actual: usize, expected: usize },
@@ -562,6 +582,7 @@ pub enum SerializedField {
 pub enum SerializedPolynomialComponent {
     KeySwitchingKeyC0,
     KeySwitchingKeyC1,
+    RelinearizationKeyBVec,
 }
 
 /// Separate enum to indicate parameters-related errors.
