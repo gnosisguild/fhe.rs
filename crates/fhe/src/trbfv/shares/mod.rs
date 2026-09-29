@@ -389,6 +389,19 @@ impl ShareManager {
     ///
     /// # Returns
     /// A decryption share polynomial that contributes to the final decryption
+    ///
+    /// # Secret handling
+    /// The decryption product `c1 * s_i` and the decryption phase
+    /// `c0 + c1 * s_i` accumulated on top of it are secret-dependent. The
+    /// ciphertext clone is guarded before the secret key is multiplied into
+    /// it in place, and the phase is kept in a wipe-on-drop owner until it is
+    /// moved into the returned share; the additions accumulate in place, so
+    /// no secret-dependent by-value intermediate is created or dropped. Two
+    /// narrow move-based windows remain, consistent with the rest of this
+    /// crate: the inverse-NTT conversion of the product (see the inline
+    /// comment) and the transfer of the finished share into the returned
+    /// polynomial, whose allocation the caller owns from then on. The
+    /// consumed smudging owner wipes its noise when this function returns.
     #[allow(clippy::indexing_slicing)] // BFV ciphertext always has exactly 2 components
     pub fn decryption_share(
         &self,
@@ -411,17 +424,37 @@ impl ShareManager {
                 right: crate::ParameterSource::Ciphertext,
             });
         }
-        let ciphertext_times_secret_key = (&c1 * secret_key).into_power_basis();
-        // Move the consumed noise into the returned share while leaving a
-        // zero polynomial behind for the zeroizing owner to drop. The
-        // zeroize crate's `Zeroizing` wrapper intentionally has no
-        // `into_inner`; replacing it avoids an unsafe extraction that would
-        // bypass the wipe-on-drop guarantee.
-        let ctx = smudging.ctx().clone();
-        let replacement = Poly::zero(&ctx);
-        let smudging = std::mem::replace(&mut *smudging, replacement);
-        let decryption_share = c0 + ciphertext_times_secret_key + smudging;
-        Ok(decryption_share)
+        // The decryption product becomes secret-dependent as soon as the
+        // secret key is multiplied in: guard the ciphertext clone first, then
+        // run the multiplication in place inside the guard, so a partial
+        // multiplication unwinds into the guard's wipe-on-drop.
+        let mut product = Zeroizing::new(c1);
+        product.disallow_variable_time_computations();
+        *product.as_mut() *= secret_key;
+        // Move the multiplied product out of its guard for the inverse
+        // transform, leaving a zero polynomial behind for the guard to drop.
+        // Honest limitation: the moved value is unguarded while
+        // `into_power_basis` performs the inverse NTT in place — a brief
+        // move-based gap. The transform has no known panic source on
+        // standard-layout coefficients, but an unwind through the transform
+        // itself is not covered by a guard here.
+        let replacement = Poly::zero(product.ctx());
+        let product = std::mem::replace(product.as_mut(), replacement).into_power_basis();
+        // The phase accumulated on top of the product stays in a wipe-on-drop
+        // owner until its allocation is transferred into the returned share.
+        let mut phase = Zeroizing::new(product);
+        // In-place additions only: `AddAssign` borrows the operands, so no
+        // separate `c0 + c1 * s_i` intermediate is created. Every operand
+        // disallowed variable-time computations above, so the additions use
+        // the constant-time path. The smudging owner keeps its noise until
+        // this function returns, then wipes it.
+        *phase.as_mut() += &c0;
+        *phase.as_mut() += smudging.as_ref();
+        let ctx = phase.ctx().clone();
+        Ok(std::mem::replace(
+            phase.as_mut(),
+            Poly::<PowerBasis>::zero(&ctx),
+        ))
     }
 
     /// Decrypt ciphertext from collected decryption shares.
@@ -638,8 +671,11 @@ mod tests {
     use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use crate::support::presets::{insecure, insecure_128, secure8192};
     use crate::trbfv::smudging::{MAX_LAMBDA, SmudgingConfig, SmudgingNoiseGenerator};
+    use fhe_math::rq::{Ntt, RepresentationTag};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use zeroize::Zeroize;
 
     #[test]
     fn poly_coefficient_guard_returns_math_error_for_noncanonical_values() {
@@ -1145,6 +1181,9 @@ mod tests {
             .decryption_share(&ct, &key_share, AggregatedSmudgingShare::new(smudging_poly))
             .unwrap();
         assert!(!decryption_share.allows_variable_time_computations());
+        let mut expected = Zeroizing::new((&ct.c[1] * key_share.as_ntt()).into_power_basis());
+        *expected.as_mut() += &ct.c[0].clone().into_power_basis();
+        assert_eq!(decryption_share, *expected);
 
         // The aggregated key owner is reusable; only the smudging owner is
         // consumed by each decryption-share computation.
@@ -1211,6 +1250,80 @@ mod tests {
                 max_level: 0,
             })
         );
+    }
+
+    /// Observe `Zeroizing` calling `Poly::zeroize` on unwind without reading
+    /// freed storage or adding instrumentation to ShareManager.
+    struct PolyWipeProbe<R: RepresentationTag> {
+        poly: Poly<R>,
+        wiped: Arc<AtomicBool>,
+    }
+
+    impl<R: RepresentationTag> Zeroize for PolyWipeProbe<R> {
+        fn zeroize(&mut self) {
+            let had_data = self.poly.coefficients().iter().any(|&value| value != 0);
+            self.poly.zeroize();
+            self.wiped.store(
+                had_data && self.poly.coefficients().iter().all(|&value| value == 0),
+                Ordering::SeqCst,
+            );
+        }
+    }
+
+    /// The product and phase use the same `Zeroizing<Poly>` ownership in
+    /// `decryption_share`. This checks the wipe mechanism for both NTT and
+    /// power-basis polynomials; it does not inject a panic into that function.
+    #[test]
+    fn decryption_polynomial_guards_wipe_on_unwind() {
+        let params = insecure().unwrap().parameters;
+        let ctx = params.context_at_level(0).unwrap();
+        let mut rng = crate::support::presets::rng(245);
+
+        fn check<R: RepresentationTag>(poly: Poly<R>) {
+            let wiped = Arc::new(AtomicBool::new(false));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = Zeroizing::new(PolyWipeProbe {
+                    poly,
+                    wiped: Arc::clone(&wiped),
+                });
+                panic!("simulated unwind while a polynomial is guarded");
+            }));
+            assert!(result.is_err());
+            assert!(wiped.load(Ordering::SeqCst));
+        }
+
+        check(Poly::<Ntt>::random(ctx, &mut rng));
+        check(Poly::<PowerBasis>::random(ctx, &mut rng));
+    }
+
+    #[test]
+    fn decryption_share_rejects_mismatched_smudging_context() {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng);
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let ct = pk.try_encrypt(&plaintext, &mut rng).unwrap();
+
+        let secret_key_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_key_poly).clone());
+
+        // Smudging built over a different ring level is rejected before any
+        // secret product exists; the consumed smudging owner is then wiped by
+        // its zeroizing drop.
+        let other_context = params.context_at_level(1).unwrap();
+        let smudging = AggregatedSmudgingShare::new(Poly::<PowerBasis>::zero(other_context));
+        let result = manager.decryption_share(&ct, &key_share, smudging);
+
+        assert!(matches!(
+            result,
+            Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::Ciphertext,
+            })
+        ));
     }
 
     #[test]
