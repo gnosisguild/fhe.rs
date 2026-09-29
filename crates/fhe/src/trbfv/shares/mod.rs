@@ -468,6 +468,14 @@ impl ShareManager {
     ///
     /// # Returns
     /// The decrypted plaintext
+    ///
+    /// # Errors
+    /// Returns
+    /// [`ParametersError::UnsupportedPlaintextModulus`](crate::ParametersError::UnsupportedPlaintextModulus)
+    /// immediately after the ciphertext-parameter checks when the plaintext
+    /// modulus does not fit in a `u64`: the final scaling step of threshold
+    /// decryption requires a machine-word plaintext modulus, and the check
+    /// runs before any share validation or reconstruction work (issue #252).
     // All indexing is on vectors built with known sizes matching the index ranges
     #[allow(clippy::indexing_slicing)]
     pub fn decrypt_from_shares(
@@ -477,6 +485,15 @@ impl ShareManager {
         ciphertext: &Ciphertext,
     ) -> Result<Plaintext, Error> {
         self.validate_ciphertext_parameters(ciphertext)?;
+        // The final scaling step requires a machine-word plaintext modulus;
+        // reject larger plaintexts before any context setup, share validation,
+        // or reconstruction work (issue #252).
+        let ptxt_u64 = self.params.plaintext.as_u64().ok_or_else(|| {
+            Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
+                reason: "threshold BFV decrypt_from_shares requires a u64 plaintext modulus"
+                    .to_string(),
+            })
+        })?;
         // Reject a level whose ciphertext modulus cannot encode plaintexts
         // before reconstructing or converting anything.
         self.params.validate_plaintext_level(ciphertext.level)?;
@@ -508,12 +525,6 @@ impl ShareManager {
         result_poly.set_coefficients(arr_matrix)?;
 
         let par = ciphertext.params.clone();
-        let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
-            Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
-                reason: "threshold BFV decrypt_from_shares requires a u64 plaintext modulus"
-                    .to_string(),
-            })
-        })?;
 
         // Scale the reconstructed phase by t/Q with the precomputed bridge for
         // the ciphertext level. Its plaintext context has enough moduli for

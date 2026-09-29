@@ -53,6 +53,9 @@ impl SmudgingNoiseGenerator {
     /// # Errors
     /// Returns error if:
     /// - Inputs are invalid (zero n/m, empty moduli, zero plaintext, zero variance)
+    /// - The plaintext modulus does not fit in a `u64` (see
+    ///   [`crate::ParametersError::UnsupportedPlaintextModulus`]); the
+    ///   threshold bound arithmetic requires a machine-word plaintext modulus
     /// - `lambda` exceeds [`MAX_LAMBDA`]
     /// - `2 * B_C >= Delta` (circuit too deep or parameters too small)
     /// - `2 * (B_C + n * B_sm) >= Delta` (security requirement infeasible)
@@ -72,7 +75,16 @@ impl SmudgingNoiseGenerator {
         if moduli.is_empty() {
             return Err(Error::smudging_bound_infeasible("moduli slice is empty"));
         }
-        let t = BigUint::from(config.params.plaintext());
+        // The bound arithmetic below (Delta and the Prop. 20 recursion) binds
+        // the plaintext modulus to a machine word, so a plaintext modulus
+        // larger than `u64` is rejected here, before any plaintext access or
+        // bound computation — including for depth-zero circuits (issue #252).
+        let t_u64 = config.params.plaintext.as_u64().ok_or_else(|| {
+            Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
+                reason: "threshold BFV smudging bound requires a u64 plaintext modulus".to_string(),
+            })
+        })?;
+        let t = BigUint::from(t_u64);
         if t == BigUint::from(0_u64) {
             return Err(Error::smudging_bound_infeasible(
                 "plaintext modulus must be positive",
@@ -144,7 +156,9 @@ impl SmudgingNoiseGenerator {
                     .max()
                     .ok_or_else(|| Error::smudging_bound_infeasible("moduli slice is empty"))?,
             );
-            let k = BigUint::from(config.params.plaintext());
+            // Reuse the single validated machine-word plaintext modulus for
+            // the recursion coefficient `k` (issue #252).
+            let k = BigUint::from(t_u64);
             let n_sk = BigUint::from(config.n as u64);
 
             // Aggregate RLK error: |S| * B_e

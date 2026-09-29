@@ -207,6 +207,16 @@ Urban–Rambaud&nbsp;2024 proves security only for odd `n` (under the
 `n = 2t + 1` honest-majority model).  Even-`n` deployments fall outside the
 paper's theorem and have not been independently analyzed.
 
+### Plaintext modulus must fit in `u64`
+
+Plain BFV supports plaintext moduli larger than `u64::MAX`
+(`set_plaintext_modulus_biguint`), but the threshold arithmetic binds `t` to a
+machine word: `SmudgingNoiseGenerator::new` and
+`ShareManager::decrypt_from_shares` reject a >64-bit `t` with
+`ParametersError::UnsupportedPlaintextModulus`, checked before any bound or
+reconstruction work. `ShareManager::new` itself does not validate `t`, so
+parameter-build acceptance does not mean the threshold entry points support it.
+
 ### Incomplete protocol orchestration
 
 This module implements sharing, smudging, and decryption — it does **not**
