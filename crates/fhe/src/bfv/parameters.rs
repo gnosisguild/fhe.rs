@@ -128,6 +128,22 @@ impl FheParameters for BfvParameters {}
 unsafe impl Send for BfvParameters {}
 
 impl BfvParameters {
+    /// Maximum number of ciphertext moduli a single parameter set may hold.
+    ///
+    /// This count is a documented resource policy, not a security guarantee and
+    /// not a budget on total construction work: parameter construction builds a
+    /// ciphertext context, a cipher/plaintext bridge, and a multiplication
+    /// context per modulus-switching level, so the moduli count dominates the
+    /// cost of building parameters and of deserializing untrusted
+    /// protobuf-encoded ones. The cap is sized to keep the largest built-in
+    /// [`Self::default_parameters_128`] preset (degree 32768, 16 moduli) and
+    /// the supported large degree-16384 preset (9 moduli) constructible.
+    ///
+    /// Callers processing untrusted input must still bound the polynomial
+    /// degree and gate deserialized parameters before use; the global
+    /// serialized-byte cap (`fhe_traits::MAX_SERIALIZED_BYTES`) is unchanged.
+    pub const MAX_CIPHERTEXT_MODULI: usize = 16;
+
     /// Returns the underlying polynomial degree
     #[must_use]
     pub const fn degree(&self) -> usize {
@@ -455,6 +471,9 @@ impl BfvParametersBuilder {
     /// Sets the sizes of the ciphertext moduli.
     /// Only one of `set_moduli_sizes` and `set_moduli`
     /// can be specified.
+    ///
+    /// At most [`BfvParameters::MAX_CIPHERTEXT_MODULI`] sizes are supported;
+    /// [`Self::build`] rejects larger counts before generating any prime.
     pub fn set_moduli_sizes(&mut self, sizes: &[usize]) -> &mut Self {
         sizes.clone_into(&mut self.ciphertext_moduli_sizes);
         self
@@ -463,6 +482,9 @@ impl BfvParametersBuilder {
     /// Sets the ciphertext moduli to use.
     /// Only one of `set_moduli_sizes` and `set_moduli`
     /// can be specified.
+    ///
+    /// At most [`BfvParameters::MAX_CIPHERTEXT_MODULI`] moduli are supported;
+    /// [`Self::build`] rejects larger counts before validating the moduli.
     pub fn set_moduli(&mut self, moduli: &[u64]) -> &mut Self {
         moduli.clone_into(&mut self.ciphertext_moduli);
         self
@@ -585,6 +607,22 @@ impl BfvParametersBuilder {
         if self.ciphertext_moduli.is_empty() && self.ciphertext_moduli_sizes.is_empty() {
             return Err(Error::ParametersError(
                 ParametersError::MissingCiphertextModulusSpecification,
+            ));
+        }
+
+        // Reject oversized moduli counts before any expensive work: prime
+        // generation, primality testing, and the per-level context and scaler
+        // construction in `build` all scale with this count.
+        let moduli_count = self
+            .ciphertext_moduli
+            .len()
+            .max(self.ciphertext_moduli_sizes.len());
+        if moduli_count > BfvParameters::MAX_CIPHERTEXT_MODULI {
+            return Err(Error::ParametersError(
+                ParametersError::TooManyCiphertextModuli {
+                    actual: moduli_count,
+                    maximum: BfvParameters::MAX_CIPHERTEXT_MODULI,
+                },
             ));
         }
 
@@ -920,6 +958,20 @@ impl Deserialize for BfvParameters {
     fn try_deserialize(bytes: &[u8]) -> Result<Self> {
         let params: Parameters =
             crate::serialization::decode(bytes, crate::SerializedObject::Parameters)?;
+
+        // Reject oversized moduli counts immediately after the cheap protobuf
+        // decode, before any `BigUint` work. The builder rejects the same
+        // condition in `validate_configuration`, but only after the plaintext
+        // modulus has been parsed; each accepted modulus otherwise costs a
+        // full context and scaler construction when building.
+        if params.moduli.len() > BfvParameters::MAX_CIPHERTEXT_MODULI {
+            return Err(Error::ParametersError(
+                ParametersError::TooManyCiphertextModuli {
+                    actual: params.moduli.len(),
+                    maximum: BfvParameters::MAX_CIPHERTEXT_MODULI,
+                },
+            ));
+        }
 
         let plaintext_modulus = match params.plaintext_modulus {
             Some(PlaintextModulusProto::Plaintext(value)) => BigUint::from(value),
@@ -1374,6 +1426,140 @@ mod tests {
     }
 
     #[test]
+    fn builder_rejects_more_than_max_ciphertext_moduli() {
+        // The sizes path is rejected before any prime is generated.
+        let sizes = [62usize; BfvParameters::MAX_CIPHERTEXT_MODULI + 1];
+        assert!(matches!(
+            BfvParametersBuilder::new()
+                .set_degree(16)
+                .set_plaintext_modulus(2)
+                .set_moduli_sizes(&sizes)
+                .build(),
+            Err(FheError::ParametersError(
+                ParametersError::TooManyCiphertextModuli {
+                    actual: 17,
+                    maximum: 16,
+                }
+            ))
+        ));
+
+        // The explicit-moduli path is rejected before the moduli values are
+        // validated, so repeated placeholder values suffice here.
+        let moduli = [97u64; BfvParameters::MAX_CIPHERTEXT_MODULI + 1];
+        assert!(matches!(
+            BfvParametersBuilder::new()
+                .set_degree(16)
+                .set_plaintext_modulus(2)
+                .set_moduli(&moduli)
+                .build(),
+            Err(FheError::ParametersError(
+                ParametersError::TooManyCiphertextModuli {
+                    actual: 17,
+                    maximum: 16,
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn builder_accepts_max_ciphertext_moduli_at_small_degree() -> Result<(), Box<dyn Error>> {
+        let generated = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(2)
+            .set_moduli_sizes(&[62usize; BfvParameters::MAX_CIPHERTEXT_MODULI])
+            .build()?;
+        assert_eq!(generated.moduli.len(), BfvParameters::MAX_CIPHERTEXT_MODULI);
+        assert_eq!(
+            generated.max_level(),
+            BfvParameters::MAX_CIPHERTEXT_MODULI - 1
+        );
+
+        // The explicit-moduli path accepts the same boundary count.
+        let explicit = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(2)
+            .set_moduli(generated.moduli())
+            .build()?;
+        assert_eq!(explicit, generated);
+
+        // A full serialization round-trip succeeds exactly at the supported
+        // count, exercising the deserialization count gate from the accept
+        // side.
+        let round_tripped = BfvParameters::try_deserialize(&generated.to_bytes())?;
+        assert_eq!(round_tripped, generated);
+
+        Ok(())
+    }
+
+    #[test]
+    fn deserialization_rejects_tiny_oversized_moduli_payload() {
+        // A tiny payload with 64 moduli (repeated values suffice: the count
+        // gate runs before the moduli are validated) must be rejected by the
+        // typed error instead of constructing 64 contexts and scalers.
+        let proto = Parameters {
+            degree: 16,
+            moduli: vec![97; 64],
+            variance: 10,
+            plaintext_modulus: Some(PlaintextModulusProto::Plaintext(2)),
+            error1_variance: None,
+        };
+        assert!(matches!(
+            BfvParameters::try_deserialize(&proto.encode_to_vec()),
+            Err(FheError::ParametersError(
+                ParametersError::TooManyCiphertextModuli {
+                    actual: 64,
+                    maximum: 16,
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn adversarial_oversized_moduli_deserialization_is_bounded() {
+        // 64 distinct NTT-friendly moduli for degree 4096 form a tiny protobuf
+        // that used to spend seconds constructing per-level contexts and
+        // scalers during deserialization. The supported-maximum gate must
+        // reject it quickly; the generous bound only has to fail if that gate
+        // stops running before context construction.
+        const OVERSIZED_MODULI_COUNT: usize = 64;
+        let mut moduli = Vec::with_capacity(OVERSIZED_MODULI_COUNT);
+        let mut candidate = 2 * 4096u64 + 1;
+        while moduli.len() < OVERSIZED_MODULI_COUNT {
+            if fhe_util::is_prime(candidate) {
+                moduli.push(candidate);
+            }
+            candidate += 2 * 4096;
+        }
+
+        let bytes = Parameters {
+            degree: 4096,
+            moduli,
+            variance: 10,
+            plaintext_modulus: Some(PlaintextModulusProto::Plaintext(2)),
+            error1_variance: None,
+        }
+        .encode_to_vec();
+
+        let start = std::time::Instant::now();
+        let result = BfvParameters::try_deserialize(&bytes);
+        let elapsed = start.elapsed();
+        assert!(matches!(
+            result,
+            Err(FheError::ParametersError(
+                ParametersError::TooManyCiphertextModuli {
+                    actual: 64,
+                    maximum: 16,
+                }
+            ))
+        ));
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "oversized parameter deserialization took {elapsed:?}; the \
+             ciphertext-moduli count must be checked before building contexts"
+        );
+    }
+
+    #[test]
     fn validates_plaintext_against_ciphertext_moduli() {
         let too_large = BfvParametersBuilder::new()
             .set_degree(16)
@@ -1605,6 +1791,24 @@ mod tests {
             Some(FheError::ParametersError(
                 ParametersError::NoDefaultParameters { plaintext_bits: 10 }
             ))
+        );
+
+        // The largest preset sits exactly at the supported ciphertext-moduli
+        // ceiling. Assert the serialization carries its full structure here;
+        // the count gate itself is degree-independent, so the full
+        // deserialization round-trip at this count is covered cheaply by
+        // `builder_accepts_max_ciphertext_moduli_at_small_degree`.
+        let largest = params
+            .iter()
+            .max_by_key(|parameters| (parameters.degree(), parameters.moduli.len()))
+            .unwrap();
+        assert_eq!(largest.degree(), 32768);
+        let proto = Parameters::decode(largest.to_bytes().as_slice()).unwrap();
+        assert_eq!(proto.degree, 32768);
+        assert_eq!(
+            proto.moduli.as_slice(),
+            largest.moduli.as_ref(),
+            "the largest preset must serialize all of its ciphertext moduli"
         );
     }
 }
