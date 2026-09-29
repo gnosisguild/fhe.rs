@@ -42,6 +42,14 @@ The implementations contained in the `fhe.rs` ecosystem have never been independ
 
 Use at your own risk.
 
+Some API limits are resource policies, not security guarantees and not budgets
+on total construction work: `BfvParameters::MAX_CIPHERTEXT_MODULI` bounds how
+many ciphertext moduli one parameter set may hold (each accepted modulus costs
+a context and scaler per modulus-switching level), and
+`fhe_traits::MAX_SERIALIZED_BYTES` bounds decoder work. Applications
+constructing or deserializing parameters from untrusted sources must still
+bound the polynomial degree and validate parameters before use.
+
 ## Verification
 
 The repository's normal verification commands are:

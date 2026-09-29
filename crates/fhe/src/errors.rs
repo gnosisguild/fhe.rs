@@ -750,6 +750,11 @@ pub enum ParametersError {
     /// Indicates no default parameter set can accommodate a plaintext size.
     #[error("No default parameters support a {plaintext_bits}-bit plaintext modulus")]
     NoDefaultParameters { plaintext_bits: usize },
+
+    /// Indicates that a parameter set requests more ciphertext moduli than the
+    /// supported maximum.
+    #[error("Too many ciphertext moduli: {actual} specified, maximum is {maximum}")]
+    TooManyCiphertextModuli { actual: usize, maximum: usize },
 }
 
 impl ParametersError {
