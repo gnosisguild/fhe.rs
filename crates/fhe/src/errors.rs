@@ -454,6 +454,75 @@ pub enum SerializationError {
         maximum: usize,
     },
 
+    /// Deriving the schema-based encoded-size bound for a locally authorized
+    /// deserialization request (see
+    /// [`EvaluationKey::from_bytes_with_request`][ekbfr]) overflowed the
+    /// platform's addressable range while computing the bound with checked
+    /// arithmetic. The authorized shape cannot be served on this platform.
+    ///
+    /// This is an arithmetic limitation of the derived bound, not a
+    /// rejection of the payload; no payload bytes are read when this error
+    /// is returned.
+    ///
+    /// [ekbfr]: crate::bfv::EvaluationKey::from_bytes_with_request
+    #[error(
+        "the encoded-size bound derived from the authorized request overflows usize on this platform"
+    )]
+    WireBoundOverflow,
+
+    /// A serialized evaluation key carried a Galois key substitution
+    /// exponent outside the set authorized by the locally constructed
+    /// [`EvaluationKeyDecodeRequest`][ekdr] (exponents are compared after
+    /// normalizing modulo `2 * degree`).
+    ///
+    /// [ekdr]: crate::bfv::EvaluationKeyDecodeRequest
+    #[error("Serialized evaluation key contains an unauthorized Galois key exponent {exponent}")]
+    UnexpectedGaloisKeyExponent { exponent: usize },
+
+    /// A serialized evaluation key was missing a Galois key entry that the
+    /// locally constructed [`EvaluationKeyDecodeRequest`][ekdr] authorizes
+    /// with [`GaloisKeySpec::Exactly`][gke]::`Exactly`: the request requires
+    /// the full authorized exponent set, so a key carrying only a subset is
+    /// rejected even though it would decode. The reported exponent is the
+    /// smallest missing authorized exponent.
+    ///
+    /// [ekdr]: crate::bfv::EvaluationKeyDecodeRequest
+    /// [gke]: crate::bfv::GaloisKeySpec
+    #[error("Serialized evaluation key is missing the authorized Galois key exponent {exponent}")]
+    MissingGaloisKeyExponent { exponent: usize },
+
+    /// A locally constructed [`EvaluationKeyDecodeRequest`][ekdr] authorizes
+    /// more distinct Galois key entries than distinct substitution exponents
+    /// exist for the parameters (at most `degree` odd residues modulo
+    /// `2 * degree`), so the request is invalid and no payload can satisfy
+    /// it.
+    ///
+    /// [ekdr]: crate::bfv::EvaluationKeyDecodeRequest
+    #[error(
+        "The request authorizes {requested} distinct Galois key entries; at most {maximum} distinct substitution exponents exist"
+    )]
+    ExcessiveGaloisKeySpec { requested: usize, maximum: usize },
+
+    /// A serialized evaluation key contained more Galois key entries than
+    /// the locally constructed [`EvaluationKeyDecodeRequest`][ekdr]
+    /// authorizes.
+    ///
+    /// [ekdr]: crate::bfv::EvaluationKeyDecodeRequest
+    #[error(
+        "Serialized evaluation key contains {actual} Galois key entries; the request authorizes at most {authorized}"
+    )]
+    GaloisKeyCountExceeded { authorized: usize, actual: usize },
+
+    /// A serialized evaluation key stores its key-switching rows in a form
+    /// (a regenerating seed or explicit polynomial rows) that the locally
+    /// constructed [`EvaluationKeyDecodeRequest`][ekdr] does not authorize.
+    ///
+    /// [ekdr]: crate::bfv::EvaluationKeyDecodeRequest
+    #[error("Serialized evaluation key stores {found}; the request authorizes only {expected}")]
+    SeedPolicyMismatch {
+        expected: &'static str,
+        found: &'static str,
+    },
     /// A protobuf payload could not be decoded.
     #[error("Failed to decode {object:?}: {message}")]
     Decode {
@@ -464,6 +533,13 @@ pub enum SerializationError {
     /// A required protobuf field is absent.
     #[error("Missing required field {field:?}")]
     MissingField { field: SerializedField },
+
+    /// A serialized evaluation key carries two Galois keys for the same
+    /// substitution exponent (compared after normalizing modulo `2 * degree`).
+    /// No constructor can produce that, and decoding used to silently keep
+    /// only the last key, so the payload is rejected.
+    #[error("Serialized evaluation key contains a duplicate Galois key exponent {exponent}")]
+    DuplicateGaloisExponent { exponent: usize },
 
     /// A serialized polynomial collection has the wrong length.
     #[error("{component:?} has {actual} polynomials; expected {expected}")]
