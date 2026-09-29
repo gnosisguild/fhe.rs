@@ -1,6 +1,6 @@
 # fhe.rs: Fully Homomorphic Encryption in Rust
 
-[![continuous integration](https://github.com/tlepoint/fhe.rs/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/tlepoint/fhe.rs/actions/workflows/rust.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![continuous integration](https://github.com/gnosisguild/fhe.rs/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/gnosisguild/fhe.rs/actions/workflows/rust.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 This repository contains the `fhe.rs` library, an experimental cryptographic library in Rust for Ring-LWE-based homomorphic encryption, developed by [Tancrède Lepoint](https://tancre.de).
 For more information about the library, see [fhe.rs](https://fhe.rs).
@@ -8,7 +8,6 @@ For more information about the library, see [fhe.rs](https://fhe.rs).
 The library features:
 
 * An implementation of a RNS-variant of the Brakerski-Fan-Vercauteren (BFV) homomorphic encryption scheme;
-* Performances comparable or better than state-of-the-art libraries in C++ and Go.
 
 > **Note**
 > This library is **not** related to the `tfhe-rs` library (a.k.a. `concrete`), Zama's fully homomorphic encryption in Rust, available at [tfhe.rs](https://github.com/zama-ai/tfhe-rs).
@@ -148,8 +147,8 @@ running:
 
 The test parameter profiles are named `insecure`, `secure8192`, and
 `secure16384`. The `insecure` profile provides fast breadth and negative
-coverage only: it uses the supplied degree-512 threshold parameters, degree-512
-DKG/share-transport parameters, lambda 2, and no multiplicative depth. The
+coverage only: it uses degree-128 threshold and share-transport parameters,
+lambda 2, and a depth-3 test configuration. The
 larger profiles exercise production-like parameter ranges but do not constitute
 a cryptographic security proof. Serialization is an unconditional part of the
 current crate API, so CI tests both default/no-default core builds and the

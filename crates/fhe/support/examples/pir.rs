@@ -1,5 +1,4 @@
-//! CLI configuration for PIR example runs.
-// Expect indexing in examples for simplicity
+//! Shared CLI configuration for the SealPIR and MulPIR examples.
 
 use clap::Parser;
 
@@ -22,6 +21,3 @@ pub struct Cli {
     /// Size in bytes of each database element.
     pub element_size: usize,
 }
-
-#[allow(dead_code)]
-fn main() {}

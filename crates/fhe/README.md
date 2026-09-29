@@ -67,7 +67,7 @@ Note that operations actually happen modulo the `plaintext_modulus`, here set to
 
 ## Examples
 
-More examples exercizing multiple functions from the API are provided in the repository [`examples/`](./examples/). For example, this library implements [SealPIR](https://eprint.iacr.org/2017/1142) and [MulPIR](https://eprint.iacr.org/2019/1483), which can be run as follows:
+More examples exercising multiple functions from the API are provided in the repository [`examples/`](./examples/). For example, this library implements [SealPIR](https://eprint.iacr.org/2017/1142) and [MulPIR](https://eprint.iacr.org/2019/1483), which can be run as follows:
 
 ```bash
 cargo run --release --example sealpir

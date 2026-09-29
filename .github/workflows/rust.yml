@@ -156,13 +156,11 @@ jobs:
           cargo run --release -p fhe --example bfv_mul
           cargo run --release -p fhe --example bfv_ops
           cargo run --release -p fhe --example mulpir
-          cargo run --release -p fhe --example pir
           cargo run --release -p fhe --example rgsw
           cargo run --release -p fhe --example sealpir
           cargo run --release -p fhe --example trlbfv_mul
           cargo run --release -p fhe --all-features --example trbfv_add
           cargo run --release -p fhe --all-features --example trbfv_add_bfv_share
-          cargo run --release -p fhe --all-features --example trbfv_add_bfv_share_insecure
           cargo run --release -p fhe --all-features --example trbfv_mul_bfv_share
           cargo run --release -p fhe --all-features --example trbfv_mul_bfv_share_mbfv_pk
           cargo run --release -p fhe --all-features --example voting

@@ -10,7 +10,12 @@ channel, no FLSS (function-linear secret sharing), and no GURS (guaranteed
 uniform random string) generation. The smudging exchange is assumed to have
 already happened out of band.
 
-This module enables distributed decryption between `n` parties without necessarily involving all of them: any `threshold + 1` of the `n` parties can decrypt a ciphertext, while any coalition of at most `threshold` parties learns nothing. The threshold must be exactly `(n-1)/2` (integer division), the maximal corruption tolerance under an honest majority — see `config.rs` for the derivation.
+This module supplies the sharing and decryption components for `n` parties:
+`threshold + 1` distinct parties can reconstruct under the supported
+parameters. A secrecy claim against a coalition of at most `threshold` parties
+also depends on the paper's assumptions and the external protocol components
+listed below; this library does not establish that claim end to end. The
+threshold must be exactly `(n-1)/2` (integer division) — see `config.rs`.
 
 ## Implementation Boundary
 
@@ -65,20 +70,13 @@ arithmetic. Callers should use `ShareManager`; its high-level share
 generation, aggregation, and reconstruction APIs retain the same logical share
 layout.
 
-> **Breaking change:** the `TRBFV` orchestrator struct has been removed;
-> `ShareManager` is the single public trBFV type (`ShareManager::
-> decrypt_from_shares` is the former `TRBFV::decrypt`). Smudging noise is
-> generated directly with the smudging module's public machinery:
-> `SmudgingConfig::new` (pass the [`FreshNoiseModel`](smudging/bound.rs) that
-> matches the encryption path of the input ciphertexts, and chain
-> `.with_mult_depth(depth)` when needed) →
-> `SmudgingNoiseGenerator::new` → `generate`. Sampled noise remains a non-cloneable
-> `SmudgingNoise` owner that must be dealt with
-> `ShareManager::generate_smudging_shares`, which consumes
-> it, and `ShareManager::bigints_to_poly` has been removed. Downstream code
-> doing generate-then-convert must migrate to the generate-then-deal flow
-> shown under [Usage](#usage); the old symbols fail to compile by design,
-> since a cloneable noise representation cannot enforce one-time use.
+> **Breaking change:** `TRBFV::decrypt` has been replaced by
+> `ShareManager::decrypt_from_shares`. The `TRBFV` orchestrator and
+> `ShareManager::bigints_to_poly` were removed. Use `SmudgingConfig::new`
+> with the correct [`FreshNoiseModel`](smudging/bound.rs) (and
+> `.with_mult_depth(depth)` if needed), then `SmudgingNoiseGenerator::new`
+> and `generate`. Pass the non-cloneable noise owner to
+> `ShareManager::generate_smudging_shares`; see [Usage](#usage).
 
 ## Noise and Correctness Formulas (Urban–Rambaud 2024)
 
@@ -234,6 +232,13 @@ aggregate. Consequently, safe Rust cannot use one live aggregate in two
 decryption calls. The guarantee ends at the explicit transport boundary:
 serialized or copied share matrices can be replayed, so authenticated
 transport and durable replay prevention remain the integrator's responsibility.
+Only dealt and individual shares have public transport operations; this crate
+does not export/import aggregated owners or expose the exact sampled or
+aggregated noise as a proof witness. Applications needing proofs or persistence
+must design those parts outside this API. In particular, retaining transported
+share matrices to re-aggregate after a restart can recreate the same noise:
+the integrator must bind it to its original ciphertext and decryption domain
+and prevent cross-domain reuse durably.
 
 Secret-key share material follows a separate reusable-owner path. Dealing
 returns a non-cloneable `DealtSecretKeyShares`; applications explicitly convert
@@ -262,15 +267,10 @@ parameter-build acceptance does not mean the threshold entry points support it.
 
 ### Incomplete protocol orchestration
 
-This module implements sharing, smudging, and decryption — it does **not**
-include the complete robust protocol stack from Urban–Rambaud&nbsp;2024:
-- No distributed key generation (DKG).
-- No authenticated broadcast channel.
-- No FLSS pre-processing or GURS generation.
-- No proactive refresh or identifiable-abort mechanisms.
-
-Callers who need full end-to-end robust threshold FHE must provide these
-components externally.
+Sharing, smudging, and decryption do not provide the complete robust protocol.
+DKG, authenticated broadcast, FLSS/GURS, retries, and identifiable aborts
+remain at the [integrator boundary](#implementation-boundary). Proactive
+refresh is also not implemented.
 
 ### `lambda` is a caller-chosen policy
 
