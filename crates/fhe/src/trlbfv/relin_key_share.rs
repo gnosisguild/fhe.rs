@@ -20,15 +20,27 @@ use std::sync::Arc;
 ///
 /// Holds the private values that a party must commit to in order to prove
 /// correct construction of its relinearization-key contribution.  The witness
-/// must be kept confidential and **zeroized after use**.
+/// must be kept confidential; every field is a wipe-on-drop owner
+/// ([`Zeroizing`]), so dropping the witness — normally, on an early error,
+/// or during an unwind — erases `r` and both error vectors.
+///
+/// # Keeping the witness values guarded
+///
+/// Keep every error row inside its [`Zeroizing`] owner. Cloning a row yields
+/// a new guarded copy, but moving the inner polynomial out of a guard (for
+/// example with [`std::mem::replace`]) creates an unguarded secret copy that
+/// Rust will drop without wiping; zeroize any extracted value before it
+/// drops.
 pub struct RelinKeyWitness {
     /// Ephemeral randomness key used during RLK generation.
     /// Auto-zeroized when dropped.
     pub r: Zeroizing<SecretKey>,
     /// Per-row errors from `ksk_r_to_s`: `eᵢ` such that `d0ᵢ = eᵢ − sk·d1ᵢ + gᵢ·r`.
-    pub errors_d0: Vec<Poly<NttShoup>>,
+    /// Auto-zeroized when dropped; ownership transfers to the caller.
+    pub errors_d0: Vec<Zeroizing<Poly<NttShoup>>>,
     /// Per-row errors from `ksk_s_to_r`: `eᵢ` such that `d2ᵢ = eᵢ + r·aᵢ + gᵢ·sk`.
-    pub errors_d2: Vec<Poly<NttShoup>>,
+    /// Auto-zeroized when dropped; ownership transfers to the caller.
+    pub errors_d2: Vec<Zeroizing<Poly<NttShoup>>>,
 }
 
 /// A party's additive contribution to threshold l-BFV relinearization-key
@@ -587,6 +599,18 @@ mod tests {
         assert_eq!(share.d2_components().len(), crp_a.len());
         assert_eq!(witness.errors_d0.len(), crp_d1.len());
         assert_eq!(witness.errors_d2.len(), crp_a.len());
+
+        // Witness error rows are wipe-on-drop owners and remain secret in
+        // time policy (compile-time pin of the guarded field types).
+        let errors_d0: &Vec<Zeroizing<Poly<NttShoup>>> = &witness.errors_d0;
+        let errors_d2: &Vec<Zeroizing<Poly<NttShoup>>> = &witness.errors_d2;
+        assert!(
+            errors_d0
+                .iter()
+                .chain(errors_d2.iter())
+                .all(|e| !e.allows_variable_time_computations())
+        );
+
         assert_eq!(share.ciphertext_level(), 0);
         assert_eq!(share.key_level(), 0);
         assert_eq!(share.d0_components()[0].ctx().moduli(), params.moduli());

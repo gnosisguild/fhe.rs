@@ -326,6 +326,12 @@ impl LBFVRelinearizationKey {
     /// - `r` is the ephemeral `SecretKey`; auto-zeroized when dropped.
     /// - `errors_d0[i]` is the small error `eᵢ` such that `d0ᵢ = eᵢ − sk·d1ᵢ + gᵢ·r`.
     /// - `errors_d2[i]` is the small error `eᵢ` such that `d2ᵢ = eᵢ + r·aᵢ + gᵢ·sk`.
+    ///
+    /// The error rows are secret-dependent and are handed over as wipe-on-drop
+    /// [`Zeroizing`] owners: ownership transfers to the caller, each row keeps
+    /// variable-time computations disabled, and dropping it — normally, on an
+    /// early error, or during an unwind — wipes its coefficients and Shoup
+    /// tables.
     #[allow(clippy::type_complexity)]
     pub(crate) fn generate_components_with_polys_extended<R: RngCore + CryptoRng>(
         sk: &SecretKey,
@@ -338,8 +344,8 @@ impl LBFVRelinearizationKey {
         KeySwitchingKey,
         KeySwitchingKey,
         Zeroizing<SecretKey>,
-        Vec<Poly<NttShoup>>,
-        Vec<Poly<NttShoup>>,
+        Vec<Zeroizing<Poly<NttShoup>>>,
+        Vec<Zeroizing<Poly<NttShoup>>>,
     )> {
         let ctx_relin_key = sk.params.context_at_level(key_level)?;
         let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
@@ -1340,10 +1346,14 @@ mod tests {
             .zip(errors_d0.iter())
             .enumerate()
         {
+            // The witness error rows are wipe-on-drop owners and remain
+            // secret in time policy.
+            assert!(!e0_i.allows_variable_time_computations());
             let lhs = (&d0_i.clone().into_ntt() + &(&d1_i.clone().into_ntt() * &sk_ntt))
                 .into_power_basis();
             let gi = rns.get_garner(i).expect("garner");
-            let rhs = (&e0_i.clone().into_ntt() + &(gi * &r_pb).into_ntt()).into_power_basis();
+            let rhs =
+                (&e0_i.as_ref().clone().into_ntt() + &(gi * &r_pb).into_ntt()).into_power_basis();
             assert_eq!(lhs, rhs, "d0 witness equation failed at row {i}");
         }
 
@@ -1363,10 +1373,12 @@ mod tests {
             .zip(errors_d2.iter())
             .enumerate()
         {
+            assert!(!e2_i.allows_variable_time_computations());
             let lhs = (&d2_i.clone().into_ntt() + &(&a_i.clone().into_ntt() * &neg_r_ntt))
                 .into_power_basis();
             let gi = rns.get_garner(i).expect("garner");
-            let rhs = (&e2_i.clone().into_ntt() + &(gi * &sk_pb).into_ntt()).into_power_basis();
+            let rhs =
+                (&e2_i.as_ref().clone().into_ntt() + &(gi * &sk_pb).into_ntt()).into_power_basis();
             assert_eq!(lhs, rhs, "d2 witness equation failed at row {i}");
         }
 
