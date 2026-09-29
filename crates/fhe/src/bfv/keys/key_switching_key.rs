@@ -49,7 +49,10 @@ pub struct KeySwitchingKey {
     /// Context of the key switching key polynomials.
     pub ctx_ksk: Arc<Context>,
 
-    /// For level with only one modulus, we will use basis.
+    /// For a single-modulus key-switching context, the logarithm of the
+    /// decomposition base (`log_modulus / 2`); zero denotes the standard RNS
+    /// decomposition used with a multi-modulus key context. Deserialization
+    /// only accepts these constructor-produced values.
     pub log_base: usize,
 }
 
@@ -837,12 +840,53 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
     fn try_convert_from(value: &KeySwitchingKeyProto, params: &Arc<BfvParameters>) -> Result<Self> {
         let ciphertext_level = value.ciphertext_level as usize;
         let ksk_level = value.ksk_level as usize;
+
+        // The constructors reject an inverted level ordering before any key
+        // material is produced, so the decoder must reject it too instead of
+        // deferring the failure to `key_switch`.
+        if ciphertext_level < ksk_level {
+            return Err(Error::SerializationError(
+                SerializationError::InvalidKeySwitchingLevelOrder {
+                    ciphertext_level,
+                    key_level: ksk_level,
+                },
+            ));
+        }
+
         let ctx_ksk = params.context_at_level(ksk_level)?.clone();
         let ctx_ciphertext = params.context_at_level(ciphertext_level)?.clone();
 
-        let c0_size: usize;
+        // The decomposition base and the row count must match what the
+        // constructors produce for this key context: the standard RNS
+        // decomposition (`log_base = 0`) over a multi-modulus key context, or
+        // the base-2^(log_modulus/2) decomposition over a single-modulus key
+        // context (which the constructors only produce at the maximal
+        // ciphertext and key levels).
         let log_base = value.log_base as usize;
-        if log_base != 0 {
+        let single_modulus_key_context = ctx_ksk.moduli().len() == 1;
+        let expected_log_base = if single_modulus_key_context {
+            ctx_ksk
+                .moduli()
+                .first()
+                .ok_or(fhe_math::Error::EmptyModuli)?
+                .next_power_of_two()
+                .ilog2() as usize
+                / 2
+        } else {
+            0
+        };
+        if log_base != expected_log_base || (single_modulus_key_context && log_base == 0) {
+            return Err(Error::SerializationError(
+                SerializationError::InvalidKeySwitchingLogBase {
+                    log_base,
+                    expected_log_base,
+                },
+            ));
+        }
+
+        let c0_size: usize = if log_base == 0 {
+            ctx_ciphertext.moduli().len()
+        } else {
             if ksk_level != params.max_level() || ciphertext_level != params.max_level() {
                 return Err(Error::SerializationError(
                     SerializationError::InvalidKeySwitchingDecompositionLevels {
@@ -851,14 +895,15 @@ impl BfvTryConvertFrom<&KeySwitchingKeyProto> for KeySwitchingKey {
                         expected: params.max_level(),
                     },
                 ));
-            } else {
-                let log_modulus: usize =
-                    params.moduli().first().unwrap().next_power_of_two().ilog2() as usize;
-                c0_size = log_modulus.div_ceil(log_base);
             }
-        } else {
-            c0_size = ctx_ciphertext.moduli().len();
-        }
+            let log_modulus: usize = ctx_ksk
+                .moduli()
+                .first()
+                .ok_or(fhe_math::Error::EmptyModuli)?
+                .next_power_of_two()
+                .ilog2() as usize;
+            log_modulus.div_ceil(log_base)
+        };
         if value.c0.len() != c0_size {
             return Err(Error::SerializationError(
                 SerializationError::WrongPolynomialCount {
@@ -1540,4 +1585,267 @@ mod tests {
     }
 
     // --- Finding 2: protobuf log_base validation ---
+
+    /// The decoder must reject an inverted level ordering — no constructor
+    /// produces `ciphertext_level < ksk_level`, and the runtime check lives
+    /// in `key_switch`, so accepting it at decode would defer the failure to
+    /// operation time.
+    #[test]
+    fn proto_conversion_rejects_ciphertext_level_below_ksk_level() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx_ksk = params.context_at_level(1)?;
+        let from = Poly::<PowerBasis>::small(ctx_ksk, 10, &mut rng)?;
+        let ksk = KeySwitchingKey::new(&sk, &from, 1, 1, &mut rng)?;
+        let mut proto = KeySwitchingKeyProto::from(&ksk);
+
+        // Tamper: ciphertext level drops below the key level.
+        proto.ciphertext_level = 0;
+        assert!(matches!(
+            KeySwitchingKey::try_convert_from(&proto, &params),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::InvalidKeySwitchingLevelOrder {
+                    ciphertext_level: 0,
+                    key_level: 1,
+                }
+            ))
+        ));
+        Ok(())
+    }
+
+    /// A nonzero `log_base` on a multi-modulus key context is a layout no
+    /// constructor produces (the constructors only set `log_base` on the
+    /// single-modulus decomposition path), including arbitrary oversized
+    /// values that would corrupt the runtime decomposition.
+    #[test]
+    fn proto_conversion_rejects_unsupported_log_base_for_multi_modulus_context()
+    -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+        let ksk = KeySwitchingKey::new(&sk, &from, 0, 0, &mut rng)?;
+        assert_eq!(ksk.log_base, 0);
+
+        for tampered_log_base in [3usize, 70] {
+            let mut proto = KeySwitchingKeyProto::from(&ksk);
+            proto.log_base = tampered_log_base as u32;
+            assert!(matches!(
+                KeySwitchingKey::try_convert_from(&proto, &params),
+                Err(crate::Error::SerializationError(
+                    crate::SerializationError::InvalidKeySwitchingLogBase {
+                        log_base,
+                        expected_log_base: 0,
+                    }
+                )) if log_base == tampered_log_base
+            ));
+        }
+        Ok(())
+    }
+
+    /// A single-modulus key context only supports the base-2^(log_modulus/2)
+    /// decomposition; `log_base = 0` and any other value are layouts no
+    /// constructor produces. The honest decomposition key round-trips as a
+    /// control.
+    #[test]
+    fn proto_conversion_rejects_non_constructor_log_base_for_decomposition_context()
+    -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        assert_eq!(ctx.moduli().len(), 1);
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+        let ksk = KeySwitchingKey::new(&sk, &from, 0, 0, &mut rng)?;
+
+        let modulus = ctx.moduli().first().expect("single modulus");
+        let log_modulus = modulus.next_power_of_two().ilog2() as usize;
+        let expected_log_base = log_modulus / 2;
+        assert!(expected_log_base > 0);
+        assert_eq!(ksk.log_base, expected_log_base);
+
+        // Control: the honest payload round-trips.
+        let decoded =
+            KeySwitchingKey::try_convert_from(&KeySwitchingKeyProto::from(&ksk), &params)?;
+        assert_eq!(decoded, ksk);
+
+        // Tamper: log_base zeroed out...
+        let mut zeroed = KeySwitchingKeyProto::from(&ksk);
+        zeroed.log_base = 0;
+        assert_eq!(expected_log_base, 31); // 62-bit modulus → 62 / 2
+        assert!(matches!(
+            KeySwitchingKey::try_convert_from(&zeroed, &params),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::InvalidKeySwitchingLogBase {
+                    log_base: 0,
+                    expected_log_base: 31,
+                }
+            ))
+        ));
+
+        // ...and both a plausible and an oversized wrong base.
+        for tampered_log_base in [expected_log_base - 1, expected_log_base + 1, 70] {
+            let mut proto = KeySwitchingKeyProto::from(&ksk);
+            proto.log_base = tampered_log_base as u32;
+            assert!(matches!(
+                KeySwitchingKey::try_convert_from(&proto, &params),
+                Err(crate::Error::SerializationError(
+                    crate::SerializationError::InvalidKeySwitchingLogBase {
+                        log_base,
+                        expected_log_base: 31,
+                    }
+                )) if log_base == tampered_log_base
+            ));
+        }
+        Ok(())
+    }
+
+    /// The decoder must enforce the constructor row counts in both
+    /// representations: the seeded representation derives `c1` from the seed,
+    /// the explicit representation embeds `c1`, and neither may carry a
+    /// different number of gadget rows than the constructors produce.
+    #[test]
+    fn proto_conversion_rejects_wrong_row_count() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+        let expected_rows = params.moduli().len();
+
+        // Seeded representation: truncate and extend c0.
+        let seeded = KeySwitchingKey::new(&sk, &from, 0, 0, &mut rng)?;
+        let mut truncated = KeySwitchingKeyProto::from(&seeded);
+        truncated.c0.pop();
+        assert!(matches!(
+            KeySwitchingKey::try_convert_from(&truncated, &params),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::WrongPolynomialCount {
+                    component: crate::SerializedPolynomialComponent::KeySwitchingKeyC0,
+                    expected: 6,
+                    actual: 5,
+                }
+            ))
+        ));
+        let mut extended = KeySwitchingKeyProto::from(&seeded);
+        extended.c0.push(extended.c0.first().expect("row").clone());
+        assert!(KeySwitchingKey::try_convert_from(&extended, &params).is_err());
+
+        // Explicit representation: truncate and extend c1.
+        let c1 = KeySwitchingKey::c1_from_seed(ctx, [43u8; 32], expected_rows);
+        let explicit = KeySwitchingKey::new_with_c1(&sk, &from, c1, 0, 0, &mut rng)?;
+        let mut truncated_c1 = KeySwitchingKeyProto::from(&explicit);
+        truncated_c1.c1.pop();
+        assert!(matches!(
+            KeySwitchingKey::try_convert_from(&truncated_c1, &params),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::WrongPolynomialCount {
+                    component: crate::SerializedPolynomialComponent::KeySwitchingKeyC1,
+                    expected: 6,
+                    actual: 5,
+                }
+            ))
+        ));
+        let mut extended_c1 = KeySwitchingKeyProto::from(&explicit);
+        extended_c1
+            .c1
+            .push(extended_c1.c1.first().expect("row").clone());
+        assert!(KeySwitchingKey::try_convert_from(&extended_c1, &params).is_err());
+
+        // Same row-count enforcement on the decomposition path.
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+        let decomposition = KeySwitchingKey::new(&sk, &from, 0, 0, &mut rng)?;
+        let mut truncated_rows = KeySwitchingKeyProto::from(&decomposition);
+        truncated_rows.c0.pop();
+        assert!(matches!(
+            KeySwitchingKey::try_convert_from(&truncated_rows, &params),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::WrongPolynomialCount {
+                    component: crate::SerializedPolynomialComponent::KeySwitchingKeyC0,
+                    ..
+                }
+            ))
+        ));
+        Ok(())
+    }
+
+    /// Round-trip for the explicit (seedless) representation on both the
+    /// standard RNS and the single-modulus decomposition layouts.
+    #[test]
+    fn proto_conversion_explicit_c1_roundtrip() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        // Standard RNS layout over a multi-modulus context.
+        let params = BfvParameters::default_arc(6, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+        let c1 = KeySwitchingKey::c1_from_seed(ctx, [44u8; 32], params.moduli().len());
+        let explicit = KeySwitchingKey::new_with_c1(&sk, &from, c1, 0, 0, &mut rng)?;
+        assert!(explicit.seed.is_none());
+        let decoded =
+            KeySwitchingKey::try_convert_from(&KeySwitchingKeyProto::from(&explicit), &params)?;
+        assert_eq!(decoded, explicit);
+        assert!(decoded.seed.is_none());
+
+        // Single-modulus decomposition layout at the maximal level.
+        let params = BfvParameters::default_arc(1, 8);
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx = params.context_at_level(0)?;
+        let from = Poly::<PowerBasis>::small(ctx, 10, &mut rng)?;
+        let modulus = ctx.moduli().first().expect("single modulus");
+        let log_modulus = modulus.next_power_of_two().ilog2() as usize;
+        let expected_rows = log_modulus.div_ceil(log_modulus / 2);
+        let c1 = KeySwitchingKey::c1_from_seed(ctx, [45u8; 32], expected_rows);
+        let explicit = KeySwitchingKey::new_with_c1(&sk, &from, c1, 0, 0, &mut rng)?;
+        assert_eq!(explicit.log_base, log_modulus / 2);
+        let decoded =
+            KeySwitchingKey::try_convert_from(&KeySwitchingKeyProto::from(&explicit), &params)?;
+        assert_eq!(decoded, explicit);
+        Ok(())
+    }
+
+    /// Round-trip for seeded keys at nonzero (constructor-compatible)
+    /// levels, on both the standard RNS layout and the single-modulus
+    /// decomposition layout.
+    #[test]
+    fn proto_conversion_nonzero_level_roundtrip() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(6, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+
+        // Ciphertext level 1 with the key at level 0: 5 gadget rows.
+        let ctx_ksk = params.context_at_level(0)?;
+        let from = Poly::<PowerBasis>::small(ctx_ksk, 10, &mut rng)?;
+        let leveled = KeySwitchingKey::new(&sk, &from, 1, 0, &mut rng)?;
+        assert_eq!(leveled.c0.len(), params.context_at_level(1)?.moduli().len());
+        let decoded =
+            KeySwitchingKey::try_convert_from(&KeySwitchingKeyProto::from(&leveled), &params)?;
+        assert_eq!(decoded, leveled);
+
+        // Ciphertext level 2 with the key at level 1.
+        let ctx_ksk = params.context_at_level(1)?;
+        let from = Poly::<PowerBasis>::small(ctx_ksk, 10, &mut rng)?;
+        let leveled = KeySwitchingKey::new(&sk, &from, 2, 1, &mut rng)?;
+        let decoded =
+            KeySwitchingKey::try_convert_from(&KeySwitchingKeyProto::from(&leveled), &params)?;
+        assert_eq!(decoded, leveled);
+
+        // The maximal level is the single-modulus decomposition layout.
+        let max_level = params.max_level();
+        let ctx_ksk = params.context_at_level(max_level)?;
+        let from = Poly::<PowerBasis>::small(ctx_ksk, 10, &mut rng)?;
+        let decomposition = KeySwitchingKey::new(&sk, &from, max_level, max_level, &mut rng)?;
+        assert!(decomposition.log_base > 0);
+        let decoded = KeySwitchingKey::try_convert_from(
+            &KeySwitchingKeyProto::from(&decomposition),
+            &params,
+        )?;
+        assert_eq!(decoded, decomposition);
+        Ok(())
+    }
 }

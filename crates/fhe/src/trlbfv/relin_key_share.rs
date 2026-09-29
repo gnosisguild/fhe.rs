@@ -701,6 +701,20 @@ impl DeserializeParametrized for RelinKeyShare {
             .into());
         }
 
+        // The l-BFV contribution constructors reject single-modulus key and
+        // ciphertext contexts ("These parameters do not support key
+        // switching"), so a serialized share that decodes into such a layout
+        // — including the single-modulus decomposition (`log_base != 0`) the
+        // generic key-switching-key decoder admits — is rejected here
+        // instead of failing later during aggregation.
+        if ksk_r_to_s.ctx_ksk.moduli().len() == 1 || ksk_r_to_s.ctx_ciphertext.moduli().len() == 1 {
+            return Err(SerializationError::InvalidFormat {
+                reason: "RelinKeyShare key-switching contexts must have more than one modulus"
+                    .to_string(),
+            }
+            .into());
+        }
+
         // Reference-string gate: the shared URS `d1` rows (ksk_r_to_s.c1) and
         // CRS `a` rows (ksk_s_to_r.c1) must be distinct within each vector and
         // disjoint across the two vectors. A serialized share built from
@@ -867,6 +881,176 @@ mod proto_tests {
 
         assert!(RelinKeyShare::from_bytes(&operational.to_bytes(), &params).is_err());
         assert!(LBFVRelinearizationKey::from_bytes(&share.to_bytes(), &params).is_err());
+        Ok(())
+    }
+
+    /// Mutation tests for the share decoder: every field the contribution
+    /// constructors constrain (levels, contexts via levels, gadget-row
+    /// counts, and the decomposition base) must be rejected at decode time
+    /// with a typed error instead of surfacing later during aggregation.
+    #[test]
+    fn serialized_share_rejects_inconsistent_layouts() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let share =
+            RelinKeyShare::contribute_with_seed(&sk, [11u8; 32], [12u8; 32], 0, 0, &mut rng)?;
+
+        // Control: the honest payload round-trips.
+        assert_eq!(
+            RelinKeyShare::from_bytes(&share.to_bytes(), &params)?,
+            share
+        );
+        let proto: LbfvRelinKeyShare =
+            LbfvRelinKeyShare::decode(share.to_bytes().as_slice()).expect("valid share proto");
+        let decode_proto = |proto: &LbfvRelinKeyShare| -> Result<RelinKeyShare> {
+            RelinKeyShare::from_bytes(&proto.encode_to_vec(), &params)
+        };
+
+        // Tamper: truncate a gadget row; the decoder must enforce the
+        // constructor row count (one row per ciphertext-context modulus).
+        let mut row_count = proto.clone();
+        if let Some(ksk) = row_count
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_r_to_s.as_mut())
+        {
+            ksk.c0.pop();
+        }
+        assert!(matches!(
+            decode_proto(&row_count),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::WrongPolynomialCount {
+                    component: crate::SerializedPolynomialComponent::KeySwitchingKeyC0,
+                    expected: 3,
+                    actual: 2,
+                }
+            ))
+        ));
+
+        // Tamper: a nonzero decomposition base on a multi-modulus key
+        // context is a layout no l-BFV constructor produces.
+        let mut log_base = proto.clone();
+        if let Some(ksk) = log_base
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_r_to_s.as_mut())
+        {
+            ksk.log_base = 3;
+        }
+        if let Some(ksk) = log_base
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_s_to_r.as_mut())
+        {
+            ksk.log_base = 3;
+        }
+        assert!(matches!(
+            decode_proto(&log_base),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::InvalidKeySwitchingLogBase {
+                    log_base: 3,
+                    expected_log_base: 0,
+                }
+            ))
+        ));
+
+        // Tamper: moving both levels to the maximal level keeps the level
+        // ordering coherent but puts the key context in a single-modulus
+        // context; with the standard `log_base = 0` this is not a
+        // constructor layout.
+        let mut key_level = proto.clone();
+        if let Some(ksk) = key_level
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_r_to_s.as_mut())
+        {
+            ksk.ksk_level = params.max_level() as u32;
+            ksk.ciphertext_level = params.max_level() as u32;
+        }
+        if let Some(ksk) = key_level
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_s_to_r.as_mut())
+        {
+            ksk.ksk_level = params.max_level() as u32;
+            ksk.ciphertext_level = params.max_level() as u32;
+        }
+        assert!(matches!(
+            decode_proto(&key_level),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::InvalidKeySwitchingLogBase { log_base: 0, .. }
+            ))
+        ));
+
+        // Tamper: key levels above the ciphertext level are rejected by the
+        // key-switching-key decoder before any rows are inspected.
+        let mut level_order = proto.clone();
+        if let Some(ksk) = level_order
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_r_to_s.as_mut())
+        {
+            ksk.ksk_level = 1;
+        }
+        if let Some(ksk) = level_order
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_s_to_r.as_mut())
+        {
+            ksk.ksk_level = 1;
+        }
+        assert!(matches!(
+            decode_proto(&level_order),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::InvalidKeySwitchingLevelOrder {
+                    ciphertext_level: 0,
+                    key_level: 1,
+                }
+            ))
+        ));
+
+        // Tamper: a maximal ciphertext level (one-modulus ciphertext
+        // context) with matching row surgery is still a layout the l-BFV
+        // constructors reject, so the decoder must not accept it even though
+        // the row counts now cohere.
+        let mut single_modulus = proto.clone();
+        if let Some(contribution) = single_modulus.contribution.as_mut() {
+            if let Some(ksk) = contribution.ksk_r_to_s.as_mut() {
+                ksk.ciphertext_level = params.max_level() as u32;
+                ksk.c0.truncate(1);
+                ksk.c1.truncate(1);
+            }
+            if let Some(ksk) = contribution.ksk_s_to_r.as_mut() {
+                ksk.ciphertext_level = params.max_level() as u32;
+                ksk.c0.truncate(1);
+                ksk.c1.truncate(1);
+            }
+        }
+        assert!(matches!(
+            decode_proto(&single_modulus),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::InvalidFormat { reason }
+            )) if reason.contains("one modulus")
+        ));
+
+        Ok(())
+    }
+
+    /// Valid seeded shares round-trip at a nonzero ciphertext level too.
+    #[test]
+    fn serialized_share_roundtrips_nonzero_ciphertext_level() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let share =
+            RelinKeyShare::contribute_with_seed(&sk, [14u8; 32], [15u8; 32], 1, 0, &mut rng)?;
+        assert_eq!(share.ciphertext_level(), 1);
+        assert_eq!(share.key_level(), 0);
+        assert_eq!(
+            RelinKeyShare::from_bytes(&share.to_bytes(), &params)?,
+            share
+        );
         Ok(())
     }
 }

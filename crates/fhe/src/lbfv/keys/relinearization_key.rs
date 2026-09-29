@@ -130,6 +130,11 @@ impl LBFVRelinearizationKey {
     /// Return the key-switching decomposition base logarithm.
     ///
     /// A value of zero denotes the RNS decomposition used by l-BFV.
+    /// Deserialization and [`from_components`](Self::from_components) only
+    /// accept constructor-compatible layouts, so for an operational l-BFV
+    /// key this is always zero: the single-modulus decomposition
+    /// (`log_base != 0`) is rejected because the l-BFV constructors refuse
+    /// single-modulus key and ciphertext contexts.
     #[must_use]
     pub const fn decomposition_log_base(&self) -> usize {
         self.ksk_r_to_s.log_base
@@ -418,6 +423,23 @@ impl LBFVRelinearizationKey {
     /// reference strings: repeated rows within either vector and rows shared
     /// between the two vectors are rejected, so no operational key built from
     /// observably reused randomness is ever returned.
+    ///
+    /// # Structural invariants
+    ///
+    /// The components must describe the layout the l-BFV constructors
+    /// produce: matching parameters, ciphertext level, key level, and
+    /// decomposition base; contexts in both KSKs that match the parameters
+    /// at the declared levels (and therefore each other; compared by value,
+    /// so distinct but value-equal contexts are accepted); a ciphertext
+    /// level not below the key level; key-switching contexts with more than
+    /// one modulus; the standard RNS decomposition (`log_base = 0`); gadget
+    /// rows in both KSKs whose count equals the number of
+    /// ciphertext-context moduli and whose c0 rows use the key context (the
+    /// c1 rows are context-gated by the reference-string validation); and a
+    /// `b_vec` of `#moduli − ciphertext_level` polynomials, each using the
+    /// key context. These are the same invariants the deserializers enforce,
+    /// so an aggregated key is never built from shares the decoders would
+    /// have rejected.
     pub(crate) fn from_components(
         ksk_r_to_s: KeySwitchingKey,
         ksk_s_to_r: KeySwitchingKey,
@@ -454,6 +476,75 @@ impl LBFVRelinearizationKey {
             ));
         }
 
+        // The l-BFV constructors reject single-modulus key and ciphertext
+        // contexts and never produce the single-modulus decomposition
+        // (`log_base != 0`), so only the standard RNS layout over
+        // multi-modulus contexts is accepted here. An inverted level
+        // ordering, a context that does not match the parameters at the
+        // declared levels (including stale context fields), or a row count
+        // that does not match the ciphertext context is likewise rejected
+        // at this boundary instead of surfacing later during
+        // relinearization.
+        if ksk_r_to_s.ciphertext_level < ksk_r_to_s.ksk_level {
+            return Err(Error::DefaultError(
+                "RLK KSKs have ciphertext_level below ksk_level".to_string(),
+            ));
+        }
+        // Both KSKs must carry the contexts the parameters derive at the
+        // (already-matched) declared levels; context equality is by value,
+        // so distinct but value-equal contexts are accepted.
+        let expected_ctx_ciphertext = ksk_r_to_s
+            .params
+            .context_at_level(ksk_r_to_s.ciphertext_level)?
+            .clone();
+        let expected_ctx_ksk = ksk_r_to_s
+            .params
+            .context_at_level(ksk_r_to_s.ksk_level)?
+            .clone();
+        if ksk_r_to_s.ctx_ciphertext != expected_ctx_ciphertext
+            || ksk_r_to_s.ctx_ksk != expected_ctx_ksk
+            || ksk_s_to_r.ctx_ciphertext != expected_ctx_ciphertext
+            || ksk_s_to_r.ctx_ksk != expected_ctx_ksk
+        {
+            return Err(Error::DefaultError(
+                "RLK KSK contexts do not match the parameters at the declared levels".to_string(),
+            ));
+        }
+        if ksk_r_to_s.ctx_ksk.moduli().len() == 1 || ksk_r_to_s.ctx_ciphertext.moduli().len() == 1 {
+            return Err(Error::DefaultError(
+                "These parameters do not support key switching".to_string(),
+            ));
+        }
+        if ksk_r_to_s.log_base != 0 {
+            return Err(Error::DefaultError(
+                "RLK KSKs must use the standard RNS decomposition (log_base = 0)".to_string(),
+            ));
+        }
+        // Both KSKs must carry one gadget row per ciphertext-context
+        // modulus, and every c0 row must use the key context: internal
+        // c0/c1 agreement alone is not enough (a truncated-but-internally-
+        // consistent KSK would otherwise pass), the c1 rows are already
+        // context-gated by the reference-string check below, and a c0 row
+        // in another context would fail only during relinearization.
+        let expected_rows = ksk_r_to_s.ctx_ciphertext.moduli().len();
+        for (name, ksk) in [("ksk_r_to_s", &ksk_r_to_s), ("ksk_s_to_r", &ksk_s_to_r)] {
+            if ksk.c0.len() != expected_rows {
+                return Err(Error::DefaultError(format!(
+                    "{name} row count mismatch: expected {expected_rows}, got {}",
+                    ksk.c0.len()
+                )));
+            }
+            if let Some(i) = ksk
+                .c0
+                .iter()
+                .position(|row| row.ctx() != &ksk_r_to_s.ctx_ksk)
+            {
+                return Err(Error::DefaultError(format!(
+                    "{name} c0 polynomial at index {i} does not use the key context"
+                )));
+            }
+        }
+
         let expected_b_vec_len = ksk_r_to_s
             .params
             .moduli()
@@ -466,6 +557,14 @@ impl LBFVRelinearizationKey {
             return Err(Error::DefaultError(format!(
                 "b_vec length mismatch: expected {expected_b_vec_len}, got {}",
                 b_vec.len()
+            )));
+        }
+        // Each b_vec row must live in the key context: relinearization
+        // combines them with the key-switching rows, and a row from any
+        // other context cannot be reduced into the ciphertext context.
+        if let Some(i) = b_vec.iter().position(|b| b.ctx() != &ksk_r_to_s.ctx_ksk) {
+            return Err(Error::DefaultError(format!(
+                "b_vec polynomial at index {i} does not use the key context"
             )));
         }
 
@@ -971,46 +1070,71 @@ impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
         )?;
 
         // --- Cross-KSK structural validation ---
+        // These checks keep the decoder's accepted shape in sync with
+        // `from_components` and the share decoder: an inconsistent layout is
+        // rejected with a typed serialization error instead of failing later
+        // during relinearization.
         if ksk_s_to_r.params != ksk_r_to_s.params {
-            return Err(Error::DefaultError(
-                "RLK KSKs have mismatched parameters".to_string(),
-            ));
+            return Err(SerializationError::InvalidFormat {
+                reason: "RLK KSKs have mismatched parameters".to_string(),
+            }
+            .into());
         }
         if ksk_s_to_r.ciphertext_level != ksk_r_to_s.ciphertext_level {
-            return Err(Error::DefaultError(
-                "RLK KSKs have mismatched ciphertext levels".to_string(),
-            ));
+            return Err(SerializationError::InvalidFormat {
+                reason: "RLK KSKs have mismatched ciphertext levels".to_string(),
+            }
+            .into());
         }
         if ksk_s_to_r.ksk_level != ksk_r_to_s.ksk_level {
-            return Err(Error::DefaultError(
-                "RLK KSKs have mismatched key levels".to_string(),
-            ));
+            return Err(SerializationError::InvalidFormat {
+                reason: "RLK KSKs have mismatched key levels".to_string(),
+            }
+            .into());
         }
         if ksk_s_to_r.ctx_ciphertext != ksk_r_to_s.ctx_ciphertext {
-            return Err(Error::DefaultError(
-                "RLK KSKs have mismatched ciphertext contexts".to_string(),
-            ));
+            return Err(SerializationError::InvalidFormat {
+                reason: "RLK KSKs have mismatched ciphertext contexts".to_string(),
+            }
+            .into());
         }
         if ksk_s_to_r.ctx_ksk != ksk_r_to_s.ctx_ksk {
-            return Err(Error::DefaultError(
-                "RLK KSKs have mismatched key contexts".to_string(),
-            ));
+            return Err(SerializationError::InvalidFormat {
+                reason: "RLK KSKs have mismatched key contexts".to_string(),
+            }
+            .into());
         }
         if ksk_s_to_r.log_base != ksk_r_to_s.log_base {
-            return Err(Error::DefaultError(
-                "RLK KSKs have mismatched log_base".to_string(),
-            ));
+            return Err(SerializationError::InvalidFormat {
+                reason: "RLK KSKs have mismatched log_base".to_string(),
+            }
+            .into());
         }
         // Validate c0/c1 dimensions in each KSK
         if ksk_r_to_s.c0.len() != ksk_r_to_s.c1.len() {
-            return Err(Error::DefaultError(
-                "ksk_r_to_s has mismatched c0/c1 dimensions".to_string(),
-            ));
+            return Err(SerializationError::InvalidFormat {
+                reason: "ksk_r_to_s has mismatched c0/c1 dimensions".to_string(),
+            }
+            .into());
         }
         if ksk_s_to_r.c0.len() != ksk_s_to_r.c1.len() {
-            return Err(Error::DefaultError(
-                "ksk_s_to_r has mismatched c0/c1 dimensions".to_string(),
-            ));
+            return Err(SerializationError::InvalidFormat {
+                reason: "ksk_s_to_r has mismatched c0/c1 dimensions".to_string(),
+            }
+            .into());
+        }
+
+        // The l-BFV constructors reject single-modulus key and ciphertext
+        // contexts ("These parameters do not support key switching"), so a
+        // serialized key that decodes into such a layout — including the
+        // single-modulus decomposition (`log_base != 0`) the generic
+        // key-switching-key decoder admits — is rejected here instead of
+        // failing later during relinearization.
+        if ksk_r_to_s.ctx_ksk.moduli().len() == 1 || ksk_r_to_s.ctx_ciphertext.moduli().len() == 1 {
+            return Err(SerializationError::InvalidFormat {
+                reason: "RLK key-switching contexts must have more than one modulus".to_string(),
+            }
+            .into());
         }
 
         // Reference-string gate: the shared URS `d1` rows (ksk_r_to_s.c1) and
@@ -1028,23 +1152,25 @@ impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
             .moduli()
             .len()
             .checked_sub(ksk_r_to_s.ciphertext_level)
-            .ok_or_else(|| {
-                Error::DefaultError(
-                    "Invalid b_vec: ciphertext_level exceeds modulus count".to_string(),
-                )
+            .ok_or_else(|| SerializationError::InvalidFormat {
+                reason: "Invalid b_vec: ciphertext_level exceeds modulus count".to_string(),
             })?;
         if value.b_vec.len() != expected_b_vec_len {
-            return Err(Error::DefaultError(format!(
-                "Invalid b_vec length: expected {expected_b_vec_len}, got {}",
-                value.b_vec.len()
-            )));
+            return Err(SerializationError::WrongPolynomialCount {
+                component: crate::SerializedPolynomialComponent::RelinearizationKeyBVec,
+                expected: expected_b_vec_len,
+                actual: value.b_vec.len(),
+            }
+            .into());
         }
 
         let key_ctx = ksk_r_to_s.ctx_ksk.clone();
         let mut b_vec = Vec::with_capacity(value.b_vec.len());
         for (i, poly_bytes) in value.b_vec.iter().enumerate() {
             let poly = Poly::<NttShoup>::from_bytes(poly_bytes, &key_ctx).map_err(|e| {
-                Error::DefaultError(format!("Invalid b_vec polynomial at index {i}: {e}"))
+                SerializationError::InvalidFormat {
+                    reason: format!("Invalid b_vec polynomial at index {i}: {e}"),
+                }
             })?;
             b_vec.push(poly);
         }
@@ -1752,6 +1878,385 @@ mod tests {
                 }
             ))
         ));
+
+        Ok(())
+    }
+
+    /// Mutation tests for the operational l-BFV RLK decoder: every field the
+    /// l-BFV constructors constrain (levels, contexts via levels, gadget-row
+    /// counts, the decomposition base, and `b_vec`) must be rejected at
+    /// decode time with a typed error instead of deferring to
+    /// `relinearizes`.
+    #[test]
+    fn serialized_rlk_rejects_inconsistent_layouts() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+        let key = LBFVRelinearizationKey::new(&sk, &pk, Some([91u8; 32]), &mut rng)?;
+
+        // Control: the honest payload round-trips.
+        assert_eq!(
+            LBFVRelinearizationKey::from_bytes(&key.to_bytes(), &params)?,
+            key
+        );
+
+        let decode_proto =
+            |proto: &LBFVRelinearizationKeyProto| -> std::result::Result<LBFVRelinearizationKey, crate::Error> {
+                LBFVRelinearizationKey::from_bytes(&proto.encode_to_vec(), &params)
+            };
+
+        // Control: decoding the re-encoded proto keeps the same rows.
+        let proto: LBFVRelinearizationKeyProto =
+            LBFVRelinearizationKeyProto::decode(key.to_bytes().as_slice())?;
+        assert_eq!(decode_proto(&proto)?, key);
+
+        // Tamper: truncate a gadget row; the decoder must enforce the
+        // constructor row count (one row per ciphertext-context modulus).
+        let mut row_count = proto.clone();
+        row_count.ksk_r_to_s.as_mut().expect("ksk_r_to_s").c0.pop();
+        assert!(matches!(
+            decode_proto(&row_count),
+            Err(crate::Error::SerializationError(
+                SerializationError::WrongPolynomialCount {
+                    component: crate::SerializedPolynomialComponent::KeySwitchingKeyC0,
+                    expected: 3,
+                    actual: 2,
+                }
+            ))
+        ));
+
+        // Tamper: a nonzero decomposition base on a multi-modulus key
+        // context is a layout no l-BFV constructor produces.
+        let mut log_base = proto.clone();
+        if let Some(ksk) = log_base.ksk_r_to_s.as_mut() {
+            ksk.log_base = 3;
+        }
+        if let Some(ksk) = log_base.ksk_s_to_r.as_mut() {
+            ksk.log_base = 3;
+        }
+        assert!(matches!(
+            decode_proto(&log_base),
+            Err(crate::Error::SerializationError(
+                SerializationError::InvalidKeySwitchingLogBase {
+                    log_base: 3,
+                    expected_log_base: 0,
+                }
+            ))
+        ));
+
+        // Tamper: moving both levels to the maximal level keeps the level
+        // ordering coherent but puts the key context in a single-modulus
+        // context; with the standard `log_base = 0` this is not a
+        // constructor layout.
+        let mut key_level = proto.clone();
+        if let Some(ksk) = key_level.ksk_r_to_s.as_mut() {
+            ksk.ksk_level = params.max_level() as u32;
+            ksk.ciphertext_level = params.max_level() as u32;
+        }
+        if let Some(ksk) = key_level.ksk_s_to_r.as_mut() {
+            ksk.ksk_level = params.max_level() as u32;
+            ksk.ciphertext_level = params.max_level() as u32;
+        }
+        assert!(matches!(
+            decode_proto(&key_level),
+            Err(crate::Error::SerializationError(
+                SerializationError::InvalidKeySwitchingLogBase { log_base: 0, .. }
+            ))
+        ));
+
+        // Tamper: key levels above the ciphertext level are rejected by the
+        // key-switching-key decoder before any rows are inspected.
+        let mut level_order = proto.clone();
+        if let Some(ksk) = level_order.ksk_r_to_s.as_mut() {
+            ksk.ksk_level = 1;
+        }
+        if let Some(ksk) = level_order.ksk_s_to_r.as_mut() {
+            ksk.ksk_level = 1;
+        }
+        assert!(matches!(
+            decode_proto(&level_order),
+            Err(crate::Error::SerializationError(
+                SerializationError::InvalidKeySwitchingLevelOrder {
+                    ciphertext_level: 0,
+                    key_level: 1,
+                }
+            ))
+        ));
+
+        // Tamper: a maximal ciphertext level (one-modulus ciphertext
+        // context) with matching row surgery is still a layout the l-BFV
+        // constructors reject, so the decoder must not accept it even though
+        // the row counts now cohere.
+        let mut single_modulus = proto.clone();
+        {
+            let ksk_r_to_s = single_modulus.ksk_r_to_s.as_mut().expect("ksk_r_to_s");
+            ksk_r_to_s.ciphertext_level = params.max_level() as u32;
+            ksk_r_to_s.c0.truncate(1);
+            ksk_r_to_s.c1.truncate(1);
+            let ksk_s_to_r = single_modulus.ksk_s_to_r.as_mut().expect("ksk_s_to_r");
+            ksk_s_to_r.ciphertext_level = params.max_level() as u32;
+            ksk_s_to_r.c0.truncate(1);
+            ksk_s_to_r.c1.truncate(1);
+            single_modulus.b_vec.truncate(1);
+        }
+        assert!(matches!(
+            decode_proto(&single_modulus),
+            Err(crate::Error::SerializationError(
+                SerializationError::InvalidFormat { reason }
+            )) if reason.contains("one modulus")
+        ));
+
+        // Tamper: an extra `b_vec` row breaks the `#moduli − ciphertext
+        // level` invariant.
+        let mut b_vec = proto.clone();
+        let extra_row = b_vec.b_vec.first().expect("b_vec row").clone();
+        b_vec.b_vec.push(extra_row);
+        assert!(matches!(
+            decode_proto(&b_vec),
+            Err(crate::Error::SerializationError(
+                SerializationError::WrongPolynomialCount {
+                    component: crate::SerializedPolynomialComponent::RelinearizationKeyBVec,
+                    expected: 3,
+                    actual: 4,
+                }
+            ))
+        ));
+
+        Ok(())
+    }
+
+    /// Valid seeded keys round-trip at a nonzero ciphertext level too.
+    #[test]
+    fn serialized_rlk_roundtrips_nonzero_ciphertext_level() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+
+        let key = LBFVRelinearizationKey::new_leveled(&sk, &pk, Some([93u8; 32]), 1, 0, &mut rng)?;
+        assert_eq!(key.ciphertext_level(), 1);
+        assert_eq!(key.key_level(), 0);
+        assert_eq!(
+            LBFVRelinearizationKey::from_bytes(&key.to_bytes(), &params)?,
+            key
+        );
+        Ok(())
+    }
+
+    /// `from_components` enforces the same structural invariants as the
+    /// decoders, so an operational key can never be assembled — directly or
+    /// through aggregation — from KSKs the deserializers would have
+    /// rejected.
+    #[test]
+    fn from_components_rejects_inconsistent_ksk_layouts() -> Result<(), Box<dyn Error>> {
+        use crate::bfv::KeySwitchingKey;
+
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = LBFVPublicKey::new(&sk, &mut rng)?;
+        let b_vec = pk.extract_b_polynomials(0, 0, Representation::NttShoup)?;
+
+        // Control: honest components assemble.
+        let (ksk_r_to_s, ksk_s_to_r) = LBFVRelinearizationKey::generate_components_with_seed(
+            &sk, [95u8; 32], [96u8; 32], 0, 0, &mut rng,
+        )?;
+        assert!(
+            LBFVRelinearizationKey::from_components(
+                ksk_r_to_s.clone(),
+                ksk_s_to_r.clone(),
+                b_vec.clone(),
+            )
+            .is_ok()
+        );
+
+        // Tamper: key levels above the ciphertext level.
+        let mut below = ksk_r_to_s.clone();
+        below.ksk_level = 1;
+        let mut below_s = ksk_s_to_r.clone();
+        below_s.ksk_level = 1;
+        assert!(matches!(
+            LBFVRelinearizationKey::from_components(below, below_s, b_vec.clone()),
+            Err(crate::Error::DefaultError(msg)) if msg.contains("ciphertext_level below ksk_level")
+        ));
+
+        // Tamper: `log_base != 0` on multi-modulus contexts is a layout the
+        // l-BFV constructors never produce.
+        let mut decomposition = ksk_r_to_s.clone();
+        decomposition.log_base = 31;
+        let mut decomposition_s = ksk_s_to_r.clone();
+        decomposition_s.log_base = 31;
+        assert!(matches!(
+            LBFVRelinearizationKey::from_components(decomposition, decomposition_s, b_vec.clone()),
+            Err(crate::Error::DefaultError(msg)) if msg.contains("standard RNS decomposition")
+        ));
+
+        // Tamper: a gadget-row count that does not match the ciphertext
+        // context (dims kept equal so the earlier per-KSK check passes).
+        let drop_last_row = |ksk: &mut KeySwitchingKey| {
+            let mut c0 = ksk.c0.to_vec();
+            c0.pop();
+            let mut c1 = ksk.c1.to_vec();
+            c1.pop();
+            ksk.c0 = c0.into_boxed_slice();
+            ksk.c1 = c1.into_boxed_slice();
+        };
+        let mut rows = ksk_r_to_s.clone();
+        drop_last_row(&mut rows);
+        let mut rows_s = ksk_s_to_r.clone();
+        drop_last_row(&mut rows_s);
+        assert!(matches!(
+            LBFVRelinearizationKey::from_components(rows, rows_s, b_vec.clone()),
+            Err(crate::Error::DefaultError(msg)) if msg.contains("row count mismatch")
+        ));
+
+        // Tamper: a one-modulus ciphertext context. The generic key-switching
+        // key constructor supports this layout, but the l-BFV constructors
+        // reject it, so `from_components` must reject it too.
+        let ctx_ksk = params.context_at_level(params.max_level() - 1)?;
+        let from_1 = Poly::<PowerBasis>::small(ctx_ksk, 10, &mut rng)?;
+        let from_2 = Poly::<PowerBasis>::small(ctx_ksk, 10, &mut rng)?;
+        let single_ct_1 = KeySwitchingKey::new(&sk, &from_1, params.max_level(), 1, &mut rng)?;
+        let single_ct_2 = KeySwitchingKey::new(&sk, &from_2, params.max_level(), 1, &mut rng)?;
+        assert_eq!(single_ct_1.log_base, 0);
+        assert_eq!(
+            single_ct_1.ctx_ciphertext.moduli().len(),
+            1,
+            "the ciphertext context must be single-modulus for this mutation"
+        );
+        let single_ct_rows = single_ct_1.c0.to_vec();
+        assert!(matches!(
+            LBFVRelinearizationKey::from_components(single_ct_1, single_ct_2, single_ct_rows),
+            Err(crate::Error::DefaultError(msg))
+                if msg.contains("do not support key switching")
+        ));
+
+        // Tamper: a one-modulus key context (the single-modulus decomposition
+        // layout) is likewise rejected.
+        let ctx_max = params.context_at_level(params.max_level())?;
+        let from_1 = Poly::<PowerBasis>::small(ctx_max, 10, &mut rng)?;
+        let from_2 = Poly::<PowerBasis>::small(ctx_max, 10, &mut rng)?;
+        let single_key_1 = KeySwitchingKey::new(&sk, &from_1, params.max_level(), 2, &mut rng)?;
+        let single_key_2 = KeySwitchingKey::new(&sk, &from_2, params.max_level(), 2, &mut rng)?;
+        assert!(single_key_1.log_base > 0);
+        let single_key_rows = single_key_1.c0.to_vec();
+        assert!(matches!(
+            LBFVRelinearizationKey::from_components(single_key_1, single_key_2, single_key_rows),
+            Err(crate::Error::DefaultError(msg))
+                if msg.contains("do not support key switching")
+        ));
+
+        // Tamper: an s_to_r KSK truncated to a shorter but internally
+        // matched row count must be caught by the shared expected count,
+        // not only by the r_to_s check.
+        let mut truncated_s = ksk_s_to_r.clone();
+        drop_last_row(&mut truncated_s);
+        assert!(matches!(
+            LBFVRelinearizationKey::from_components(
+                ksk_r_to_s.clone(),
+                truncated_s,
+                b_vec.clone(),
+            ),
+            Err(crate::Error::DefaultError(msg))
+                if msg.contains("ksk_s_to_r row count mismatch")
+        ));
+
+        // Tamper: an s_to_r KSK whose key context belongs to another level
+        // does not describe one coherent layout with its r_to_s partner.
+        let mut cross_ctx = ksk_s_to_r.clone();
+        cross_ctx.ctx_ksk = params.context_at_level(1)?.clone();
+        assert!(matches!(
+            LBFVRelinearizationKey::from_components(
+                ksk_r_to_s.clone(),
+                cross_ctx,
+                b_vec.clone(),
+            ),
+            Err(crate::Error::DefaultError(msg))
+                if msg.contains("do not match the parameters at the declared levels")
+        ));
+
+        // Tamper: stale context fields inconsistent with the declared
+        // levels (levels moved up coherently, contexts left at level 0)
+        // must be rejected even though the levels themselves are valid.
+        let mut stale_r = ksk_r_to_s.clone();
+        stale_r.ciphertext_level = 1;
+        stale_r.ksk_level = 1;
+        let mut stale_s = ksk_s_to_r.clone();
+        stale_s.ciphertext_level = 1;
+        stale_s.ksk_level = 1;
+        assert!(matches!(
+            LBFVRelinearizationKey::from_components(stale_r, stale_s, b_vec.clone()),
+            Err(crate::Error::DefaultError(msg))
+                if msg.contains("do not match the parameters at the declared levels")
+        ));
+
+        // Tamper: a b_vec row from another context cannot participate in
+        // relinearization and must be rejected even at the correct length.
+        let ctx_other = params.context_at_level(1)?;
+        let stray = Poly::<NttShoup>::try_convert_from(
+            vec![0u64; ctx_other.moduli().len() * params.degree()],
+            ctx_other,
+            false,
+        )
+        .map_err(crate::Error::MathError)?;
+        let mut wrong_ctx_b_vec = b_vec.clone();
+        *wrong_ctx_b_vec.first_mut().expect("b_vec row") = stray;
+        assert!(matches!(
+            LBFVRelinearizationKey::from_components(
+                ksk_r_to_s.clone(),
+                ksk_s_to_r.clone(),
+                wrong_ctx_b_vec,
+            ),
+            Err(crate::Error::DefaultError(msg))
+                if msg.contains("does not use the key context")
+        ));
+
+        // Tamper: c0 rows are caller-supplied (KeySwitchingKey fields are
+        // public), so a row from another context — which would fail only
+        // during relinearization — must be rejected in both KSKs.
+        let stray_c0 = Poly::<NttShoup>::try_convert_from(
+            vec![0u64; ctx_other.moduli().len() * params.degree()],
+            ctx_other,
+            false,
+        )
+        .map_err(crate::Error::MathError)?;
+        let mut stray_r = ksk_r_to_s.clone();
+        let mut r_rows = stray_r.c0.to_vec();
+        *r_rows.first_mut().expect("c0 row") = stray_c0.clone();
+        stray_r.c0 = r_rows.into_boxed_slice();
+        assert!(matches!(
+            LBFVRelinearizationKey::from_components(stray_r, ksk_s_to_r.clone(), b_vec.clone()),
+            Err(crate::Error::DefaultError(msg)) if msg.contains(
+                "ksk_r_to_s c0 polynomial at index 0 does not use the key context"
+            )
+        ));
+        let mut stray_s = ksk_s_to_r.clone();
+        let mut s_rows = stray_s.c0.to_vec();
+        *s_rows.first_mut().expect("c0 row") = stray_c0;
+        stray_s.c0 = s_rows.into_boxed_slice();
+        assert!(matches!(
+            LBFVRelinearizationKey::from_components(ksk_r_to_s.clone(), stray_s, b_vec.clone()),
+            Err(crate::Error::DefaultError(msg)) if msg.contains(
+                "ksk_s_to_r c0 polynomial at index 0 does not use the key context"
+            )
+        ));
+
+        // Value-equal but distinct contexts are still accepted: the
+        // aggregation path compares decoded contexts by value, so identity
+        // must not be required.
+        let twin_ctx_ksk =
+            Context::new_arc(params.moduli(), params.degree()).map_err(crate::Error::MathError)?;
+        assert!(
+            !Arc::ptr_eq(&twin_ctx_ksk, params.context_at_level(0)?),
+            "the rebuilt context must be a distinct allocation"
+        );
+        let twin_r = {
+            let mut twin = ksk_r_to_s.clone();
+            twin.ctx_ksk = twin_ctx_ksk;
+            twin
+        };
+        LBFVRelinearizationKey::from_components(twin_r, ksk_s_to_r.clone(), b_vec.clone())?;
 
         Ok(())
     }
