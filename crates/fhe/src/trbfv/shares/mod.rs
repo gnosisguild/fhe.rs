@@ -3,8 +3,10 @@
 //! This module provides the ShareManager struct that handles aggregation of secret shares
 //! and computation of decryption shares in the threshold BFV scheme.
 
+mod decryption;
 mod secret_key;
 
+pub use decryption::DecryptionShare;
 pub use secret_key::{AggregatedSecretKeyShare, DealtSecretKeyShares, SecretKeyShare};
 
 use super::prf::PartyPrfKeys;
@@ -67,68 +69,6 @@ pub struct ShareManager {
     threshold: usize,
     /// BFV parameters (degree, moduli, etc.)
     params: Arc<BfvParameters>,
-}
-
-/// A partial decryption bound to one party, designated set `S`, and ciphertext.
-///
-/// Created by [`ShareManager::decryption_share`] or reconstructed after
-/// transport with [`DecryptionShare::from_parts`]. FinDec rejects a slice
-/// whose members were produced for different sets or ciphertexts.
-#[derive(Clone)]
-pub struct DecryptionShare {
-    poly: Poly<PowerBasis>,
-    party_id: usize,
-    decryptors: Vec<usize>,
-    digest: super::prf::ContextDigest,
-}
-
-impl std::fmt::Debug for DecryptionShare {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("DecryptionShare")
-            .field("party_id", &self.party_id)
-            .finish_non_exhaustive()
-    }
-}
-
-impl DecryptionShare {
-    /// Rehydrate a partial decryption after application transport.
-    ///
-    /// The digest `H(S, ct)` is recomputed from `decryptors` and `ciphertext`.
-    /// Authentication of the polynomial remains the application's
-    /// responsibility.
-    pub fn from_parts(
-        poly: Poly<PowerBasis>,
-        party_id: usize,
-        decryptors: Vec<usize>,
-        ciphertext: &Ciphertext,
-    ) -> Result<Self, Error> {
-        let digest = super::prf::context_digest(&decryptors, ciphertext)?;
-        Ok(Self {
-            poly,
-            party_id,
-            decryptors,
-            digest,
-        })
-    }
-
-    /// Consume the share into transport parts: polynomial, 1-based party id,
-    /// and designated set `S`.
-    #[must_use]
-    pub fn into_parts(self) -> (Poly<PowerBasis>, usize, Vec<usize>) {
-        (self.poly, self.party_id, self.decryptors)
-    }
-}
-
-#[cfg(test)]
-impl DecryptionShare {
-    fn allows_variable_time_computations(&self) -> bool {
-        self.poly.allows_variable_time_computations()
-    }
-
-    fn coefficients(&self) -> ndarray::ArrayView2<'_, u64> {
-        self.poly.coefficients()
-    }
 }
 
 impl ShareManager {
@@ -1771,7 +1711,15 @@ mod tests {
             &params,
         );
         let (poly, party_id, decryptors) = original.clone().into_parts();
-        let restored = DecryptionShare::from_parts(poly, party_id, decryptors, &ct).unwrap();
+        assert_eq!(poly, original.poly);
+        assert_eq!(party_id, 1);
+        assert_eq!(decryptors.as_slice(), &reconstructing);
+        let restored =
+            crate::trbfv::DecryptionShare::from_parts(poly, party_id, decryptors, &ct).unwrap();
+        assert_eq!(restored.poly, original.poly);
+        assert_eq!(restored.party_id, original.party_id);
+        assert_eq!(restored.decryptors, original.decryptors);
+        assert_eq!(restored.digest, original.digest);
         let other = part_dec(
             &manager,
             &ct,
