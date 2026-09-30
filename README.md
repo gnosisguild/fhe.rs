@@ -81,8 +81,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
 CI checks tests and doctests with all/no-default features, examples, benchmarks,
-formatting, Clippy, rustdoc, and generated Protobuf sources. The heavier
-threshold stress run is in [`.github/workflows/stress.yml`](.github/workflows/stress.yml).
+formatting, Clippy, rustdoc, and generated Protobuf sources. Release integration
+tests include the larger threshold BFV and l-BFV end-to-end profiles.
 
 Test profiles and deterministic RNG helpers live in
 [`crates/fhe/support/mod.rs`](crates/fhe/support/mod.rs), outside the public API.
