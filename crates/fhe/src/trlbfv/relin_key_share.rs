@@ -455,13 +455,20 @@ mod tests {
             .map(|sk| PublicKeyShare::contribute_with_seed(sk, pk_seed, &mut rng))
             .collect::<Result<Vec<_>>>()?;
         let aggregated_pk: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
-        let rlk_shares = sks
+        let mut rlk_shares = sks
             .iter()
             .map(|sk| RelinKeyShare::contribute_with_seed(sk, d1_seed, rlk_a_seed, 0, 0, &mut rng))
             .collect::<Result<Vec<_>>>()?;
 
-        let result = aggregate_relinearization_key(&rlk_shares, &aggregated_pk);
-        assert!(result.is_err());
+        for _ in 0..2 {
+            assert_eq!(
+                aggregate_relinearization_key(&rlk_shares, &aggregated_pk).unwrap_err(),
+                crate::Error::Multiparty(crate::MultipartyError::PublicKeyCrsMismatch {
+                    row_index: 0,
+                })
+            );
+            rlk_shares.reverse();
+        }
         Ok(())
     }
 

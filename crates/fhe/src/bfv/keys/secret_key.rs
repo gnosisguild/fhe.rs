@@ -110,6 +110,7 @@ impl SecretKey {
     /// This operations may run in a variable time depending on the value of the
     /// noise.
     pub unsafe fn measure_noise(&self, ct: &Ciphertext) -> Result<usize> {
+        self.validate()?;
         let plaintext = Zeroizing::new(self.try_decrypt(ct)?);
         let m = Zeroizing::new(plaintext.to_poly()?);
 
@@ -283,6 +284,10 @@ impl Serialize for SecretKey {
 impl DeserializeParametrized for SecretKey {
     type Error = Error;
 
+    /// Decode a secret key. Wrong coefficient counts are reported as
+    /// [`SerializationError::InvalidSecretKeyCoefficientCount`] at this wire
+    /// boundary; [`SecretKey::new`] and in-memory validation instead use
+    /// [`crate::SecretKeyError::InvalidCoefficientCount`].
     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
         let proto: SecretKeyProto =
             crate::serialization::decode(bytes, crate::SerializedObject::SecretKey)?;
@@ -598,6 +603,31 @@ mod tests {
     }
 
     #[test]
+    fn measure_noise_rejects_invalid_secret_key_before_ciphertext_processing()
+    -> Result<(), Box<dyn Error>> {
+        let mut rng = crate::support::presets::rng(242);
+        let params = BfvParameters::default_arc(1, 16);
+        let mut sk = SecretKey::random(&params, &mut rng);
+        let pt = Plaintext::zero(Encoding::poly(), &params)?;
+        let ciphertext = sk.try_encrypt(&pt, &mut rng)?;
+        let empty_ciphertext = Ciphertext::zero(&params);
+
+        for actual in [0, params.degree() - 1, params.degree() + 1] {
+            sk.coeffs = vec![0; actual].into_boxed_slice();
+            for ct in [&ciphertext, &empty_ciphertext] {
+                assert_eq!(
+                    unsafe { sk.measure_noise(ct) }.unwrap_err(),
+                    crate::Error::SecretKey(crate::SecretKeyError::InvalidCoefficientCount {
+                        actual,
+                        expected: params.degree(),
+                    })
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn serialize_roundtrip() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(2, 16);
@@ -611,21 +641,32 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_invalid_length() {
+    fn coefficient_count_errors_distinguish_serialized_and_in_memory_keys() {
         let params = BfvParameters::default_arc(1, 16);
-        let mut proto = SecretKeyProto {
-            coeffs: vec![0; params.degree()],
-        };
-        proto.coeffs.pop();
-
-        let bytes = proto.encode_to_vec();
-        let err = SecretKey::from_bytes(&bytes, &params).unwrap_err();
-
-        assert!(matches!(
-            err,
-            crate::Error::SerializationError(
-                crate::SerializationError::InvalidSecretKeyCoefficientCount { .. }
-            )
-        ));
+        let mut sk = SecretKey::new(vec![0; params.degree()], &params).unwrap();
+        for actual in [0, params.degree() - 1, params.degree() + 1] {
+            let proto = SecretKeyProto {
+                coeffs: vec![0; actual],
+            };
+            let error = crate::Error::SecretKey(crate::SecretKeyError::InvalidCoefficientCount {
+                actual,
+                expected: params.degree(),
+            });
+            assert_eq!(
+                SecretKey::new(proto.coeffs.clone(), &params).unwrap_err(),
+                error
+            );
+            sk.coeffs = proto.coeffs.clone().into_boxed_slice();
+            assert_eq!(sk.validate().unwrap_err(), error);
+            assert_eq!(
+                SecretKey::from_bytes(&proto.encode_to_vec(), &params).unwrap_err(),
+                crate::Error::SerializationError(
+                    crate::SerializationError::InvalidSecretKeyCoefficientCount {
+                        actual,
+                        expected: params.degree(),
+                    }
+                )
+            );
+        }
     }
 }

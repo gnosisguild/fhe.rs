@@ -231,7 +231,6 @@ impl PublicKey {
 
     fn validate_encryption_inputs(&self, pt: &Plaintext) -> Result<usize> {
         pt.validate_for(&self.params)?;
-        self.c.validate_for(&self.params)?;
         if self.c.len() != 2 {
             return Err(crate::CiphertextError::InvalidPolynomialCount {
                 operation: crate::CiphertextOperation::PublicKeyEncryption,
@@ -240,6 +239,7 @@ impl PublicKey {
             }
             .into());
         }
+        self.c.validate_for(&self.params)?;
         let plaintext_level = pt.level();
         if plaintext_level < self.c.level {
             return Err(Error::InvalidLevel {
@@ -449,6 +449,41 @@ mod tests {
 
         assert!(pk.try_encrypt(&pt, &mut rng).is_err());
         assert!(pk.try_encrypt_with_intermediates(&pt, &mut rng).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_rejects_wrong_polynomial_counts_before_randomness() -> Result<(), Box<dyn Error>>
+    {
+        let mut rng = crate::support::presets::rng(241);
+        let params = BfvParameters::default_arc(1, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
+        let pt = Plaintext::zero(Encoding::poly(), &params)?;
+
+        for actual in [0, 1, 3] {
+            let mut malformed_pk = pk.clone();
+            malformed_pk.c.c = vec![pk.c[0].clone(); actual];
+            for error in [
+                malformed_pk
+                    .try_encrypt(&pt, &mut crate::support::PanicOnUseRng)
+                    .err(),
+                malformed_pk
+                    .try_encrypt_with_intermediates(&pt, &mut crate::support::PanicOnUseRng)
+                    .err(),
+            ] {
+                assert_eq!(
+                    error,
+                    Some(crate::Error::Ciphertext(
+                        crate::CiphertextError::InvalidPolynomialCount {
+                            operation: crate::CiphertextOperation::PublicKeyEncryption,
+                            actual,
+                            expected: 2,
+                        }
+                    ))
+                );
+            }
+        }
         Ok(())
     }
 

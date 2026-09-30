@@ -375,11 +375,7 @@ pub fn aggregate_relinearization_key(
                 Error::DefaultError("Public key is missing its a_j polynomial".to_string())
             })?;
         if a_ksk != *pk_a_j {
-            return Err(crate::MultipartyError::PublicKeyCrsMismatch {
-                share_index: 0,
-                row_index: j,
-            }
-            .into());
+            return Err(crate::MultipartyError::PublicKeyCrsMismatch { row_index: j }.into());
         }
     }
 

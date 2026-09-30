@@ -25,6 +25,9 @@ impl Rq {
             if tag == 3 {
                 message.coefficients.zeroize();
             }
+            // Rq is decoded here as a top-level, flat scalar/bytes-only message.
+            // A fresh per-field recursion budget relies on that assumption;
+            // revisit context propagation if nested decoding is introduced.
             message.merge_field(tag, wire_type, &mut bytes, DecodeContext::default())?;
         }
         Ok(message)

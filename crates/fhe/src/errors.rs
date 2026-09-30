@@ -274,6 +274,9 @@ pub enum ThresholdError {
 #[expect(missing_docs, reason = "error variants are documented inline")]
 #[non_exhaustive]
 pub enum SecretKeyError {
+    /// A constructed or caller-mutated secret key has the wrong coefficient
+    /// count. Malformed serialized keys instead produce
+    /// [`SerializationError::InvalidSecretKeyCoefficientCount`].
     #[error("Secret key has {actual} coefficients; expected {expected}")]
     InvalidCoefficientCount { actual: usize, expected: usize },
 }
@@ -444,14 +447,11 @@ pub enum MultipartyError {
         reference_share_index: usize,
     },
 
-    /// A relinearization-key share's CRS disagrees with the supplied public key.
-    #[error(
-        "Relinearization key share {share_index} CRS row {row_index} does not match the public key"
-    )]
-    PublicKeyCrsMismatch {
-        share_index: usize,
-        row_index: usize,
-    },
+    /// The CRS shared by all relinearization-key contributions disagrees with
+    /// the supplied public key. This aggregate-versus-key mismatch does not
+    /// identify a faulty contributor or establish which input is correct.
+    #[error("Relinearization key aggregate CRS row {row_index} does not match the public key")]
+    PublicKeyCrsMismatch { row_index: usize },
 
     #[error(
         "Reference strings must be generated independently: the CRS and URS seeds are identical"
@@ -630,7 +630,9 @@ pub enum SerializationError {
     #[error("Serialized public-key seed has {actual} bytes; expected {expected}")]
     InvalidPublicKeySeedLength { actual: usize, expected: usize },
 
-    /// A serialized secret key has the wrong coefficient count.
+    /// A serialized secret key has the wrong coefficient count. This describes
+    /// malformed wire data; construction and in-memory validation instead use
+    /// [`SecretKeyError::InvalidCoefficientCount`].
     #[error("Serialized secret key has {actual} coefficients; expected {expected}")]
     InvalidSecretKeyCoefficientCount { actual: usize, expected: usize },
 
@@ -936,6 +938,10 @@ mod tests {
             })
             .to_string(),
             "Multiparty protocol error: Expected 3 common random polynomials, got 2"
+        );
+        assert_eq!(
+            Error::Multiparty(MultipartyError::PublicKeyCrsMismatch { row_index: 1 }).to_string(),
+            "Multiparty protocol error: Relinearization key aggregate CRS row 1 does not match the public key"
         );
         assert_eq!(
             Error::Multiparty(MultipartyError::IdenticalReferenceStringSeeds).to_string(),
