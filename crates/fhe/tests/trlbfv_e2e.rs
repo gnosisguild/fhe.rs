@@ -13,9 +13,7 @@ use std::sync::Arc;
 
 use fhe::aggregate::AggregateIter;
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, SecretKey};
-use fhe::trbfv::{
-    PartyPrfKeys, SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
-};
+use fhe::trbfv::{SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe::trlbfv::{LBFVPublicKey, PublicKeyShare, RelinKeyShare, aggregate_relinearization_key};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array, Array2};
@@ -123,7 +121,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
         );
     }
 
-    let prf_keys = PartyPrfKeys::generate_committee(N, &mut rng).expect("committee PRF keys");
+    let prf_keys = support::examples::simulated_committee_prf_keys(N, &mut rng);
     let config = SmudgingConfig::new(params.clone(), N, 1, LAMBDA_VALUE)
         .expect("smudging config")
         .with_mult_depth(MULT_DEPTH);

@@ -15,8 +15,8 @@ masks, and threshold decryption with additive and limited multiplicative
 support via distributed *l*-BFV relinearization keys. It is **not** the
 complete robust protocol from Urban–Rambaud 2024: there is no distributed key
 generation, no broadcast channel, no FLSS, and no GURS generation. Committee
-PRF keys are sampled locally as uniformly random 256-bit strings and
-evaluated with Poseidon2 through the SAFE sponge API.
+PRF masks are evaluated with Poseidon2 through the SAFE sponge API using
+party-owned key bundles established by the application protocol.
 
 This module enables distributed decryption between `n` parties without necessarily involving all of them: any `threshold + 1` of the `n` parties can decrypt a ciphertext, while any coalition of at most `threshold` parties learns nothing. The threshold must be exactly `(n-1)/2` (integer division), the maximal corruption tolerance under an honest majority — see `config.rs` for the derivation.
 
@@ -30,6 +30,7 @@ the paper. The following table is the boundary for callers and integrators:
 | ------------------------------ | -------------- |
 | BFV and l-BFV operations (Sections 4 and 6) | Implemented by `fhe.rs`. |
 | Shamir sharing, share aggregation, smudging bounds, PRF masks, and threshold decryption | Implemented by `fhe.rs`. |
+| Committee PRF key establishment and secure distribution | Must be supplied externally. |
 | DKG, PVSS, FLSS, and GURS | Must be supplied externally. |
 | Authenticated transport, broadcast, retries, and identifiable aborts | Must be supplied externally. |
 | Committee membership, accepted-party policy, and application lifecycle | Must be supplied externally. |
@@ -39,21 +40,23 @@ The public trBFV setup and decryption flow is:
 
 1. Create a `ShareManager` instance with BFV parameters.
 2. Generate and distribute Shamir shares for each party's secret contribution.
-3. Sample committee PRF keys once with `PartyPrfKeys::generate_committee(n, rng)`
-   and securely distribute each party's `2n` keys. This is independent of
-   `ShareManager`. Applications that move keys across a transport boundary use
-   `PartyPrfKeys::into_transport` / `from_transport`.
+3. Establish matching pairwise PRF keys in the application protocol. Each party
+   receives its own `2n` keys and rehydrates them with `PartyPrfKeys::from_transport`.
+   This is independent of `ShareManager`.
 4. Aggregate the received secret-key contributions for the same externally
    agreed party set.
 5. For a designated decryptor set `S` of size `threshold + 1`, each party in
    `S` samples local smudging noise and computes a partial decryption.
 6. Sum the `|S|` partial decryptions (FinDec) to recover the plaintext.
 
-`PartyPrfKeys::generate_committee` returns all parties' key bundles to its
-caller. It is suitable for local simulations or a trusted setup; it performs no
-network exchange or secret sharing. Distributed applications must securely
-establish matching pairwise keys externally rather than invoking this factory
-independently on each node.
+fhe.rs does not generate or establish committee PRF keys. Tests, examples, and
+benchmarks use the repository-only `support::examples::simulated_committee_prf_keys`
+helper to make internally consistent local bundles. It centralizes all key
+material, does not implement a secure setup protocol, and is not part of the
+published library API. Real applications must establish matching pairwise keys
+in their protocol and pass each party its own bundle.
+`from_transport` checks the local party metadata and vector lengths; it cannot
+verify that counterpart bundles contain matching pairwise keys.
 
 For party `i`, `PartyPrfKeys::party_id()` is `i` and `committee_size()` is the
 total committee size `n`. Its two key vectors follow the paper's indices:
@@ -265,9 +268,9 @@ The example can be run with configurable parameters (threshold must equal `(num_
 cargo run --release --example trbfv_add -- --num_parties=10 --threshold=4
 ```
 
-Decrypting two ciphertexts with the same committee keys (a fresh mask `H(S, ct)` per ciphertext) is in [`examples/trbfv_two_ciphertexts.rs`](../../examples/trbfv_two_ciphertexts.rs):
+Decrypting two ciphertexts with a simulated ten-party committee (a fresh mask `H(S, ct)` per ciphertext) is in [`examples/trbfv_ten_parties.rs`](../../examples/trbfv_ten_parties.rs):
 ```bash
-cargo run --release --example trbfv_two_ciphertexts
+cargo run --release --example trbfv_ten_parties
 ```
 
 Basic usage pattern:
@@ -286,17 +289,15 @@ let secret_key_dealt = share_manager.generate_secret_key_shares(secret_key_poly,
 // Explicit application transport boundary; the dealt owner is consumed here.
 let secret_key_dealt = secret_key_dealt.into_transport();
 
-// Simulation or trusted setup: sample committee PRF keys once, independently
-// of ShareManager, and securely give party i its 2n keys. Distributed key
-// establishment is external; do not sample independently on each node.
-let prf_keys = PartyPrfKeys::generate_committee(n_parties, &mut rng)?;
-let transported = prf_keys[party_index].clone().into_transport();
-let prf_keys_i = PartyPrfKeys::from_transport(PartyPrfKeyTransport::new(
-    transported.party_id(),
-    transported.committee_size(),
-    transported.keys_i_j().to_vec(),
-    transported.keys_j_i().to_vec(),
-)?)?;
+// These matching pairwise keys are established by the application protocol.
+// Each party receives only its own two vectors through authenticated transport.
+let prf_transport = PartyPrfKeyTransport::new(
+    party_id,
+    n_parties,
+    keys_i_j_from_protocol,
+    keys_j_i_from_protocol,
+)?;
+let prf_keys_i = PartyPrfKeys::from_transport(prf_transport)?;
 
 // Each party: aggregate the share matrices received from the other parties
 // into its share of the joint secret key

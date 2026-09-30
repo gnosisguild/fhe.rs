@@ -658,6 +658,7 @@ mod tests {
     use super::*;
     use crate::ThresholdError;
     use crate::bfv::{Encoding, PublicKey, SecretKey};
+    use crate::support::examples::simulated_committee_prf_keys;
     use crate::support::presets::{insecure, secure8192};
     use crate::trbfv::prf::PartyPrfKeys;
     use crate::trbfv::smudging::{SmudgingConfig, SmudgingNoiseGenerator};
@@ -816,7 +817,7 @@ mod tests {
         let key_share = AggregatedSecretKeyShare::from_power_basis(
             (*manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap()).clone(),
         );
-        let prf_keys = PartyPrfKeys::generate_committee(n, &mut rng).unwrap();
+        let prf_keys = simulated_committee_prf_keys(n, &mut rng);
         let reconstructing = vec![1usize, 2, 3];
         let noise = generator.generate(&mut rng).unwrap();
         assert!(
@@ -842,7 +843,7 @@ mod tests {
         let key_share = AggregatedSecretKeyShare::from_power_basis(
             (*manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap()).clone(),
         );
-        let prf_keys = PartyPrfKeys::generate_committee(n, &mut rng).unwrap();
+        let prf_keys = simulated_committee_prf_keys(n, &mut rng);
         let share = manager
             .decryption_share(&ct, &key_share, 1, &[1, 2], noise, &prf_keys[0])
             .unwrap();
@@ -906,7 +907,7 @@ mod tests {
         smudging_poly.allow_variable_time_computations(variable_time);
         assert!(ct.c[1].allows_variable_time_computations());
         let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_key_poly).clone());
-        let prf_keys = PartyPrfKeys::generate_committee(n, &mut rng).unwrap();
+        let prf_keys = simulated_committee_prf_keys(n, &mut rng);
         let reconstructing = vec![1usize, 2];
         let _ = smudging_poly;
 
@@ -967,7 +968,7 @@ mod tests {
             .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
             .unwrap();
         let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_poly).clone());
-        let prf_keys = PartyPrfKeys::generate_committee(manager.n(), &mut rng).unwrap();
+        let prf_keys = simulated_committee_prf_keys(manager.n(), &mut rng);
         let result = manager.decryption_share(
             &ciphertext,
             &key_share,
@@ -1107,7 +1108,7 @@ mod tests {
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
         let reconstructing = vec![1, 2];
-        let prf_keys = PartyPrfKeys::generate_committee(n, &mut rng).unwrap();
+        let prf_keys = simulated_committee_prf_keys(n, &mut rng);
 
         // Each party generates their decryption share
         let mut decryption_shares = Vec::new();
@@ -1203,7 +1204,7 @@ mod tests {
         // Corresponding 0-based indices in vectors: {1, 3, 4}
         let chosen_indices = vec![1usize, 3usize, 4usize];
         let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
-        let prf_keys = PartyPrfKeys::generate_committee(n, &mut rng).unwrap();
+        let prf_keys = simulated_committee_prf_keys(n, &mut rng);
 
         // Each chosen party generates their decryption share
         let mut decryption_shares = Vec::new();
@@ -1298,7 +1299,7 @@ mod tests {
             1usize, 3usize, 4usize, 6usize, 10usize, 12usize, 14usize, 16usize, 18usize, 19usize,
         ];
         let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
-        let prf_keys = PartyPrfKeys::generate_committee(n, &mut rng).unwrap();
+        let prf_keys = simulated_committee_prf_keys(n, &mut rng);
 
         // Each chosen party generates their decryption share
         let mut decryption_shares = Vec::new();
@@ -1389,7 +1390,7 @@ mod tests {
         // Choose 5 fixed distinct parties (0-based): {0,2,3,6,8}
         let chosen_indices: Vec<usize> = vec![0usize, 2usize, 3usize, 6usize, 8usize];
         let reconstructing_correct: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
-        let prf_keys = PartyPrfKeys::generate_committee(n, &mut rng).unwrap();
+        let prf_keys = simulated_committee_prf_keys(n, &mut rng);
 
         // Each chosen party generates their decryption share
         let mut decryption_shares = Vec::new();
@@ -1673,7 +1674,7 @@ mod tests {
         let key_share = AggregatedSecretKeyShare::from_power_basis(
             (*manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap()).clone(),
         );
-        let prf_keys = PartyPrfKeys::generate_committee(manager.n(), &mut rng).unwrap();
+        let prf_keys = simulated_committee_prf_keys(manager.n(), &mut rng);
 
         let err = manager
             .decryption_share(
@@ -1700,7 +1701,7 @@ mod tests {
         let key_share = AggregatedSecretKeyShare::from_power_basis(
             (*manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap()).clone(),
         );
-        let prf_keys = PartyPrfKeys::generate_committee(manager.n(), &mut rng).unwrap();
+        let prf_keys = simulated_committee_prf_keys(manager.n(), &mut rng);
         let reconstructing = [1usize, 2];
         let original = part_dec(
             &manager,
@@ -1812,7 +1813,7 @@ mod tests {
             9usize, 10usize, 14usize, 7usize, 5usize, 3usize, 2usize, 1usize,
         ];
         let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
-        let prf_keys = PartyPrfKeys::generate_committee(n, &mut rng).unwrap();
+        let prf_keys = simulated_committee_prf_keys(n, &mut rng);
 
         // Each chosen party generates their decryption share in the same (non-increasing) order
         let mut decryption_shares = Vec::new();

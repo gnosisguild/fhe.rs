@@ -124,8 +124,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let crp = CommonRandomPoly::new(&params_trbfv, &mut rng)?;
     let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
-    let committee_prf_keys =
-        Arc::new(PartyPrfKeys::generate_committee(num_parties, &mut rng).unwrap());
+    let committee_prf_keys = Arc::new(support::examples::simulated_committee_prf_keys(
+        num_parties,
+        &mut rng,
+    ));
     let smudging_config = SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda)
         .unwrap()
         .with_mult_depth(preset.multiplicative_depth.unwrap());

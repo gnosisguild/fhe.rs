@@ -8,8 +8,9 @@
 //!
 //! `H(S, ct)` is a Poseidon2/SAFE digest computed once per [`PartyPrfKeys::mask`]
 //! call. The `j = i` term is omitted: `k_{i,i}` appears on both sides and
-//! cancels. The masks cancel when summed over `S`. Keys are uniformly random
-//! 256-bit strings, interpreted as BN254 scalar-field elements. `F` is
+//! cancels. The masks cancel when summed over `S`. Pairwise keys are 256-bit
+//! strings expected to be uniformly random, interpreted as BN254 scalar-field
+//! elements. `F` is
 //! Poseidon2 via the SAFE sponge API (`e3-safe`).
 
 use crate::Error;
@@ -18,7 +19,6 @@ use ark_ff::{PrimeField, Zero};
 use e3_safe::{ABSORB_FLAG, Field, SQUEEZE_FLAG, SafeSponge};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_math::zq::Modulus;
-use rand::{CryptoRng, RngCore};
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 use zeroize_derive::{Zeroize as ZeroizeFields, ZeroizeOnDrop};
@@ -50,7 +50,8 @@ impl fmt::Debug for PrfKey {
 /// At index `j - 1`, `keys_i_j` holds `k_{i,j}` and `keys_j_i` holds `k_{j,i}`.
 /// Their PRF evaluations are respectively added to and subtracted from `i`'s
 /// mask. Both vectors belong to `i`; the names describe index order, not message
-/// direction.
+/// direction. The application protocol establishes the key material; this crate
+/// only validates and evaluates each party's supplied bundle.
 #[derive(Clone, ZeroizeFields, ZeroizeOnDrop)]
 pub struct PartyPrfKeys {
     party_id: usize,
@@ -70,82 +71,6 @@ impl fmt::Debug for PartyPrfKeys {
 }
 
 impl PartyPrfKeys {
-    /// Sample the committee `n × n` key matrix and return each party's `2n`
-    /// keys, independently of a [`crate::trbfv::ShareManager`].
-    ///
-    /// This factory returns all parties' key bundles to its caller. Use it once
-    /// for a local simulation or trusted setup, then securely distribute each
-    /// bundle to its owner. It performs no network exchange or secret sharing.
-    /// Distributed applications must establish matching pairwise keys externally;
-    /// independent calls on each node produce incompatible committee keys.
-    ///
-    /// Party indices are 1-based, matching Shamir evaluation points.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use fhe::trbfv::PartyPrfKeys;
-    ///
-    /// let committee_size = 9;
-    /// let mut rng = rand::rng();
-    /// let keys = PartyPrfKeys::generate_committee(committee_size, &mut rng)?;
-    /// assert_eq!(keys.len(), committee_size);
-    /// for (index, party_keys) in keys.iter().enumerate() {
-    ///     assert_eq!(party_keys.party_id(), index + 1);
-    ///     assert_eq!(party_keys.committee_size(), committee_size);
-    /// }
-    /// # Ok::<(), fhe::Error>(())
-    /// ```
-    pub fn generate_committee<R: RngCore + CryptoRng>(
-        committee_size: usize,
-        rng: &mut R,
-    ) -> Result<Vec<Self>, Error> {
-        if committee_size == 0 {
-            return Err(Error::invalid_party_count(0, 1));
-        }
-
-        let matrix_len = committee_size
-            .checked_mul(committee_size)
-            .ok_or_else(|| Error::invalid_party_count(committee_size, 1))?;
-        let mut keys = vec![PrfKey([0u8; KEY_LEN]); matrix_len];
-        for key in &mut keys {
-            rng.fill_bytes(&mut key.0);
-        }
-
-        (0..committee_size)
-            .map(|party_index| {
-                let mut keys_i_j = Vec::with_capacity(committee_size);
-                let mut keys_j_i = Vec::with_capacity(committee_size);
-                for peer_index in 0..committee_size {
-                    let key_i_j_index = party_index
-                        .checked_mul(committee_size)
-                        .and_then(|offset| offset.checked_add(peer_index))
-                        .ok_or_else(|| Error::invalid_party_count(committee_size, 1))?;
-                    let key_j_i_index = peer_index
-                        .checked_mul(committee_size)
-                        .and_then(|offset| offset.checked_add(party_index))
-                        .ok_or_else(|| Error::invalid_party_count(committee_size, 1))?;
-                    keys_i_j.push(
-                        keys.get(key_i_j_index)
-                            .ok_or_else(|| Error::invalid_party_count(committee_size, 1))?
-                            .clone(),
-                    );
-                    keys_j_i.push(
-                        keys.get(key_j_i_index)
-                            .ok_or_else(|| Error::invalid_party_count(committee_size, 1))?
-                            .clone(),
-                    );
-                }
-                Ok(Self {
-                    party_id: party_index + 1,
-                    committee_size,
-                    keys_i_j,
-                    keys_j_i,
-                })
-            })
-            .collect()
-    }
-
     /// 1-based identity of the party that holds these keys.
     #[must_use]
     pub fn party_id(&self) -> usize {
@@ -219,7 +144,10 @@ impl PartyPrfKeys {
         }
     }
 
-    /// Rehydrate one party's keys after application transport.
+    /// Rehydrate one party's keys after application protocol setup and transport.
+    ///
+    /// This validates local metadata and vector lengths only; the application
+    /// protocol must ensure the pairwise keys match across parties.
     pub fn from_transport(mut transport: PartyPrfKeyTransport) -> Result<Self, Error> {
         // Revalidate because callers can explicitly zeroize the transport owner
         // after constructing it, clearing both its keys and metadata.
@@ -507,9 +435,11 @@ mod tests {
 
     use super::*;
     use crate::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
+    use crate::support::examples::simulated_committee_prf_keys;
     use crate::support::presets::insecure;
     use fhe_traits::{FheEncoder, FheEncrypter};
     use rand::rng;
+    use rand::{CryptoRng, RngCore};
 
     fn test_ciphertext<R: RngCore + CryptoRng>(rng: &mut R) -> Ciphertext {
         let params = insecure().unwrap().parameters;
@@ -520,15 +450,9 @@ mod tests {
     }
 
     #[test]
-    fn generate_committee_rejects_zero_parties() {
-        let mut rng = rng();
-        assert!(PartyPrfKeys::generate_committee(0, &mut rng).is_err());
-    }
-
-    #[test]
     fn committee_keys_match_across_parties() {
         let mut rng = rng();
-        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let keys = simulated_committee_prf_keys(3, &mut rng);
         assert_eq!(keys.len(), 3);
         for (index, party) in keys.iter().enumerate() {
             assert_eq!(party.party_id(), index + 1);
@@ -544,7 +468,7 @@ mod tests {
     fn masks_sum_to_zero_over_the_decryptor_set() {
         let mut rng = rng();
         let ct = test_ciphertext(&mut rng);
-        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let keys = simulated_committee_prf_keys(3, &mut rng);
         let decryptors = [1usize, 3];
         let mut acc = keys[0].mask(&decryptors, &ct).unwrap();
         acc += &keys[2].mask(&decryptors, &ct).unwrap();
@@ -559,7 +483,7 @@ mod tests {
     fn evaluate_is_deterministic() {
         let mut rng = rng();
         let ct = test_ciphertext(&mut rng);
-        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let keys = simulated_committee_prf_keys(3, &mut rng);
         let decryptors = canonical_decryptors(&[1usize, 2]);
         let digest = hash_context(&decryptors, &ct).unwrap();
         let first = evaluate(&keys[0].keys_i_j[1], &digest, &ct).unwrap();
@@ -590,7 +514,7 @@ mod tests {
     fn self_term_is_skipped() {
         let mut rng = rng();
         let ct = test_ciphertext(&mut rng);
-        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let keys = simulated_committee_prf_keys(3, &mut rng);
         let mask = keys[0].mask(&[1], &ct).unwrap();
         assert!(
             mask.coefficients().iter().all(|&value| value == 0),
@@ -602,7 +526,7 @@ mod tests {
     fn different_decryptor_sets_produce_different_masks() {
         let mut rng = rng();
         let ct = test_ciphertext(&mut rng);
-        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let keys = simulated_committee_prf_keys(3, &mut rng);
         let first = keys[0].mask(&[1, 2], &ct).unwrap();
         let second = keys[0].mask(&[1, 3], &ct).unwrap();
         assert_ne!(first.coefficients(), second.coefficients());
@@ -613,7 +537,7 @@ mod tests {
         let mut rng = rng();
         let first_ct = test_ciphertext(&mut rng);
         let second_ct = test_ciphertext(&mut rng);
-        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let keys = simulated_committee_prf_keys(3, &mut rng);
         let first = keys[0].mask(&[1, 2], &first_ct).unwrap();
         let second = keys[0].mask(&[1, 2], &second_ct).unwrap();
         assert_ne!(first.coefficients(), second.coefficients());
@@ -623,7 +547,7 @@ mod tests {
     fn transport_roundtrip_preserves_masks() {
         let mut rng = rng();
         let ct = test_ciphertext(&mut rng);
-        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let keys = simulated_committee_prf_keys(3, &mut rng);
         let decryptors = [1usize, 2];
         let original = keys[0].mask(&decryptors, &ct).unwrap();
         let restored = PartyPrfKeys::from_transport(keys[0].clone().into_transport()).unwrap();
@@ -675,7 +599,7 @@ mod tests {
     #[test]
     fn transport_is_revalidated_after_explicit_zeroization() {
         let mut rng = rng();
-        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let keys = simulated_committee_prf_keys(3, &mut rng);
         let mut transport = keys[0].clone().into_transport();
         transport.zeroize();
         assert!(PartyPrfKeys::from_transport(transport).is_err());

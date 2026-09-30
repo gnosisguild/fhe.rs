@@ -88,8 +88,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Setup trBFV module
     let share_manager = ShareManager::new(num_parties, threshold, params.clone()).unwrap();
-    let committee_prf_keys =
-        Arc::new(PartyPrfKeys::generate_committee(num_parties, &mut rng).unwrap());
+    let committee_prf_keys = Arc::new(support::examples::simulated_committee_prf_keys(
+        num_parties,
+        &mut rng,
+    ));
     let smudging_config =
         SmudgingConfig::new(params.clone(), num_parties, num_summed, lambda).unwrap();
     let smudging_generator = Arc::new(SmudgingNoiseGenerator::new(smudging_config).unwrap());

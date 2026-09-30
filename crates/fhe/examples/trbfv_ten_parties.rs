@@ -1,10 +1,10 @@
 //! Two independent threshold decryptions with a ten-party committee.
 //!
-//! Committee PRF keys are sampled once for this local simulation/trusted setup.
-//! A distributed deployment must establish matching keys and securely
-//! distribute each party's bundle externally. Each ciphertext is decrypted on
-//! its own: fresh local smudging, a digest `H(S, ct)`, and a mask `r_i^{S,ct}`
-//! from that digest. The two masks differ because the digest includes `ct`.
+//! The repository support helper simulates external pairwise-key setup locally;
+//! a distributed deployment must establish matching keys and securely distribute
+//! each party's bundle externally. Each ciphertext is decrypted on its own:
+//! fresh local smudging, a digest `H(S, ct)`, and a mask `r_i^{S,ct}` from that
+//! digest. The two masks differ because the digest includes `ct`.
 //! Five of the ten parties participate, which is the minimum for threshold 4.
 //!
 //! ```text
@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // The first threshold + 1 parties reconstruct from the ten-party committee.
     let reconstructing: Vec<usize> = (1..=RECONSTRUCTING_PARTIES).collect();
-    let prf_keys = PartyPrfKeys::generate_committee(N_PARTIES, &mut rng)?;
+    let prf_keys = support::examples::simulated_committee_prf_keys(N_PARTIES, &mut rng);
     let config = SmudgingConfig::new(params.clone(), N_PARTIES, num_ciphertexts, preset.lambda)?;
     let generator = SmudgingNoiseGenerator::new(config)?;
 
