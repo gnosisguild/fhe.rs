@@ -363,8 +363,11 @@ impl ShareManager {
                 self.n,
             ));
         }
-        if prf_keys.party_count() != self.n {
-            return Err(Error::invalid_party_count(prf_keys.party_count(), self.n));
+        if prf_keys.committee_size() != self.n {
+            return Err(Error::invalid_party_count(
+                prf_keys.committee_size(),
+                self.n,
+            ));
         }
         if prf_keys.party_id() != party_id {
             return Err(Error::invalid_party_id(prf_keys.party_id(), self.n));

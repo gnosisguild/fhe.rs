@@ -43,14 +43,20 @@ impl fmt::Debug for PrfKey {
     }
 }
 
-/// The `2n` PRF keys held by one party: outgoing `k_{i,j}` and incoming
-/// `k_{j,i}` for every `j ∈ [n]`.
+/// The `2n` PRF keys held by party `i`, indexed as in the paper.
+///
+/// `party_id` is the owner's 1-based identity `i`; `committee_size` is the total
+/// number of parties `n`, including the owner, not a counterpart's identity.
+/// At index `j - 1`, `keys_i_j` holds `k_{i,j}` and `keys_j_i` holds `k_{j,i}`.
+/// Their PRF evaluations are respectively added to and subtracted from `i`'s
+/// mask. Both vectors belong to `i`; the names describe index order, not message
+/// direction.
 #[derive(Clone, ZeroizeFields, ZeroizeOnDrop)]
 pub struct PartyPrfKeys {
     party_id: usize,
-    party_count: usize,
-    outgoing: Vec<PrfKey>,
-    incoming: Vec<PrfKey>,
+    committee_size: usize,
+    keys_i_j: Vec<PrfKey>,
+    keys_j_i: Vec<PrfKey>,
 }
 
 impl fmt::Debug for PartyPrfKeys {
@@ -58,7 +64,7 @@ impl fmt::Debug for PartyPrfKeys {
         formatter
             .debug_struct("PartyPrfKeys")
             .field("party_id", &self.party_id)
-            .field("party_count", &self.party_count)
+            .field("committee_size", &self.committee_size)
             .finish_non_exhaustive()
     }
 }
@@ -80,61 +86,61 @@ impl PartyPrfKeys {
     /// ```
     /// use fhe::trbfv::PartyPrfKeys;
     ///
-    /// let party_count = 9;
+    /// let committee_size = 9;
     /// let mut rng = rand::rng();
-    /// let keys = PartyPrfKeys::generate_committee(party_count, &mut rng)?;
-    /// assert_eq!(keys.len(), party_count);
+    /// let keys = PartyPrfKeys::generate_committee(committee_size, &mut rng)?;
+    /// assert_eq!(keys.len(), committee_size);
     /// for (index, party_keys) in keys.iter().enumerate() {
     ///     assert_eq!(party_keys.party_id(), index + 1);
-    ///     assert_eq!(party_keys.party_count(), party_count);
+    ///     assert_eq!(party_keys.committee_size(), committee_size);
     /// }
     /// # Ok::<(), fhe::Error>(())
     /// ```
     pub fn generate_committee<R: RngCore + CryptoRng>(
-        party_count: usize,
+        committee_size: usize,
         rng: &mut R,
     ) -> Result<Vec<Self>, Error> {
-        if party_count == 0 {
+        if committee_size == 0 {
             return Err(Error::invalid_party_count(0, 1));
         }
 
-        let matrix_len = party_count
-            .checked_mul(party_count)
-            .ok_or_else(|| Error::invalid_party_count(party_count, 1))?;
+        let matrix_len = committee_size
+            .checked_mul(committee_size)
+            .ok_or_else(|| Error::invalid_party_count(committee_size, 1))?;
         let mut keys = vec![PrfKey([0u8; KEY_LEN]); matrix_len];
         for key in &mut keys {
             rng.fill_bytes(&mut key.0);
         }
 
-        (0..party_count)
+        (0..committee_size)
             .map(|party_index| {
-                let mut outgoing = Vec::with_capacity(party_count);
-                let mut incoming = Vec::with_capacity(party_count);
-                for other in 0..party_count {
-                    let outgoing_index = party_index
-                        .checked_mul(party_count)
-                        .and_then(|offset| offset.checked_add(other))
-                        .ok_or_else(|| Error::invalid_party_count(party_count, 1))?;
-                    let incoming_index = other
-                        .checked_mul(party_count)
+                let mut keys_i_j = Vec::with_capacity(committee_size);
+                let mut keys_j_i = Vec::with_capacity(committee_size);
+                for peer_index in 0..committee_size {
+                    let key_i_j_index = party_index
+                        .checked_mul(committee_size)
+                        .and_then(|offset| offset.checked_add(peer_index))
+                        .ok_or_else(|| Error::invalid_party_count(committee_size, 1))?;
+                    let key_j_i_index = peer_index
+                        .checked_mul(committee_size)
                         .and_then(|offset| offset.checked_add(party_index))
-                        .ok_or_else(|| Error::invalid_party_count(party_count, 1))?;
-                    outgoing.push(
-                        keys.get(outgoing_index)
-                            .ok_or_else(|| Error::invalid_party_count(party_count, 1))?
+                        .ok_or_else(|| Error::invalid_party_count(committee_size, 1))?;
+                    keys_i_j.push(
+                        keys.get(key_i_j_index)
+                            .ok_or_else(|| Error::invalid_party_count(committee_size, 1))?
                             .clone(),
                     );
-                    incoming.push(
-                        keys.get(incoming_index)
-                            .ok_or_else(|| Error::invalid_party_count(party_count, 1))?
+                    keys_j_i.push(
+                        keys.get(key_j_i_index)
+                            .ok_or_else(|| Error::invalid_party_count(committee_size, 1))?
                             .clone(),
                     );
                 }
                 Ok(Self {
                     party_id: party_index + 1,
-                    party_count,
-                    outgoing,
-                    incoming,
+                    committee_size,
+                    keys_i_j,
+                    keys_j_i,
                 })
             })
             .collect()
@@ -146,10 +152,10 @@ impl PartyPrfKeys {
         self.party_id
     }
 
-    /// Number of parties in the committee that sampled these keys.
+    /// Total number of parties `n` in the committee, including this owner.
     #[must_use]
-    pub fn party_count(&self) -> usize {
-        self.party_count
+    pub fn committee_size(&self) -> usize {
+        self.committee_size
     }
 
     /// Evaluate `r_i^{S,ct}` for this party and decryptor set `S`.
@@ -160,8 +166,8 @@ impl PartyPrfKeys {
     ) -> Result<Poly<PowerBasis>, Error> {
         let decryptors = canonical_decryptors(decryptors);
         for &party_id in &decryptors {
-            if party_id == 0 || party_id > self.party_count {
-                return Err(Error::invalid_party_id(party_id, self.party_count));
+            if party_id == 0 || party_id > self.committee_size {
+                return Err(Error::invalid_party_id(party_id, self.committee_size));
             }
         }
 
@@ -169,23 +175,23 @@ impl PartyPrfKeys {
         let ctx = ciphertext.params.context_at_level(ciphertext.level)?;
         let mut acc = Poly::<PowerBasis>::zero(ctx);
         acc.disallow_variable_time_computations();
-        for &other in &decryptors {
-            // k_{i,i} appears in both outgoing and incoming, so the two
+        for &peer_party_id in &decryptors {
+            // k_{i,i} appears in both key vectors, so the two
             // evaluations cancel. The paper notes this term can be ignored.
-            if other == self.party_id {
+            if peer_party_id == self.party_id {
                 continue;
             }
-            let key_index = other - 1;
-            let outgoing = self
-                .outgoing
+            let key_index = peer_party_id - 1;
+            let key_i_j = self
+                .keys_i_j
                 .get(key_index)
-                .ok_or_else(|| Error::invalid_party_id(other, self.party_count))?;
-            let incoming = self
-                .incoming
+                .ok_or_else(|| Error::invalid_party_id(peer_party_id, self.committee_size))?;
+            let key_j_i = self
+                .keys_j_i
                 .get(key_index)
-                .ok_or_else(|| Error::invalid_party_id(other, self.party_count))?;
-            let mut positive = evaluate(outgoing, &digest, ciphertext)?;
-            let mut negative = evaluate(incoming, &digest, ciphertext)?;
+                .ok_or_else(|| Error::invalid_party_id(peer_party_id, self.committee_size))?;
+            let mut positive = evaluate(key_i_j, &digest, ciphertext)?;
+            let mut negative = evaluate(key_j_i, &digest, ciphertext)?;
             acc += &positive;
             acc -= &negative;
             positive.zeroize();
@@ -197,39 +203,40 @@ impl PartyPrfKeys {
 
     /// Consume these keys at an explicit application transport boundary.
     ///
-    /// Key generation itself remains external; this only moves already-sampled
-    /// keys across the application's transport.
+    /// This exposes raw bytes to the application's serializer. It neither
+    /// establishes pairwise keys nor sends any messages.
     #[must_use]
-    pub fn into_transport(mut self) -> PartyPrfKeyMaterial {
+    pub fn into_transport(mut self) -> PartyPrfKeyTransport {
         let party_id = self.party_id;
-        let party_count = self.party_count;
-        let outgoing = take_key_bytes(&mut self.outgoing);
-        let incoming = take_key_bytes(&mut self.incoming);
-        PartyPrfKeyMaterial {
+        let committee_size = self.committee_size;
+        let keys_i_j = take_key_bytes(&mut self.keys_i_j);
+        let keys_j_i = take_key_bytes(&mut self.keys_j_i);
+        PartyPrfKeyTransport {
             party_id,
-            party_count,
-            outgoing,
-            incoming,
+            committee_size,
+            keys_i_j,
+            keys_j_i,
         }
     }
 
     /// Rehydrate one party's keys after application transport.
-    pub fn from_transport(mut material: PartyPrfKeyMaterial) -> Result<Self, Error> {
-        let validated = PartyPrfKeyMaterial::new(
-            material.party_id,
-            material.party_count,
-            std::mem::take(&mut material.outgoing),
-            std::mem::take(&mut material.incoming),
+    pub fn from_transport(mut transport: PartyPrfKeyTransport) -> Result<Self, Error> {
+        // Revalidate because callers can explicitly zeroize the transport owner
+        // after constructing it, clearing both its keys and metadata.
+        let mut validated = PartyPrfKeyTransport::new(
+            transport.party_id,
+            transport.committee_size,
+            std::mem::take(&mut transport.keys_i_j),
+            std::mem::take(&mut transport.keys_j_i),
         )?;
-        let mut validated = std::mem::ManuallyDrop::new(validated);
         Ok(Self {
             party_id: validated.party_id,
-            party_count: validated.party_count,
-            outgoing: std::mem::take(&mut validated.outgoing)
+            committee_size: validated.committee_size,
+            keys_i_j: std::mem::take(&mut validated.keys_i_j)
                 .into_iter()
                 .map(PrfKey)
                 .collect(),
-            incoming: std::mem::take(&mut validated.incoming)
+            keys_j_i: std::mem::take(&mut validated.keys_j_i)
                 .into_iter()
                 .map(PrfKey)
                 .collect(),
@@ -237,53 +244,59 @@ impl PartyPrfKeys {
     }
 }
 
-/// One party's committee PRF keys after leaving the in-memory owner.
+/// Raw key bytes and owner metadata at an application transport boundary.
+///
+/// This is a byte representation of the same keys, not additional key material.
+/// [`PartyPrfKeys`] is the validated owner used for mask evaluation. Both types
+/// wipe their keys on drop; applications supply serialization and authenticated,
+/// confidential transport.
 #[derive(ZeroizeFields, ZeroizeOnDrop)]
-pub struct PartyPrfKeyMaterial {
+pub struct PartyPrfKeyTransport {
     party_id: usize,
-    party_count: usize,
-    outgoing: Vec<[u8; PRF_KEY_LEN]>,
-    incoming: Vec<[u8; PRF_KEY_LEN]>,
+    committee_size: usize,
+    keys_i_j: Vec<[u8; PRF_KEY_LEN]>,
+    keys_j_i: Vec<[u8; PRF_KEY_LEN]>,
 }
 
-impl fmt::Debug for PartyPrfKeyMaterial {
+impl fmt::Debug for PartyPrfKeyTransport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PartyPrfKeyMaterial")
+            .debug_struct("PartyPrfKeyTransport")
             .field("party_id", &self.party_id)
-            .field("party_count", &self.party_count)
+            .field("committee_size", &self.committee_size)
             .finish_non_exhaustive()
     }
 }
 
-impl PartyPrfKeyMaterial {
-    /// Build transport material from raw key bytes received at the application
+impl PartyPrfKeyTransport {
+    /// Build a transport owner from raw key bytes received at the application
     /// boundary.
     pub fn new(
         party_id: usize,
-        party_count: usize,
-        outgoing: Vec<[u8; PRF_KEY_LEN]>,
-        incoming: Vec<[u8; PRF_KEY_LEN]>,
+        committee_size: usize,
+        keys_i_j: Vec<[u8; PRF_KEY_LEN]>,
+        keys_j_i: Vec<[u8; PRF_KEY_LEN]>,
     ) -> Result<Self, Error> {
-        let material = Self {
+        let transport = Self {
             party_id,
-            party_count,
-            outgoing,
-            incoming,
+            committee_size,
+            keys_i_j,
+            keys_j_i,
         };
-        if party_count == 0 {
+        if committee_size == 0 {
             return Err(Error::invalid_party_count(0, 1));
         }
-        if party_id == 0 || party_id > party_count {
-            return Err(Error::invalid_party_id(party_id, party_count));
+        if party_id == 0 || party_id > committee_size {
+            return Err(Error::invalid_party_id(party_id, committee_size));
         }
-        if material.outgoing.len() != party_count || material.incoming.len() != party_count {
+        if transport.keys_i_j.len() != committee_size || transport.keys_j_i.len() != committee_size
+        {
             return Err(Error::malformed_shares(
                 party_id,
                 "PRF key vectors must have length n".to_string(),
             ));
         }
-        Ok(material)
+        Ok(transport)
     }
 
     /// 1-based identity of the party that holds these keys.
@@ -292,22 +305,24 @@ impl PartyPrfKeyMaterial {
         self.party_id
     }
 
-    /// Number of parties in the committee that sampled these keys.
+    /// Total number of parties `n` in the committee, including this owner.
     #[must_use]
-    pub fn party_count(&self) -> usize {
-        self.party_count
+    pub fn committee_size(&self) -> usize {
+        self.committee_size
     }
 
-    /// Outgoing keys `k_{i,j}` for every `j ∈ [n]`.
+    /// Keys `k_{i,j}` for owner `i`, indexed by `j - 1` for each party `j`.
+    /// Their PRF evaluations are added to the owner's mask.
     #[must_use]
-    pub fn outgoing(&self) -> &[[u8; PRF_KEY_LEN]] {
-        &self.outgoing
+    pub fn keys_i_j(&self) -> &[[u8; PRF_KEY_LEN]] {
+        &self.keys_i_j
     }
 
-    /// Incoming keys `k_{j,i}` for every `j ∈ [n]`.
+    /// Keys `k_{j,i}` for owner `i`, indexed by `j - 1` for each party `j`.
+    /// Their PRF evaluations are subtracted from the owner's mask.
     #[must_use]
-    pub fn incoming(&self) -> &[[u8; PRF_KEY_LEN]] {
-        &self.incoming
+    pub fn keys_j_i(&self) -> &[[u8; PRF_KEY_LEN]] {
+        &self.keys_j_i
     }
 }
 
@@ -517,11 +532,12 @@ mod tests {
         assert_eq!(keys.len(), 3);
         for (index, party) in keys.iter().enumerate() {
             assert_eq!(party.party_id(), index + 1);
-            assert_eq!(party.party_count(), 3);
+            assert_eq!(party.committee_size(), 3);
+            for (peer_index, peer) in keys.iter().enumerate() {
+                assert_eq!(party.keys_i_j[peer_index].0, peer.keys_j_i[index].0);
+                assert_eq!(party.keys_j_i[peer_index].0, peer.keys_i_j[index].0);
+            }
         }
-        // k_{1,2} held by party 1 as outgoing[1] equals party 2 incoming[0].
-        assert_eq!(keys[0].outgoing[1].0, keys[1].incoming[0].0);
-        assert_eq!(keys[0].incoming[1].0, keys[1].outgoing[0].0);
     }
 
     #[test]
@@ -546,8 +562,8 @@ mod tests {
         let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
         let decryptors = canonical_decryptors(&[1usize, 2]);
         let digest = hash_context(&decryptors, &ct).unwrap();
-        let first = evaluate(&keys[0].outgoing[1], &digest, &ct).unwrap();
-        let second = evaluate(&keys[0].outgoing[1], &digest, &ct).unwrap();
+        let first = evaluate(&keys[0].keys_i_j[1], &digest, &ct).unwrap();
+        let second = evaluate(&keys[0].keys_i_j[1], &digest, &ct).unwrap();
         assert_eq!(first.coefficients(), second.coefficients());
     }
 
@@ -613,16 +629,16 @@ mod tests {
         let restored = PartyPrfKeys::from_transport(keys[0].clone().into_transport()).unwrap();
         let roundtrip = restored.mask(&decryptors, &ct).unwrap();
         assert_eq!(original.coefficients(), roundtrip.coefficients());
-        let material = keys[1].clone().into_transport();
-        assert_eq!(material.party_id(), 2);
-        assert_eq!(material.party_count(), 3);
-        assert_eq!(material.outgoing().len(), 3);
-        assert_eq!(material.incoming().len(), 3);
-        let rebuilt = PartyPrfKeyMaterial::new(
-            material.party_id(),
-            material.party_count(),
-            material.outgoing().to_vec(),
-            material.incoming().to_vec(),
+        let transport = keys[1].clone().into_transport();
+        assert_eq!(transport.party_id(), 2);
+        assert_eq!(transport.committee_size(), 3);
+        assert_eq!(transport.keys_i_j().len(), 3);
+        assert_eq!(transport.keys_j_i().len(), 3);
+        let rebuilt = PartyPrfKeyTransport::new(
+            transport.party_id(),
+            transport.committee_size(),
+            transport.keys_i_j().to_vec(),
+            transport.keys_j_i().to_vec(),
         )
         .unwrap();
         let restored_from_parts = PartyPrfKeys::from_transport(rebuilt).unwrap();
@@ -633,9 +649,35 @@ mod tests {
                 .unwrap()
                 .coefficients()
         );
-        assert!(
-            PartyPrfKeyMaterial::new(0, 3, vec![[0u8; KEY_LEN]; 3], vec![[0u8; KEY_LEN]; 3])
+    }
+
+    #[test]
+    fn transport_rejects_invalid_metadata_and_key_vector_lengths() {
+        for (party_id, committee_size, keys_i_j_len, keys_j_i_len) in [
+            (0, 3, 3, 3),
+            (4, 3, 3, 3),
+            (1, 0, 0, 0),
+            (1, 3, 2, 3),
+            (1, 3, 3, 2),
+        ] {
+            assert!(
+                PartyPrfKeyTransport::new(
+                    party_id,
+                    committee_size,
+                    vec![[0u8; PRF_KEY_LEN]; keys_i_j_len],
+                    vec![[0u8; PRF_KEY_LEN]; keys_j_i_len],
+                )
                 .is_err()
-        );
+            );
+        }
+    }
+
+    #[test]
+    fn transport_is_revalidated_after_explicit_zeroization() {
+        let mut rng = rng();
+        let keys = PartyPrfKeys::generate_committee(3, &mut rng).unwrap();
+        let mut transport = keys[0].clone().into_transport();
+        transport.zeroize();
+        assert!(PartyPrfKeys::from_transport(transport).is_err());
     }
 }

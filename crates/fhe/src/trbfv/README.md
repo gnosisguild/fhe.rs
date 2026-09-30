@@ -55,6 +55,14 @@ network exchange or secret sharing. Distributed applications must securely
 establish matching pairwise keys externally rather than invoking this factory
 independently on each node.
 
+For party `i`, `PartyPrfKeys::party_id()` is `i` and `committee_size()` is the
+total committee size `n`. Its two key vectors follow the paper's indices:
+`keys_i_j` contains `(k_{i,j})_j`, whose PRF evaluations are added to the mask;
+`keys_j_i` contains `(k_{j,i})_j`, whose evaluations are subtracted. Neither name
+describes message direction. `PartyPrfKeyTransport` is the zeroizing raw-byte
+representation for application transport, while `PartyPrfKeys` is the reusable
+owner used to evaluate masks; they contain the same keys, not two different sets.
+
 The examples in `crates/fhe/examples/` simulate the external setup and share
 transport locally. They demonstrate the supported component flow, but they do
 not implement DKG, authenticated broadcast, PVSS, ZK validation, or the paper's
@@ -266,7 +274,7 @@ Basic usage pattern:
 
 ```rust
 use fhe::trbfv::{
-    PartyPrfKeyMaterial, PartyPrfKeys, SecretKeyShare, ShareManager, SmudgingConfig,
+    PartyPrfKeyTransport, PartyPrfKeys, SecretKeyShare, ShareManager, SmudgingConfig,
     SmudgingNoiseGenerator,
 };
 
@@ -283,11 +291,11 @@ let secret_key_dealt = secret_key_dealt.into_transport();
 // establishment is external; do not sample independently on each node.
 let prf_keys = PartyPrfKeys::generate_committee(n_parties, &mut rng)?;
 let transported = prf_keys[party_index].clone().into_transport();
-let prf_keys_i = PartyPrfKeys::from_transport(PartyPrfKeyMaterial::new(
+let prf_keys_i = PartyPrfKeys::from_transport(PartyPrfKeyTransport::new(
     transported.party_id(),
-    transported.party_count(),
-    transported.outgoing().to_vec(),
-    transported.incoming().to_vec(),
+    transported.committee_size(),
+    transported.keys_i_j().to_vec(),
+    transported.keys_j_i().to_vec(),
 )?)?;
 
 // Each party: aggregate the share matrices received from the other parties
