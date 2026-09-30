@@ -1610,51 +1610,23 @@ mod tests {
     }
 
     #[test]
-    fn error1_variance_functionality() -> Result<(), Box<dyn Error>> {
-        let params = BfvParametersBuilder::new()
-            .set_degree(8)
-            .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62])
-            .set_variance(10)
-            .build()?;
-        assert_eq!(params.get_error1_variance(), &BigUint::from(10u32));
-
-        let error2_big = BigUint::from(20u32);
-        let params = BfvParametersBuilder::new()
-            .set_degree(8)
-            .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62])
-            .set_variance(10)
-            .set_error1_variance(error2_big.clone())
-            .build()?;
-        assert_eq!(params.get_error1_variance(), &error2_big);
-        assert_eq!(params.variance(), 10);
-
-        let large_error2 = BigUint::parse_bytes(
+    fn large_error1_variance_setters_preserve_values() -> Result<(), Box<dyn Error>> {
+        let large_error1 = BigUint::parse_bytes(
             b"57896044618658097711785492504343953926634992332820282019728792003956564819967",
             10,
         )
         .unwrap();
-        let params_with_large_error2 = BfvParametersBuilder::new()
+        let params_with_large_error1 = BfvParametersBuilder::new()
             .set_degree(8)
             .set_plaintext_modulus(1153)
             .set_moduli_sizes(&[62; 3])
             .set_variance(10)
-            .set_error1_variance(large_error2.clone())
+            .set_error1_variance(large_error1.clone())
             .build()?;
         assert_eq!(
-            params_with_large_error2.get_error1_variance(),
-            &large_error2
+            params_with_large_error1.get_error1_variance(),
+            &large_error1
         );
-
-        let params_usize = BfvParametersBuilder::new()
-            .set_degree(8)
-            .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62])
-            .set_variance(10)
-            .set_error1_variance_usize(15)
-            .build()?;
-        assert_eq!(params_usize.get_error1_variance(), &BigUint::from(15u32));
 
         let mut builder = BfvParametersBuilder::new();
         builder
@@ -1708,75 +1680,34 @@ mod tests {
     }
 
     #[test]
-    fn test_error1_variance_tracks_variance() -> Result<(), Box<dyn Error>> {
-        let params = BfvParametersBuilder::new()
-            .set_degree(8)
-            .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62])
-            .set_variance(15)
-            .build()?;
-
-        assert_eq!(params.variance(), 15);
-        assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_error1_variance_independent_when_set() -> Result<(), Box<dyn Error>> {
-        let params = BfvParametersBuilder::new()
-            .set_degree(8)
-            .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62])
-            .set_error1_variance_usize(20)
-            .set_variance(15)
-            .build()?;
-
-        assert_eq!(params.variance(), 15);
-        assert_eq!(params.get_error1_variance(), &BigUint::from(20u32));
-
-        let params2 = BfvParametersBuilder::new()
-            .set_degree(8)
-            .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62])
-            .set_variance(15)
-            .set_error1_variance_usize(20)
-            .build()?;
-
-        assert_eq!(params2.variance(), 15);
-        assert_eq!(params2.get_error1_variance(), &BigUint::from(20u32));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_error1_variance_follows_multiple_variance_changes() -> Result<(), Box<dyn Error>> {
+    fn error1_variance_tracks_changes_unless_explicitly_set() -> Result<(), Box<dyn Error>> {
         let mut builder = BfvParametersBuilder::new();
         builder
             .set_degree(8)
             .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62])
-            .set_variance(5)
-            .set_variance(10)
-            .set_variance(15);
+            .set_moduli_sizes(&[62]);
+        for variance in [5, 10, 15] {
+            let params = builder.set_variance(variance).build()?;
+            assert_eq!(params.variance(), variance);
+            assert_eq!(params.get_error1_variance(), &BigUint::from(variance));
+        }
 
-        let params = builder.build()?;
-
-        assert_eq!(params.variance(), 15);
-        assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
+        // Setting error1 after variance overrides the default; later variance
+        // changes must not overwrite that explicit choice.
+        builder.set_error1_variance_usize(20);
+        for variance in [15, 10, 15] {
+            let params = builder.set_variance(variance).build()?;
+            assert_eq!(params.variance(), variance);
+            assert_eq!(params.get_error1_variance(), &BigUint::from(20u32));
+        }
 
         Ok(())
-    }
-
-    #[test]
-    fn default_parameters_iterator() {
-        let mut it = BfvParameters::default_parameters_128(20).unwrap();
-        assert!(it.next().is_some());
     }
 
     #[test]
     fn default_parameters_filtering() {
         let params: Vec<_> = BfvParameters::default_parameters_128(20).unwrap().collect();
+        assert!(!params.is_empty());
 
         for param in &params {
             let modulus_product_bitlength = param.moduli_sizes.iter().sum::<usize>();

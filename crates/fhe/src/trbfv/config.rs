@@ -56,17 +56,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_valid_threshold_config() {
-        assert!(validate_threshold_config(5, 2).is_ok());
-        assert!(validate_threshold_config(3, 1).is_ok());
-        assert!(validate_threshold_config(10, 4).is_ok());
-
-        // Maximal corruption tolerance: T = (n - 1) / 2.
-        assert!(validate_threshold_config(20, 9).is_ok());
-        assert!(validate_threshold_config(21, 10).is_ok());
-    }
-
-    #[test]
     fn test_supported_deployment_configs() {
         let deployments = [
             ("minimum", 3, 2, 1),
@@ -87,6 +76,7 @@ mod tests {
             ("", 18, 10, 8),
             ("small", 19, 10, 9),
             ("", 20, 11, 9),
+            ("", 21, 11, 10),
         ];
         for (name, n, h, t) in deployments {
             assert!(

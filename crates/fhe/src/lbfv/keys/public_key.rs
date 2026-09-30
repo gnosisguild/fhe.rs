@@ -992,7 +992,7 @@ mod tests {
             BfvParameters::default_arc(1, 8),
             insecure().unwrap().parameters,
         ] {
-            for level in 0..params.max_level() {
+            for level in 0..=params.max_level() {
                 for _ in 0..20 {
                     let sk = SecretKey::random(&params, &mut rng);
                     let pk = LBFVPublicKey::new(&sk, &mut rng)?;
@@ -1005,7 +1005,6 @@ mod tests {
                     let ct = pk.try_encrypt(&pt, &mut rng)?;
                     let pt2 = sk.try_decrypt(&ct)?;
 
-                    println!("Noise: {}", unsafe { sk.measure_noise(&ct)? });
                     assert_eq!(pt2, pt);
                 }
             }
@@ -1118,21 +1117,6 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(1, 8),
-            insecure().unwrap().parameters,
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
-            let pk = LBFVPublicKey::new(&sk, &mut rng)?;
-            let bytes = pk.to_bytes();
-            assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
-        }
-        Ok(())
-    }
-
-    #[test]
     fn test_malformed_l_rejected() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut rng = rng();
         let params = insecure().unwrap().parameters;
@@ -1161,22 +1145,26 @@ mod tests {
     #[test]
     fn seeded_and_explicit_serialization_roundtrip() -> std::result::Result<(), Box<dyn Error>> {
         let mut rng = rng();
-        let params = insecure().unwrap().parameters;
-        let sk = SecretKey::random(&params, &mut rng);
-        let seeded = LBFVPublicKey::new(&sk, &mut rng)?;
-        let seeded_bytes = seeded.to_bytes();
-        assert_eq!(LBFVPublicKey::from_bytes(&seeded_bytes, &params)?, seeded);
+        for params in [
+            BfvParameters::default_arc(1, 8),
+            insecure().unwrap().parameters,
+        ] {
+            let sk = SecretKey::random(&params, &mut rng);
+            let seeded = LBFVPublicKey::new(&sk, &mut rng)?;
+            let seeded_bytes = seeded.to_bytes();
+            assert_eq!(LBFVPublicKey::from_bytes(&seeded_bytes, &params)?, seeded);
 
-        let b_polynomials = seeded.c.iter().map(|ct| ct.c[0].clone()).collect();
-        let a_polynomials = seeded.c.iter().map(|ct| ct.c[1].clone()).collect();
-        let explicit =
-            LBFVPublicKey::from_parts(b_polynomials, a_polynomials, params.clone(), None)?;
-        let explicit_bytes = explicit.to_bytes();
-        assert_eq!(
-            LBFVPublicKey::from_bytes(&explicit_bytes, &params)?,
-            explicit
-        );
-        assert!(seeded_bytes.len() < explicit_bytes.len());
+            let b_polynomials = seeded.c.iter().map(|ct| ct.c[0].clone()).collect();
+            let a_polynomials = seeded.c.iter().map(|ct| ct.c[1].clone()).collect();
+            let explicit =
+                LBFVPublicKey::from_parts(b_polynomials, a_polynomials, params.clone(), None)?;
+            let explicit_bytes = explicit.to_bytes();
+            assert_eq!(
+                LBFVPublicKey::from_bytes(&explicit_bytes, &params)?,
+                explicit
+            );
+            assert!(seeded_bytes.len() < explicit_bytes.len());
+        }
         Ok(())
     }
 

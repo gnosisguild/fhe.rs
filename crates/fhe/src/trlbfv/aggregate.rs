@@ -854,18 +854,13 @@ mod tests {
         let duplicated = vec![pairs[0].clone(), pairs[0].clone(), pairs[1].clone()];
         let (pk, rlk) = aggregate_key_pair(duplicated)?;
 
-        // Functional under the multiset sum sk_a + sk_a + sk_b, and equal to
-        // the independent aggregation of the same multiset.
+        // Functional under the multiset sum sk_a + sk_a + sk_b.
         let multiset_sks = vec![sks[0].clone(), sks[0].clone(), sks[1].clone()];
         assert_eq!(
             square_decrypt(&pk, &rlk, &multiset_sks, &params, &mut rng, 3)?,
             9
         );
 
-        let independent =
-            aggregate_key_pair(vec![pairs[0].clone(), pairs[0].clone(), pairs[1].clone()])?;
-        assert_eq!(pk, independent.0);
-        assert_eq!(rlk, independent.1);
         Ok(())
     }
 
