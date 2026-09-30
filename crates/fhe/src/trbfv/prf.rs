@@ -33,7 +33,7 @@ const CTX_DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2/ctx";
 const EVAL_DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2/eval";
 
 /// A 256-bit PRF key. Sampled uniformly at random and mapped into the
-/// Poseidon2 field inside [`evaluate`].
+/// Poseidon2 field by the internal evaluation routine.
 #[derive(Clone, ZeroizeFields, ZeroizeOnDrop)]
 pub struct PrfKey([u8; KEY_LEN]);
 

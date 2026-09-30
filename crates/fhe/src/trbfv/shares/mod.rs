@@ -34,7 +34,7 @@ use zeroize::{Zeroize, Zeroizing};
 /// `threshold` is the degree `T` of the Shamir sharing polynomial, read as the
 /// maximum number of corrupted parties the deployment tolerates. Reconstruction
 /// requires `T + 1` shares. `ShareManager` enforces the trBFV invariants
-/// `n >= 3` and `T = (n - 1) / 2` (see [`validate_threshold_config`]).
+/// `n >= 3` and `T = (n - 1) / 2` (see `validate_threshold_config`).
 ///
 /// # Protocol Flow
 /// 1. Each party generates secret shares using secret sharing
@@ -183,14 +183,15 @@ impl ShareManager {
 }
 
 impl ShareManager {
-    /// Utility to create a Zeroizing<Poly> from coefficients.
+    /// Utility to create a `Zeroizing<Poly>` from coefficients.
     ///
     /// # Arguments
-    /// - `coeffs`: Coefficients that can be converted to Poly (Box<[i64]>, Array2<u64>, etc.)
+    /// - `coeffs`: Coefficients that can be converted to `Poly` (`Box<[i64]>`,
+    ///   `Array2<u64>`, etc.)
     /// - `ctx`: BFV context to use for the polynomial
     ///
     /// # Returns
-    /// A Zeroizing<Poly> in PowerBasis representation
+    /// A `Zeroizing<Poly<PowerBasis>>` in `PowerBasis` representation.
     pub fn coeffs_to_poly<T>(
         &self,
         coeffs: T,
