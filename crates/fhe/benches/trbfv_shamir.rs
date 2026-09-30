@@ -100,7 +100,7 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
             })
             .collect();
 
-        let public_key = PublicKey::new(&secret_key, &mut setup_rng);
+        let public_key = PublicKey::new(&secret_key, &mut setup_rng).unwrap();
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params)
             .expect("plaintext encoding must succeed");
         let ciphertext: Arc<Ciphertext> = Arc::new(

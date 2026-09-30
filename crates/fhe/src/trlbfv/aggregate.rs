@@ -184,6 +184,8 @@ fn sum_ksk_c0<'a>(
 ///
 /// Returns an error if `shares` is empty or if any observable property above
 /// fails to hold.
+/// Reference-string mismatch errors report zero-based indices in `shares`,
+/// comparing against share 0. They do not establish which contributor is honest.
 ///
 /// The aggregate error grows with the number of summed contributions. Callers
 /// must ensure that `shares.len()` is supported by their parameter set's noise
@@ -296,20 +298,26 @@ pub fn aggregate_relinearization_key(
     }
 
     // Verify the concrete d1 (URS) polynomials match across all shares.
-    for s in rest {
+    for (index, s) in rest.iter().enumerate() {
         if s.ksk_r_to_s.c1 != first.ksk_r_to_s.c1 {
-            return Err(Error::DefaultError(
-                "Relinearization key shares have inconsistent d1 (URS) polynomials".to_string(),
-            ));
+            return Err(crate::MultipartyError::ReferenceStringMismatch {
+                role: crate::ReferenceStringRole::Urs,
+                share_index: index + 1,
+                reference_share_index: 0,
+            }
+            .into());
         }
     }
 
     // Verify the concrete a (CRS) polynomials match across all shares.
-    for s in rest {
+    for (index, s) in rest.iter().enumerate() {
         if s.ksk_s_to_r.c1 != first.ksk_s_to_r.c1 {
-            return Err(Error::DefaultError(
-                "Relinearization key shares have inconsistent a (CRS) polynomials".to_string(),
-            ));
+            return Err(crate::MultipartyError::ReferenceStringMismatch {
+                role: crate::ReferenceStringRole::Crs,
+                share_index: index + 1,
+                reference_share_index: 0,
+            }
+            .into());
         }
     }
 
@@ -367,9 +375,7 @@ pub fn aggregate_relinearization_key(
                 Error::DefaultError("Public key is missing its a_j polynomial".to_string())
             })?;
         if a_ksk != *pk_a_j {
-            return Err(Error::DefaultError(
-                "CRS consistency failed: RLK's a_j does not match public key's a_j".to_string(),
-            ));
+            return Err(crate::MultipartyError::PublicKeyCrsMismatch { row_index: j }.into());
         }
     }
 
@@ -482,7 +488,7 @@ mod tests {
         let joint_coeffs: Vec<i64> = (0..params.degree())
             .map(|d| sks.iter().map(|sk| sk.coeffs[d]).sum())
             .collect();
-        let joint_sk = SecretKey::new(joint_coeffs, &params);
+        let joint_sk = SecretKey::new(joint_coeffs, &params)?;
         let pt = Plaintext::try_encode(&[3u64], Encoding::poly(), &params)?;
         let ct = pk.try_encrypt(&pt, &mut rng)?;
         let mut square = &ct * &ct;
@@ -649,7 +655,7 @@ mod tests {
         let joint_coeffs: Vec<i64> = (0..params.degree())
             .map(|d| sks.iter().map(|sk| sk.coeffs[d]).sum())
             .collect();
-        let joint_sk = SecretKey::new(joint_coeffs, params);
+        let joint_sk = SecretKey::new(joint_coeffs, params)?;
         let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
         Ok(decoded.first().copied().expect("decoded coefficient"))
     }

@@ -27,7 +27,7 @@ fn bench_timing_operations(c: &mut Criterion) {
     group.bench_function("generate_bfv_keypair", |b| {
         b.iter(|| {
             let sk = SecretKey::random(&params_bfv, &mut rng);
-            let pk = PublicKey::new(&sk, &mut rng);
+            let pk = PublicKey::new(&sk, &mut rng).unwrap();
             black_box((sk, pk))
         });
     });
@@ -52,7 +52,7 @@ fn bench_timing_operations(c: &mut Criterion) {
     });
 
     let sk_bfv = SecretKey::random(&params_bfv, &mut make_rng());
-    let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
+    let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng()).unwrap();
     // Representative polynomial-length payload, not a measured share-dealing
     // protocol. Encoding is setup; the timed operation is encryption alone.
     let test_share: Vec<u64> = (0..degree).map(|i| i as u64 % 1000).collect();

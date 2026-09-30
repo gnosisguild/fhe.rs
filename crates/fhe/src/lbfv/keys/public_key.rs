@@ -119,13 +119,7 @@ impl LBFVPublicKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Self> {
-        if sk.coeffs.len() != sk.params.degree() {
-            return Err(Error::DefaultError(format!(
-                "Secret key has {} coefficients, expected {}",
-                sk.coeffs.len(),
-                sk.params.degree()
-            )));
-        }
+        sk.validate()?;
 
         let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
         let row_seeds = Self::derive_crs_row_seeds(&sk.params, seed);
@@ -169,6 +163,7 @@ impl LBFVPublicKey {
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a random
     /// seed.
     pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
+        sk.validate()?;
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
         Self::new_with_seed(sk, seed, rng)
@@ -185,13 +180,7 @@ impl LBFVPublicKey {
         seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
         rng: &mut R,
     ) -> Result<Self> {
-        if sk.coeffs.len() != sk.params.degree() {
-            return Err(Error::DefaultError(format!(
-                "Secret key has {} coefficients, expected {}",
-                sk.coeffs.len(),
-                sk.params.degree()
-            )));
-        }
+        sk.validate()?;
 
         let l = sk.params.moduli().len();
         if a_polynomials.len() != l {

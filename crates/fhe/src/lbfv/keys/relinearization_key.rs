@@ -159,6 +159,7 @@ impl LBFVRelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<(KeySwitchingKey, KeySwitchingKey)> {
+        sk.validate()?;
         let ctx_relin_key = sk.params.context_at_level(key_level)?;
         let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
         let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
@@ -253,6 +254,7 @@ impl LBFVRelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<(KeySwitchingKey, KeySwitchingKey)> {
+        sk.validate()?;
         let ctx_relin_key = sk.params.context_at_level(key_level)?;
         let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
         let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
@@ -366,6 +368,7 @@ impl LBFVRelinearizationKey {
         Vec<Zeroizing<Poly<NttShoup>>>,
         Vec<Zeroizing<Poly<NttShoup>>>,
     )> {
+        sk.validate()?;
         let ctx_relin_key = sk.params.context_at_level(key_level)?;
         let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
         let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;

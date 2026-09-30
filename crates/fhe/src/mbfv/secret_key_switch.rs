@@ -43,6 +43,8 @@ impl SecretKeySwitchShare {
         ct: Arc<Ciphertext>,
         rng: &mut R,
     ) -> Result<Self> {
+        sk_input_share.validate()?;
+        sk_output_share.validate()?;
         if sk_input_share.params != sk_output_share.params {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::InputSecretKey,
@@ -186,7 +188,7 @@ impl DecryptionShare {
         rng: &mut R,
     ) -> Result<Self> {
         let params = &sk_input_share.params;
-        let zero = SecretKey::new(vec![0; params.degree()], params);
+        let zero = SecretKey::new(vec![0; params.degree()], params)?;
         let sks_share = SecretKeySwitchShare::new(sk_input_share, &zero, ct.clone(), rng)?;
         Ok(DecryptionShare { sks_share })
     }

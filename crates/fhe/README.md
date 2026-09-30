@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .build_arc()?;
     let mut rng = rng();
     let secret_key = SecretKey::random(&parameters, &mut rng);
-    let public_key = PublicKey::new(&secret_key, &mut rng);
+    let public_key = PublicKey::new(&secret_key, &mut rng)?;
 
     let plaintext_1 = Plaintext::try_encode(&[20_u64], Encoding::poly(), &parameters)?;
     let plaintext_2 = Plaintext::try_encode(&[-7_i64], Encoding::poly(), &parameters)?;

@@ -16,7 +16,7 @@ fn default_128_profile_supports_bfv_addition() {
         .expect("the selected default-128 profile must exist");
     let mut rng = support::presets::rng(71);
     let sk = SecretKey::random(&params, &mut rng);
-    let pk = PublicKey::new(&sk, &mut rng);
+    let pk = PublicKey::new(&sk, &mut rng).unwrap();
     let left = Plaintext::try_encode(&[17_u64], Encoding::poly(), &params).unwrap();
     let right = Plaintext::try_encode(&[25_u64], Encoding::poly(), &params).unwrap();
     let sum =

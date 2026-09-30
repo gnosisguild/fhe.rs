@@ -118,17 +118,22 @@ impl EncryptionIntermediates {
 
 impl PublicKey {
     /// Generate a new [`PublicKey`] from a [`SecretKey`].
-    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Self {
-        let zero = Plaintext::zero(Encoding::poly(), &sk.params).unwrap();
-        let mut c: Ciphertext = sk.try_encrypt(&zero, rng).unwrap();
+    ///
+    /// # Errors
+    /// Returns validation or key-generation errors.
+    /// Invalid secret-key lengths are rejected before randomness is drawn.
+    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
+        sk.validate()?;
+        let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
+        let mut c: Ciphertext = sk.try_encrypt(&zero, rng)?;
         // The polynomials of a public key should not allow for variable time
         // computation.
         c.iter_mut()
             .for_each(|p| p.disallow_variable_time_computations());
-        Self {
+        Ok(Self {
             params: sk.params.clone(),
             c,
-        }
+        })
     }
 
     /// Generate a public key and return the sampled values used to construct it.
@@ -138,6 +143,7 @@ impl PublicKey {
         sk: &SecretKey,
         rng: &mut R,
     ) -> Result<(Self, PublicKeyGenerationIntermediates)> {
+        sk.validate()?;
         let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
         let zero_poly = Zeroizing::new(zero.to_poly()?);
 
@@ -225,6 +231,14 @@ impl PublicKey {
 
     fn validate_encryption_inputs(&self, pt: &Plaintext) -> Result<usize> {
         pt.validate_for(&self.params)?;
+        if self.c.len() != 2 {
+            return Err(crate::CiphertextError::InvalidPolynomialCount {
+                operation: crate::CiphertextOperation::PublicKeyEncryption,
+                actual: self.c.len(),
+                expected: 2,
+            }
+            .into());
+        }
         self.c.validate_for(&self.params)?;
         let plaintext_level = pt.level();
         if plaintext_level < self.c.level {
@@ -333,6 +347,14 @@ impl DeserializeParametrized for PublicKey {
             crate::serialization::decode(bytes, crate::SerializedObject::PublicKey)?;
         if let Some(proto_c) = &proto.c {
             let mut c = Ciphertext::try_convert_from(proto_c, params)?;
+            if c.len() != 2 {
+                return Err(SerializationError::WrongPolynomialCount {
+                    component: crate::SerializedPolynomialComponent::PublicKeyCiphertext,
+                    actual: c.len(),
+                    expected: 2,
+                }
+                .into());
+            }
             if c.level != 0 {
                 Err(Error::SerializationError(
                     SerializationError::InvalidPublicKeyLevel {
@@ -377,7 +399,7 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 16);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
         assert_eq!(pk.params, params);
         assert_eq!(
             sk.try_decrypt(&pk.c)?,
@@ -396,7 +418,7 @@ mod tests {
             for level in 0..=params.max_level() {
                 for _ in 0..20 {
                     let sk = SecretKey::random(&params, &mut rng);
-                    let pk = PublicKey::new(&sk, &mut rng);
+                    let pk = PublicKey::new(&sk, &mut rng)?;
 
                     let pt = Plaintext::try_encode(
                         &fhe_math::zq::Modulus::new(params.plaintext())
@@ -422,11 +444,46 @@ mod tests {
         let params = BfvParameters::default_arc(1, 16);
         let other_params = BfvParameters::default_arc(1, 16);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
         let pt = Plaintext::try_encode(&[1u64][..], Encoding::poly(), &other_params)?;
 
         assert!(pk.try_encrypt(&pt, &mut rng).is_err());
         assert!(pk.try_encrypt_with_intermediates(&pt, &mut rng).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_rejects_wrong_polynomial_counts_before_randomness() -> Result<(), Box<dyn Error>>
+    {
+        let mut rng = crate::support::presets::rng(241);
+        let params = BfvParameters::default_arc(1, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
+        let pt = Plaintext::zero(Encoding::poly(), &params)?;
+
+        for actual in [0, 1, 3] {
+            let mut malformed_pk = pk.clone();
+            malformed_pk.c.c = vec![pk.c[0].clone(); actual];
+            for error in [
+                malformed_pk
+                    .try_encrypt(&pt, &mut crate::support::PanicOnUseRng)
+                    .err(),
+                malformed_pk
+                    .try_encrypt_with_intermediates(&pt, &mut crate::support::PanicOnUseRng)
+                    .err(),
+            ] {
+                assert_eq!(
+                    error,
+                    Some(crate::Error::Ciphertext(
+                        crate::CiphertextError::InvalidPolynomialCount {
+                            operation: crate::CiphertextOperation::PublicKeyEncryption,
+                            actual,
+                            expected: 2,
+                        }
+                    ))
+                );
+            }
+        }
         Ok(())
     }
 
@@ -464,7 +521,7 @@ mod tests {
             })
         ));
 
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
         let (_ct, mut encryption_intermediates) =
             pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
         encryption_intermediates.zeroize();
@@ -490,7 +547,7 @@ mod tests {
             BfvParameters::default_arc(6, 16),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
-            let pk = PublicKey::new(&sk, &mut rng);
+            let pk = PublicKey::new(&sk, &mut rng)?;
             let bytes = pk.to_bytes();
             assert_eq!(pk, PublicKey::from_bytes(&bytes, &params)?);
         }
@@ -519,7 +576,7 @@ mod tests {
                 &BigUint::from(error1_variance.unwrap_or(10))
             );
             let sk = SecretKey::random(&params, &mut rng);
-            let pk = PublicKey::new(&sk, &mut rng);
+            let pk = PublicKey::new(&sk, &mut rng)?;
             let q = fhe_math::zq::Modulus::new(params.plaintext())?;
             let pt = Plaintext::try_encode(
                 &q.random_vec(params.degree(), &mut rng),

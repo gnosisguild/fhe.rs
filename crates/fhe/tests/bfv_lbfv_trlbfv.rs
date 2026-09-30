@@ -86,7 +86,7 @@ fn bfv_addition_and_simd_round_trip_use_deterministic_profile() {
     for profile in profiles().into_iter().take(2) {
         let mut rng = support::presets::rng(profile.seed);
         let sk = SecretKey::random(&profile.preset.parameters, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
 
         let left =
             Plaintext::try_encode(&[2_u64], Encoding::poly(), &profile.preset.parameters).unwrap();
@@ -179,7 +179,7 @@ fn trlbfv_public_key_aggregation_is_order_independent() {
     let joint_coeffs: Vec<i64> = (0..profile.preset.parameters.degree())
         .map(|index| secret_keys.iter().map(|key| key.coeffs[index]).sum())
         .collect();
-    let joint_sk = SecretKey::new(joint_coeffs, &profile.preset.parameters);
+    let joint_sk = SecretKey::new(joint_coeffs, &profile.preset.parameters).unwrap();
     let plaintext =
         Plaintext::try_encode(&[7_u64], Encoding::poly(), &profile.preset.parameters).unwrap();
     let ciphertext = aggregated.try_encrypt(&plaintext, &mut rng).unwrap();
@@ -193,7 +193,7 @@ fn trlbfv_public_key_aggregation_is_order_independent() {
     let subset_coeffs: Vec<i64> = (0..profile.preset.parameters.degree())
         .map(|index| secret_keys[..2].iter().map(|key| key.coeffs[index]).sum())
         .collect();
-    let subset_sk = SecretKey::new(subset_coeffs, &profile.preset.parameters);
+    let subset_sk = SecretKey::new(subset_coeffs, &profile.preset.parameters).unwrap();
     let subset_ciphertext = subset.try_encrypt(&plaintext, &mut rng).unwrap();
     assert_eq!(
         subset_sk.try_decrypt(&subset_ciphertext).unwrap(),

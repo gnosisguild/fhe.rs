@@ -19,6 +19,7 @@ use num_bigint::BigUint;
 use num_traits::cast::ToPrimitive;
 use pulp::Arch;
 use rand::{CryptoRng, Rng, Rng as RngCore, distr::Uniform};
+use zeroize::Zeroizing;
 
 /// cond ? on_true : on_false
 const fn const_time_cond_select(on_true: u64, on_false: u64, cond: bool) -> u64 {
@@ -894,14 +895,14 @@ impl Modulus {
     /// up to `2^nbits - 1`, which may exceed `p`.
     pub fn deserialize_vec(&self, b: &[u8]) -> Result<Vec<u64>> {
         let p_nbits = 64 - (self.p - 1).leading_zeros() as usize;
-        let v = transcode_from_bytes(b, p_nbits);
+        let mut v = Zeroizing::new(transcode_from_bytes(b, p_nbits));
         if let Some(&value) = v.iter().find(|&&x| x >= self.p) {
             return Err(Error::NonCanonicalValue {
                 value,
                 modulus: self.p,
             });
         }
-        Ok(v)
+        Ok(std::mem::take(v.as_mut()))
     }
 }
 

@@ -67,6 +67,16 @@ impl RelinKeyShare {
         &self.ksk_r_to_s.c0
     }
 
+    /// Return the shared `d1` (URS) components in gadget-row order.
+    ///
+    /// These read-only rows allow comparison with a protocol's expected URS
+    /// without aggregating a singleton share. Matching rows do not authenticate
+    /// a contributor or prove that its secret-dependent components are correct.
+    #[must_use]
+    pub fn d1_components(&self) -> &[Poly<NttShoup>] {
+        &self.ksk_r_to_s.c1
+    }
+
     /// Return the secret-dependent `d2` components in gadget-row order.
     ///
     /// Each [`Poly<NttShoup>`] contains all RNS limbs for one row. These rows
@@ -77,6 +87,16 @@ impl RelinKeyShare {
     #[must_use]
     pub fn d2_components(&self) -> &[Poly<NttShoup>] {
         &self.ksk_s_to_r.c0
+    }
+
+    /// Return the shared `a` (CRS) components in gadget-row order.
+    ///
+    /// These read-only rows allow comparison with a protocol's expected CRS.
+    /// Matching rows do not authenticate a contributor or prove that its
+    /// secret-dependent components are correct.
+    #[must_use]
+    pub fn a_components(&self) -> &[Poly<NttShoup>] {
+        &self.ksk_s_to_r.c1
     }
 
     /// Return the ciphertext level used by this relinearization-key share.
@@ -347,7 +367,7 @@ mod tests {
         let joint_coeffs: Vec<i64> = (0..params.degree())
             .map(|d| sks.iter().map(|sk| sk.coeffs[d]).sum())
             .collect();
-        let joint_sk = SecretKey::new(joint_coeffs, &params);
+        let joint_sk = SecretKey::new(joint_coeffs, &params)?;
         let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
         assert_eq!(decoded.first(), Some(&9));
         Ok(())
@@ -386,7 +406,7 @@ mod tests {
         let joint_coeffs: Vec<i64> = (0..params.degree())
             .map(|d| sks.iter().map(|sk| sk.coeffs[d]).sum())
             .collect();
-        let joint_sk = SecretKey::new(joint_coeffs, &params);
+        let joint_sk = SecretKey::new(joint_coeffs, &params)?;
         let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
         assert_eq!(decoded.first(), Some(&4));
         Ok(())
@@ -435,13 +455,20 @@ mod tests {
             .map(|sk| PublicKeyShare::contribute_with_seed(sk, pk_seed, &mut rng))
             .collect::<Result<Vec<_>>>()?;
         let aggregated_pk: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
-        let rlk_shares = sks
+        let mut rlk_shares = sks
             .iter()
             .map(|sk| RelinKeyShare::contribute_with_seed(sk, d1_seed, rlk_a_seed, 0, 0, &mut rng))
             .collect::<Result<Vec<_>>>()?;
 
-        let result = aggregate_relinearization_key(&rlk_shares, &aggregated_pk);
-        assert!(result.is_err());
+        for _ in 0..2 {
+            assert_eq!(
+                aggregate_relinearization_key(&rlk_shares, &aggregated_pk).unwrap_err(),
+                crate::Error::Multiparty(crate::MultipartyError::PublicKeyCrsMismatch {
+                    row_index: 0,
+                })
+            );
+            rlk_shares.reverse();
+        }
         Ok(())
     }
 
@@ -633,7 +660,7 @@ mod tests {
         let joint_coeffs: Vec<i64> = (0..params.degree())
             .map(|d| sks.iter().map(|sk| sk.coeffs[d]).sum())
             .collect();
-        let joint_sk = SecretKey::new(joint_coeffs, &params);
+        let joint_sk = SecretKey::new(joint_coeffs, &params)?;
         let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
         assert_eq!(decoded.first(), Some(&25));
         Ok(())
@@ -925,7 +952,7 @@ mod tests {
         let joint_coeffs: Vec<i64> = (0..params.degree())
             .map(|d| sks.iter().map(|sk| sk.coeffs[d]).sum())
             .collect();
-        let joint_sk = SecretKey::new(joint_coeffs, &params);
+        let joint_sk = SecretKey::new(joint_coeffs, &params)?;
         let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
         assert_eq!(decoded.first(), Some(&9));
         Ok(())

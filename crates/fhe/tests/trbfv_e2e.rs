@@ -120,7 +120,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
         })
         .collect();
 
-    let pk = PublicKey::new(&secret_key, &mut rng);
+    let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
     let mut encrypt = |value: u64| {
         let plaintext =
             Plaintext::try_encode(&[value], Encoding::poly(), &params).expect("plaintext encoding");

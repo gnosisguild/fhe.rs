@@ -21,7 +21,7 @@ enum PlaintextCoefficients {
 }
 
 /// A plaintext object, that encodes a vector according to a specific encoding.
-#[derive(Debug, Clone, Eq)]
+#[derive(Clone, Eq)]
 pub struct Plaintext {
     /// The parameters of the underlying BFV encryption scheme.
     pub(crate) params: Arc<BfvParameters>,
@@ -29,6 +29,16 @@ pub struct Plaintext {
     pub(crate) encoding: Option<Encoding>,
     /// Canonical plaintext representation.
     pub(crate) poly_ntt: Poly<Ntt>,
+}
+
+impl std::fmt::Debug for Plaintext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Plaintext")
+            .field("params", &self.params)
+            .field("encoding", &self.encoding)
+            .field("poly_ntt", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Zeroize for Plaintext {
@@ -553,7 +563,7 @@ mod tests {
 
         let mut rng = crate::support::presets::rng(239);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
         let encrypted: crate::Result<crate::bfv::Ciphertext> =
             sk.try_encrypt(&invalid_plaintext, &mut rng);
         assert_eq!(encrypted.unwrap_err(), invalid);
