@@ -1,10 +1,27 @@
-// Threshold BFV multiplication using an MBFV public key, l-BFV RLK, and encrypted shares.
+// Threshold BFV multiplication with distributed l-BFV RLK and encrypted share transport.
 //
-// Uses secure16384 computation and transport profiles from support/presets.rs.
-// The transport plaintext modulus must be >= max(q_i), so canonical Shamir
-// residues encode without reduction. Defaults to 3 parties (profile maximum: 20).
-// Local simulation only; see src/trbfv/README.md for the protocol boundary.
-#![allow(missing_docs)]
+// Two BFV parameter sets:
+//
+//   First set  (computation) — n=20, z=3, k=1000, d=16384, 5×51-bit moduli, λ=31.
+//   This example uses 3 parties by default; the profile supports up to 20.
+//
+//   Second set (share encryption) — k = q[1] of first set ≈ 2^50, d=16384,
+//              2×53-bit moduli. Each Shamir share value lies in [0, q_i) ⊆ [0, k),
+//              so it encodes directly as a BFV plaintext.
+//              BFV decrypt is correct because k ≈ 2^50 < q₀/2 ≈ 2^52.0000  ✓
+//
+// Protocol:
+//  1. Each party generates: trBFV key share, Shamir shares of sk, an l-BFV RLK share,
+//     and a share-encryption BFV key pair (second set). Committee PRF keys are
+//     sampled once and distributed to the parties.
+//  2. Share-encryption public keys are published. Each party BFV-encrypts its Shamir
+//     shares for every receiver under the receiver's share-encryption key.
+//  3. Each receiver decrypts and aggregates the collected shares to reconstruct
+//     its Lagrange evaluation point of the combined secret key SK = Σ sk_j.
+//  4. Values are encrypted under the combined mbfv PublicKey, multiplied and
+//     relinearized, then threshold-decrypted by t+1 parties with local
+//     smudging and committee PRF masks (smudging is not Shamir-shared).
+#![allow(clippy::indexing_slicing, missing_docs)]
 
 #[path = "../support/mod.rs"]
 mod support;
@@ -15,10 +32,12 @@ use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
-    trbfv::{FreshNoiseModel, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{
+        DecryptionShare, FreshNoiseModel, PartyPrfKeys, ShareManager, SmudgingConfig,
+        SmudgingNoiseGenerator,
+    },
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
-use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use ndarray::{Array, ArrayView};
 use rand::{Rng, SeedableRng};
@@ -26,7 +45,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use support::examples::trbfv::{TrbfvShares, parse_cli, print_notice_without_num_summed};
+use support::examples::trbfv::{TrbfvShares, parse_cli, print_notice_and_exit};
 use support::examples::util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -46,9 +65,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // ── Second BFV parameter set (share encryption) ───────────────────────────
-    // The plaintext modulus equals the largest computation modulus
-    // (k = q[0] = max(q_i)), so every canonical Shamir share residue
-    // r ∈ [0, q_i) is strictly below k and encodes exactly.
+    // The plaintext modulus equals the largest computation modulus, so every
+    // Shamir share fits as a BFV plaintext.
     println!("\nBuilding share-encryption parameters (second set)...");
     let params_share_enc: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share enc)",
@@ -66,26 +84,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         plaintext_modulus_share_enc
     );
 
-    // Transport exactness guard: BFV encoding reduces coefficients modulo the
-    // share-encryption plaintext modulus k, so the profile must keep
-    // k ≥ max(q_i); otherwise high canonical residues would silently wrap.
-    let max_computation_modulus = params_trbfv.moduli().iter().copied().max().unwrap();
-    assert!(
-        plaintext_modulus_share_enc >= max_computation_modulus,
-        "share-encryption plaintext modulus {plaintext_modulus_share_enc} does not \
-         cover the largest computation modulus {max_computation_modulus}; \
-         transported Shamir residues would silently wrap"
-    );
-
     // ── CLI argument parsing ──────────────────────────────────────────────────
     let args: Vec<String> = env::args().skip(1).collect();
     if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
-        print_notice_without_num_summed(None)
+        print_notice_and_exit(None)
     }
 
     let cli = match parse_cli(&args, 3, 1, preset.lambda, None) {
         Ok(cli) => cli,
-        Err(error) => print_notice_without_num_summed(Some(error)),
+        Err(error) => print_notice_and_exit(Some(error)),
     };
     let num_parties = cli.num_parties;
     let threshold = cli.threshold;
@@ -109,7 +116,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     struct Party {
         pk_share: MBFVPublicKeyShare,
         shares: TrbfvShares,
-        decryption_share: Poly<PowerBasis>,
+        decryption_share: Option<DecryptionShare>,
+        prf_keys: PartyPrfKeys,
         pk_lbfv_share: PublicKeyShare, // l-BFV PK contribution (CRS = pk_seed)
         rlk_share: RelinKeyShare,
         // Share-encryption key pair (second BFV parameter set).
@@ -119,13 +127,28 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let crp = CommonRandomPoly::new(&params_trbfv, &mut rng)?;
     let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
+    let committee_prf_keys = Arc::new(support::examples::simulated_committee_prf_keys(
+        num_parties,
+        &mut rng,
+    ));
+    let smudging_config = SmudgingConfig::new(
+        params_trbfv.clone(),
+        num_parties,
+        3,
+        lambda,
+        FreshNoiseModel::BfvPublicKey,
+    )
+    .unwrap()
+    .with_mult_depth(preset.multiplicative_depth.unwrap());
+    let smudging_generator = Arc::new(SmudgingNoiseGenerator::new(smudging_config).unwrap());
     let num_moduli = params_trbfv.moduli().len();
 
     println!("\n💻 Available CPU cores: {}", rayon::current_num_threads());
     let mut parties: Vec<Party> = timeit!("Party setup (parallel)", {
         (0..num_parties)
             .into_par_iter()
-            .map(|_| {
+            .enumerate()
+            .map(|(party_index, _)| {
                 let mut rng = rand::rng();
 
                 // trBFV keys and Shamir shares.
@@ -140,31 +163,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 let secret_key_shares_transport = share_manager
                     .generate_secret_key_shares(secret_key_poly, &mut rng)
-                    .unwrap()
-                    .into_transport();
-
-                // Smudging noise shares (depth=3 multiplications). The
-                // decrypted circuit is the pure product `((a×b)×c)×d` of
-                // four fresh ciphertexts with no pre-sum, so the tight
-                // circuit size is m=1; m=3 is a conservative overprovision
-                // matching the profile design point. The default accepted
-                // set is all n parties. The multiplied ciphertexts are
-                // encrypted with the MBFV-aggregated BFV public key, whose
-                // ternary encryption randomness the BfvPublicKey model
-                // assumes; only the l-BFV relinearization key is used here.
-                let config = SmudgingConfig::new(
-                    params_trbfv.clone(),
-                    num_parties,
-                    3,
-                    lambda,
-                    FreshNoiseModel::BfvPublicKey,
-                )
-                .unwrap()
-                .with_mult_depth(preset.multiplicative_depth.unwrap());
-                let generator = SmudgingNoiseGenerator::new(config).unwrap();
-                let smudging_noise = generator.generate(&mut rng).unwrap();
-                let smudging_shares_transport = share_manager
-                    .generate_smudging_shares(smudging_noise, &mut rng)
                     .unwrap()
                     .into_transport();
 
@@ -187,14 +185,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let secret_key_enc = SecretKey::random(&params_share_enc, &mut rng);
                 let public_key_enc = PublicKey::new(&secret_key_enc, &mut rng).unwrap();
 
-                let ctx0 = params_trbfv.context_at_level(0).unwrap();
                 Party {
                     pk_share,
-                    shares: TrbfvShares::new(
-                        secret_key_shares_transport,
-                        smudging_shares_transport,
-                    ),
-                    decryption_share: Poly::<PowerBasis>::zero(ctx0),
+                    shares: TrbfvShares::new(secret_key_shares_transport),
+                    decryption_share: None,
+                    prf_keys: committee_prf_keys[party_index].clone(),
                     pk_lbfv_share,
                     rlk_share,
                     secret_key_enc,
@@ -217,70 +212,47 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Share encryption and transmission ─────────────────────────────────────
     // Each sender BFV-encrypts the share row it owes to each receiver under that
     // receiver's share-encryption public key (second parameter set). This is safe:
-    //   • k = q[0] = max(q_i) → every canonical share residue r ∈ [0, q_i) is
-    //     strictly below k, so encoding is exact (no silent reduction mod k)
-    //   • k ≈ 2^50 < q₀/2 ≈ 2^51  → BFV decrypt is algebraically exact
+    //   • k = q[1] ≥ q_i for all i → share values ∈ [0, q_i) ⊆ [0, k)
+    //   • k ≈ 2^57 < q₀/2 ≈ 2^59  → BFV decrypt is algebraically exact
     //
-    // encrypted_shares[sender][receiver] = (Vec<Ciphertext>, Vec<Ciphertext>)
-    //   first  vec: one ciphertext per modulus for the sk share row
-    //   second vec: one ciphertext per modulus for the smudging error share row
+    // encrypted_shares[sender][receiver]: one ciphertext per modulus for the sk share row
     let public_key_enc_list: Vec<PublicKey> =
         parties.iter().map(|p| p.public_key_enc.clone()).collect();
 
-    let encrypted_shares: Vec<Vec<(Vec<Ciphertext>, Vec<Ciphertext>)>> =
-        timeit!("Share encryption (parallel)", {
-            parties
-                .par_iter()
-                .map(|party| {
-                    (0..num_parties)
-                        .map(|receiver_idx| {
-                            let mut rng = rand::rng();
-                            let rpk = public_key_enc_list.get(receiver_idx).unwrap();
+    let encrypted_shares: Vec<Vec<Vec<Ciphertext>>> = timeit!("Share encryption (parallel)", {
+        parties
+            .par_iter()
+            .map(|party| {
+                (0..num_parties)
+                    .map(|receiver_idx| {
+                        let mut rng = rand::rng();
+                        let rpk = public_key_enc_list.get(receiver_idx).unwrap();
 
-                            let enc_sk: Vec<Ciphertext> = (0..num_moduli)
-                                .map(|m| {
-                                    let row = party
-                                        .shares
-                                        .secret_key_shares_transport
-                                        .get(m)
-                                        .unwrap()
-                                        .row(receiver_idx)
-                                        .to_vec();
-                                    let pt = Plaintext::try_encode(
-                                        &row,
-                                        Encoding::poly(),
-                                        &params_share_enc,
-                                    )
-                                    .unwrap();
-                                    rpk.try_encrypt(&pt, &mut rng).unwrap()
-                                })
-                                .collect();
+                        let enc_sk: Vec<Ciphertext> = (0..num_moduli)
+                            .map(|m| {
+                                let row = party
+                                    .shares
+                                    .secret_key_shares_transport
+                                    .get(m)
+                                    .unwrap()
+                                    .row(receiver_idx)
+                                    .to_vec();
+                                let pt = Plaintext::try_encode(
+                                    &row,
+                                    Encoding::poly(),
+                                    &params_share_enc,
+                                )
+                                .unwrap();
+                                rpk.try_encrypt(&pt, &mut rng).unwrap()
+                            })
+                            .collect();
 
-                            let enc_es: Vec<Ciphertext> = (0..num_moduli)
-                                .map(|m| {
-                                    let row = party
-                                        .shares
-                                        .smudging_shares_transport
-                                        .get(m)
-                                        .unwrap()
-                                        .row(receiver_idx)
-                                        .to_vec();
-                                    let pt = Plaintext::try_encode(
-                                        &row,
-                                        Encoding::poly(),
-                                        &params_share_enc,
-                                    )
-                                    .unwrap();
-                                    rpk.try_encrypt(&pt, &mut rng).unwrap()
-                                })
-                                .collect();
-
-                            (enc_sk, enc_es)
-                        })
-                        .collect()
-                })
-                .collect()
-        });
+                        enc_sk
+                    })
+                    .collect()
+            })
+            .collect()
+    });
 
     // ── Share decryption and collection ───────────────────────────────────────
     timeit!("Share decryption and collection (parallel)", {
@@ -289,7 +261,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .enumerate()
             .for_each(|(receiver_idx, party)| {
                 for sender_shares in encrypted_shares.iter() {
-                    let (enc_sk, enc_es) = sender_shares.get(receiver_idx).unwrap();
+                    let enc_sk = sender_shares.get(receiver_idx).unwrap();
 
                     let mut secret_key_rows = Array::zeros((0, degree));
                     for ct in enc_sk {
@@ -297,15 +269,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
                         secret_key_rows.push_row(ArrayView::from(&row)).unwrap();
                     }
-                    let mut smudging_rows = Array::zeros((0, degree));
-                    for ct in enc_es {
-                        let pt = party.secret_key_enc.try_decrypt(ct).unwrap();
-                        let row: Vec<u64> = Vec::<u64>::try_decode(&pt, Encoding::poly()).unwrap();
-                        smudging_rows.push_row(ArrayView::from(&row)).unwrap();
-                    }
-                    party
-                        .shares
-                        .collect_transport(secret_key_rows, smudging_rows);
+                    party.shares.collect_transport(secret_key_rows);
                 }
             });
     });
@@ -363,29 +327,43 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // ── Threshold decryption ──────────────────────────────────────────────────
     let t_start = Instant::now();
-    parties.par_iter_mut().for_each(|party| {
-        let smudging = party.shares.take_smudging().unwrap();
-        let secret_key = party.shares.secret_key().unwrap();
-        party.decryption_share = share_manager
-            .decryption_share(&product, secret_key, smudging)
-            .unwrap();
-    });
+    parties
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(party_index, party)| {
+            if party_index > threshold {
+                return;
+            }
+            let mut rng = rand::rng();
+            let secret_key = party.shares.secret_key().unwrap();
+            party.decryption_share = Some(
+                share_manager
+                    .decryption_share(
+                        &product,
+                        secret_key,
+                        party_index + 1,
+                        &(1..=threshold + 1).collect::<Vec<_>>(),
+                        smudging_generator.generate(&mut rng).unwrap(),
+                        &party.prf_keys,
+                    )
+                    .unwrap(),
+            );
+        });
     println!(
         "Decryption share generation: {:.2?} ({:.2} ms/party)",
         t_start.elapsed(),
         t_start.elapsed().as_millis() as f64 / num_parties as f64
     );
 
-    let decryption_shares: Vec<Poly<PowerBasis>> = parties
+    let decryption_shares: Vec<DecryptionShare> = parties
         .iter()
         .take(threshold + 1)
-        .map(|p| p.decryption_share.clone())
+        .map(|p| p.decryption_share.clone().unwrap())
         .collect();
 
     let result = timeit!("Combine shares and decrypt", {
-        let party_indices: Vec<usize> = (1..=threshold + 1).collect();
         let pt = share_manager
-            .decrypt_from_shares(&decryption_shares, &party_indices, &product)
+            .decrypt_from_shares(&decryption_shares, &product)
             .unwrap();
         let v = Vec::<u64>::try_decode(&pt, Encoding::poly())?;
         Ok::<u64, Box<dyn Error>>(v.first().copied().unwrap_or_default())

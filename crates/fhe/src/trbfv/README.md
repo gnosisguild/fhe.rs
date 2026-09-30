@@ -1,159 +1,384 @@
-# Threshold BFV (trBFV)
+# Threshold BFV (TRBFV)
 
-Shamir sharing, smudging noise, and threshold decryption based on
-[Urban–Rambaud 2024](https://eprint.iacr.org/2024/1285.pdf).
-Addition is supported directly; multiplication uses distributed l-BFV
-relinearization keys. This is a cryptographic component, not the paper's
-complete robust multiparty protocol.
+A pure-Rust implementation of threshold BFV homomorphic encryption. Shamir
+sharing of the secret key follows Antoine Urban and Matthieu Rambaud in
+[Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf)
+(Urban–Rambaud 2024). Partial decryption follows Colin de Verdière, Alain
+Passelègue, and Damien Stehlé in
+[On Threshold Fully Homomorphic Encryption with Synchronized Decryptors](https://eprint.iacr.org/2026/031.pdf)
+(eprint 2026/031): the designated decryptor set `S` is known up front, each
+party applies its Lagrange coefficient locally, adds fresh smudging noise, and
+masks the share with committee PRF keys.
 
-## Implementation boundary
+The current implementation covers Shamir sharing, local smudging noise, PRF
+masks, and threshold decryption with additive and limited multiplicative
+support via distributed *l*-BFV relinearization keys. It is **not** the
+complete robust protocol from Urban–Rambaud 2024: there is no distributed key
+generation, no broadcast channel, no FLSS, and no GURS generation. Committee
+PRF masks are evaluated with Poseidon2 through the SAFE sponge API using
+party-owned key bundles established by the application protocol.
 
-| Library provides | Application provides |
-| ---------------- | -------------------- |
-| BFV/l-BFV arithmetic and key contributions | DKG, PVSS, FLSS, and GURS |
-| Shamir sharing and aggregation | Authenticated transport and broadcast |
-| Smudging bounds and one-time noise owners | Participant/session binding and durable replay prevention |
-| Decryption shares and reconstruction | Proof verification, admission policy, retries, and identifiable aborts |
+This module enables distributed decryption between `n` parties without necessarily involving all of them: any `threshold + 1` of the `n` parties can decrypt a ciphertext, while any coalition of at most `threshold` parties learns nothing. The threshold must be exactly `(n-1)/2` (integer division), the maximal corruption tolerance under an honest majority — see `config.rs` for the derivation.
 
-`ShareManager` requires `n >= 3` and `threshold = (n - 1) / 2`. Reconstruction
-uses exactly `threshold + 1` distinct **1-based** party IDs, in the same order
-as the decryption shares. Odd committees (`n = 2t + 1`) match the paper's
-model. Even committees are accepted but fall outside its theorem.
-Proactive refresh is not implemented.
+## Implementation Boundary
 
-Contributions are not authenticated or bound to a participant or session by
-this API. Applications must use the same agreed contributor set throughout
-key generation, sharing, and decryption. Examples simulate setup and transport
-locally; they do not implement the missing protocol components.
+This crate exposes the cryptographic component used by a threshold FHE
+application. It does not expose the complete multiparty protocol described in
+the paper. The following table is the boundary for callers and integrators:
 
-## Share ownership
+| Paper or application component | Responsibility |
+| ------------------------------ | -------------- |
+| BFV and l-BFV operations (Sections 4 and 6) | Implemented by `fhe.rs`. |
+| Shamir sharing, share aggregation, smudging bounds, PRF masks, and threshold decryption | Implemented by `fhe.rs`. |
+| Committee PRF key establishment and secure distribution | Must be supplied externally. |
+| DKG, PVSS, FLSS, and GURS | Must be supplied externally. |
+| Authenticated transport, broadcast, retries, and identifiable aborts | Must be supplied externally. |
+| Committee membership, accepted-party policy, and application lifecycle | Must be supplied externally. |
+| ZK proofs and application wire formats | Must be supplied externally. |
 
-1. Deal each secret-key contribution with `generate_secret_key_shares`.
-2. Transport each recipient's shares and aggregate them with
-   `aggregate_secret_key_shares`.
-3. Sample fresh smudging noise, consume it with `generate_smudging_shares`,
-   and aggregate each recipient's received noise shares.
-4. Call `decryption_share` for each decrypting party, borrowing its aggregate
-   secret-key share and consuming its aggregate smudging share.
-5. Reconstruct with `decrypt_from_shares`.
+The public trBFV setup and decryption flow is:
 
-Secret-key aggregates are reusable and zeroized on drop. Smudging noise and
-aggregates are non-cloneable, one-time owners. Only dealt and individual shares
-expose transport operations; sampled noise and aggregated owners do not expose
-transport or proof witnesses.
+1. Create a `ShareManager` instance with BFV parameters.
+2. Generate and distribute Shamir shares for each party's secret contribution.
+3. Establish matching pairwise PRF keys in the application protocol. Each party
+   receives its own `2n` keys and rehydrates them with
+   `PartyPrfKeys::from_transport`. This is independent of `ShareManager`.
+4. Aggregate the received secret-key contributions for the same externally
+   agreed party set.
+5. For a designated decryptor set `S` of size `threshold + 1`, each party in
+   `S` samples local smudging noise and computes a partial decryption.
+6. Sum the `|S|` partial decryptions (FinDec) to recover the plaintext.
 
-Ownership prevents reuse of a live noise aggregate in safe Rust, **not replay
-of transported matrices**. Persisted or copied shares can recreate the same
-noise after re-aggregation. Bind transport to the ciphertext, key epoch, and
-decryption domain, and prevent cross-domain reuse durably.
+fhe.rs does not generate or establish committee PRF keys. Tests, examples, and
+benchmarks use the repository-only `support::examples::simulated_committee_prf_keys`
+helper to make internally consistent local bundles. It centralizes all key
+material, does not implement a secure setup protocol, and is not part of the
+published library API. Real applications must establish matching pairwise keys
+in their protocol and pass each party its own bundle.
+`from_transport` checks the local party metadata and vector lengths; it cannot
+verify that counterpart bundles contain matching pairwise keys.
 
-## Smudging configuration
+For party `i`, `PartyPrfKeys::party_id()` is `i` and `committee_size()` is the
+total committee size `n`. Its two key vectors follow the paper's indices:
+`keys_i_j` contains `(k_{i,j})_j`, whose PRF evaluations are added to the mask;
+`keys_j_i` contains `(k_{j,i})_j`, whose evaluations are subtracted. Neither name
+describes message direction. `PartyPrfKeyTransport` is the zeroizing raw-byte
+representation for application transport, while `PartyPrfKeys` is the reusable
+owner used to evaluate masks; they contain the same keys, not two different sets.
 
-`SmudgingConfig::new(params, n, m, lambda, model)` selects the bound;
-`.with_mult_depth(depth)` adds multiplication levels.
-`SmudgingNoiseGenerator::new` checks feasibility before sampling. The dealing
-manager checks the noise owner's full BFV parameters and party count, but
-cannot verify the caller's circuit, depth, `lambda`, or noise model.
+The examples in `crates/fhe/examples/` simulate the external setup and share
+transport locally. They demonstrate the supported component flow, but they do
+not implement DKG, authenticated broadcast, PVSS, ZK validation, or the paper's
+robustness protocol.
+
+Paper-conforming deployments use odd `n` with `n = 2t + 1`. The current API
+also accepts even `n` for compatibility; those deployments are an
+implementation-specific extension and must not be presented as covered by the
+paper's theorem. The API likewise does not bind a contribution matrix to a
+party identity or session, so callers must enforce a common participant set and
+identity/session binding at their protocol boundary.
+
+## Architecture
+
+The module follows a modular design with clear separation of concerns:
+
+- `rns_shamir.rs` - crate-private direct RNS Shamir arithmetic
+- `prf.rs` - committee PRF keys and partial-decryption masks
+- `smudging/` - Smudging noise generation with optimal variance calculation using arbitrary precision arithmetic
+- `shares/` - typed secret-key share owners, aggregation, and partial decryption
+- `config.rs` - Parameter validation
+- `errors.rs` - Threshold-specific error types
+
+The former public `trbfv::shamir` module and `ShamirSecretSharing` type were
+removed when share generation and reconstruction moved to direct RNS
+arithmetic. Callers should use `ShareManager`; its high-level share
+generation, aggregation, and reconstruction APIs retain the same logical share
+layout.
+
+> **Breaking change:** the `TRBFV` orchestrator struct has been removed;
+> `ShareManager` is the single public trBFV type (`ShareManager::
+> decrypt_from_shares` is the former `TRBFV::decrypt`). Partial decryption
+> no longer consumes Shamir-shared smudging noise.
+> `ShareManager::generate_smudging_shares` has been removed. Callers sample
+> local noise at decryption time and pass committee PRF keys into
+> `decryption_share` together with the designated set `S`. FinDec sums the
+> partial decryptions instead of Lagrange-reconstructing them. Smudging
+> noise is generated with `SmudgingConfig::new` (chain `.with_mult_depth(depth)`
+> when needed) → `SmudgingNoiseGenerator::new` → `generate`. The sampled
+> `SmudgingNoise` owner is consumed by `decryption_share`. Secret-key
+> material uses the typed owners `DealtSecretKeyShares`, `SecretKeyShare`,
+> and `AggregatedSecretKeyShare`. `ShareManager::bigints_to_poly` has been
+> removed.
+
+## Noise and Correctness Formulas
+
+This section summarises the formulas implemented in
+[`smudging/`](smudging/). Ciphertext-noise growth follows Urban–Rambaud 2024
+(Prop. 20 and Eq. 30). The smudging bound instantiates
+`B_SM = Ω(2^λ · B_Dec)` from the 2026 synchronized-decryptor paper, with
+`B_Dec` taken to be this crate's `B_C` after circuit evaluation.
+
+### Delta and the strict correctness inequality
+
+BFV encodes a plaintext `m` as `Δ · m` with scaling factor
+`Δ = ⌊Q / t⌋`. Rounding back to the nearest multiple of `Δ` is correct only
+when the total noise is strictly less than half a gap, `Δ / 2`:
+
+```text
+2 * (B_C + n * B_sm) < Δ
+```
+
+where
+- `Q` is the product of all CRT moduli,
+- `t` is the plaintext modulus,
+- `n` is the total number of parties (used even when only `|S| = threshold + 1`
+  parties smudge; this is conservative),
+- `B_C` is the ciphertext noise infinity-norm bound after circuit evaluation,
+- `B_sm` is the smudging-noise coefficient bound.
+
+`SmudgingNoiseGenerator::new` also requires `2 * B_C < Δ` before adding
+smudging. Equality is rejected on both checks (`>= Δ`): a bound that only
+meets `Δ / 2` does not guarantee correct rounding.
+
+### Ciphertext noise recursion (multiplicative circuits)
+
+Let `d` be the polynomial ring degree, `ℓ` the number of CRT moduli,
+`B_g` the largest CRT modulus, and `mult_depth` the number of multiplication
+levels. The code uses `||sk||_∞ = n` and `B_e = 2 · variance` (the BFV
+error-polynomial variance, distinct from `error1_variance` used for `B_enc`).
+
+- **Fresh encryption noise** (public-key models):
+
+  ```text
+  e_pk    = n * B_e
+  B_fresh = d * u_bound * e_pk + B_enc + d * B_e * ||sk||_∞
+  ```
+
+  `u_bound` is `1` for `BfvPublicKey` and `2 * variance` for
+  `LbfvPublicKey`. `B_enc` comes from the error sampler (see below).
+  `BfvSecretKey` uses `B_fresh = 2 * variance`; `Custom` uses the caller's
+  supplied bound.
+
+- **Initial bound** (additive circuit, `mult_depth = 0`):
+
+  ```text
+  B_C^(0) = m * (B_fresh + (Q mod t))
+  ```
+
+- **Recursion** (Prop. 20 of Urban–Rambaud 2024), applied `mult_depth` times:
+
+  ```text
+  B_C^(i+1) = 2 * k * d^2 * ||sk||_∞ * B_C^(i) + B_relin
+  ```
+
+  with `k = t`. The relinearisation error (Eq. 30) uses aggregate RLK error
+  `B_e^agg = n * B_e`:
+
+  ```text
+  B_relin = d * ℓ * ||sk||_∞ * B_g * B_e^agg
+          + 2 * d^2 * ℓ^2 * ||sk||_∞^2 * B_g * B_e^agg
+  ```
+
+  Using all `n` parties is conservative when fewer relinearization
+  contributions are aggregated.
+
+- **Smudging bound:**
+
+  ```text
+  B_sm = 2^(lambda + 1) * d * B_C
+  ```
+
+  `lambda` is the statistical security parameter. The extra factor `2 * d`
+  is the whole-transcript policy (issue #108): a single decryption reveals
+  all `d` coefficients of the smudging noise at once, so a union bound over
+  the coefficients adds a factor `d`, and `2^(lambda + 1)` keeps the
+  constant-`2` convention of the correctness inequality. The older form
+  `B_sm = 2^lambda * B_C` only bounds the statistical distance for a
+  *single* coefficient and is not what this module implements.
+
+### Sampler-specific `B_enc`
+
+`B_enc` is the worst-case coefficient magnitude returned by
+`fhe_math::rq::error_coefficient_bound(error1_variance)`. This shared helper
+selects the same CBD or uniform sampler as `Poly::conditional_error`, so the
+smudging bound tracks the encryption sampler's actual coefficient bound.
 
 ### Fresh-noise model
 
-Choose the model matching the actual encryption path:
+`SmudgingConfig::new(params, n, m, lambda, model)` requires an explicit model
+for the fresh ciphertexts entering the circuit. Choose the model that matches
+the actual encryption path:
 
-| `FreshNoiseModel` | Input ciphertexts | Fresh-noise assumption |
-| ----------------- | ----------------- | ---------------------- |
-| `BfvPublicKey` | BFV public-key encryption, including aggregated MBFV keys | Ternary randomness: `u_bound = 1` |
-| `LbfvPublicKey` | l-BFV public-key encryption, including aggregated keys | Small randomness: `u_bound = 2 * variance` |
-| `BfvSecretKey` | BFV secret-key encryption | One small error: `B_fresh = 2 * variance` |
+| `FreshNoiseModel` | Encryption path | Bound assumption |
+| ----------------- | --------------- | ---------------- |
+| `BfvPublicKey` | BFV public-key encryption, including aggregated MBFV keys | Ternary randomness (`u_bound = 1`) |
+| `LbfvPublicKey` | l-BFV public-key encryption, including aggregated keys | Small randomness (`u_bound = 2 * variance`) |
+| `BfvSecretKey` | BFV secret-key encryption | One small error (`B_fresh = 2 * variance`) |
 | `Custom(bound)` | External keys or samplers | Caller-justified positive `B_fresh` |
 
-There is no default. An understated bound invalidates the smudging guarantee;
-the library cannot verify an external noise distribution. For mixed input
-paths, use the largest fresh-noise bound.
+For public-key models, `e_pk = n * B_e`, `B_e = 2 * variance`, and
+`B_fresh = d * u_bound * e_pk + B_enc + d * B_e * n`; `u_bound` is shown in
+the table. `BfvSecretKey` uses `B_fresh = 2 * variance` and `Custom` uses the
+provided bound.
 
-### Circuit size and depth
+There is no default. The model and its arithmetic assumptions are trusted
+caller input; understated noise invalidates the guarantee. For mixed input
+paths, use the largest justified fresh-noise bound. The decryption API checks
+that sampled noise matches the manager's committee size and BFV parameters,
+but cannot verify the circuit, depth, `lambda`, or model.
 
-`m` bounds the largest sum of **fresh** ciphertexts before the modelled circuit:
+`SmudgingConfig::new` is fallible: it rejects zero parties, zero ciphertexts,
+and unsupported lambda values. Its fields are private; use accessors to inspect
+them and `.with_mult_depth(depth)` before passing the config to
+`SmudgingNoiseGenerator::new`. The generator checks feasibility, including
+during the multiplicative-depth recursion.
 
-| Circuit | `m` |
-| ------- | --- |
-| `a + b + c` | `3` |
-| `a * b * c`, without pre-sums | `1` |
-| `(a + b) * c` | `2` |
+## Known Limitations
 
-It is not a count of outputs or independent decryptions. Additions of evaluated
-results after multiplication are not modelled automatically: analyze such
-circuits and choose a conservative circuit-specific bound. Increasing `m`
-inflates the bound at a feasibility cost.
+### One-time local noise
 
-`lambda` is a caller-chosen statistical-hiding policy in `0..=MAX_LAMBDA`
-(`256`), not a computational bit-security claim. The library imposes no minimum;
-applications must enforce their own policy and analyze repeated decryptions.
+Smudging noise generated by [`SmudgingNoiseGenerator`] is **one-time
+material** that must never be reused across decryptions. Noise is sampled
+inside PartDec and consumed by `decryption_share`; it is not Shamir-shared
+at setup. The type is non-cloneable, so safe Rust cannot pass one live
+`SmudgingNoise` into two decryption calls. Serialized copies of PRF keys
+or share matrices can still be replayed, so authenticated transport and
+durable replay prevention remain the integrator's responsibility.
 
-### Bound arithmetic
+Secret-key share material follows a reusable-owner path. Dealing
+returns a non-cloneable `DealtSecretKeyShares`; applications explicitly convert
+the per-`q_i` output at their transport boundary into `SecretKeyShare`
+values. `aggregate_secret_key_shares` consumes those owners and returns a
+non-cloneable `AggregatedSecretKeyShare`, which is borrowed by each decryption
+call and zeroized when the key epoch ends. This allows multiple decryptions with
+one aggregated key while keeping the in-memory owner protected.
 
-For ring degree `d`, ciphertext-modulus product `Q`, and plaintext modulus `t`:
+### Even-`n` party counts
 
-```text
-Delta       = floor(Q / t)
-B_C[0]      = m * (B_fresh + Q mod t)
-B_C[i + 1]  = 2 * t * d^2 * sk_bound * B_C[i] + B_relin
-B_sm        = 2^(lambda + 1) * d * B_C[depth]
-```
+Party counts where `n` is even are accepted for compatibility, but
+Urban–Rambaud&nbsp;2024 proves security only for odd `n` (under the
+`n = 2t + 1` honest-majority model).  Even-`n` deployments fall outside the
+paper's theorem and have not been independently analyzed.
 
-Correctness requires the **strict** inequality
-`2 * (B_C[depth] + n * B_sm) < Delta`; equality is rejected.
-`B_relin` follows the paper's Eq. 30 with aggregate error `n * B_e`,
-conservatively allowing all `n` relinearization contributions.
+### Incomplete protocol orchestration
 
-For public-key models:
+This module implements sharing, local smudging, PRF masks, and decryption —
+it does **not** include the complete robust protocol stack from
+Urban–Rambaud&nbsp;2024:
+- No distributed key generation (DKG).
+- No authenticated broadcast channel.
+- No FLSS pre-processing or GURS generation.
+- No proactive refresh or identifiable-abort mechanisms.
+- The PRF is Poseidon2 via the SAFE sponge (`e3-safe`).
 
-```text
-B_fresh = d * u_bound * e_pk + B_enc + d * B_e * sk_bound
-B_e = 2 * variance;  e_pk = n * B_e;  sk_bound = n
-```
+Callers who need full end-to-end robust threshold FHE must provide these
+components externally.
 
-`B_enc = fhe_math::rq::error_coefficient_bound(error1_variance)` follows
-the same CBD/uniform branch as the encryption sampler.
+### `lambda` is a caller-chosen policy
 
-For one transcript, uniform noise on `[-B_sm, B_sm]` hides two honest shifts
-bounded by `B_C` with total variation distance at most
-`min(1, 2 * d * B_C / (2 * B_sm + 1))`. The degree factor covers all revealed
-coefficients; the extra factor `2` in `2^(lambda + 1)` is conservative slack,
-not part of the correctness inequality. This argument assumes an independent
-honest noise contribution and a valid ciphertext-noise bound. Composition
-across decryptions requires external analysis.
+The statistical security parameter `lambda` is a plain `usize` in
+`0..=smudging::MAX_LAMBDA`. A larger `lambda` produces a stronger noise-flooding
+guarantee — it is **not** a computational-security bound or a claim about
+bit-security. The library enforces only representability: values above
+`smudging::MAX_LAMBDA` are rejected, while values below the deployment's own
+policy minimum are accepted and are simply weaker. Since achievability
+depends on the full parameter set (degree, moduli, plaintext modulus,
+circuit depth), the library does not impose a universal minimum; callers
+validate against their own policy.
 
-Threshold smudging and reconstruction require `t <= u64::MAX`, even though
-plain BFV supports larger plaintext moduli. Both entry points reject larger
-values with `ParametersError::UnsupportedPlaintextModulus`;
-`ShareManager::new` alone does not check this restriction.
+## Usage
 
-## Examples
+For a complete working example demonstrating multi-party setup, share distribution, and threshold decryption, see [`examples/trbfv_add.rs`](../../examples/trbfv_add.rs). A variant that transports secret-key Shamir shares encrypted under per-party BFV keys is in [`examples/trbfv_add_bfv_share.rs`](../../examples/trbfv_add_bfv_share.rs). A multiplicative example using distributed *l*-BFV relinearization keys is in [`examples/trbfv_mul_bfv_share.rs`](../../examples/trbfv_mul_bfv_share.rs).
 
-* [`trbfv_add`](../../examples/trbfv_add.rs): addition and local share exchange.
-* [`trbfv_add_bfv_share`](../../examples/trbfv_add_bfv_share.rs): encrypted share transport.
-* [`trbfv_mul_bfv_share`](../../examples/trbfv_mul_bfv_share.rs): multiplication with distributed l-BFV keys.
-
+The example can be run with configurable parameters (threshold must equal `(num_parties - 1) / 2`):
 ```bash
-cargo run --release -p fhe --features experimental-mbfv --example trbfv_add -- --num_parties=5 --threshold=2
+cargo run --release --example trbfv_add -- --num_parties=10 --threshold=4
 ```
 
-The examples use repository test profiles, not deployment recommendations.
-The MBFV-enabled examples inherit that feature's unresolved security limitations.
+Decrypting two ciphertexts with a simulated ten-party committee (a fresh mask `H(S, ct)` per ciphertext) is in [`examples/trbfv_ten_parties.rs`](../../examples/trbfv_ten_parties.rs):
+```bash
+cargo run --release --example trbfv_ten_parties
+```
 
-## Implementation
+Basic usage pattern:
 
-* `config.rs`: committee validation.
-* `rns_shamir.rs`: crate-private sharing and reconstruction.
-* `smudging/bound.rs`: configuration and bound arithmetic.
-* `smudging/noise.rs`: centered-uniform sampling and noise ownership.
-* `shares/`: dealing, aggregate owners, and decryption.
-* `errors.rs`: threshold errors.
+```rust
+use fhe::trbfv::{
+    PartyPrfKeyTransport, PartyPrfKeys, SecretKeyShare, ShareManager, SmudgingConfig,
+    SmudgingNoiseGenerator,
+    FreshNoiseModel,
+};
 
-## Security
+// Setup threshold scheme; each party holds its own manager instance
+let share_manager = ShareManager::new(n_parties, threshold, params.clone())?;
 
-This implementation has not been independently audited. Use at your own risk.
-Secret-coefficient sharing uses constant-time modular arithmetic; Lagrange
-inversion depends only on public party IDs and prime moduli. These properties
-do not establish end-to-end protocol security. l-BFV relinearization additionally
-relies on the construction's circular-security assumption.
+// Each party: deal secret shares of its key contribution.
+let secret_key_dealt = share_manager.generate_secret_key_shares(secret_key_poly, &mut rng)?;
+// Explicit application transport boundary; the dealt owner is consumed here.
+let secret_key_dealt = secret_key_dealt.into_transport();
+
+// These matching pairwise keys are established by the application protocol.
+// Each party receives only its own two vectors through authenticated transport.
+let prf_transport = PartyPrfKeyTransport::new(
+    party_id,
+    n_parties,
+    keys_i_j_from_protocol,
+    keys_j_i_from_protocol,
+)?;
+let prf_keys_i = PartyPrfKeys::from_transport(prf_transport)?;
+
+// Each party: aggregate the share matrices received from the other parties
+// into its share of the joint secret key
+let secret_key_aggregate = share_manager.aggregate_secret_key_shares(
+    collected_secret_key
+        .into_iter()
+        .map(SecretKeyShare::from_transport)
+        .collect(),
+)?;
+
+// Designated set S. Each decrypting party samples local smudging and
+// computes PartDec.
+let config = SmudgingConfig::new(
+    params.clone(),
+    n_parties,
+    num_ciphertexts,
+    lambda,
+    FreshNoiseModel::BfvPublicKey,
+)?.with_mult_depth(mult_depth);
+let generator = SmudgingNoiseGenerator::new(config)?;
+let es_noise = generator.generate(&mut rng)?;
+let decryption_share = share_manager.decryption_share(
+    &ciphertext,
+    &secret_key_aggregate,
+    party_id,
+    &reconstructing_parties,
+    es_noise,
+    &prf_keys_i,
+)?;
+
+// Combine exactly threshold + 1 typed decryption shares. Each share is bound
+// to its party, designated set S, and H(S, ct); FinDec rejects mixed sets.
+let plaintext =
+    share_manager.decrypt_from_shares(&decryption_shares, &ciphertext)?;
+```
+
+`decryption_share` borrows the ciphertext and aggregated secret-key share
+but consumes the one-time `SmudgingNoise`. It returns a `DecryptionShare`
+bound to the party, designated set, and ciphertext. After transport, rebuild
+the share with `DecryptionShare::from_parts` (the digest is recomputed from
+`S` and `ct`). `decrypt_from_shares` borrows those shares and the ciphertext.
+
+## Security Considerations
+
+This implementation has not been independently audited. Use with appropriate caution in production environments.
+
+The security of the threshold scheme relies on:
+- Proper parameter selection for the underlying BFV scheme
+- Secure distribution of shares among parties
+- Protection of individual secret key shares and committee PRF keys
+- Fresh local smudging noise at each partial decryption
+
+Shamir secret sharing operates directly on canonical RNS residues. Operations
+on secret coefficients use the constant-time `Modulus` arithmetic; Lagrange
+inversion depends only on public party coordinates and prime ciphertext
+moduli.

@@ -19,18 +19,14 @@ use zeroize::{Zeroize, Zeroizing};
 /// Each coefficient is sampled uniformly from `[-B_sm, B_sm]` directly into
 /// RNS representation, as specified for the smudging noise in the trBFV
 /// paper. The secret sampling path uses constant-time `u64`/`u128` limb
-/// arithmetic only.
-///
-/// The generator records the configuration's party count alongside the BFV
-/// parameters, and every noise owner it produces carries that binding so a
-/// dealer ([`crate::trbfv::ShareManager::generate_smudging_shares`]) can
-/// reject noise sampled for a different committee or parameter set.
+/// arithmetic only. The generated owner records its committee size and BFV
+/// parameters so partial decryption can reject a mismatched configuration
+/// before consuming the polynomial. The statistical parameter is used to
+/// calculate the bound but is not retained by the owner.
 #[derive(Debug)]
 pub struct SmudgingNoiseGenerator {
     params: Arc<BfvParameters>,
-    /// Party count the bound was computed for (`SmudgingConfig::n`); sampled
-    /// noise is bound to it.
-    parties: usize,
+    committee_size: usize,
     smudging_bound: BigUint,
 }
 
@@ -180,7 +176,7 @@ impl SmudgingNoiseGenerator {
 
         Ok(Self {
             params: config.params,
-            parties: config.n,
+            committee_size: config.n,
             smudging_bound: b_sm,
         })
     }
@@ -226,10 +222,16 @@ fn limbs_mod(limbs: &[u64], qi: &Modulus) -> u64 {
 
 /// Freshly sampled smudging noise with private wipe-on-drop storage.
 ///
-/// Consumed by [`crate::trbfv::ShareManager::generate_smudging_shares`], which
-/// checks its immutable party-count and BFV-parameter binding. No cloning,
+/// Consumed by [`crate::trbfv::ShareManager::decryption_share`]. No cloning,
 /// coefficient access, or serialization is exposed: reusing this noise across
 /// decryptions breaks statistical hiding.
+///
+/// The owner retains the committee size and full BFV parameters used for its
+/// sampling bound. Partial decryption checks these against its configuration;
+/// the polynomial's ring context alone does not capture all BFV parameters.
+/// The configured `lambda` determines the bound but is not stored here:
+/// enforcing a deployment's minimum statistical security is the caller's
+/// responsibility.
 ///
 /// ```compile_fail
 /// # use fhe::trbfv::{ShareManager, SmudgingNoise};
@@ -243,58 +245,50 @@ fn limbs_mod(limbs: &[u64], qi: &Modulus) -> u64 {
 /// # use fhe::trbfv::SmudgingNoise;
 /// # use std::sync::Arc;
 /// fn read_binding(noise: &SmudgingNoise) -> (usize, Arc<BfvParameters>) {
-///     (noise.parties, Arc::clone(&noise.params))
+///     (noise.committee_size, Arc::clone(&noise.params))
 /// }
 /// ```
 pub struct SmudgingNoise {
-    /// Party count of the generator that sampled this noise; a dealer
-    /// rejects noise sized for a different committee.
-    parties: usize,
-    /// Complete BFV parameter set the noise was sampled under; a dealer
-    /// rejects noise whose parameters differ in any value, including the
-    /// plaintext modulus, ciphertext moduli, and error variances.
-    params: Arc<BfvParameters>,
     poly: Zeroizing<Poly<PowerBasis>>,
+    committee_size: usize,
+    params: Arc<BfvParameters>,
 }
 
 impl SmudgingNoise {
     /// Consume the owner and release the noise polynomial.
     ///
-    /// Crate-private so the supported dealing operation is the only consumer;
-    /// external code cannot extract a reusable raw polynomial.
+    /// Crate-private so partial decryption is the only consumer; external
+    /// code cannot extract a reusable raw polynomial.
     pub(crate) fn into_poly(self) -> Zeroizing<Poly<PowerBasis>> {
         self.poly
     }
 
-    /// Verify this owner was sampled for the dealer's party count and exact
-    /// BFV parameters.
-    ///
-    /// Crate-private so the supported dealing operation
-    /// ([`ShareManager::generate_smudging_shares`]) can run it at the dealing
-    /// boundary, before the polynomial is extracted or any randomness is
-    /// consumed. Party counts are compared exactly; parameters take the
-    /// `Arc` pointer-equality fast path and then compare by value, so
-    /// independently built but equivalent configurations are accepted while
-    /// any differing field is rejected. The noise itself stays private under
-    /// this wipe-on-drop owner either way.
-    pub(crate) fn validate_dealer_binding(
+    /// Check the committee size and complete BFV parameters used for sampling.
+    pub(crate) fn matches_configuration(
         &self,
-        dealer_parties: usize,
-        dealer_params: &Arc<BfvParameters>,
-    ) -> Result<(), Error> {
-        if self.parties != dealer_parties {
-            return Err(Error::smudging_noise_party_count_mismatch(
-                self.parties,
-                dealer_parties,
-            ));
+        committee_size: usize,
+        params: &BfvParameters,
+    ) -> bool {
+        self.committee_size == committee_size && self.params.as_ref() == params
+    }
+
+    /// Number of parties used to calculate the sampling bound.
+    pub(crate) fn committee_size(&self) -> usize {
+        self.committee_size
+    }
+
+    /// Wrap an already-constructed polynomial for tests of the algebraic path.
+    #[cfg(test)]
+    pub(crate) fn from_poly(
+        poly: Zeroizing<Poly<PowerBasis>>,
+        committee_size: usize,
+        params: Arc<BfvParameters>,
+    ) -> Self {
+        Self {
+            poly,
+            committee_size,
+            params,
         }
-        if !Arc::ptr_eq(&self.params, dealer_params) && self.params != *dealer_params {
-            return Err(Error::ParameterMismatch {
-                left: crate::ParameterSource::SmudgingNoise,
-                right: crate::ParameterSource::Parameters,
-            });
-        }
-        Ok(())
     }
 }
 
@@ -381,9 +375,9 @@ impl SmudgingNoiseGenerator {
         let moduli = ctx.moduli_operators();
         if self.smudging_bound == BigUint::from(0u64) {
             return Ok(SmudgingNoise {
-                parties: self.parties,
-                params: Arc::clone(&self.params),
                 poly: Zeroizing::new(Poly::<PowerBasis>::zero(ctx)),
+                committee_size: self.committee_size,
+                params: self.params.clone(),
             });
         }
 
@@ -454,9 +448,9 @@ impl SmudgingNoiseGenerator {
         poly.as_mut()
             .set_coefficients(matrix.release_for_install())?;
         Ok(SmudgingNoise {
-            parties: self.parties,
-            params: Arc::clone(&self.params),
             poly,
+            committee_size: self.committee_size,
+            params: self.params.clone(),
         })
     }
 
@@ -497,7 +491,7 @@ mod tests {
     fn generator_with_bound(params: Arc<BfvParameters>, bound: BigUint) -> SmudgingNoiseGenerator {
         SmudgingNoiseGenerator {
             params,
-            parties: 1,
+            committee_size: 1,
             smudging_bound: bound,
         }
     }
@@ -744,17 +738,44 @@ mod tests {
         .unwrap();
         let noise = generator.generate(&mut rng).unwrap();
         assert_eq!(generator.params, params);
-        assert_eq!(generator.parties, 3);
+        assert_eq!(generator.committee_size, 3);
         assert!(generator.smudging_bound() > &BigUint::zero());
-        assert_eq!(noise.parties, 3);
-        assert!(Arc::ptr_eq(&noise.params, &params));
+        assert_eq!(noise.committee_size(), 3);
+        assert!(noise.matches_configuration(3, &params));
+        assert!(!noise.matches_configuration(1, &params));
 
-        // The zero-bound branch records the same metadata.
+        // The zero-bound branch records and validates the same metadata.
         let zero_generator = generator_with_bound(params.clone(), BigUint::zero());
         let zero_noise = zero_generator.generate(&mut rng).unwrap();
-        assert_eq!(zero_noise.parties, 1);
-        assert!(Arc::ptr_eq(&zero_noise.params, &params));
+        assert_eq!(zero_noise.committee_size(), 1);
+        assert!(zero_noise.matches_configuration(1, &params));
         assert!(zero_noise.poly.coefficients().iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn sampled_noise_is_bound_to_committee_and_full_bfv_parameters() {
+        let mut rng = rng();
+        let params = small_params(&[62, 62, 62]);
+        let other_params = BfvParametersBuilder::new()
+            .set_degree(params.degree())
+            .set_plaintext_modulus(3)
+            .set_moduli(params.moduli())
+            .build_arc()
+            .unwrap();
+        assert_eq!(
+            params.context_at_level(0).unwrap(),
+            other_params.context_at_level(0).unwrap(),
+            "different plaintext moduli can share the same polynomial ring"
+        );
+
+        for bound in [BigUint::zero(), BigUint::from(5u32)] {
+            let generator = generator_with_bound(params.clone(), bound);
+            let noise = generator.generate(&mut rng).unwrap();
+            assert_eq!(noise.committee_size(), 1);
+            assert!(noise.matches_configuration(1, &params));
+            assert!(!noise.matches_configuration(3, &params));
+            assert!(!noise.matches_configuration(1, &other_params));
+        }
     }
 
     #[test]

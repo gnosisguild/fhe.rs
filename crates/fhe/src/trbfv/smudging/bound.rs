@@ -63,8 +63,8 @@ pub enum FreshNoiseModel {
 /// Choose `m`, depth, `lambda`, and [`FreshNoiseModel`] for the actual circuit
 /// and encryption path. There is no default model. `lambda` is a statistical
 /// policy, not computational bit-security; the library enforces no minimum.
-/// [`crate::trbfv::ShareManager::generate_smudging_shares`] checks only party
-/// count and full BFV parameters, not these caller-selected assumptions.
+/// [`crate::trbfv::ShareManager::decryption_share`] checks the noise owner's
+/// party count and full BFV parameters, not these caller-selected assumptions.
 ///
 /// # Choosing the circuit size `m`
 ///

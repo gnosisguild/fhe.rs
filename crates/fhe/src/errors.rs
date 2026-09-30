@@ -256,6 +256,23 @@ pub enum ThresholdError {
         dealer_parties: usize,
     },
 
+    /// Smudging noise was sampled for a different party count than the share
+    /// manager that consumes it.
+    #[error(
+        "smudging noise was sampled for different BFV parameters or committee size (noise n = {actual_n}, manager n = {expected_n})"
+    )]
+    SmudgingConfigurationMismatch {
+        /// Party count stamped on the noise
+        actual_n: usize,
+        /// Party count of the share manager
+        expected_n: usize,
+    },
+
+    /// Partial decryptions were produced for different designated sets or
+    /// ciphertexts.
+    #[error("decryption shares were produced for inconsistent designated sets or ciphertexts")]
+    InconsistentDecryptionShares,
+
     /// The number of parties is too large for the modulus chain.
     #[error(
         "n {n} is not smaller than the smallest modulus {min_modulus}; the MPC protocol \

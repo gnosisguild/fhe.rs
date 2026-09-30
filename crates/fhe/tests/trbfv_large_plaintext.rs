@@ -8,7 +8,9 @@
 mod support;
 
 use fhe::bfv::{BfvParameters, BfvParametersBuilder, Ciphertext, Encoding};
-use fhe::trbfv::{FreshNoiseModel, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
+use fhe::trbfv::{
+    DecryptionShare, FreshNoiseModel, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
+};
 use fhe::{Error, ParametersError};
 use fhe_math::rq::{Ntt, Poly, PowerBasis};
 use fhe_traits::FheDecoder;
@@ -77,7 +79,7 @@ fn decrypt_from_shares_rejects_large_plaintext_modulus_before_reconstruction()
 
     // An empty share list and out-of-range party indices would be rejected
     // by reconstruction itself; the plaintext-modulus error must come first.
-    let result = manager.decrypt_from_shares(&[], &[7, 9], &ciphertext);
+    let result = manager.decrypt_from_shares(&[], &ciphertext);
     assert!(matches!(
         result,
         Err(Error::ParametersError(
@@ -111,8 +113,11 @@ fn u64_plaintext_modulus_controls_succeed() -> Result<(), Box<dyn StdError>> {
         vec![Poly::<Ntt>::zero(ctx), Poly::<Ntt>::zero(ctx)],
         &params,
     )?;
-    let shares = vec![Poly::<PowerBasis>::zero(ctx), Poly::<PowerBasis>::zero(ctx)];
-    let plaintext = manager.decrypt_from_shares(&shares, &[1, 2], &ciphertext)?;
+    let shares = vec![
+        DecryptionShare::from_parts(Poly::<PowerBasis>::zero(ctx), 1, vec![1, 2], &ciphertext)?,
+        DecryptionShare::from_parts(Poly::<PowerBasis>::zero(ctx), 2, vec![1, 2], &ciphertext)?,
+    ];
+    let plaintext = manager.decrypt_from_shares(&shares, &ciphertext)?;
     let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext, Encoding::poly())?;
     assert!(decoded.iter().all(|&value| value == 0));
     Ok(())

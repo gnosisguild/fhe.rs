@@ -37,6 +37,8 @@ zeroize.workspace = true
 zeroize_derive.workspace = true
 ndarray.workspace = true
 thiserror.workspace = true
+ark-ff = "0.5"
+e3-safe = { git = "https://github.com/theinterfold/interfold", package = "e3-safe", rev = "fb5f14198c6ec812b23020079024695043fa6ee5" }
 
 [dev-dependencies]
 clap.workspace = true
@@ -100,6 +102,9 @@ required-features = ["experimental-mbfv"]
 [[example]]
 name = "trbfv_add_bfv_share"
 required-features = ["experimental-mbfv"]
+
+[[example]]
+name = "trbfv_ten_parties"
 
 [[test]]
 name = "trbfv_profiles"

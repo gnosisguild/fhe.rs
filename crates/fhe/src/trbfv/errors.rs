@@ -78,6 +78,21 @@ impl Error {
         })
     }
 
+    /// Create a smudging-configuration mismatch error.
+    #[must_use]
+    pub fn smudging_configuration_mismatch(actual_n: usize, expected_n: usize) -> Self {
+        Error::Threshold(ThresholdError::SmudgingConfigurationMismatch {
+            actual_n,
+            expected_n,
+        })
+    }
+
+    /// Create an inconsistent-decryption-share error.
+    #[must_use]
+    pub fn inconsistent_decryption_shares() -> Self {
+        Error::Threshold(ThresholdError::InconsistentDecryptionShares)
+    }
+
     /// Create a party-count-exceeds-modulus error.
     #[must_use]
     pub fn party_count_exceeds_modulus(n: usize, min_modulus: u64) -> Self {
@@ -170,6 +185,25 @@ mod tests {
             error.to_string(),
             "Threshold error: smudging noise party count 1 does not match dealer party count 5"
         );
+
+        let error = Error::smudging_configuration_mismatch(1, 3);
+        assert!(matches!(
+            error,
+            Error::Threshold(ThresholdError::SmudgingConfigurationMismatch {
+                actual_n: 1,
+                expected_n: 3,
+            })
+        ));
+        assert_eq!(
+            error.to_string(),
+            "Threshold error: smudging noise was sampled for different BFV parameters or committee size (noise n = 1, manager n = 3)"
+        );
+
+        let error = Error::inconsistent_decryption_shares();
+        assert!(matches!(
+            error,
+            Error::Threshold(ThresholdError::InconsistentDecryptionShares)
+        ));
 
         let error = Error::party_count_exceeds_modulus(70000, 65537);
         assert!(matches!(
