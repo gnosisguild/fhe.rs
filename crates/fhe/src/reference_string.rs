@@ -1,42 +1,12 @@
-//! Reference-string validation primitives and the l-BFV boundary that maps
-//! them onto the public multiparty errors.
+//! Reference-string validation and mapping to role-specific multiparty errors.
 //!
-//! # Role-neutral core
+//! Core comparisons are role-neutral; l-BFV wrappers identify the CRS `a` and
+//! URS `d1`. Checks reject identical seeds, repeated rows, and cross-overlap,
+//! but cannot certify independence of unequal correlated randomness.
 //!
-//! The core primitives (`same_concrete_values`, `validate_distinct_seeds`,
-//! `find_repeated_row`, `find_cross_overlap`) assign no protocol meaning to
-//! their arguments: seeds are compared by `Eq` and row vectors are named
-//! `left`/`right`, with hits reported as index pairs or the small internal
-//! [`IdenticalSeeds`] error. Any two reference strings or seed types can be
-//! compared; which side is a CRS or a URS is decided by the callers.
-//!
-//! # l-BFV boundary
-//!
-//! `validate_no_repeated_rows`, `validate_no_cross_overlap`, and
-//! `validate_reference_string_pair` form the l-BFV-specific boundary; the
-//! seeded key-generation caller maps `IdenticalSeeds` there as well. They
-//! attach the protocol roles — the common reference string (CRS) `a` and the
-//! uniform random string (URS) `d1` — and map core failures onto
-//! [`MultipartyError::IdenticalReferenceStringSeeds`],
-//! [`MultipartyError::RepeatedReferenceStringRow`], and
-//! [`MultipartyError::OverlappingReferenceStringRows`] with
-//! [`ReferenceStringRole`] information. l-BFV key generation requires the two
-//! reference strings to be **generated independently**: these checks reject
-//! observably reused randomness (identical seeds, repeated rows, shared rows)
-//! before a key or share built from it can be returned or published, but they
-//! **cannot certify** independence of deliberately correlated yet unequal
-//! randomness. That guarantee remains a protocol responsibility: the
-//! reference strings must come from an independently sampled, honestly
-//! generated source.
-//!
-//! # Comparison semantics
-//!
-//! Row comparisons inspect the RNS coefficient values at a common context,
-//! reduced by each row's modulus when the raw residues differ, so
-//! lazily-reduced and canonical representations of the same value compare
-//! equal. Representation bookkeeping that is not part of a polynomial's
-//! mathematical value (such as the variable-time execution flag) is ignored,
-//! while genuinely different values are never reported as equal.
+//! Rows compare by mathematical residues at a common context, ignoring timing
+//! flags and Shoup metadata. Lazy and canonical encodings of one value compare
+//! equal. Protocols must still generate reference strings independently.
 
 use fhe_math::rq::{Poly, RepresentationTag};
 

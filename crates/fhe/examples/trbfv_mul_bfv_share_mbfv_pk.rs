@@ -1,29 +1,9 @@
-// Threshold BFV multiplication with distributed l-BFV RLK and encrypted share transport.
+// Threshold BFV multiplication using an MBFV public key, l-BFV RLK, and encrypted shares.
 //
-// Two BFV parameter sets:
-//
-//   First set  (computation) — n=20, z=3, k=1000, d=16384, 5×51-bit moduli, λ=31.
-//   This example uses 3 parties by default; the profile supports up to 20.
-//
-//   Second set (share encryption) — k = q[0] of first set = max(q_i) ≈ 2^50,
-//              d=16384, 2×53-bit moduli. Exact share transport requires the
-//              share-encryption plaintext modulus k to exceed every transported
-//              canonical residue r ∈ [0, q_i): BFV encoding reduces coefficients
-//              modulo k, so a residue r ≥ k would silently wrap to r mod k in
-//              transit. This preset satisfies the requirement exactly by
-//              setting k = q[0] = max(q_i), so each share value lies in
-//              [0, q_i) ⊆ [0, k) and encodes directly as a BFV plaintext.
-//              BFV decrypt is correct because k ≈ 2^50 < q₀/2 ≈ 2^51  ✓
-//
-// Protocol:
-//  1. Each party generates: trBFV key share, Shamir shares of sk and smudging error,
-//     an l-BFV RLK share, and a share-encryption BFV key pair (second set).
-//  2. Share-encryption public keys are published. Each party BFV-encrypts its Shamir
-//     shares for every receiver under the receiver's share-encryption key.
-//  3. Each receiver decrypts and aggregates the collected shares to reconstruct
-//     its Lagrange evaluation point of the combined secret key SK = Σ sk_j.
-//  4. Two values are encrypted under the combined mbfv PublicKey, multiplied and
-//     relinearized using the aggregated RLK, then threshold-decrypted by t+1 parties.
+// Uses secure16384 computation and transport profiles from support/presets.rs.
+// The transport plaintext modulus must be >= max(q_i), so canonical Shamir
+// residues encode without reduction. Defaults to 3 parties (profile maximum: 20).
+// Local simulation only; see src/trbfv/README.md for the protocol boundary.
 #![allow(missing_docs)]
 
 #[path = "../support/mod.rs"]

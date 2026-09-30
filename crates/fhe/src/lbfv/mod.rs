@@ -1,11 +1,9 @@
-//!
 //! Single-party l-BFV operational keys: [`LBFVPublicKey`] and
 //! [`LBFVRelinearizationKey`].
 //!
 //! The l-BFV (linear BFV) relinearization algorithm is described in [Robust
 //! Multiparty Computation from Threshold Encryption Based on
-//! RLWE](https://eprint.iacr.org/2024/1285.pdf). This module provides
-//! single-party l-BFV operational keys and their constructors.
+//! RLWE](https://eprint.iacr.org/2024/1285.pdf).
 //!
 //! Threshold/multiparty shares and aggregation live separately in
 //! [`crate::trlbfv`]. Contribution selection, authentication, and replay
@@ -19,16 +17,10 @@
 //!
 //! # Independence of the reference strings
 //!
-//! l-BFV key generation consumes two shared reference strings: the CRS `a`
-//! carried by the public key and the URS `d1` used for relinearization-key
-//! generation. The two strings **must be generated independently** (distinct
-//! seeds or separately sampled polynomials). Constructors in this module
-//! reject identical seeds, rows repeated within one string, and rows shared
-//! between the two strings, so no key built from observably reused randomness
-//! is returned or deserialized. These equality checks cannot certify
-//! independence against deliberately correlated but unequal randomness;
-//! obtaining the reference strings from an independently sampled, honestly
-//! generated source remains a protocol responsibility.
+//! Public-key CRS `a` and relinearization URS `d1` **must be generated
+//! independently**. Construction and deserialization reject identical seeds,
+//! repeated rows, and shared rows. These checks cannot detect unequal correlated
+//! randomness; independent generation remains a protocol responsibility.
 //!
 //! The l-BFV relinearization argument relies on the circular-security
 //! assumption inherited from the cited multi-key construction. This caveat

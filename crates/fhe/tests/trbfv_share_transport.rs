@@ -1,4 +1,4 @@
-//! Share-transport plaintext-modulus regression tests (issue #253).
+//! Share-transport plaintext-modulus regression tests.
 //!
 //! Encrypted share transport encodes each Shamir share residue as a BFV
 //! plaintext under a separate parameter set. BFV encoding reduces

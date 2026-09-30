@@ -303,29 +303,12 @@ const WIRE_LEN_PREFIX_MAX_BYTES: usize = 10;
 /// the top-level framing.
 const WIRE_OUTER_OVERHEAD_BYTES: usize = 64;
 
-/// A locally authorized description of the one evaluation key a receiving
-/// application is willing to decode with
-/// [`EvaluationKey::from_bytes_with_request`].
+/// Locally authorized key shape for [`EvaluationKey::from_bytes_with_request`].
 ///
-/// The request must be constructed **locally**, from the application's own
-/// key configuration (the parameters it uses, the levels it operates at, and
-/// the operations it intends to run with the key). Never derive it from the
-/// incoming bytes or from a remote sender's description of the key: the
-/// whole point of the request is that the decoder's resource bound is fixed
-/// before any payload byte is read, so an untrusted peer cannot enlarge it.
-///
-/// The request pins the expected ciphertext and evaluation-key levels, the
-/// number (or exact set) of Galois key entries, and the wire form of the
-/// key-switching rows (regenerating seed or explicit rows). The
-/// decomposition base and the key-switching row count and size are not
-/// caller-controlled: they are derived from the validated parameters and
-/// levels, exactly as the constructors produce them.
-///
-/// Deriving a bound from a request is **not authentication** and not an
-/// application-wide memory guarantee: a request for a large key can still
-/// legitimately describe an object costing many GiB to decode. Applications
-/// that want a smaller footprint can check `bytes.len()` against their own
-/// policy before calling, or authorize a tighter request.
+/// Construct this from the application's expected key configuration, never
+/// from incoming bytes or sender claims. Levels, Galois entries, and seed form
+/// are caller-selected; decomposition and row sizes derive from validated BFV
+/// parameters. The request authorizes resources, not authenticity or peak memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvaluationKeyDecodeRequest {
     /// The ciphertext level the evaluation key must operate at.
@@ -342,31 +325,16 @@ pub struct EvaluationKeyDecodeRequest {
 /// The Galois key entries a locally authorized
 /// [`EvaluationKeyDecodeRequest`] admits.
 ///
-/// Exponents are substitution exponents compared after normalizing modulo
-/// `2 * degree`, mirroring [`fhe_math::rq::SubstitutionExponent`]: this
-/// applies to the wire and to an exact set's members alike, so a member
-/// such as `2 * degree + 3` authorizes the same key as `3`. For an even
-/// `degree`, valid substitution exponents are the odd values below
-/// `2 * degree`; the constructors obtain them from rotation steps via
-/// `q^3 mod 2 * degree` and from the literal `2 * degree - 1` used by row
-/// rotation and inner sums.
+/// Substitution exponents normalize modulo `2 * degree`, as in
+/// [`fhe_math::rq::SubstitutionExponent`]. Valid normalized values are odd;
+/// for example, `2 * degree + 3` and `3` identify the same key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaloisKeySpec {
-    /// At most this many distinct Galois key entries, with any valid
-    /// substitution exponents. At most `degree` distinct entries can ever
-    /// decode, so counts above [`BfvParameters::degree`] — including the
-    /// `usize::MAX` sentinel — are rejected when the bound is derived
-    /// instead of silently loosening it.
+    /// At most this many distinct entries, with any valid exponent.
+    /// Counts above [`BfvParameters::degree`] are rejected.
     AtMost(usize),
-    /// Exactly this set of substitution exponents: every member must be
-    /// present in the payload and no other entry may appear, so a key
-    /// carrying only a subset of the request is rejected. Each member is
-    /// normalized modulo `2 * degree` before matching; two members that
-    /// normalize to the same exponent make the request unsatisfiable and
-    /// are rejected when the bound is derived, as is a member whose
-    /// normalized value is even. This is the tightest authorization and
-    /// yields the smallest derived bound; it models a locally known key
-    /// configuration such as "the inner-sum key".
+    /// Exactly these exponents: missing and extra entries are rejected.
+    /// Members that normalize to even or duplicate values are invalid.
     Exactly(BTreeSet<u32>),
 }
 
@@ -383,11 +351,7 @@ impl GaloisKeySpec {
 /// The wire form a locally authorized [`EvaluationKeyDecodeRequest`] admits
 /// for the key-switching rows of each Galois key.
 ///
-/// The constructors store the `c1` rows either as a 32-byte seed that
-/// regenerates them ([`SeedPolicy::Seeded`], the default
-/// [`EvaluationKeyBuilder`](crate::bfv::EvaluationKeyBuilder) route) or as
-/// explicit polynomial rows ([`SeedPolicy::ExplicitRows`]); both decode to
-/// equivalent keys.
+/// `c1` rows are encoded as a regenerating 32-byte seed or explicit polynomials.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedPolicy {
     /// Every key-switching key must carry a regenerating seed.
@@ -417,19 +381,8 @@ impl EvaluationKeyDecodeRequest {
     /// upper bound, in bytes, on the encoded payload of any evaluation key
     /// that satisfies it.
     ///
-    /// The bound is computed from the request and the parameters alone —
-    /// never from a payload: the maximum entry count times the
-    /// parameter-implied key-switching row count and row size, plus checked
-    /// allowances for Protobuf tags, length prefixes, scalar fields, and the
-    /// seed. All arithmetic is checked; overflow yields
-    /// [`SerializationError::WireBoundOverflow`] rather than a wrapped
-    /// bound, which keeps the derivation correct on 32-bit platforms. The
-    /// same holds for the parameter-implied row size, whose per-modulus
-    /// serialization lengths are computed with checked arithmetic. One
-    /// irreducible limitation remains: `2 * degree` itself cannot overflow
-    /// for any constructible [`BfvParameters`], because parameter
-    /// construction validates the degree and builds the polynomial contexts
-    /// before a request can reference them.
+    /// Uses only the request and parameters: entry count × key-switching row
+    /// count × row size, plus wire overhead. All size arithmetic is checked.
     ///
     /// # Errors
     ///
@@ -579,90 +532,26 @@ fn derived_wire_bound(
 }
 
 impl EvaluationKey {
-    /// Decode an evaluation key whose shape a locally authorized request
-    /// describes, enforcing a byte bound derived from that request.
+    /// Decode a key under a locally authorized shape and derived byte limit,
+    /// instead of the default [`fhe_traits::MAX_SERIALIZED_BYTES`] cap.
     ///
-    /// The default [`fhe_traits::DeserializeParametrized::from_bytes`] route
-    /// rejects any payload above the global 256 MiB cap
-    /// ([`fhe_traits::MAX_SERIALIZED_BYTES`]). Large parameters exceed that
-    /// cap for legitimate keys: a degree-32768 key with nine 62-bit moduli
-    /// and inner-sum support encodes to roughly 309 MB. This method is the
-    /// opt-in route for such keys.
+    /// Use only for trusted, authenticated delivery. Construct `request` from
+    /// local expectations, never sender claims; it does not authenticate bytes.
+    /// [`EvaluationKeyDecodeRequest::wire_bound`] is enforced before parsing.
+    /// It limits encoded size, not peak memory; apply a tighter budget if needed.
     ///
-    /// # The bound is derived, never negotiated
-    ///
-    /// The bound comes from `request` — which the application constructs
-    /// locally from its own key configuration — combined with the validated
-    /// parameters via [`EvaluationKeyDecodeRequest::wire_bound`]. It is
-    /// enforced before any Protobuf decoding allocates, so the decoder's
-    /// resource envelope never depends on the payload's own length or on a
-    /// sender's description of the key. Payloads above the derived bound are
-    /// rejected with [`SerializationError::PayloadTooLarge`].
-    ///
-    /// # When to use this route
-    ///
-    /// Only for **authenticated, trusted** large keys. The request is a
-    /// shape and resource authorization, not an authenticity check: it
-    /// cannot verify who produced the bytes. Use this route only for keys
-    /// delivered over a trusted, authenticated channel, whose shape you have
-    /// locally authorized.
-    ///
-    /// # More restrictive than the default route
-    ///
-    /// This route pins the wire schema: the request's levels, Galois key
-    /// entry set or count, and seed policy are enforced against the payload
-    /// by the wire preflight. Unknown Protobuf fields at the evaluation-key,
-    /// Galois-key, and key-switching-key scopes are rejected, where the
-    /// default route skips them; unknown fields inside polynomial rows can
-    /// be skipped if the row fits within its fixed slack allowance. A payload
-    /// that is valid for the default route may therefore still be rejected
-    /// here, with a typed error, and vice versa: where a payload violates
-    /// several independent rules at once, the preflight may report a
-    /// different one of those typed errors (or a different ordering) than
-    /// the default route.
-    ///
-    /// # Resource requirements
-    ///
-    /// A request can legitimately authorize a key costing many GiB to
-    /// decode: peak memory reaches several times the encoded size because
-    /// the encoded buffer, the decoded Protobuf representation, and the
-    /// in-memory key coexist (the 309 MB reference key peaks around 4 GiB
-    /// with both keys in memory, or roughly 1.5 GiB on top of the input
-    /// buffer otherwise). The derived bound bounds the encoded payload, not
-    /// resident memory; applications with a smaller footprint can check
-    /// `bytes.len()` against their own policy before calling.
-    ///
-    /// The preflight remains a lightweight, zero-copy scan that enforces the
-    /// parameter-implied shape (exact key-switching row counts and bounded
-    /// row lengths, level consistency, seed placement), rejects duplicate
-    /// Galois key exponents — compared after normalizing modulo
-    /// `2 * degree` — and rejects encodings the default route tolerates:
-    /// repeated scalar fields (for which `prost` applies last-wins
-    /// semantics) and varints wider than the declared `uint32` fields (which
-    /// `prost` silently truncates). Post-decode validation is unchanged and
-    /// remains authoritative.
+    /// The wire preflight checks levels, Galois entries, seed form, exact row
+    /// counts, and bounded row lengths before Protobuf allocation. It rejects
+    /// duplicate exponents/scalar fields, oversized `uint32` varints, and unknown
+    /// fields at evaluation-, Galois-, and key-switching-key scopes. Polynomial
+    /// rows may contain unknown fields within fixed length slack. This route is
+    /// stricter than default decoding; post-decode validation still applies.
     ///
     /// # Errors
     ///
-    /// Returns [`SerializationError::PayloadTooLarge`] when the payload
-    /// exceeds the derived bound (checked before any parsing),
-    /// [`SerializationError::WireBoundOverflow`] when the request's bound
-    /// cannot be derived on this platform,
-    /// [`SerializationError::ExcessiveGaloisKeySpec`] when the request
-    /// authorizes more distinct entries than substitution exponents exist,
-    /// and [`SerializationError::DuplicateGaloisExponent`] when an exact
-    /// set has two members that normalize to the same exponent. The
-    /// preflight then rejects payloads that disagree with the request —
-    /// [`Error::InvalidLevel`] for levels,
-    /// [`SerializationError::GaloisKeyCountExceeded`] for the entry count,
-    /// [`SerializationError::UnexpectedGaloisKeyExponent`] for an
-    /// unauthorized exponent,
-    /// [`SerializationError::MissingGaloisKeyExponent`] when an exact
-    /// request's full authorized set is not present, and
-    /// [`SerializationError::SeedPolicyMismatch`] when the rows use an
-    /// unauthorized seed form; it rejects shape violations with the same
-    /// typed errors as
-    /// [`fhe_traits::DeserializeParametrized::from_bytes`].
+    /// Returns request-validation errors from [`EvaluationKeyDecodeRequest::wire_bound`],
+    /// [`SerializationError::PayloadTooLarge`] above the derived limit, and typed
+    /// level, Galois-entry, seed-policy, or shape errors for mismatched payloads.
     pub fn from_bytes_with_request(
         bytes: &[u8],
         params: &Arc<BfvParameters>,
@@ -778,27 +667,10 @@ fn scalar_as_u32(raw: u64, field: &'static str) -> std::result::Result<u32, Seri
 /// Pre-decode shape validation of a serialized evaluation key against a
 /// locally authorized request.
 ///
-/// The scan borrows the payload in place and copies no payload bytes; its
-/// acceptance-path allocations are bounded sets independent of the payload
-/// size — for exact requests the authorized normalized-exponent set (plus a
-/// sorted copy for deterministic reporting), and the set of already-seen
-/// exponents (at most one per authorized entry) — and rejection paths may
-/// allocate error messages. It rejects, before `prost` materializes
-/// anything: malformed wire structure, unknown Protobuf fields at the
-/// evaluation-key, Galois-key, and key-switching-key scopes (the request
-/// pins the schema), duplicate or non-canonical scalar fields, scalar
-/// varints wider than their declared `uint32` fields, Galois key entries or
-/// exponents outside the request — for exact requests, a missing authorized
-/// exponent is rejected too, so a subset of the requested key does not
-/// decode — levels disagreeing with the request, key-switching keys whose
-/// declared shape does not match the parameters (levels, decomposition
-/// base, exact row counts, row lengths, seed placement, seed form), and
-/// key-switching levels inconsistent with the outer evaluation-key levels.
-///
-/// This bounds decoder work and memory before the decoder allocates; it
-/// does not replace the post-decode validation, which remains authoritative.
-/// Where a payload violates several independent rules, the preflight may
-/// report a different typed error than the default route would.
+/// Borrows wire bytes without copying them. Exponent-set allocations are bounded
+/// by the request, not the payload; rejection may allocate diagnostic messages.
+/// Enforces [`EvaluationKey::from_bytes_with_request`]'s schema contract before
+/// Protobuf allocation, without replacing post-decode validation.
 fn preflight_wire_shape(
     bytes: &[u8],
     params: &Arc<BfvParameters>,
@@ -3117,7 +2989,7 @@ mod tests {
         Ok(())
     }
 
-    /// End-to-end roundtrip of the evaluation key reported in issue #246:
+    /// End-to-end roundtrip of an evaluation key exceeding the default cap:
     /// degree 32768, nine 62-bit moduli, inner-sum support, about 309 MB
     /// encoded. The default route must reject it and the request route must
     /// decode it. Key generation, serialization, and decoding with both keys

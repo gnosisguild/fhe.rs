@@ -123,19 +123,8 @@ impl Aggregate<PublicKeyShare> for LBFVPublicKey {
 // Relinearization-key aggregation helpers
 // ---------------------------------------------------------------------------
 
-/// Sum the `c0` components of a set of key-switching keys, coordinate-wise over
-/// the gadget dimension.
-///
-/// This is the additive aggregation `Σ d0_i` / `Σ d2_i`: each share's
-/// secret-dependent part (`d0_i` for `ksk_r_to_s`, `d2_i` for `ksk_s_to_r`) is
-/// stored as that key-switching key's `c0` component, so summing the `c0`s is
-/// exactly summing the `d0_i` / `d2_i`. The shared `c1` (= `d1` / `a`) is not
-/// summed — it is identical across shares and carried over by the caller.
-///
-/// Aggregation is a rare generation-time operation, so we pay the cost here:
-/// convert each operand to `Ntt` (which supports addition), sum, and rebuild
-/// the Shoup table once via `into_ntt_shoup` for the cheap-multiply property
-/// to hold on the hot path.
+/// Sum secret-dependent `c0` rows (`d0`/`d2`) in NTT form, then rebuild Shoup
+/// tables. Shared `c1` rows (`d1`/`a`) are carried over, not summed.
 fn sum_ksk_c0<'a>(
     ksks: impl Iterator<Item = &'a KeySwitchingKey>,
 ) -> Result<Box<[Poly<NttShoup>]>> {
@@ -180,46 +169,16 @@ fn sum_ksk_c0<'a>(
 /// Aggregate threshold l-BFV relinearization-key contributions into an
 /// operational [`LBFVRelinearizationKey`].
 ///
-/// # What this function validates
+/// Validates structure, parameters, levels, contexts, dimensions, shared URS/CRS
+/// rows, and agreement with `public_key`'s CRS. Repeated or overlapping
+/// reference-string rows are rejected; independence still requires honest
+/// generation (see [`crate::lbfv`]).
 ///
-/// Only the properties it can observe: per-share arithmetic structure,
-/// matching parameters, levels, contexts, and gadget dimensions, the shared
-/// URS `d1` and CRS `a` rows (which must form independent reference strings:
-/// identical rows across the two vectors and repeated rows within either
-/// vector are rejected, so no aggregated key built from observably reused
-/// randomness is returned), and consistency of the RLK CRS rows with
-/// `public_key`'s CRS rows.
-///
-/// # What this function cannot establish
-///
-/// * That the relinearization-key shares and `public_key` were contributed by
-///   the **same set of parties**. A public key aggregated from one collection
-///   of shares combined with relinearization-key shares aggregated from a
-///   different collection can pass every check here, yielding a key that may
-///   appear to operate normally yet decrypt incorrectly. Use
-///   [`aggregate_key_pair`] to submit the two halves of one selected
-///   contributor set as a single paired collection, so a one-sided omission
-///   cannot be passed directly. The caller must still form the pairs correctly.
-/// * That the contributions are consistent with `public_key`'s secret — the
-///   sum of the contributors' secret summands. Same-secret consistency is a
-///   cryptographic property, but this crate currently ships no proof system
-///   or verifier for it, so nothing here checks it for arbitrary externally
-///   supplied shares; a single malicious contribution can subvert the
-///   aggregate. Once such a proof system is defined, in-library
-///   cryptographic proof verification of the relevant PK/RLK relations could
-///   establish this property as a library capability;
-///   [`RelinKeyWitness`](crate::trlbfv::RelinKeyWitness) is generation-side
-///   witness material, not itself a proof or complete proof material.
-/// * Who the contributors are. Contributor authentication and admission are
-///   external protocol responsibilities.
-/// * That contributions are distinct. Duplicate inclusion — of a whole share
-///   or of a half — is admitted policy, not something this arithmetic layer
-///   detects; a duplicated contribution is summed twice exactly as if it had
-///   been submitted by two parties.
-///
-/// As elsewhere, these equality checks cannot certify independence of
-/// deliberately correlated but unequal randomness; generating the two
-/// reference strings independently remains a protocol responsibility.
+/// The caller must use the same contributor set for both keys. This function
+/// cannot verify that relation or same-secret consistency; mismatches can pass
+/// validation and decrypt incorrectly. Prefer [`aggregate_key_pair`] to avoid
+/// accidental collection mismatch. Authentication, duplicate/replay policy,
+/// and proof verification are outside this API.
 ///
 /// # Errors
 ///
@@ -437,56 +396,15 @@ pub fn aggregate_relinearization_key(
 /// selected contributor set into an operational
 /// `(`[`LBFVPublicKey`]`, `[`LBFVRelinearizationKey`]`)` pair.
 ///
-/// # The pairing contract
+/// Both outputs use the same paired collection: omitting a pair omits both
+/// halves. Form each pair from one contributor's secret summand. This prevents
+/// accidental one-sided omissions, not malicious mispairing: same-secret
+/// consistency is not proved or verified. Caller-side `zip` can also truncate
+/// lists before submission. Duplicate pairs are summed twice; identities,
+/// admission, and replay are not checked.
 ///
-/// All contributions are consumed as a single collection of
-/// `(PublicKeyShare, RelinKeyShare)` pairs. The public key is summed from the
-/// PK halves and the relinearization key from the RLK halves of exactly these
-/// pairs, so the two outputs are always built from same-length submissions:
-/// the accidental mismatch of aggregating a public key from one collection of
-/// shares and a relinearization key from another collection — for example
-/// three public-key contributions against two relinearization-key
-/// contributions — cannot be passed directly to this entry point. Omitting a
-/// whole pair omits both halves; when pairs were formed correctly, the
-/// resulting key is functional for the selected multiset of contributions.
-///
-/// # What this API does not do
-///
-/// Pairing is a caller discipline against *accidental* collection mismatch,
-/// not a cryptographic guarantee. In particular, constructing pairs by
-/// zipping two separate lists can silently discard extra contributions before
-/// this function sees them:
-///
-/// * Deliberately mispaired tuples — a [`PublicKeyShare`] from one
-///   contributor paired with a [`RelinKeyShare`] from another — are accepted
-///   whenever the observable reference strings agree, and cannot be detected
-///   here. Binding each pair's two halves to one contributor is a protocol
-///   responsibility.
-/// * Same-secret consistency is **not** cryptographically verified for
-///   arbitrary externally supplied pairs. This API keeps one selected set
-///   paired, but it proves nothing about the relationship between each
-///   pair's two halves: it does not check that a pair's `PublicKeyShare` and
-///   `RelinKeyShare` were derived from the same secret summand, nor that a
-///   submitted half is consistent with the aggregate derived from the
-///   corresponding summands. Each contributor contributes a distinct
-///   additive summand, so a single secret shared across pairs is not the
-///   relevant property. Verifying these relations is a cryptographic
-///   capability this crate does not yet implement; once a proof system for
-///   the relevant PK/RLK relations is defined, in-library cryptographic
-///   proof verification could establish it as a future library capability —
-///   not an application policy.
-/// * Contributor identities are not authenticated and contributions are not
-///   guaranteed honest. Contributor authentication and admission are
-///   external protocol responsibilities.
-/// * Duplicate submissions are admitted policy: an exact duplicate pair is
-///   summed twice, exactly as if two parties had submitted it. This library
-///   is an arithmetic layer and does not police replay.
-///
-/// Aggregation then proceeds through the existing validated path:
-/// [`Aggregate`] for the public key, [`aggregate_relinearization_key`] for
-/// the relinearization key. All of that function's guarantees and limits
-/// apply unchanged — parameters, levels, contexts, reference-string rows,
-/// and arithmetic structure are validated; everything listed above is not.
+/// Uses [`Aggregate`] and [`aggregate_relinearization_key`]; their structural
+/// validation and reference-string requirements apply.
 ///
 /// # Errors
 ///
@@ -854,18 +772,13 @@ mod tests {
         let duplicated = vec![pairs[0].clone(), pairs[0].clone(), pairs[1].clone()];
         let (pk, rlk) = aggregate_key_pair(duplicated)?;
 
-        // Functional under the multiset sum sk_a + sk_a + sk_b, and equal to
-        // the independent aggregation of the same multiset.
+        // Functional under the multiset sum sk_a + sk_a + sk_b.
         let multiset_sks = vec![sks[0].clone(), sks[0].clone(), sks[1].clone()];
         assert_eq!(
             square_decrypt(&pk, &rlk, &multiset_sks, &params, &mut rng, 3)?,
             9
         );
 
-        let independent =
-            aggregate_key_pair(vec![pairs[0].clone(), pairs[0].clone(), pairs[1].clone()])?;
-        assert_eq!(pk, independent.0);
-        assert_eq!(rlk, independent.1);
         Ok(())
     }
 
@@ -873,7 +786,7 @@ mod tests {
     /// paired with an RLK half from another — is accepted and cannot be
     /// detected: the library validates observable reference strings, not
     /// which contributor produced which half. The output is exactly what the
-    /// legacy separate-list path would have produced from the same halves,
+    /// separate-list path produces from the same halves,
     /// which is the point: pairing constrains counts, not provenance.
     #[test]
     fn intentionally_cross_paired_input_is_accepted_undetected() -> Result<()> {
@@ -904,7 +817,7 @@ mod tests {
         assert_eq!(pk_cross, pk_a);
 
         // The RLK half is exactly B's RLK aggregated against A's public key —
-        // i.e. what the legacy separate-list API produces for this mismatch.
+        // i.e. what the separate-list API produces for this mismatch.
         let rlk_b_halves: Vec<RelinKeyShare> = pairs_b.iter().map(|(_, rlk)| rlk.clone()).collect();
         let rlk_b_against_a = aggregate_relinearization_key(&rlk_b_halves, &pk_a)?;
         assert_eq!(rlk_cross, rlk_b_against_a);

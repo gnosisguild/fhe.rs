@@ -99,43 +99,14 @@ impl CommonRandomPoly {
 
 /// A vector of [`CommonRandomPoly`] values together with optional seed metadata.
 ///
-/// The vector length is `l = |{q_i}|`, the number of RNS moduli at level 0 of
-/// the associated [`BfvParameters`]. This is the common random material used by:
+/// Contains one concrete polynomial per level-0 RNS modulus for multiparty
+/// and l-BFV key generation. Equality and aggregation use the concrete values;
+/// the optional seed is reconstruction metadata, not identity or authentication.
 ///
-/// - **MBFV** relinearization key generation (Protocol 2, <https://eprint.iacr.org/2020/304>),
-///   where the CRP vector is passed to [`RelinKeyGenerator`](crate::mbfv::RelinKeyGenerator).
-/// - **l-BFV** public-key and relinearization-key generation, where two
-///   independent vectors (the CRS `a` and the URS `d1`) serve as the shared
-///   polynomials `a_j` and `d1_j` in the linear-key protocol
-///   (<https://eprint.iacr.org/2024/1285>).
-///
-/// # Concrete vs. seed-derived
-///
-/// Every [`CommonRandomPolyVec`] **always** stores concrete polynomials. The
-/// optional `seed` is pure metadata: it records the seed from which the
-/// polynomials *would* be deterministically reconstructed. It is preserved for
-/// compact broadcast/reconstruction, but the authoritative values are the
-/// concrete polynomials; equality comparisons and aggregation checks always use
-/// the polynomials, never the seed.
-///
-/// All parties in one protocol execution must use the same ordered vector. The
-/// vector itself does not identify a session or prevent cross-session reuse;
-/// those requirements and the protocol-specific reuse policy belong to the
-/// surrounding protocol.
-///
-/// # Independence requirement
-///
-/// When two [`CommonRandomPolyVec`] values are used together as the l-BFV
-/// reference strings — the CRS `a` and the URS `d1` of
-/// [`LBFVRelinearizationKey`](crate::lbfv::LBFVRelinearizationKey) and
-/// [`RelinKeyShare`](crate::trlbfv::RelinKeyShare) generation — the two
-/// vectors must be generated independently (distinct seeds or separately
-/// sampled polynomials). Constructors that build keys from both vectors
-/// reject identical seeds, rows repeated within one vector, and rows shared
-/// between the two vectors. These equality checks only catch observably
-/// reused randomness; they cannot certify that deliberately correlated but
-/// unequal randomness is independent, which remains a protocol
-/// responsibility.
+/// All parties must use the same ordered vector and enforce session/reuse policy
+/// externally. For l-BFV, CRS and URS vectors must be generated independently;
+/// equality checks reject obvious reuse but cannot prove independence (see
+/// [`crate::lbfv`]).
 ///
 /// # Construction
 ///
@@ -191,8 +162,7 @@ impl CommonRandomPolyVec {
     /// caller using the same `seed` and `params` obtains identical polynomials.
     /// The seed is stored as metadata.
     ///
-    /// The seed expansion is unchanged; the derived rows are still checked
-    /// against the no-repeat invariant before the vector is returned.
+    /// Repeated derived rows are rejected.
     pub fn from_seed(
         params: &Arc<BfvParameters>,
         seed: <ChaCha8Rng as SeedableRng>::Seed,

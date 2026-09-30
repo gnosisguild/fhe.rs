@@ -82,7 +82,7 @@ fn depth1_mul_distributed_lbfv_trlbfv_decrypt() {
         .map(|_| {
             // The multiplied ciphertexts are encrypted with the aggregated
             // l-BFV public key, whose `Poly::small(variance)` encryption
-            // randomness the LbfvPublicKey model assumes (issue #250).
+            // randomness the LbfvPublicKey model assumes.
             let config = SmudgingConfig::new(
                 params.clone(),
                 N,

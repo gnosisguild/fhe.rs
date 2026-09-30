@@ -261,26 +261,11 @@ impl KeySwitchingKey {
     /// `NttShoup` form for consistency with `c0`.  They are needed by ZK
     /// witness-generation routines that must prove knowledge of the noise.
     ///
-    /// The errors are secret-dependent, so each row is handed to the caller
-    /// as a wipe-on-drop [`Zeroizing`] owner: ownership is transferred to the
-    /// caller, every row keeps variable-time computations disabled (the
-    /// error sampling and conversion run in constant time), and dropping a
-    /// row — normally, on an early error, or during an unwind — wipes its
-    /// coefficients and Shoup tables. The public `c0` rows of the returned
-    /// key keep their public time policy.
-    ///
-    /// # Keeping the witness rows guarded
-    ///
-    /// Keep every error row inside its [`Zeroizing`] owner. Cloning a row
-    /// yields a new guarded copy, but moving the inner polynomial out of a
-    /// guard (for example with [`std::mem::replace`]) creates an unguarded
-    /// secret copy that Rust will drop without wiping; zeroize any extracted
-    /// value before it drops.
-    ///
-    /// Wiping coverage inside this constructor is likewise not absolute: the
-    /// sampler's internal partial buffer (for example when the RNG panics
-    /// mid-sample) and the brief move-based conversion intervals are not
-    /// guaranteed wiped without `fhe-math` changes.
+    /// Secret errors retain constant-time policy and wipe-on-drop [`Zeroizing`]
+    /// owners; public `c0` rows retain public timing policy. Keep witnesses guarded:
+    /// extracted inner polynomials must be zeroized by the caller. Internal
+    /// partial sampling buffers and move-based conversions are not fully covered
+    /// if sampling or conversion panics.
     pub fn new_with_c1_extended<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         from: &Poly<PowerBasis>,

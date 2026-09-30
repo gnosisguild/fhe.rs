@@ -1,21 +1,23 @@
 # fhe [![fhe crate version](https://img.shields.io/crates/v/fhe.svg)](https://crates.io/crates/fhe) [![documentation](https://docs.rs/fhe/badge.svg)](https://docs.rs/fhe)
 
-**A pure-Rust implementation of fully homomorphic encryption schemes based on Ring-LWE.**
+Ring-LWE-based homomorphic encryption in Rust: compute additions and
+multiplications without decrypting the inputs.
 
-This library implements [Fully Homomorphic Encryption](https://en.wikipedia.org/wiki/Homomorphic_encryption#Fully_homomorphic_encryption) schemes, i.e., encryption schemes which perform implicit additions and multiplications on plaintext values while exclusively manipulating encrypted data.
-
-This library provides implementations of:
-
-* BFV, the Brakerski-Fan-Vercauteren (BFV) homomorphic encryption scheme.
-  More precisely, this library implements a leveled variant of the [HPS](https://eprint.iacr.org/2018/117) (Halevi--Polyakov--Shoup) RNS-variant of the scheme.
+* `bfv`: leveled Brakerski–Fan–Vercauteren encryption using the
+  [HPS RNS variant](https://eprint.iacr.org/2018/117).
+* `lbfv`: linear-BFV operational public and relinearization keys.
+* `trlbfv`: additive contributions and aggregation for l-BFV keys.
+* `trbfv`: Shamir sharing, smudging, and threshold decryption;
+  see the [threshold guide](src/trbfv/README.md).
 
 ## Installation
 
-Add the following to your `Cargo.toml`:
+Published crates:
 
 ```toml
 [dependencies]
 fhe = "0.4.1"
+fhe-traits = "0.4.1"
 ```
 
 ## Cargo features
@@ -27,8 +29,8 @@ fhe = "0.4.1"
 
 ## Example
 
-Below is a simple example using BFV of an homomorphic multiplication.
-One ciphertext encrypts the value `20` using the secret key, and one ciphertext encrypts the value `-7` using the public key. The ciphertexts are then multiplied, and after decryption, the program checks that the decrypted value has `20 * (-7) = -140` in the first coefficient.
+Multiply a secret-key encryption of `20` by a public-key encryption of `-7`.
+These parameters illustrate the API; they are not a deployment recommendation.
 
 ```rust
 use fhe::bfv::{BfvParametersBuilder, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey};
@@ -63,55 +65,48 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-Note that operations actually happen modulo the `plaintext_modulus`, here set to `1024 (= 1 << 10)`; for example, we would have had that the homomorphic multiplication of `805` and `-7` is `509 = (805 * (-7)) mod 1024`. Additionally, the `poly()` encoding means that the vector being encoded corresponds to the coefficients of a polynomial in `(ZZ / (1024))[x] / (x^2048+1)` (and homomorphic multiplication happens in that ring); here since only one coefficient is provided, the value is placed in the constant coefficient. The library also contains a `simd()` encoding, which enables component-wise operation on the values of the vector, provided the technical limitation that the plaintext modulus is congruent to `1` modulo twice the polynomial degree.
+Arithmetic is modulo the plaintext modulus, here `1024`. `Encoding::poly()`
+encodes polynomial coefficients in `Z_1024[x] / (x^2048 + 1)`, so a single
+value occupies the constant coefficient. `Encoding::simd()` supports slot-wise
+arithmetic when the plaintext modulus is `1` modulo twice the ring degree.
 
 ## Examples
 
-More examples exercizing multiple functions from the API are provided in the repository [`examples/`](./examples/). For example, this library implements [SealPIR](https://eprint.iacr.org/2017/1142) and [MulPIR](https://eprint.iacr.org/2019/1483), which can be run as follows:
+Runnable examples are in [`examples/`](./examples/), including
+[SealPIR](https://eprint.iacr.org/2017/1142) and
+[MulPIR](https://eprint.iacr.org/2019/1483):
 
 ```bash
 cargo run --release --example sealpir
-```
-
-and
-
-```bash
 cargo run --release --example mulpir
 ```
 
-## Performance
+## Serialization
 
-Micro benchmarks can be obtained by running `cargo bench`. This crate uses [criterion.rs](https://criterion.rs) for benchmarks.
+Protobuf-backed decoders apply a 256 MiB pre-decode limit. Larger evaluation
+keys require a locally authorized `EvaluationKeyDecodeRequest`; see the
+[serialization limits](../../README.md#serialization-limits).
 
-The l-BFV serialization benchmark compares seeded and explicit public-key
-representations:
+l-BFV public keys and contributions serialize as seeded or explicit
+representations. Seeds compress CRS rows; they do not authenticate the CRS.
+A level-0 `LBFVRelinearizationKey` can reconstruct its public key with
+`reconstruct_public_key`, avoiding duplicate transport of the same rows.
+
+## Benchmarks and tests
+
+Benchmarks use [Criterion](https://criterion.rs). The serialization benchmark
+compares seeded and explicit l-BFV public keys:
 
 ```bash
 cargo bench -p fhe --bench lbfv_serialization
+cargo test -p fhe
 ```
 
-For the repository's degree-16384, five-modulus profile, an operational public
-key is 2,611,311 bytes in seeded form and 5,222,567 bytes in explicit form.
-The corresponding contribution envelopes are 2,611,316 and 5,222,572 bytes.
-The seed is compression metadata; protocol implementations must authenticate
-the expected CRS independently. Seeded operational keys and public-key
-contributions use the compact form canonically. Payloads from the former flat
-`c`/`l`/`seed` schema are rejected; applications own persistence and protocol
-version migration.
+## Security
 
-A level-0 `LBFVRelinearizationKey` already contains the public key's `b` rows
-and CRS `a` rows. `LBFVRelinearizationKey::reconstruct_public_key` rebuilds the
-typed public key from that material. This allows application protocols to
-transport the relinearization key once rather than duplicate the public-key
-rows. Comparison against existing commitments, combined envelopes, availability
-references, and protocol versioning remain application responsibilities.
-
-## Unit tests
-
-Run tests with `cargo test`.
-
-## ⚠️ Security / Stability
-
-The implementations in this crate have never been independently audited for security.
-
-Use at your own risk.
+This crate has not been independently audited. Use at your own risk.
+Multiparty primitives validate arithmetic structure, not contributor honesty
+or identity. Authentication, reference-string generation, session binding,
+and replay prevention belong to the surrounding protocol.
+l-BFV relinearization also relies on the cited construction's circular-security
+assumption; see the `lbfv` module documentation.

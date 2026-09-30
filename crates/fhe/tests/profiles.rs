@@ -77,7 +77,7 @@ fn secure8192_profile_is_feasible_and_covers_share_moduli() {
     );
 
     // The l-BFV public-key model widens the encryption-randomness support to
-    // 2 * variance (issue #250), which is still feasible for this profile and
+    // 2 * variance, which is still feasible for this profile and
     // pins the model-dependent arithmetic exactly.
     let lbfv_bound = SmudgingNoiseGenerator::new(
         SmudgingConfig::new(
@@ -137,7 +137,7 @@ fn secure16384_profile_is_feasible_and_covers_share_moduli() {
     // This profile backs both multiplication examples: depth-1+ circuits
     // encrypted with the MBFV-aggregated BFV public key and with the
     // distributed l-BFV public key. Both fresh-noise models must stay
-    // feasible at the profile's depth (issue #250).
+    // feasible at the profile's depth.
     for model in [
         FreshNoiseModel::BfvPublicKey,
         FreshNoiseModel::LbfvPublicKey,
