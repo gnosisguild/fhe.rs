@@ -1,21 +1,27 @@
 //! Threshold l-BFV key generation with [`PublicKeyShare`] and [`RelinKeyShare`].
 //!
-//! This is the threshold/multiparty boundary for l-BFV, analogous to
-//! [`crate::mbfv`]. Parties create [`PublicKeyShare`] and [`RelinKeyShare`]
-//! values here, and aggregation produces the operational key types from
-//! [`crate::lbfv`]. The shares are additive contributions from secret-key
-//! summands; they are not Shamir shares used for threshold decryption.
-//! The operational key types are re-exported here for convenience; their
-//! canonical definitions are in [`crate::lbfv`]. Public-key shares use the
-//! shared [`Aggregate`] trait, while relinearization-key aggregation takes a
-//! public key as additional input through [`aggregate_relinearization_key`].
+//! Shares are additive secret-key contributions, not Shamir decryption shares.
+//! Aggregation produces operational [`crate::lbfv`] keys:
+//! - [`Aggregate`] combines public-key shares.
+//! - [`aggregate_relinearization_key`] combines RLK shares with a public key.
+//! - [`aggregate_key_pair`] combines both halves of one selected contributor set.
 //!
-//! The implementation covers the additive public-key and linear
-//! relinearization-key construction described by Urban--Rambaud, §5. DKG
-//! orchestration, authentication, ZK proofs, FLSS/GURS, guaranteed output
-//! delivery, noise-budget policy, and threshold decryption remain caller or
-//! protocol responsibilities. In particular, callers must select and
-//! authenticate contributions and prevent duplicate inclusion.
+//! Contribution envelopes and operational-key encodings are distinct wire types.
+//!
+//! # Security boundary
+//!
+//! Aggregation validates parameters, levels, contexts, reference strings, and
+//! arithmetic structure. It does not authenticate contributors, reject duplicate
+//! submissions, or prove that PK/RLK halves use the same secret summand.
+//! [`RelinKeyWitness`] is not a proof; this crate provides no consistency-proof
+//! verifier. Pairing avoids accidental one-sided omissions, not malicious
+//! mispairing or caller-side `zip` truncation. See [`aggregate_key_pair`].
+//!
+//! CRS and URS generation must be independent. Checks reject identical seeds,
+//! repeated rows, and shared rows, but cannot detect unequal correlated randomness.
+//! DKG, FLSS/GURS, output delivery, authentication, admission, session binding,
+//! and replay prevention remain protocol responsibilities. Threshold decryption
+//! is provided separately by [`crate::trbfv`].
 
 mod aggregate;
 mod public_key_share;
@@ -23,6 +29,6 @@ mod relin_key_share;
 
 pub use crate::aggregate::{Aggregate, AggregateIter};
 pub use crate::lbfv::{LBFVPublicKey, LBFVRelinearizationKey};
-pub use aggregate::aggregate_relinearization_key;
+pub use aggregate::{aggregate_key_pair, aggregate_relinearization_key};
 pub use public_key_share::PublicKeyShare;
 pub use relin_key_share::{RelinKeyShare, RelinKeyWitness};

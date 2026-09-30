@@ -6,6 +6,7 @@ use fhe::bfv::{BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, dot_pr
 use fhe_traits::{FheEncoder, FheEncrypter};
 use itertools::{Itertools, izip};
 use rand::rng;
+use std::hint::black_box;
 use std::time::Duration;
 
 pub fn bfv_benchmark(c: &mut Criterion) {
@@ -26,14 +27,10 @@ pub fn bfv_benchmark(c: &mut Criterion) {
     {
         for &size in sizes {
             let sk = SecretKey::random(&params, &mut rng);
-            let pt1 = Plaintext::try_encode(&(1..16u64).collect_vec(), Encoding::poly(), &params)
-                .unwrap();
-            let mut c1: Ciphertext = sk.try_encrypt(&pt1, &mut rng).unwrap();
-
             let ct_vec = (0..size)
                 .map(|i| {
                     let pt = Plaintext::try_encode(
-                        &((i as u64)..16u64).collect_vec(),
+                        &(0..16).map(|j| ((i + j) % 100) as u64).collect_vec(),
                         Encoding::poly(),
                         &params,
                     )
@@ -44,13 +41,30 @@ pub fn bfv_benchmark(c: &mut Criterion) {
             let pt_vec = (0..size)
                 .map(|i| {
                     Plaintext::try_encode(
-                        &((i as u64)..39u64).collect_vec(),
+                        &(0..36).map(|j| ((i + 3 * j) % 100) as u64).collect_vec(),
                         Encoding::poly(),
                         &params,
                     )
                     .unwrap()
                 })
                 .collect_vec();
+
+            // Both benchmarks compute the same dot product over the same
+            // nonempty plaintext vectors. The old naive case accumulated in
+            // a ciphertext shared across iterations (and even benchmark
+            // registrations), so its timed workload drifted on every run.
+            let naive = || {
+                let mut sum = Ciphertext::zero(&params);
+                for (ct, pt) in izip!(&ct_vec, &pt_vec) {
+                    sum += &(ct * pt);
+                }
+                sum
+            };
+            assert_eq!(
+                naive(),
+                dot_product_scalar(ct_vec.iter(), pt_vec.iter()).unwrap(),
+                "naive and optimized benchmark workloads must agree"
+            );
 
             group.bench_function(
                 BenchmarkId::new(
@@ -63,7 +77,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                     ),
                 ),
                 |b| {
-                    b.iter(|| izip!(&ct_vec, &pt_vec).for_each(|(cti, pti)| c1 += &(cti * pti)));
+                    b.iter(|| black_box(naive()));
                 },
             );
 
@@ -78,7 +92,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                     ),
                 ),
                 |b| {
-                    b.iter(|| dot_product_scalar(ct_vec.iter(), pt_vec.iter()));
+                    b.iter(|| black_box(dot_product_scalar(ct_vec.iter(), pt_vec.iter()).unwrap()));
                 },
             );
         }

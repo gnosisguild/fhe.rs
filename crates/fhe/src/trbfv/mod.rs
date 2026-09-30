@@ -25,4 +25,4 @@ pub use prf::{PRF_KEY_LEN, PartyPrfKeyMaterial, PartyPrfKeys, PrfKey};
 pub use shares::{
     AggregatedSecretKeyShare, DealtSecretKeyShares, DecryptionShare, SecretKeyShare, ShareManager,
 };
-pub use smudging::{SmudgingConfig, SmudgingNoise, SmudgingNoiseGenerator};
+pub use smudging::{FreshNoiseModel, SmudgingConfig, SmudgingNoise, SmudgingNoiseGenerator};

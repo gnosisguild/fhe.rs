@@ -7,6 +7,26 @@ use fhe::Error;
 use fhe::trbfv::{AggregatedSecretKeyShare, SecretKeyShare, ShareManager};
 use ndarray::{Array2, ArrayView};
 
+/// Usage line of the common TRBFV example help.
+///
+/// `--num_summed` is only advertised when the example supports it (the
+/// addition examples); multiplication examples omit it from their usage.
+#[must_use]
+pub(crate) fn usage_line(supports_num_summed: bool) -> String {
+    let summation_argument = if supports_num_summed {
+        " [--num_summed=N]"
+    } else {
+        ""
+    };
+    format!("[-h|--help]{summation_argument} [--num_parties=N] [--threshold=T] [--lambda=L]")
+}
+
+/// Constraints line of the common TRBFV example help.
+///
+/// These mirror the `ShareManager::new` invariants: at least three parties
+/// with the exact honest-majority threshold `T = (N-1)/2`.
+pub(crate) const CONSTRAINTS_LINE: &str = "N >= 3, T = (N-1)/2, and L >= 1";
+
 /// Print the common TRBFV example help and terminate the process.
 pub fn print_notice_and_exit(error: Option<String>) -> ! {
     print_notice(error, true);
@@ -23,18 +43,15 @@ fn print_notice(error: Option<String>, supports_num_summed: bool) -> ! {
         "{} Threshold BFV example",
         style("  overview:").magenta().bold()
     );
-    let summation_argument = if supports_num_summed {
-        " [--num_summed=N]"
-    } else {
-        ""
-    };
     println!(
-        "{} [-h|--help]{summation_argument} [--num_parties=N] [--threshold=T] [--lambda=L]",
-        style("     usage:").magenta().bold()
+        "{} {}",
+        style("     usage:").magenta().bold(),
+        usage_line(supports_num_summed)
     );
     println!(
-        "{} N >= 1, T <= (N-1)/2, and L >= 1",
-        style("constraints:").magenta().bold()
+        "{} {}",
+        style("constraints:").magenta().bold(),
+        CONSTRAINTS_LINE
     );
     if let Some(error) = error.as_ref() {
         println!("{} {}", style("     error:").red().bold(), error);
@@ -43,7 +60,7 @@ fn print_notice(error: Option<String>, supports_num_summed: bool) -> ! {
 }
 
 /// Common command-line values shared by all TRBFV examples.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct TrbfvCli {
     pub num_summed: Option<usize>,
     pub num_parties: usize,
@@ -78,7 +95,13 @@ pub fn parse_cli(
             "--num_parties" => values.num_parties = value,
             "--threshold" => values.threshold = value,
             "--lambda" => values.lambda = value,
-            "--num_summed" => return Err("`--num_summed` is not supported here".into()),
+            "--num_summed" => {
+                return Err(
+                    "`--num_summed` is not supported by this example (see --help for the \
+                     accepted arguments)"
+                        .into(),
+                );
+            }
             _ => return Err(format!("Unrecognized argument: {argument}")),
         }
     }
@@ -89,8 +112,21 @@ pub fn parse_cli(
     {
         return Err("Party, ciphertext, and lambda counts must be nonzero".into());
     }
-    if values.threshold > values.num_parties.saturating_sub(1) / 2 {
-        return Err("Threshold must be at most (num_parties - 1) / 2".into());
+    // Mirror the `ShareManager::new` invariants so invalid settings are
+    // rejected before any party setup can panic.
+    if values.num_parties < 3 {
+        return Err(format!(
+            "Number of parties must be at least 3 (got {})",
+            values.num_parties
+        ));
+    }
+    let expected_threshold = (values.num_parties - 1) / 2;
+    if values.threshold != expected_threshold {
+        return Err(format!(
+            "Threshold must be exactly (num_parties - 1) / 2 = {expected_threshold} \
+             for {} parties (got {})",
+            values.num_parties, values.threshold
+        ));
     }
     Ok(values)
 }

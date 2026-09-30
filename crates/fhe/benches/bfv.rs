@@ -5,7 +5,7 @@
     reason = "performance or example code relies on validated indices"
 )]
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use fhe::bfv::{
     BfvParameters, Ciphertext, Encoding, EvaluationKeyBuilder, Multiplicator, Plaintext, PublicKey,
     RelinearizationKey, SecretKey,
@@ -16,6 +16,7 @@ use fhe_traits::{FheEncoder, FheEncrypter};
 use itertools::Itertools;
 use num_bigint::BigUint;
 use rand::rng;
+use std::hint::black_box;
 use std::time::Duration;
 
 pub fn bfv_benchmark(c: &mut Criterion) {
@@ -54,7 +55,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
             Plaintext::try_encode(&(1..16u64).collect_vec(), Encoding::simd(), &params).unwrap();
         let pt2 =
             Plaintext::try_encode(&(3..39u64).collect_vec(), Encoding::simd(), &params).unwrap();
-        let mut c1: Ciphertext = sk.try_encrypt(&pt1, &mut rng).unwrap();
+        let c1: Ciphertext = sk.try_encrypt(&pt1, &mut rng).unwrap();
         let c2: Ciphertext = sk.try_encrypt(&pt2, &mut rng).unwrap();
 
         let q = params.moduli_sizes().iter().sum::<usize>();
@@ -69,7 +70,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("keygen_pk", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| PublicKey::new(&sk, &mut rng));
+                b.iter(|| PublicKey::new(&sk, &mut rng).unwrap());
             },
         );
 
@@ -102,7 +103,8 @@ pub fn bfv_benchmark(c: &mut Criterion) {
             BenchmarkId::new("encrypt_sk", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
                 b.iter(|| {
-                    let _: fhe::Result<Ciphertext> = sk.try_encrypt(&pt1, &mut rng);
+                    let ciphertext: Ciphertext = sk.try_encrypt(&pt1, &mut rng).unwrap();
+                    black_box(ciphertext)
                 });
             },
         );
@@ -110,7 +112,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("add_ct", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| c1 = &c1 + &c2);
+                b.iter(|| black_box(&c1 + &c2));
             },
         );
 
@@ -120,14 +122,21 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                 format!("n={}/log(q)={}", params.degree(), q),
             ),
             |b| {
-                b.iter(|| c1 += &c2);
+                b.iter_batched(
+                    || c1.clone(),
+                    |mut left| {
+                        left += &c2;
+                        black_box(left)
+                    },
+                    BatchSize::SmallInput,
+                );
             },
         );
 
         group.bench_function(
             BenchmarkId::new("add_pt", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| c1 = &c1 + &pt2);
+                b.iter(|| black_box(&c1 + &pt2));
             },
         );
 
@@ -137,14 +146,21 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                 format!("n={}/log(q)={}", params.degree(), q),
             ),
             |b| {
-                b.iter(|| c1 += &pt2);
+                b.iter_batched(
+                    || c1.clone(),
+                    |mut left| {
+                        left += &pt2;
+                        black_box(left)
+                    },
+                    BatchSize::SmallInput,
+                );
             },
         );
 
         group.bench_function(
             BenchmarkId::new("sub_ct", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| c1 = &c1 - &c2);
+                b.iter(|| black_box(&c1 - &c2));
             },
         );
 
@@ -154,14 +170,21 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                 format!("n={}/log(q)={}", params.degree(), q),
             ),
             |b| {
-                b.iter(|| c1 -= &c2);
+                b.iter_batched(
+                    || c1.clone(),
+                    |mut left| {
+                        left -= &c2;
+                        black_box(left)
+                    },
+                    BatchSize::SmallInput,
+                );
             },
         );
 
         group.bench_function(
             BenchmarkId::new("sub_pt", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| c1 = &c1 - &pt2);
+                b.iter(|| black_box(&c1 - &pt2));
             },
         );
 
@@ -171,27 +194,37 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                 format!("n={}/log(q)={}", params.degree(), q),
             ),
             |b| {
-                b.iter(|| c1 -= &pt2);
+                b.iter_batched(
+                    || c1.clone(),
+                    |mut left| {
+                        left -= &pt2;
+                        black_box(left)
+                    },
+                    BatchSize::SmallInput,
+                );
             },
         );
 
         group.bench_function(
             BenchmarkId::new("neg", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| c1 = -&c2);
+                b.iter(|| black_box(-&c2));
             },
         );
 
-        let mut c3 = &c1 * &c1;
-        let c3_clone = c3.clone();
+        let c3 = &c1 * &c1;
         if let Some(rk) = rk.as_ref() {
             group.bench_function(
                 BenchmarkId::new("relinearize", format!("n={}/log(q)={}", params.degree(), q)),
                 |b| {
-                    b.iter(|| {
-                        assert!(rk.relinearizes(&mut c3).is_ok());
-                        c3 = c3_clone.clone();
-                    });
+                    b.iter_batched(
+                        || c3.clone(),
+                        |mut product| {
+                            rk.relinearizes(&mut product).unwrap();
+                            black_box(product)
+                        },
+                        BatchSize::SmallInput,
+                    );
                 },
             );
         }
@@ -200,7 +233,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
             group.bench_function(
                 BenchmarkId::new("rotate_rows", format!("n={}/log(q)={}", params.degree(), q)),
                 |b| {
-                    b.iter(|| c1 = ek.rotates_rows(&c1).unwrap());
+                    b.iter(|| black_box(ek.rotates_rows(&c1).unwrap()));
                 },
             );
 
@@ -210,14 +243,14 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                     format!("n={}/log(q)={}", params.degree(), q),
                 ),
                 |b| {
-                    b.iter(|| c1 = ek.rotates_columns_by(&c1, 1).unwrap());
+                    b.iter(|| black_box(ek.rotates_columns_by(&c1, 1).unwrap()));
                 },
             );
 
             group.bench_function(
                 BenchmarkId::new("inner_sum", format!("n={}/log(q)={}", params.degree(), q)),
                 |b| {
-                    b.iter(|| c1 = ek.computes_inner_sum(&c1).unwrap());
+                    b.iter(|| black_box(ek.computes_inner_sum(&c1).unwrap()));
                 },
             );
 
@@ -231,7 +264,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                         format!("n={}/log(q)={}", params.degree(), q),
                     ),
                     |b| {
-                        b.iter(|| ek.expands(&c1, 1 << i).unwrap());
+                        b.iter(|| black_box(ek.expands(&c1, 1 << i).unwrap()));
                     },
                 );
             }
@@ -240,14 +273,14 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("mul", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| &c1 * &c2);
+                b.iter(|| black_box(&c1 * &c2));
             },
         );
 
         group.bench_function(
             BenchmarkId::new("square", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| &c1 * &c1);
+                b.iter(|| black_box(&c1 * &c1));
             },
         );
 
@@ -259,8 +292,9 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                 ),
                 |b| {
                     b.iter(|| {
-                        c3 = &c1 * &c2;
-                        assert!(rk.relinearizes(&mut c3).is_ok());
+                        let mut product = &c1 * &c2;
+                        rk.relinearizes(&mut product).unwrap();
+                        black_box(product)
                     });
                 },
             );
@@ -274,7 +308,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                     format!("n={}/log(q)={}", params.degree(), q),
                 ),
                 |b| {
-                    b.iter(|| assert!(multiplicator.multiply(&c1, &c2).is_ok()));
+                    b.iter(|| black_box(multiplicator.multiply(&c1, &c2).unwrap()));
                 },
             );
 
@@ -305,7 +339,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
                     format!("n={}/log(q)={}", params.degree(), q),
                 ),
                 |b| {
-                    b.iter(|| assert!(multiplicator.multiply(&c1, &c2).is_ok()));
+                    b.iter(|| black_box(multiplicator.multiply(&c1, &c2).unwrap()));
                 },
             );
         }

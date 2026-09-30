@@ -22,7 +22,8 @@ use zeroize::{Zeroize, Zeroizing};
 pub struct SecretKey {
     /// The BFV parameters
     pub(crate) params: Arc<BfvParameters>,
-    /// The secret key coefficients
+    /// The secret key coefficients. Operations validate that the length still
+    /// matches the parameter degree after caller mutation.
     pub coeffs: Box<[i64]>,
 }
 
@@ -62,16 +63,44 @@ impl SecretKey {
     #[must_use]
     pub fn random<R: RngCore + CryptoRng>(params: &Arc<BfvParameters>, rng: &mut R) -> Self {
         let s_coefficients = sample_vec_cbd_f32(params.degree(), Self::SK_VARIANCE, rng).unwrap();
-        Self::new(s_coefficients, params)
+        Self::new(s_coefficients, params).unwrap()
     }
 
-    /// Generate a [`SecretKey`] from its coefficients.
-    #[must_use]
-    pub fn new(coeffs: Vec<i64>, params: &Arc<BfvParameters>) -> Self {
-        Self {
+    /// Construct a secret key with exactly one coefficient per ring degree.
+    ///
+    /// # Errors
+    /// Returns [`crate::SecretKeyError::InvalidCoefficientCount`] for a wrong
+    /// length. Rejected coefficients are wiped before being dropped.
+    ///
+    /// # Security
+    /// Coefficient magnitudes are not restricted: aggregated keys need not be
+    /// ternary. The caller must ensure their distribution and bounds satisfy
+    /// the security assumptions and noise budget of the chosen parameters.
+    pub fn new(coeffs: Vec<i64>, params: &Arc<BfvParameters>) -> Result<Self> {
+        let mut coeffs = Zeroizing::new(coeffs);
+        Self::validate_coefficient_count(coeffs.len(), params.degree())?;
+        // Boxing can shrink an overallocated vector and free an unwiped
+        // buffer. In that case, copy into the final owner and wipe the input.
+        let coeffs = if coeffs.capacity() == coeffs.len() {
+            std::mem::take(&mut *coeffs).into_boxed_slice()
+        } else {
+            Box::from(coeffs.as_slice())
+        };
+        Ok(Self {
             params: params.to_owned(),
-            coeffs: coeffs.into_boxed_slice(),
+            coeffs,
+        })
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        Self::validate_coefficient_count(self.coeffs.len(), self.params.degree())
+    }
+
+    fn validate_coefficient_count(actual: usize, expected: usize) -> Result<()> {
+        if actual != expected {
+            return Err(crate::SecretKeyError::InvalidCoefficientCount { actual, expected }.into());
         }
+        Ok(())
     }
 
     /// Measure the noise in a [`Ciphertext`].
@@ -81,8 +110,9 @@ impl SecretKey {
     /// This operations may run in a variable time depending on the value of the
     /// noise.
     pub unsafe fn measure_noise(&self, ct: &Ciphertext) -> Result<usize> {
+        self.validate()?;
         let plaintext = Zeroizing::new(self.try_decrypt(ct)?);
-        let m = Zeroizing::new(plaintext.to_poly());
+        let m = Zeroizing::new(plaintext.to_poly()?);
 
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), ct[0].ctx(), false)?
@@ -125,6 +155,7 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Ciphertext> {
+        self.validate()?;
         let level = self.params.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
@@ -160,6 +191,7 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<(Ciphertext, Zeroizing<Poly<Ntt>>, Zeroizing<Poly<Ntt>>)> {
+        self.validate()?;
         let level = self.params.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
@@ -200,6 +232,7 @@ impl SecretKey {
         p: &Poly<Ntt>,
         rng: &mut R,
     ) -> Result<Ciphertext> {
+        self.validate()?;
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
 
@@ -213,6 +246,7 @@ impl SecretKey {
         p: &Poly<Ntt>,
         rng: &mut R,
     ) -> Result<(Ciphertext, Zeroizing<Poly<Ntt>>, Zeroizing<Poly<Ntt>>)> {
+        self.validate()?;
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
 
@@ -227,8 +261,8 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Ciphertext> {
-        assert_eq!(self.params, pt.params);
-        let m = Zeroizing::new(pt.to_poly());
+        pt.validate_for(&self.params)?;
+        let m = Zeroizing::new(pt.to_poly()?);
         self.encrypt_poly_with_seed(m.as_ref(), seed, rng)
     }
 }
@@ -250,6 +284,10 @@ impl Serialize for SecretKey {
 impl DeserializeParametrized for SecretKey {
     type Error = Error;
 
+    /// Decode a secret key. Wrong coefficient counts are reported as
+    /// [`SerializationError::InvalidSecretKeyCoefficientCount`] at this wire
+    /// boundary; [`SecretKey::new`] and in-memory validation instead use
+    /// [`crate::SecretKeyError::InvalidCoefficientCount`].
     fn from_bytes(bytes: &[u8], params: &Arc<Self::Parameters>) -> Result<Self> {
         let proto: SecretKeyProto =
             crate::serialization::decode(bytes, crate::SerializedObject::SecretKey)?;
@@ -283,7 +321,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for SecretKey {
         rng: &mut R,
     ) -> Result<Ciphertext> {
         pt.validate_for(&self.params)?;
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         self.encrypt_poly(m.as_ref(), rng)
     }
 }
@@ -292,7 +330,9 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
     type Error = Error;
 
     fn try_decrypt(&self, ct: &Ciphertext) -> Result<Plaintext> {
+        self.validate()?;
         ct.validate_for(&self.params)?;
+        self.params.validate_plaintext_level(ct.level)?;
         // Let's create a secret key with the ciphertext context
         let s = Zeroizing::new(
             Poly::<PowerBasis>::try_convert_from(self.coeffs.as_ref(), ct[0].ctx(), false)?
@@ -321,7 +361,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
         let d = Zeroizing::new(c_pb.as_ref().scale(&ctx_lvl.cipher_plain_context.scaler)?);
 
         let poly = match self.params.plaintext.small() {
-            Some(plaintext_modulus) => {
+            Some(plaintext_modulus) if self.params.u64_decrypt_fast_path_is_exact() => {
                 let mut v = Vec::<u64>::try_from(d.as_ref())?;
                 v.iter_mut().for_each(|vi| *vi += **plaintext_modulus);
                 let mut w = v[..self.params.degree()].to_vec();
@@ -331,7 +371,11 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
                 plaintext_modulus.reduce_vec(&mut w);
                 Poly::<PowerBasis>::try_convert_from(w.as_slice(), ct[0].ctx(), false)?.into_ntt()
             }
-            None => {
+            _ => {
+                // Reducing through q_0 is only exact for 2t <= q_0. Otherwise
+                // (a small t above q_0 / 2 at a valid multi-modulus level)
+                // reducing through q_0 loses information; lift through the
+                // full plaintext context before reducing mod t.
                 let v: Vec<BigUint> = Vec::<BigUint>::try_from(d.as_ref())?
                     .into_iter()
                     .map(|vi| vi + self.params.plaintext_big())
@@ -359,9 +403,14 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
 #[cfg(test)]
 mod tests {
     use super::SecretKey;
-    use crate::bfv::{Encoding, Plaintext, parameters::BfvParameters};
+    use crate::bfv::{
+        Ciphertext, Encoding, Plaintext, PublicKey,
+        parameters::{BfvParameters, BfvParametersBuilder},
+    };
     use crate::proto::bfv::SecretKey as SecretKeyProto;
-    use fhe_traits::{DeserializeParametrized, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
+    use fhe_traits::{
+        DeserializeParametrized, FheDecoder, FheDecrypter, FheEncoder, FheEncrypter, Serialize,
+    };
     use prost::Message;
     use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
@@ -369,12 +418,59 @@ mod tests {
     use zeroize::Zeroize;
 
     #[test]
+    fn decrypt_lifts_through_plaintext_context_when_q0_below_2t() -> Result<(), Box<dyn Error>> {
+        let mut rng = crate::support::presets::rng(239);
+
+        // q0 = 1153 lies in (t, 2t) for t = 769: plaintext values near t wrap
+        // when the scaled phase is reduced through q0 alone, so decryption must
+        // lift through the plaintext context. The boundary complement keeps
+        // 2t <= q0 and exercises the u64 fast path with a value near t.
+        let wrap_params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(769)
+            .set_moduli(&[1153, 12289])
+            .build_arc()?;
+        assert!(!wrap_params.u64_decrypt_fast_path_is_exact());
+        let fast_params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(521)
+            .set_moduli(&[1153, 12289])
+            .build_arc()?;
+        assert!(fast_params.u64_decrypt_fast_path_is_exact());
+        // Common parameter shapes keep the fast path.
+        assert!(BfvParameters::default_arc(1, 16).u64_decrypt_fast_path_is_exact());
+        assert!(BfvParameters::default_arc(6, 16).u64_decrypt_fast_path_is_exact());
+
+        for (params, values) in [
+            (&wrap_params, vec![768u64; wrap_params.degree()]),
+            (&fast_params, vec![520u64; fast_params.degree()]),
+        ] {
+            let sk = SecretKey::random(params, &mut rng);
+            let pk = PublicKey::new(&sk, &mut rng)?;
+            let pt = Plaintext::try_encode(&values, Encoding::poly(), params)?;
+            let sk_ct: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
+            assert_eq!(sk_ct.level, 0);
+            assert_eq!(
+                Vec::<u64>::try_decode(&sk.try_decrypt(&sk_ct)?, Encoding::poly())?,
+                values
+            );
+            let pk_ct = pk.try_encrypt(&pt, &mut rng)?;
+            assert_eq!(
+                Vec::<u64>::try_decode(&sk.try_decrypt(&pk_ct)?, Encoding::poly())?,
+                values
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn extended_encryption_returns_zeroizing_intermediates() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 8);
         let sk = SecretKey::random(&params, &mut rng);
         let plaintext = Plaintext::zero(Encoding::poly(), &params)?;
-        let (ct, mut a, mut e) = sk.encrypt_poly_extended(&plaintext.to_poly(), &mut rng)?;
+        let (ct, mut a, mut e) = sk.encrypt_poly_extended(&plaintext.to_poly()?, &mut rng)?;
 
         assert_eq!(ct[1].coefficients(), a.coefficients());
         a.zeroize();
@@ -401,7 +497,7 @@ mod tests {
     fn debug_does_not_leak_coefficients() {
         // Use a distinctive sentinel value that will not appear in the params.
         let params = BfvParameters::default_arc(1, 16);
-        let sk = SecretKey::new(vec![987654321i64; params.degree()], &params);
+        let sk = SecretKey::new(vec![987654321i64; params.degree()], &params).unwrap();
         let debug = format!("{sk:?}");
         assert!(debug.contains("<redacted>"));
         assert!(
@@ -507,6 +603,31 @@ mod tests {
     }
 
     #[test]
+    fn measure_noise_rejects_invalid_secret_key_before_ciphertext_processing()
+    -> Result<(), Box<dyn Error>> {
+        let mut rng = crate::support::presets::rng(242);
+        let params = BfvParameters::default_arc(1, 16);
+        let mut sk = SecretKey::random(&params, &mut rng);
+        let pt = Plaintext::zero(Encoding::poly(), &params)?;
+        let ciphertext = sk.try_encrypt(&pt, &mut rng)?;
+        let empty_ciphertext = Ciphertext::zero(&params);
+
+        for actual in [0, params.degree() - 1, params.degree() + 1] {
+            sk.coeffs = vec![0; actual].into_boxed_slice();
+            for ct in [&ciphertext, &empty_ciphertext] {
+                assert_eq!(
+                    unsafe { sk.measure_noise(ct) }.unwrap_err(),
+                    crate::Error::SecretKey(crate::SecretKeyError::InvalidCoefficientCount {
+                        actual,
+                        expected: params.degree(),
+                    })
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn serialize_roundtrip() -> Result<(), Box<dyn Error>> {
         let mut rng = rng();
         let params = BfvParameters::default_arc(2, 16);
@@ -520,21 +641,32 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_invalid_length() {
+    fn coefficient_count_errors_distinguish_serialized_and_in_memory_keys() {
         let params = BfvParameters::default_arc(1, 16);
-        let mut proto = SecretKeyProto {
-            coeffs: vec![0; params.degree()],
-        };
-        proto.coeffs.pop();
-
-        let bytes = proto.encode_to_vec();
-        let err = SecretKey::from_bytes(&bytes, &params).unwrap_err();
-
-        assert!(matches!(
-            err,
-            crate::Error::SerializationError(
-                crate::SerializationError::InvalidSecretKeyCoefficientCount { .. }
-            )
-        ));
+        let mut sk = SecretKey::new(vec![0; params.degree()], &params).unwrap();
+        for actual in [0, params.degree() - 1, params.degree() + 1] {
+            let proto = SecretKeyProto {
+                coeffs: vec![0; actual],
+            };
+            let error = crate::Error::SecretKey(crate::SecretKeyError::InvalidCoefficientCount {
+                actual,
+                expected: params.degree(),
+            });
+            assert_eq!(
+                SecretKey::new(proto.coeffs.clone(), &params).unwrap_err(),
+                error
+            );
+            sk.coeffs = proto.coeffs.clone().into_boxed_slice();
+            assert_eq!(sk.validate().unwrap_err(), error);
+            assert_eq!(
+                SecretKey::from_bytes(&proto.encode_to_vec(), &params).unwrap_err(),
+                crate::Error::SerializationError(
+                    crate::SerializationError::InvalidSecretKeyCoefficientCount {
+                        actual,
+                        expected: params.degree(),
+                    }
+                )
+            );
+        }
     }
 }

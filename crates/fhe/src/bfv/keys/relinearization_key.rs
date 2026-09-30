@@ -58,7 +58,7 @@ impl RelinearizationKey {
         Self::new_leveled_internal(sk, 0, 0, rng)
     }
 
-    /// Generate a [`RelinearizationKey`] from a [`KeySwitchingKey`].
+    /// Generate a [`RelinearizationKey`] from a `KeySwitchingKey`.
     #[must_use]
     pub fn new_from_ksk(ksk: KeySwitchingKey) -> Self {
         Self { ksk }
@@ -87,6 +87,7 @@ impl RelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
+        sk.validate()?;
         let ctx_relin_key = sk.params.context_at_level(key_level)?;
         let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
 

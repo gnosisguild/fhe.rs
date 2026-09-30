@@ -15,7 +15,10 @@ use std::{env, error::Error, sync::Arc};
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{DecryptionShare, PartyPrfKeys, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{
+        DecryptionShare, FreshNoiseModel, PartyPrfKeys, ShareManager, SmudgingConfig,
+        SmudgingNoiseGenerator,
+    },
 };
 
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -108,8 +111,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
     let committee_prf_keys =
         std::sync::Arc::new(share_manager.generate_prf_keys(&mut rng).unwrap());
-    let smudging_config =
-        SmudgingConfig::new(params_trbfv.clone(), num_parties, num_summed, lambda).unwrap();
+    let smudging_config = SmudgingConfig::new(
+        params_trbfv.clone(),
+        num_parties,
+        num_summed,
+        lambda,
+        FreshNoiseModel::BfvPublicKey,
+    )
+    .unwrap();
     let smudging_generator =
         std::sync::Arc::new(SmudgingNoiseGenerator::new(smudging_config).unwrap());
 
@@ -136,7 +145,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .into_transport();
 
                 let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
-                let pk_bfv = PublicKey::new(&sk_bfv, &mut rng);
+                let pk_bfv = PublicKey::new(&sk_bfv, &mut rng).unwrap();
 
                 Party {
                     pk_share,

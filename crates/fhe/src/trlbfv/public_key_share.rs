@@ -187,7 +187,7 @@ mod tests {
         let joint_coeffs = (0..params.degree())
             .map(|index| sks.iter().map(|sk| sk.coeffs[index]).sum())
             .collect();
-        let joint_sk = SecretKey::new(joint_coeffs, &params);
+        let joint_sk = SecretKey::new(joint_coeffs, &params)?;
         let plaintext = Plaintext::try_encode(&[7u64], Encoding::poly(), &params)?;
         let ciphertext = aggregated.try_encrypt(&plaintext, &mut rng)?;
 

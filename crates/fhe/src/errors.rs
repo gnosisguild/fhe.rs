@@ -20,7 +20,7 @@ pub enum Error {
     #[error("Math library error: {0}")]
     MathError(#[from] fhe_math::Error),
 
-    /// Legacy catch-all error (deprecated).
+    /// An uncategorized error message.
     #[error("{0}")]
     DefaultError(String),
 
@@ -46,6 +46,10 @@ pub enum Error {
     /// A plaintext is structurally invalid for the requested operation.
     #[error("Plaintext error: {0}")]
     Plaintext(#[from] PlaintextError),
+
+    /// A secret key has an invalid coefficient count.
+    #[error("Secret-key error: {0}")]
+    SecretKey(#[from] SecretKeyError),
 
     /// A plaintext encoding is invalid or unavailable.
     #[error("Encoding error: {0}")]
@@ -88,9 +92,31 @@ pub enum ParameterSource {
     OutputSecretKey,
     PublicKey,
     Polynomial,
+    /// A one-time smudging noise owner's recorded binding: the party count
+    /// and complete BFV parameter set captured when the noise was sampled.
+    SmudgingNoise,
     KeySwitchingKey,
     RelinearizationKey,
     Multiplicator,
+}
+
+/// Identifies which reference-string vector a validation failure refers to.
+///
+/// l-BFV key generation consumes two shared reference strings: the common
+/// reference string (CRS) `a` and the uniform random string (URS) `d1`. The
+/// two vectors must be generated independently; this enum names the vector a
+/// [`MultipartyError`] refers to without disclosing any polynomial contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReferenceStringRole {
+    /// The common reference string `a` (public-key CRS rows, or the
+    /// relinearization-key `s -> r` rows).
+    Crs,
+    /// The uniform random string `d1` (the relinearization-key `r -> s` rows).
+    Urs,
+    /// A standalone common-random-polynomial vector whose CRS/URS role is not
+    /// bound at construction time.
+    CommonRandomPolyVector,
 }
 
 /// Ciphertext validation failures.
@@ -123,6 +149,7 @@ pub enum CiphertextError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CiphertextOperation {
+    PublicKeyEncryption,
     Galois,
     EvaluationKey,
     Relinearization,
@@ -212,8 +239,25 @@ pub enum ThresholdError {
         reason: String,
     },
 
-    /// Smudging noise was sampled under a different committee or parameters
-    /// than the share manager that consumes it.
+    /// Smudging noise was sampled for a different party count than the
+    /// dealer's.
+    ///
+    /// Smudging noise owners record the party count of the generator that
+    /// produced them; a manager refuses to deal noise sized for another
+    /// committee because the smudging bound would no longer hold.
+    #[error(
+        "smudging noise party count {noise_parties} does not match dealer party count \
+         {dealer_parties}"
+    )]
+    SmudgingNoisePartyCountMismatch {
+        /// Party count the noise was generated for
+        noise_parties: usize,
+        /// Party count of the manager dealing the noise
+        dealer_parties: usize,
+    },
+
+    /// Smudging noise was sampled for a different party count than the share
+    /// manager that consumes it.
     #[error(
         "smudging noise was sampled for n = {actual_n}, lambda = {actual_lambda}, but the manager has n = {expected_n}"
     )]
@@ -244,6 +288,18 @@ pub enum ThresholdError {
     },
 }
 
+/// Secret-key validation failures.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[expect(missing_docs, reason = "error variants are documented inline")]
+#[non_exhaustive]
+pub enum SecretKeyError {
+    /// A constructed or caller-mutated secret key has the wrong coefficient
+    /// count. Malformed serialized keys instead produce
+    /// [`SerializationError::InvalidSecretKeyCoefficientCount`].
+    #[error("Secret key has {actual} coefficients; expected {expected}")]
+    InvalidCoefficientCount { actual: usize, expected: usize },
+}
+
 /// Plaintext validation and conversion failures.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[expect(missing_docs, reason = "error variants are documented inline")]
@@ -254,6 +310,15 @@ pub enum PlaintextError {
 
     #[error("Polynomial context does not match plaintext level {level}")]
     PolynomialContextMismatch { level: usize },
+
+    #[error(
+        "Ciphertext modulus {ciphertext_modulus} at level {level} must exceed plaintext modulus {plaintext_modulus}"
+    )]
+    UnsupportedCiphertextLevel {
+        level: usize,
+        ciphertext_modulus: BigUint,
+        plaintext_modulus: BigUint,
+    },
 
     #[error("No plaintext encoding was specified")]
     MissingEncoding,
@@ -389,6 +454,43 @@ pub enum MultipartyError {
     #[error("Common random polynomial seed does not match polynomial at index {index}")]
     CommonRandomPolynomialSeedMismatch { index: usize },
 
+    /// Two relinearization-key shares disagree on a reference string. Indices
+    /// refer to the input slice, not authenticated party identities; neither
+    /// share is established as honest by this diagnostic.
+    #[error(
+        "Relinearization key share {share_index} has inconsistent {role:?} polynomials relative to share {reference_share_index}"
+    )]
+    ReferenceStringMismatch {
+        role: ReferenceStringRole,
+        share_index: usize,
+        reference_share_index: usize,
+    },
+
+    /// The CRS shared by all relinearization-key contributions disagrees with
+    /// the supplied public key. This aggregate-versus-key mismatch does not
+    /// identify a faulty contributor or establish which input is correct.
+    #[error("Relinearization key aggregate CRS row {row_index} does not match the public key")]
+    PublicKeyCrsMismatch { row_index: usize },
+
+    #[error(
+        "Reference strings must be generated independently: the CRS and URS seeds are identical"
+    )]
+    IdenticalReferenceStringSeeds,
+
+    #[error(
+        "{role:?} reference string contains a repeated polynomial row (indices {first_index} and {second_index})"
+    )]
+    RepeatedReferenceStringRow {
+        role: ReferenceStringRole,
+        first_index: usize,
+        second_index: usize,
+    },
+
+    #[error(
+        "Reference strings are not independent: CRS row {crs_index} equals URS row {urs_index}"
+    )]
+    OverlappingReferenceStringRows { crs_index: usize, urs_index: usize },
+
     #[error("Round-two relinearization share is missing its round-one aggregation")]
     MissingRelinearizationRoundOneShare,
 }
@@ -406,6 +508,75 @@ pub enum SerializationError {
         maximum: usize,
     },
 
+    /// Deriving the schema-based encoded-size bound for a locally authorized
+    /// deserialization request (see
+    /// [`EvaluationKey::from_bytes_with_request`][ekbfr]) overflowed the
+    /// platform's addressable range while computing the bound with checked
+    /// arithmetic. The authorized shape cannot be served on this platform.
+    ///
+    /// This is an arithmetic limitation of the derived bound, not a
+    /// rejection of the payload; no payload bytes are read when this error
+    /// is returned.
+    ///
+    /// [ekbfr]: crate::bfv::EvaluationKey::from_bytes_with_request
+    #[error(
+        "the encoded-size bound derived from the authorized request overflows usize on this platform"
+    )]
+    WireBoundOverflow,
+
+    /// A serialized evaluation key carried a Galois key substitution
+    /// exponent outside the set authorized by the locally constructed
+    /// [`EvaluationKeyDecodeRequest`][ekdr] (exponents are compared after
+    /// normalizing modulo `2 * degree`).
+    ///
+    /// [ekdr]: crate::bfv::EvaluationKeyDecodeRequest
+    #[error("Serialized evaluation key contains an unauthorized Galois key exponent {exponent}")]
+    UnexpectedGaloisKeyExponent { exponent: usize },
+
+    /// A serialized evaluation key was missing a Galois key entry that the
+    /// locally constructed [`EvaluationKeyDecodeRequest`][ekdr] authorizes
+    /// with [`GaloisKeySpec::Exactly`][gke]::`Exactly`: the request requires
+    /// the full authorized exponent set, so a key carrying only a subset is
+    /// rejected even though it would decode. The reported exponent is the
+    /// smallest missing authorized exponent.
+    ///
+    /// [ekdr]: crate::bfv::EvaluationKeyDecodeRequest
+    /// [gke]: crate::bfv::GaloisKeySpec
+    #[error("Serialized evaluation key is missing the authorized Galois key exponent {exponent}")]
+    MissingGaloisKeyExponent { exponent: usize },
+
+    /// A locally constructed [`EvaluationKeyDecodeRequest`][ekdr] authorizes
+    /// more distinct Galois key entries than distinct substitution exponents
+    /// exist for the parameters (at most `degree` odd residues modulo
+    /// `2 * degree`), so the request is invalid and no payload can satisfy
+    /// it.
+    ///
+    /// [ekdr]: crate::bfv::EvaluationKeyDecodeRequest
+    #[error(
+        "The request authorizes {requested} distinct Galois key entries; at most {maximum} distinct substitution exponents exist"
+    )]
+    ExcessiveGaloisKeySpec { requested: usize, maximum: usize },
+
+    /// A serialized evaluation key contained more Galois key entries than
+    /// the locally constructed [`EvaluationKeyDecodeRequest`][ekdr]
+    /// authorizes.
+    ///
+    /// [ekdr]: crate::bfv::EvaluationKeyDecodeRequest
+    #[error(
+        "Serialized evaluation key contains {actual} Galois key entries; the request authorizes at most {authorized}"
+    )]
+    GaloisKeyCountExceeded { authorized: usize, actual: usize },
+
+    /// A serialized evaluation key stores its key-switching rows in a form
+    /// (a regenerating seed or explicit polynomial rows) that the locally
+    /// constructed [`EvaluationKeyDecodeRequest`][ekdr] does not authorize.
+    ///
+    /// [ekdr]: crate::bfv::EvaluationKeyDecodeRequest
+    #[error("Serialized evaluation key stores {found}; the request authorizes only {expected}")]
+    SeedPolicyMismatch {
+        expected: &'static str,
+        found: &'static str,
+    },
     /// A protobuf payload could not be decoded.
     #[error("Failed to decode {object:?}: {message}")]
     Decode {
@@ -416,6 +587,13 @@ pub enum SerializationError {
     /// A required protobuf field is absent.
     #[error("Missing required field {field:?}")]
     MissingField { field: SerializedField },
+
+    /// A serialized evaluation key carries two Galois keys for the same
+    /// substitution exponent (compared after normalizing modulo `2 * degree`).
+    /// No constructor can produce that, and decoding used to silently keep
+    /// only the last key, so the payload is rejected.
+    #[error("Serialized evaluation key contains a duplicate Galois key exponent {exponent}")]
+    DuplicateGaloisExponent { exponent: usize },
 
     /// A serialized polynomial collection has the wrong length.
     #[error("{component:?} has {actual} polynomials; expected {expected}")]
@@ -443,6 +621,26 @@ pub enum SerializationError {
         expected: usize,
     },
 
+    /// A serialized key-switching key has a ciphertext level below its key
+    /// level, which no constructor can produce.
+    #[error(
+        "Serialized key-switching key has ciphertext level {ciphertext_level} below key level {key_level}"
+    )]
+    InvalidKeySwitchingLevelOrder {
+        ciphertext_level: usize,
+        key_level: usize,
+    },
+
+    /// A serialized key-switching key encodes a decomposition base the
+    /// constructors cannot produce for its key context.
+    #[error(
+        "Serialized key-switching key has log_base {log_base}; the decomposition base supported for its key context is {expected_log_base}"
+    )]
+    InvalidKeySwitchingLogBase {
+        log_base: usize,
+        expected_log_base: usize,
+    },
+
     /// A serialized key-switching seed has the wrong length.
     #[error("Serialized key-switching seed has {actual} bytes; expected {expected}")]
     InvalidKeySwitchingSeedLength { actual: usize, expected: usize },
@@ -451,7 +649,9 @@ pub enum SerializationError {
     #[error("Serialized public-key seed has {actual} bytes; expected {expected}")]
     InvalidPublicKeySeedLength { actual: usize, expected: usize },
 
-    /// A serialized secret key has the wrong coefficient count.
+    /// A serialized secret key has the wrong coefficient count. This describes
+    /// malformed wire data; construction and in-memory validation instead use
+    /// [`SecretKeyError::InvalidCoefficientCount`].
     #[error("Serialized secret key has {actual} coefficients; expected {expected}")]
     InvalidSecretKeyCoefficientCount { actual: usize, expected: usize },
 
@@ -512,8 +712,10 @@ pub enum SerializedField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SerializedPolynomialComponent {
+    PublicKeyCiphertext,
     KeySwitchingKeyC0,
     KeySwitchingKeyC1,
+    RelinearizationKeyBVec,
 }
 
 /// Separate enum to indicate parameters-related errors.
@@ -681,6 +883,11 @@ pub enum ParametersError {
     /// Indicates no default parameter set can accommodate a plaintext size.
     #[error("No default parameters support a {plaintext_bits}-bit plaintext modulus")]
     NoDefaultParameters { plaintext_bits: usize },
+
+    /// Indicates that a parameter set requests more ciphertext moduli than the
+    /// supported maximum.
+    #[error("Too many ciphertext moduli: {actual} specified, maximum is {maximum}")]
+    TooManyCiphertextModuli { actual: usize, maximum: usize },
 }
 
 impl ParametersError {
@@ -706,8 +913,9 @@ impl ParametersError {
 mod tests {
     use super::{
         Error, EvaluationKeyError, EvaluationOperation, MultipartyError, ParameterSource,
-        ParametersError, SerializationError, SerializedObject,
+        ParametersError, PlaintextError, ReferenceStringRole, SerializationError, SerializedObject,
     };
+    use num_bigint::BigUint;
 
     #[test]
     fn error_strings() {
@@ -749,6 +957,40 @@ mod tests {
             })
             .to_string(),
             "Multiparty protocol error: Expected 3 common random polynomials, got 2"
+        );
+        assert_eq!(
+            Error::Multiparty(MultipartyError::PublicKeyCrsMismatch { row_index: 1 }).to_string(),
+            "Multiparty protocol error: Relinearization key aggregate CRS row 1 does not match the public key"
+        );
+        assert_eq!(
+            Error::Multiparty(MultipartyError::IdenticalReferenceStringSeeds).to_string(),
+            "Multiparty protocol error: Reference strings must be generated independently: the CRS and URS seeds are identical"
+        );
+        assert_eq!(
+            Error::Multiparty(MultipartyError::RepeatedReferenceStringRow {
+                role: ReferenceStringRole::Urs,
+                first_index: 0,
+                second_index: 2,
+            })
+            .to_string(),
+            "Multiparty protocol error: Urs reference string contains a repeated polynomial row (indices 0 and 2)"
+        );
+        assert_eq!(
+            Error::Multiparty(MultipartyError::OverlappingReferenceStringRows {
+                crs_index: 1,
+                urs_index: 2,
+            })
+            .to_string(),
+            "Multiparty protocol error: Reference strings are not independent: CRS row 1 equals URS row 2"
+        );
+        assert_eq!(
+            Error::Plaintext(PlaintextError::UnsupportedCiphertextLevel {
+                level: 1,
+                ciphertext_modulus: BigUint::from(1153u64),
+                plaintext_modulus: BigUint::from(4099u64),
+            })
+            .to_string(),
+            "Plaintext error: Ciphertext modulus 1153 at level 1 must exceed plaintext modulus 4099"
         );
     }
 }

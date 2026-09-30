@@ -43,6 +43,8 @@ impl SecretKeySwitchShare {
         ct: Arc<Ciphertext>,
         rng: &mut R,
     ) -> Result<Self> {
+        sk_input_share.validate()?;
+        sk_output_share.validate()?;
         if sk_input_share.params != sk_output_share.params {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::InputSecretKey,
@@ -186,7 +188,7 @@ impl DecryptionShare {
         rng: &mut R,
     ) -> Result<Self> {
         let params = &sk_input_share.params;
-        let zero = SecretKey::new(vec![0; params.degree()], params);
+        let zero = SecretKey::new(vec![0; params.degree()], params)?;
         let sks_share = SecretKeySwitchShare::new(sk_input_share, &zero, ct.clone(), rng)?;
         Ok(DecryptionShare { sks_share })
     }
@@ -227,6 +229,7 @@ impl Aggregate<DecryptionShare> for Plaintext {
         let c = Zeroizing::new(c_inner.into_power_basis());
 
         // The true decryption part is done during SKS; all that is left is to scale
+        ct.params.validate_plaintext_level(ct.level)?;
         let ctx_lvl = ct.params.context_level_at(ct.level)?;
         let d = Zeroizing::new(c.as_ref().scale(&ctx_lvl.cipher_plain_context.scaler)?);
 
@@ -262,7 +265,10 @@ mod tests {
     use rand::rng;
 
     use crate::{
-        bfv::{BfvParameters, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
+        bfv::{
+            BfvParameters, BfvParametersBuilder, CommonRandomPoly, Encoding, Plaintext, PublicKey,
+            SecretKey,
+        },
         mbfv::{Aggregate, AggregateIter, DecryptionShare, PublicKeyShare, SecretKeySwitchShare},
     };
 
@@ -312,6 +318,43 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn aggregate_decryption_rejects_unsupported_plaintext_level() {
+        let mut rng = rng();
+        // Level 1 keeps a valid polynomial context, but its ciphertext modulus
+        // 1153 cannot encode plaintexts for t = 4099.
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(4099)
+            .set_moduli(&[1153, 12289])
+            .build_arc()
+            .unwrap();
+        let ctx = params.context_at_level(1).unwrap();
+        let sk = SecretKey::random(&params, &mut rng);
+        let ct = Arc::new(
+            crate::bfv::Ciphertext::new(
+                vec![
+                    fhe_math::rq::Poly::random(ctx, &mut rng),
+                    fhe_math::rq::Poly::random(ctx, &mut rng),
+                ],
+                &params,
+            )
+            .unwrap(),
+        );
+        let shares = [
+            DecryptionShare::new(&sk, &ct.clone(), &mut rng).unwrap(),
+            DecryptionShare::new(&sk, &ct, &mut rng).unwrap(),
+        ];
+        // Aggregating shares into a plaintext rejects the unsupported level
+        // before the scaling conversion.
+        assert!(matches!(
+            Plaintext::from_shares(shares),
+            Err(crate::Error::Plaintext(
+                crate::PlaintextError::UnsupportedCiphertextLevel { .. }
+            ))
+        ));
     }
 
     #[test]

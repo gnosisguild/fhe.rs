@@ -477,7 +477,7 @@ mod tests {
     fn test_ciphertext<R: RngCore + CryptoRng>(rng: &mut R) -> Ciphertext {
         let params = insecure().unwrap().parameters;
         let sk = SecretKey::random(&params, rng);
-        let pk = PublicKey::new(&sk, rng);
+        let pk = PublicKey::new(&sk, rng).unwrap();
         let pt = Plaintext::try_encode(&[7u64], Encoding::poly(), &params).unwrap();
         pk.try_encrypt(&pt, rng).unwrap()
     }

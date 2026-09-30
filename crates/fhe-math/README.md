@@ -1,17 +1,20 @@
 # fhe-math [![crate version](https://img.shields.io/crates/v/fhe-math.svg)](https://crates.io/crates/fhe-math) [![documentation](https://docs.rs/fhe-math/badge.svg)](https://docs.rs/fhe-math)
 
-Core mathematical primitives for the [`fhe.rs`](https://github.com/tlepoint/fhe.rs) ecosystem.
-
-This crate exposes building blocks such as number theoretic transforms (NTT), residue number system (RNS) arithmetic, and ring arithmetic over `Z_q` that are used by higher level crates like [`fhe`](https://crates.io/crates/fhe).
+Mathematical primitives for [`fhe.rs`](https://github.com/gnosisguild/fhe.rs):
+number-theoretic transforms (NTT), residue number systems (RNS), and polynomial
+and modular arithmetic.
 
 ## Features
 
-* `ntt`, `rns`, `rq`, and `zq` modules for modular arithmetic over large rings.
-* Optional `tfhe-ntt` features to enable hardware accelerated NTTs via the [`tfhe-ntt`](https://crates.io/crates/tfhe-ntt) crate.
+* `ntt`: number-theoretic transforms.
+* `rns`: CRT contexts and scaling.
+* `rq`: polynomials over modular rings.
+* `zq`: modular arithmetic and prime selection.
+* `tfhe-ntt`: optional accelerated transforms via [`tfhe-ntt`](https://crates.io/crates/tfhe-ntt).
 
 ## Installation
 
-Add the following to your `Cargo.toml`:
+Published crate:
 
 ```toml
 [dependencies]
@@ -28,7 +31,8 @@ cargo test -p fhe-math
 
 This project is licensed under the [MIT license](https://opensource.org/licenses/MIT).
 
-## Security / Stability
+## Security
 
-The code in this crate has not undergone an independent security audit.
-Use at your own risk.
+This crate has not been independently audited. Use at your own risk.
+Variable-time arithmetic must only be enabled for public data; consult each
+operation's API contract.

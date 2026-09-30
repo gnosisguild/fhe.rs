@@ -1,42 +1,16 @@
 /// Configuration and validation for threshold BFV (Urban–Rambaud 2024).
 ///
 /// This module enforces `n >= 3` and `T = (n - 1) / 2` for the honest-majority
-/// model.  **Even `n` is accepted** for compatibility, but Urban–Rambaud&nbsp;2024
+/// model. **Even `n` is accepted**, but Urban–Rambaud&nbsp;2024
 /// proves security only for odd party counts under the `n = 2t + 1` theorem.
 /// Even-`n` deployments fall outside the paper's coverage and have not been
 /// independently analyzed.
 use crate::Error;
 
-/// Validates threshold configuration parameters.
-///
-/// # Parameters
-/// - `n`: Number of parties in the threshold scheme
-/// - `threshold`: Degree `T` of the Shamir sharing polynomial, read as the
-///   maximum number of corrupted parties the deployment tolerates.
-///   Reconstruction requires `T + 1` shares.
-///
-/// # Security model
-///
-/// With `M` corrupted parties (and shares verifiable, e.g. via ZKPs, so honest
-/// parties never mix in bad shares), the scheme needs two properties:
-///
-/// 1. Corrupted parties cannot reconstruct alone: `M < T + 1`, i.e. `M <= T`.
-/// 2. Honest parties can reconstruct without the corrupted ones:
-///    `n - M >= T + 1`.
-///
-/// We assume corruption at the honest-majority maximum, `M = (n - 1) / 2`
-/// (integer division), so we require exactly `T = (n - 1) / 2`:
-///
-/// - `T < (n - 1) / 2` is rejected: the maximal corrupted coalition would
-///   hold `M >= T + 1` shares and could reconstruct the secret on its own.
-/// - `T > (n - 1) / 2` is rejected: the honest parties alone could not
-///   gather `T + 1` shares, losing guaranteed reconstruction. (For even `n`,
-///   `T = n / 2` would still satisfy both properties, but `T = n / 2 - 1`
-///   tolerates the same corruption count with one fewer share to pool, so we
-///   require the latter.)
-///
-/// This forces `n >= 3` (the smallest `n` with a nonzero `T`; a degree-0
-/// sharing polynomial is the secret itself, so every party would hold it).
+/// Require `n >= 3` and Shamir degree `T = (n - 1) / 2`.
+/// With `M = (n - 1) / 2` corruptions, `M < T + 1 <= n - M` allows honest
+/// reconstruction without letting the corrupted coalition reconstruct alone,
+/// assuming verifiable shares. Degree zero would reveal the secret to every party.
 pub(crate) fn validate_threshold_config(n: usize, threshold: usize) -> Result<(), Error> {
     if n == 0 {
         return Err(Error::invalid_party_count(n, 1));
@@ -54,17 +28,6 @@ pub(crate) fn validate_threshold_config(n: usize, threshold: usize) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_valid_threshold_config() {
-        assert!(validate_threshold_config(5, 2).is_ok());
-        assert!(validate_threshold_config(3, 1).is_ok());
-        assert!(validate_threshold_config(10, 4).is_ok());
-
-        // Maximal corruption tolerance: T = (n - 1) / 2.
-        assert!(validate_threshold_config(20, 9).is_ok());
-        assert!(validate_threshold_config(21, 10).is_ok());
-    }
 
     #[test]
     fn test_supported_deployment_configs() {
@@ -87,6 +50,7 @@ mod tests {
             ("", 18, 10, 8),
             ("small", 19, 10, 9),
             ("", 20, 11, 9),
+            ("", 21, 11, 10),
         ];
         for (name, n, h, t) in deployments {
             assert!(

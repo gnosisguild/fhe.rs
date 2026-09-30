@@ -25,8 +25,9 @@ pub use crp::{CommonRandomPoly, CommonRandomPolyVec};
 pub use encoding::Encoding;
 pub(crate) use keys::KeySwitchingKey;
 pub use keys::{
-    EncryptionIntermediates, EvaluationKey, EvaluationKeyBuilder, PublicKey,
-    PublicKeyGenerationIntermediates, RelinearizationKey, SecretKey,
+    EncryptionIntermediates, EvaluationKey, EvaluationKeyBuilder, EvaluationKeyDecodeRequest,
+    GaloisKeySpec, PublicKey, PublicKeyGenerationIntermediates, RelinearizationKey, SecretKey,
+    SeedPolicy,
 };
 pub use ops::{Multiplicator, dot_product_scalar};
 pub use parameters::{BfvParameters, BfvParametersBuilder};

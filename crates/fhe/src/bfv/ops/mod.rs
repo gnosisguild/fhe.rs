@@ -14,12 +14,83 @@ use std::sync::Arc;
 
 impl Ciphertext {
     /// Materialize the empty accumulator as a ciphertext containing a plaintext.
-    fn assign_plaintext(&mut self, plaintext: &Plaintext) {
-        let c0 = plaintext.to_poly();
+    fn assign_plaintext(&mut self, plaintext: &Plaintext) -> Result<()> {
+        let c0 = plaintext.to_poly()?;
         let c1 = Poly::<Ntt>::zero(c0.ctx());
         self.c = vec![c0, c1];
         self.level = plaintext.level();
         self.seed = None;
+        Ok(())
+    }
+
+    /// Add a plaintext, returning a typed error for incompatible parameters,
+    /// levels, or a level whose ciphertext modulus cannot encode plaintexts.
+    /// Use this method instead of `+=` when the inputs are not trusted.
+    pub fn try_add_plaintext(&mut self, rhs: &Plaintext) -> Result<()> {
+        rhs.validate_for(&self.params)?;
+        if self.is_empty() {
+            return self.assign_plaintext(rhs);
+        }
+        if self.level != rhs.level() {
+            return Err(Error::InvalidLevel {
+                level: rhs.level(),
+                min_level: self.level,
+                max_level: self.level,
+            });
+        }
+        self.validate_for(&self.params)?;
+        let poly = rhs.to_poly()?;
+        self[0] += &poly;
+        self.seed = None;
+        Ok(())
+    }
+
+    /// Subtract a plaintext with the same checks as [`Self::try_add_plaintext`].
+    pub fn try_sub_plaintext(&mut self, rhs: &Plaintext) -> Result<()> {
+        rhs.validate_for(&self.params)?;
+        if self.is_empty() {
+            self.assign_plaintext(rhs)?;
+            self.c[0] = -&self.c[0];
+            return Ok(());
+        }
+        if self.level != rhs.level() {
+            return Err(Error::InvalidLevel {
+                level: rhs.level(),
+                min_level: self.level,
+                max_level: self.level,
+            });
+        }
+        self.validate_for(&self.params)?;
+        let poly = rhs.to_poly()?;
+        self.c[0] -= &poly;
+        self.seed = None;
+        Ok(())
+    }
+
+    /// Multiply a ciphertext by a plaintext, returning a typed error for
+    /// incompatible parameters, levels, or a level whose ciphertext modulus
+    /// cannot encode plaintexts. Use this method instead of `*=` when the
+    /// inputs are not trusted.
+    ///
+    /// Unlike [`Self::try_add_plaintext`] and [`Self::try_sub_plaintext`], an
+    /// empty accumulator is not materialized: a validated multiplication
+    /// leaves it empty.
+    pub fn try_mul_plaintext(&mut self, rhs: &Plaintext) -> Result<()> {
+        rhs.validate_for(&self.params)?;
+        if self.is_empty() {
+            return Ok(());
+        }
+        if self.level != rhs.level() {
+            return Err(Error::InvalidLevel {
+                level: rhs.level(),
+                min_level: self.level,
+                max_level: self.level,
+            });
+        }
+        self.validate_for(&self.params)?;
+        self.iter_mut().for_each(|ci| *ci *= &rhs.poly_ntt);
+        self.seed = None;
+        Ok(())
     }
 }
 
@@ -98,17 +169,14 @@ impl Add<&Ciphertext> for &Plaintext {
 }
 
 impl AddAssign<&Plaintext> for Ciphertext {
+    #[expect(
+        clippy::expect_used,
+        reason = "the AddAssign trait is infallible; use try_add_plaintext for a typed error"
+    )]
     fn add_assign(&mut self, rhs: &Plaintext) {
-        assert!(Arc::ptr_eq(&self.params, &rhs.params));
-        if self.is_empty() {
-            self.assign_plaintext(rhs);
-            return;
-        }
-        assert_eq!(self.level, rhs.level());
-
-        let poly = rhs.to_poly();
-        self[0] += &poly;
-        self.seed = None
+        self.try_add_plaintext(rhs).expect(
+            "ciphertext/plaintext addition requires matching parameters and supported levels; use try_add_plaintext for a typed error",
+        );
     }
 }
 
@@ -196,18 +264,14 @@ impl Sub<&Ciphertext> for &Plaintext {
 }
 
 impl SubAssign<&Plaintext> for Ciphertext {
+    #[expect(
+        clippy::expect_used,
+        reason = "the SubAssign trait is infallible; use try_sub_plaintext for a typed error"
+    )]
     fn sub_assign(&mut self, rhs: &Plaintext) {
-        assert!(Arc::ptr_eq(&self.params, &rhs.params));
-        if self.is_empty() {
-            self.assign_plaintext(rhs);
-            self.c[0] = -&self.c[0];
-            return;
-        }
-        assert_eq!(self.level, rhs.level());
-
-        let poly = rhs.to_poly();
-        self.c[0] -= &poly;
-        self.seed = None
+        self.try_sub_plaintext(rhs).expect(
+            "ciphertext/plaintext subtraction requires matching parameters and supported levels; use try_sub_plaintext for a typed error",
+        );
     }
 }
 
@@ -245,13 +309,14 @@ impl Neg for Ciphertext {
 }
 
 impl MulAssign<&Plaintext> for Ciphertext {
+    #[expect(
+        clippy::expect_used,
+        reason = "the MulAssign trait is infallible; use try_mul_plaintext for a typed error"
+    )]
     fn mul_assign(&mut self, rhs: &Plaintext) {
-        assert!(Arc::ptr_eq(&self.params, &rhs.params));
-        if !self.is_empty() {
-            assert_eq!(self.level, rhs.level());
-            self.iter_mut().for_each(|ci| *ci *= &rhs.poly_ntt);
-        }
-        self.seed = None
+        self.try_mul_plaintext(rhs).expect(
+            "ciphertext/plaintext multiplication requires matching parameters and supported levels; use try_mul_plaintext for a typed error",
+        );
     }
 }
 
@@ -378,11 +443,15 @@ impl Mul<&Ciphertext> for &Ciphertext {
 #[cfg(test)]
 mod tests {
     use crate::bfv::{
-        BfvParameters, Ciphertext, Encoding, Plaintext, SecretKey, encoding::EncodingEnum,
+        BfvParameters, BfvParametersBuilder, Ciphertext, Encoding, Plaintext, SecretKey,
+        encoding::EncodingEnum,
     };
+    use crate::{Error as FheError, PlaintextError};
+    use fhe_math::rq::{Ntt, Poly};
     use fhe_traits::{
         DeserializeParametrized, FheDecoder, FheDecrypter, FheEncoder, FheEncrypter, Serialize,
     };
+    use num_bigint::BigUint;
     use rand::rng;
     use std::error::Error;
 
@@ -526,6 +595,243 @@ mod tests {
                 values
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn checked_plaintext_arithmetic_reports_typed_errors() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+
+        // t = 4099 exceeds the single-modulus level's q0 = 1153, so level 1
+        // keeps a valid polynomial context but cannot encode plaintexts.
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(4099)
+            .set_moduli(&[1153, 12289])
+            .build_arc()?;
+        let sk = SecretKey::random(&params, &mut rng);
+        let values = vec![7u64; params.degree()];
+        let valid = Plaintext::try_encode(&values, Encoding::poly(), &params)?;
+        let unsupported_plaintext = Plaintext {
+            params: params.clone(),
+            encoding: Some(Encoding::poly_at_level(1)),
+            poly_ntt: Poly::<Ntt>::zero(params.context_at_level(1)?),
+        };
+        let unsupported = FheError::Plaintext(PlaintextError::UnsupportedCiphertextLevel {
+            level: 1,
+            ciphertext_modulus: BigUint::from(1153u64),
+            plaintext_modulus: BigUint::from(4099u64),
+        });
+
+        // The empty-accumulator path rejects the level without materializing.
+        let mut empty = Ciphertext::zero(&params);
+        assert_eq!(
+            empty.try_add_plaintext(&unsupported_plaintext).unwrap_err(),
+            unsupported
+        );
+        assert!(empty.is_empty());
+        assert_eq!(
+            empty.try_sub_plaintext(&unsupported_plaintext).unwrap_err(),
+            unsupported
+        );
+        assert!(empty.is_empty());
+
+        // The non-empty path rejects the level before touching the ciphertext.
+        let mut ct: Ciphertext = sk.try_encrypt(&valid, &mut rng)?;
+        assert_eq!(ct.level, 0);
+        assert_eq!(
+            ct.try_add_plaintext(&unsupported_plaintext).unwrap_err(),
+            unsupported
+        );
+        assert_eq!(
+            ct.try_sub_plaintext(&unsupported_plaintext).unwrap_err(),
+            unsupported
+        );
+
+        // Level mismatches are typed even when both levels are supported.
+        let two_level_params = BfvParameters::default_arc(2, 16);
+        let two_level_sk = SecretKey::random(&two_level_params, &mut rng);
+        let low = Plaintext::try_encode(&values, Encoding::poly_at_level(0), &two_level_params)?;
+        let high = Plaintext::try_encode(&values, Encoding::poly_at_level(1), &two_level_params)?;
+        let mut high_ct: Ciphertext = two_level_sk.try_encrypt(&high, &mut rng)?;
+        assert_eq!(high_ct.level, 1);
+        let mismatch = FheError::InvalidLevel {
+            level: 0,
+            min_level: 1,
+            max_level: 1,
+        };
+        assert_eq!(high_ct.try_add_plaintext(&low).unwrap_err(), mismatch);
+        assert_eq!(high_ct.try_sub_plaintext(&low).unwrap_err(), mismatch);
+
+        // Parameter mismatches are typed as well.
+        let other_params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(4099)
+            .set_moduli(&[1153, 12289])
+            .build_arc()?;
+        let other_plaintext = Plaintext::try_encode(&values, Encoding::poly(), &other_params)?;
+        assert!(matches!(
+            ct.try_add_plaintext(&other_plaintext),
+            Err(FheError::ParameterMismatch { .. })
+        ));
+        assert!(matches!(
+            ct.try_sub_plaintext(&other_plaintext),
+            Err(FheError::ParameterMismatch { .. })
+        ));
+
+        // Supported-level arithmetic via the checked APIs stays correct.
+        let mut sum = ct.clone();
+        sum.try_add_plaintext(&valid)?;
+        sum.try_sub_plaintext(&valid)?;
+        assert_eq!(
+            Vec::<u64>::try_decode(&sk.try_decrypt(&sum)?, Encoding::poly())?,
+            values
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn checked_plaintext_multiplication_reports_typed_errors() -> Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+
+        // t = 4099 exceeds the single-modulus level's q0 = 1153, so level 1
+        // keeps a valid polynomial context but cannot encode plaintexts.
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(4099)
+            .set_moduli(&[1153, 12289])
+            .build_arc()?;
+        let sk = SecretKey::random(&params, &mut rng);
+        let values = vec![7u64; params.degree()];
+        let valid = Plaintext::try_encode(&values, Encoding::poly(), &params)?;
+        let unsupported_plaintext = Plaintext {
+            params: params.clone(),
+            encoding: Some(Encoding::poly_at_level(1)),
+            poly_ntt: Poly::<Ntt>::zero(params.context_at_level(1)?),
+        };
+        let unsupported = FheError::Plaintext(PlaintextError::UnsupportedCiphertextLevel {
+            level: 1,
+            ciphertext_modulus: BigUint::from(1153u64),
+            plaintext_modulus: BigUint::from(4099u64),
+        });
+
+        // The empty accumulator rejects the level (it used to skip every
+        // plaintext check) and stays empty.
+        let mut empty = Ciphertext::zero(&params);
+        assert_eq!(
+            empty.try_mul_plaintext(&unsupported_plaintext).unwrap_err(),
+            unsupported
+        );
+        assert!(empty.is_empty());
+
+        // The empty accumulator rejects mismatched parameters as well.
+        let other_params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(4099)
+            .set_moduli(&[1153, 12289])
+            .build_arc()?;
+        let other_plaintext = Plaintext::try_encode(&values, Encoding::poly(), &other_params)?;
+        let mut empty = Ciphertext::zero(&params);
+        assert!(matches!(
+            empty.try_mul_plaintext(&other_plaintext),
+            Err(FheError::ParameterMismatch { .. })
+        ));
+        assert!(empty.is_empty());
+
+        // A switched ciphertext rejects the level before any mutation; the
+        // multiplication used to silently proceed at Q <= t.
+        let mut ct: Ciphertext = sk.try_encrypt(&valid, &mut rng)?;
+        assert_eq!(ct.level, 0);
+        let mut switched = ct.clone();
+        switched.switch_down()?;
+        assert_eq!(switched.level, 1);
+        let untouched = switched.clone();
+        assert_eq!(
+            switched
+                .try_mul_plaintext(&unsupported_plaintext)
+                .unwrap_err(),
+            unsupported
+        );
+        assert_eq!(switched, untouched);
+
+        // A supported-level ciphertext rejects the plaintext's level too: the
+        // rhs check precedes the level comparison.
+        let untouched = ct.clone();
+        assert_eq!(
+            ct.try_mul_plaintext(&unsupported_plaintext).unwrap_err(),
+            unsupported
+        );
+        assert_eq!(ct, untouched);
+
+        // Level mismatches are typed before any mutation.
+        let two_level_params = BfvParameters::default_arc(2, 16);
+        let two_level_sk = SecretKey::random(&two_level_params, &mut rng);
+        let high = Plaintext::try_encode(&values, Encoding::poly_at_level(1), &two_level_params)?;
+        let low = Plaintext::try_encode(&values, Encoding::poly_at_level(0), &two_level_params)?;
+        let mut high_ct: Ciphertext = two_level_sk.try_encrypt(&high, &mut rng)?;
+        assert_eq!(high_ct.level, 1);
+        let untouched = high_ct.clone();
+        let mismatch = FheError::InvalidLevel {
+            level: 0,
+            min_level: 1,
+            max_level: 1,
+        };
+        assert_eq!(high_ct.try_mul_plaintext(&low).unwrap_err(), mismatch);
+        assert_eq!(high_ct, untouched);
+
+        // Parameter mismatches are typed before any mutation as well.
+        let untouched = ct.clone();
+        assert!(matches!(
+            ct.try_mul_plaintext(&other_plaintext),
+            Err(FheError::ParameterMismatch { .. })
+        ));
+        assert_eq!(ct, untouched);
+
+        Ok(())
+    }
+
+    #[test]
+    fn checked_plaintext_multiplication_matches_infallible_operator() -> Result<(), Box<dyn Error>>
+    {
+        let mut rng = rng();
+        let params = BfvParameters::default_arc(2, 16);
+        let q = fhe_math::zq::Modulus::new(params.plaintext()).unwrap();
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let a = q.random_vec(params.degree(), &mut rng);
+        let b = q.random_vec(params.degree(), &mut rng);
+        let mut expected = vec![0u64; params.degree()];
+        for i in 0..params.degree() {
+            for j in 0..params.degree() {
+                if i + j >= params.degree() {
+                    expected[(i + j) % params.degree()] =
+                        q.sub(expected[(i + j) % params.degree()], q.mul(a[i], b[j]));
+                } else {
+                    expected[i + j] = q.add(expected[i + j], q.mul(a[i], b[j]));
+                }
+            }
+        }
+
+        let pt_a = Plaintext::try_encode(&a, Encoding::poly(), &params)?;
+        let pt_b = Plaintext::try_encode(&b, Encoding::poly(), &params)?;
+        let ct: Ciphertext = sk.try_encrypt(&pt_a, &mut rng)?;
+
+        let mut checked = ct.clone();
+        checked.try_mul_plaintext(&pt_b)?;
+        let pt_c = sk.try_decrypt(&checked)?;
+        assert_eq!(Vec::<u64>::try_decode(&pt_c, Encoding::poly())?, expected);
+
+        // The infallible operator delegates to the checked API.
+        let mut delegated = ct.clone();
+        delegated *= &pt_b;
+        assert_eq!(delegated, checked);
+
+        // A validated multiplication leaves the empty accumulator empty.
+        let mut empty = Ciphertext::zero(&params);
+        empty.try_mul_plaintext(&pt_b)?;
+        assert_eq!(empty, Ciphertext::zero(&params));
+
         Ok(())
     }
 

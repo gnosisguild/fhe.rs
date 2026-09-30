@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::{SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
+use fhe::trbfv::{
+    FreshNoiseModel, SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
+};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::Array2;
 
@@ -67,7 +69,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
         })
         .collect();
 
-    let pk = PublicKey::new(&secret_key, &mut rng);
+    let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
     let mut encrypt = |value: u64| {
         let plaintext =
             Plaintext::try_encode(&[value], Encoding::poly(), &params).expect("plaintext encoding");
@@ -78,7 +80,14 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
     let ct_b = encrypt(3);
     let ciphertext = Arc::new(&ct_a + &ct_b);
 
-    let config = SmudgingConfig::new(params.clone(), N, 2, LAMBDA_VALUE).expect("smudging config");
+    let config = SmudgingConfig::new(
+        params.clone(),
+        N,
+        2,
+        LAMBDA_VALUE,
+        FreshNoiseModel::BfvPublicKey,
+    )
+    .expect("smudging config");
     let generator = SmudgingNoiseGenerator::new(config).expect("smudging generator");
 
     let reconstructing = vec![1, 2];

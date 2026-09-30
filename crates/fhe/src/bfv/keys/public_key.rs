@@ -118,17 +118,22 @@ impl EncryptionIntermediates {
 
 impl PublicKey {
     /// Generate a new [`PublicKey`] from a [`SecretKey`].
-    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Self {
-        let zero = Plaintext::zero(Encoding::poly(), &sk.params).unwrap();
-        let mut c: Ciphertext = sk.try_encrypt(&zero, rng).unwrap();
+    ///
+    /// # Errors
+    /// Returns validation or key-generation errors.
+    /// Invalid secret-key lengths are rejected before randomness is drawn.
+    pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
+        sk.validate()?;
+        let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
+        let mut c: Ciphertext = sk.try_encrypt(&zero, rng)?;
         // The polynomials of a public key should not allow for variable time
         // computation.
         c.iter_mut()
             .for_each(|p| p.disallow_variable_time_computations());
-        Self {
+        Ok(Self {
             params: sk.params.clone(),
             c,
-        }
+        })
     }
 
     /// Generate a public key and return the sampled values used to construct it.
@@ -138,8 +143,9 @@ impl PublicKey {
         sk: &SecretKey,
         rng: &mut R,
     ) -> Result<(Self, PublicKeyGenerationIntermediates)> {
+        sk.validate()?;
         let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
-        let zero_poly = Zeroizing::new(zero.to_poly());
+        let zero_poly = Zeroizing::new(zero.to_poly()?);
 
         let (mut c, a, e) = sk.encrypt_poly_extended(zero_poly.as_ref(), rng)?;
 
@@ -201,7 +207,7 @@ impl PublicKey {
             rng,
         )?);
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
 
         let mut c0 = u.as_ref() * &ct[0];
         c0 += e1.as_ref();
@@ -225,6 +231,14 @@ impl PublicKey {
 
     fn validate_encryption_inputs(&self, pt: &Plaintext) -> Result<usize> {
         pt.validate_for(&self.params)?;
+        if self.c.len() != 2 {
+            return Err(crate::CiphertextError::InvalidPolynomialCount {
+                operation: crate::CiphertextOperation::PublicKeyEncryption,
+                actual: self.c.len(),
+                expected: 2,
+            }
+            .into());
+        }
         self.c.validate_for(&self.params)?;
         let plaintext_level = pt.level();
         if plaintext_level < self.c.level {
@@ -290,7 +304,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for PublicKey {
             rng,
         )?);
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         let mut c0 = u.as_ref() * &ct[0];
         c0 += e1.as_ref();
         c0 += &m;
@@ -333,6 +347,14 @@ impl DeserializeParametrized for PublicKey {
             crate::serialization::decode(bytes, crate::SerializedObject::PublicKey)?;
         if let Some(proto_c) = &proto.c {
             let mut c = Ciphertext::try_convert_from(proto_c, params)?;
+            if c.len() != 2 {
+                return Err(SerializationError::WrongPolynomialCount {
+                    component: crate::SerializedPolynomialComponent::PublicKeyCiphertext,
+                    actual: c.len(),
+                    expected: 2,
+                }
+                .into());
+            }
             if c.level != 0 {
                 Err(Error::SerializationError(
                     SerializationError::InvalidPublicKeyLevel {
@@ -377,7 +399,7 @@ mod tests {
         let mut rng = rng();
         let params = BfvParameters::default_arc(1, 16);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
         assert_eq!(pk.params, params);
         assert_eq!(
             sk.try_decrypt(&pk.c)?,
@@ -393,10 +415,10 @@ mod tests {
             BfvParameters::default_arc(1, 16),
             BfvParameters::default_arc(6, 16),
         ] {
-            for level in 0..params.max_level() {
+            for level in 0..=params.max_level() {
                 for _ in 0..20 {
                     let sk = SecretKey::random(&params, &mut rng);
-                    let pk = PublicKey::new(&sk, &mut rng);
+                    let pk = PublicKey::new(&sk, &mut rng)?;
 
                     let pt = Plaintext::try_encode(
                         &fhe_math::zq::Modulus::new(params.plaintext())
@@ -408,7 +430,6 @@ mod tests {
                     let ct = pk.try_encrypt(&pt, &mut rng)?;
                     let pt2 = sk.try_decrypt(&ct)?;
 
-                    println!("Noise: {}", unsafe { sk.measure_noise(&ct)? });
                     assert_eq!(pt2, pt);
                 }
             }
@@ -423,11 +444,46 @@ mod tests {
         let params = BfvParameters::default_arc(1, 16);
         let other_params = BfvParameters::default_arc(1, 16);
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
         let pt = Plaintext::try_encode(&[1u64][..], Encoding::poly(), &other_params)?;
 
         assert!(pk.try_encrypt(&pt, &mut rng).is_err());
         assert!(pk.try_encrypt_with_intermediates(&pt, &mut rng).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_rejects_wrong_polynomial_counts_before_randomness() -> Result<(), Box<dyn Error>>
+    {
+        let mut rng = crate::support::presets::rng(241);
+        let params = BfvParameters::default_arc(1, 16);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
+        let pt = Plaintext::zero(Encoding::poly(), &params)?;
+
+        for actual in [0, 1, 3] {
+            let mut malformed_pk = pk.clone();
+            malformed_pk.c.c = vec![pk.c[0].clone(); actual];
+            for error in [
+                malformed_pk
+                    .try_encrypt(&pt, &mut crate::support::PanicOnUseRng)
+                    .err(),
+                malformed_pk
+                    .try_encrypt_with_intermediates(&pt, &mut crate::support::PanicOnUseRng)
+                    .err(),
+            ] {
+                assert_eq!(
+                    error,
+                    Some(crate::Error::Ciphertext(
+                        crate::CiphertextError::InvalidPolynomialCount {
+                            operation: crate::CiphertextOperation::PublicKeyEncryption,
+                            actual,
+                            expected: 2,
+                        }
+                    ))
+                );
+            }
+        }
         Ok(())
     }
 
@@ -465,7 +521,7 @@ mod tests {
             })
         ));
 
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
         let (_ct, mut encryption_intermediates) =
             pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
         encryption_intermediates.zeroize();
@@ -491,7 +547,7 @@ mod tests {
             BfvParameters::default_arc(6, 16),
         ] {
             let sk = SecretKey::random(&params, &mut rng);
-            let pk = PublicKey::new(&sk, &mut rng);
+            let pk = PublicKey::new(&sk, &mut rng)?;
             let bytes = pk.to_bytes();
             assert_eq!(pk, PublicKey::from_bytes(&bytes, &params)?);
         }
@@ -499,177 +555,52 @@ mod tests {
     }
 
     #[test]
-    fn encrypt_decrypt_default_variance() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(1, 8);
-        let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
-
-        let pt = Plaintext::try_encode(
-            &q.random_vec(params.degree(), &mut rng),
-            Encoding::poly(),
-            &params,
-        )?;
-
-        let ct = pk.try_encrypt(&pt, &mut rng)?;
-        let pt2 = sk.try_decrypt(&ct)?;
-
-        println!("Noise (default variance): {}", unsafe {
-            sk.measure_noise(&ct)?
-        });
-        assert_eq!(pt2, pt);
-        assert_eq!(
-            params.get_error1_variance(),
-            &BigUint::from(params.variance())
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn encrypt_decrypt_custom_error1_variance() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-
-        let params = BfvParametersBuilder::new()
-            .set_degree(8)
-            .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62usize; 1])
-            .set_variance(10)
-            .set_error1_variance_usize(15)
-            .build_arc()?;
-
-        let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
-
-        let pt = Plaintext::try_encode(
-            &q.random_vec(params.degree(), &mut rng),
-            Encoding::poly(),
-            &params,
-        )?;
-
-        let ct = pk.try_encrypt(&pt, &mut rng)?;
-        let pt2 = sk.try_decrypt(&ct)?;
-
-        println!("Noise (custom error1_variance): {}", unsafe {
-            sk.measure_noise(&ct)?
-        });
-        assert_eq!(pt2, pt);
-        assert_eq!(params.get_error1_variance(), &BigUint::from(15u32));
-        assert_eq!(params.variance(), 10);
-
-        Ok(())
-    }
-
-    #[test]
-    fn extended_encrypt_returns_noise_polynomials() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(1, 8);
-        let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
-
-        let pt = Plaintext::try_encode(
-            &q.random_vec(params.degree(), &mut rng),
-            Encoding::poly(),
-            &params,
-        )?;
-
-        let (ct, _intermediates) = pk.try_encrypt_with_intermediates(&pt, &mut rng)?;
-        let pt2 = sk.try_decrypt(&ct)?;
-
-        println!("Extended encryption - noise polynomials returned successfully");
-        assert_eq!(pt2, pt);
-
-        Ok(())
-    }
-
-    #[test]
-    fn threshold_bfv_with_large_error1_variance() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-
-        let params = BfvParametersBuilder::new()
-            .set_degree(8)
-            .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62usize; 1])
-            .set_variance(10)
-            .set_error1_variance_usize(20)
-            .build_arc()?;
-
-        let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-        let q = fhe_math::zq::Modulus::new(params.plaintext())?;
-
-        let pt = Plaintext::try_encode(
-            &q.random_vec(params.degree(), &mut rng),
-            Encoding::poly(),
-            &params,
-        )?;
-
-        let ct = pk.try_encrypt(&pt, &mut rng)?;
-        let pt2 = sk.try_decrypt(&ct)?;
-
-        println!("Threshold BFV with large error1_variance: {}", unsafe {
-            sk.measure_noise(&ct)?
-        });
-        assert_eq!(pt2, pt);
-        assert_eq!(params.get_error1_variance(), &BigUint::from(20u32));
-
-        Ok(())
-    }
-
-    #[test]
-    fn standard_vs_threshold_bfv() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-
-        let params_standard = BfvParametersBuilder::new()
-            .set_degree(8)
-            .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62usize; 1])
-            .set_variance(10)
-            .build_arc()?;
-
-        let params_threshold = BfvParametersBuilder::new()
-            .set_degree(8)
-            .set_plaintext_modulus(1153)
-            .set_moduli_sizes(&[62usize; 1])
-            .set_variance(10)
-            .set_error1_variance_usize(15)
-            .build_arc()?;
-
-        assert_eq!(
-            params_standard.get_error1_variance(),
-            &BigUint::from(params_standard.variance())
-        );
-
-        assert_eq!(
-            params_threshold.get_error1_variance(),
-            &BigUint::from(15u32)
-        );
-        assert_eq!(params_threshold.variance(), 10);
-        assert_ne!(
-            params_threshold.get_error1_variance(),
-            &BigUint::from(params_threshold.variance())
-        );
-
-        for params in [params_standard, params_threshold] {
+    fn encryption_paths_match_with_default_and_custom_error1_variance() -> Result<(), Box<dyn Error>>
+    {
+        let mut rng = crate::support::presets::rng(179);
+        // Default variance, an explicit CBD variance, and the uniform branch.
+        for error1_variance in [None, Some(15), Some(20)] {
+            let mut builder = BfvParametersBuilder::new();
+            builder
+                .set_degree(8)
+                .set_plaintext_modulus(1153)
+                .set_moduli_sizes(&[62])
+                .set_variance(10);
+            if let Some(variance) = error1_variance {
+                builder.set_error1_variance_usize(variance);
+            }
+            let params = builder.build_arc()?;
+            assert_eq!(params.variance(), 10);
+            assert_eq!(
+                params.get_error1_variance(),
+                &BigUint::from(error1_variance.unwrap_or(10))
+            );
             let sk = SecretKey::random(&params, &mut rng);
-            let pk = PublicKey::new(&sk, &mut rng);
+            let pk = PublicKey::new(&sk, &mut rng)?;
             let q = fhe_math::zq::Modulus::new(params.plaintext())?;
-
             let pt = Plaintext::try_encode(
                 &q.random_vec(params.degree(), &mut rng),
                 Encoding::poly(),
                 &params,
             )?;
 
+            let mut extended_rng = rng.clone();
             let ct = pk.try_encrypt(&pt, &mut rng)?;
-            let pt2 = sk.try_decrypt(&ct)?;
+            let (extended_ct, intermediates) =
+                pk.try_encrypt_with_intermediates(&pt, &mut extended_rng)?;
+            assert_eq!(ct, extended_ct);
+            assert_eq!(sk.try_decrypt(&ct)?, pt);
 
-            assert_eq!(pt2, pt);
+            // Check the returned values, not just that encryption succeeded.
+            let u = intermediates.randomness();
+            let mut expected_c0 = u * &pk.c[0];
+            expected_c0 += intermediates.error_0();
+            expected_c0 += &pt.to_poly()?;
+            let mut expected_c1 = u * &pk.c[1];
+            expected_c1 += intermediates.error_1();
+            assert_eq!(extended_ct[0], expected_c0);
+            assert_eq!(extended_ct[1], expected_c1);
         }
-
         Ok(())
     }
 
@@ -722,58 +653,6 @@ mod tests {
             s_check.coefficients(),
             "Returned secret key polynomial should match original"
         );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_new_vs_new_with_intermediates_consistency() -> Result<(), Box<dyn Error>> {
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(1, 8);
-
-        let sk = SecretKey::random(&params, &mut rng);
-
-        let pk1 = PublicKey::new(&sk, &mut rng);
-        let (pk2, _intermediates) = PublicKey::new_with_intermediates(&sk, &mut rng)?;
-
-        assert_eq!(pk1.params, pk2.params);
-        assert_eq!(pk1.c.len(), 2);
-        assert_eq!(pk2.c.len(), 2);
-
-        let plaintext = Plaintext::zero(Encoding::poly(), &params)?;
-
-        let ct1 = pk1.try_encrypt(&plaintext, &mut rng)?;
-        let ct2 = pk2.try_encrypt(&plaintext, &mut rng)?;
-
-        let dec1 = sk.try_decrypt(&ct1)?;
-        let dec2 = sk.try_decrypt(&ct2)?;
-
-        assert_eq!(dec1, plaintext);
-        assert_eq!(dec2, plaintext);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_new_with_intermediates_security_properties() -> Result<(), Box<dyn Error>> {
-        use fhe_math::rq::Representation;
-
-        let mut rng = rng();
-        let params = BfvParameters::default_arc(1, 8);
-        let sk = SecretKey::random(&params, &mut rng);
-
-        let (_pk, intermediates) = PublicKey::new_with_intermediates(&sk, &mut rng)?;
-        let a = intermediates.a();
-        let s = intermediates.secret_key();
-        let e = intermediates.error();
-
-        assert_eq!(a.representation(), Representation::Ntt);
-        assert_eq!(s.representation(), Representation::Ntt);
-        assert_eq!(e.representation(), Representation::Ntt);
-
-        let mut s_squared = zeroize::Zeroizing::new(s.clone());
-        *s_squared *= s;
-        assert_eq!(s_squared.representation(), Representation::Ntt);
 
         Ok(())
     }

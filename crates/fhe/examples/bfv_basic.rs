@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Generate keys
     let sk = SecretKey::random(&params, &mut rng);
-    let pk = PublicKey::new(&sk, &mut rng);
+    let pk = PublicKey::new(&sk, &mut rng)?;
 
     // ----- Without SIMD -----
     let pt_a = Plaintext::try_encode(&[3u64], Encoding::poly(), &params)?;

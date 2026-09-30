@@ -6,7 +6,7 @@
 mod support;
 
 use fhe::bfv::Ciphertext;
-use fhe::trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
+use fhe::trbfv::{FreshNoiseModel, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
 use fhe::{Error, ThresholdError};
 use num_traits::Zero;
 use std::sync::Arc;
@@ -55,14 +55,18 @@ fn profiles_match_threshold_configuration() {
 fn named_profiles_have_feasible_smudging_bounds() {
     for profile in profiles() {
         // Lambda is caller-chosen policy; the library only rejects values
-        // above fhe::trbfv::smudging::MAX_LAMBDA.
+        // above fhe::trbfv::smudging::MAX_LAMBDA. The BFV public-key model is
+        // the profile check's baseline encryption path; the l-BFV model is
+        // covered by the secure16384 profile check in profiles.rs.
         let lambda = profile.lambda;
+        let model = FreshNoiseModel::BfvPublicKey;
         let config = match profile.multiplicative_depth {
             Some(depth) => SmudgingConfig::new(
                 profile.parameters.clone(),
                 profile.num_parties,
                 profile.max_ciphertexts,
                 lambda,
+                model,
             )
             .unwrap()
             .with_mult_depth(depth),
@@ -71,6 +75,7 @@ fn named_profiles_have_feasible_smudging_bounds() {
                 profile.num_parties,
                 profile.max_ciphertexts,
                 lambda,
+                model,
             )
             .unwrap(),
         };

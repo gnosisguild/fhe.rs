@@ -17,13 +17,13 @@ use zeroize::{Zeroize, Zeroizing};
 impl<R: RepresentationTag> From<&Poly<R>> for Rq {
     fn from(p: &Poly<R>) -> Self {
         assert!(!p.has_lazy_coefficients);
-        let q: Poly<PowerBasis> = match R::REPRESENTATION {
+        let q = Zeroizing::new(match R::REPRESENTATION {
             Representation::PowerBasis => Poly::<PowerBasis>::from_parts(p.clone()),
             Representation::Ntt => Poly::<Ntt>::from_parts(p.clone()).into_power_basis(),
             Representation::NttShoup => Poly::<NttShoup>::from_parts(p.clone()).into_power_basis(),
-        };
+        });
 
-        let mut proto = Rq::default();
+        let mut proto = Zeroizing::new(Rq::default());
         match R::REPRESENTATION {
             Representation::PowerBasis => {
                 proto.representation = RepresentationProto::Powerbasis as i32
@@ -31,15 +31,32 @@ impl<R: RepresentationTag> From<&Poly<R>> for Rq {
             Representation::Ntt => proto.representation = RepresentationProto::Ntt as i32,
             Representation::NttShoup => proto.representation = RepresentationProto::Nttshoup as i32,
         }
-        let serialization: Vec<u8> = izip!(q.coefficients.outer_iter(), p.ctx.q.iter())
-            .flat_map(|(v, qi)| qi.serialize_vec(v.as_slice().unwrap()))
-            .collect();
-        proto.coefficients = serialization;
+        // Allocate once so accumulation cannot leave secret bytes in a freed
+        // capacity buffer. Each per-modulus packing buffer is also guarded.
+        let nbytes = p
+            .ctx
+            .q
+            .iter()
+            .map(|qi| qi.serialization_length(p.ctx.degree))
+            .sum();
+        proto.coefficients = Vec::with_capacity(nbytes);
+        for (row, qi) in izip!(q.coefficients.outer_iter(), p.ctx.q.iter()) {
+            let packed = match row.as_slice() {
+                Some(values) => Zeroizing::new(qi.serialize_vec(values)),
+                None => {
+                    let values = Zeroizing::new(row.to_vec());
+                    Zeroizing::new(qi.serialize_vec(&values))
+                }
+            };
+            proto.coefficients.extend_from_slice(&packed);
+        }
         proto.degree = p.ctx.degree as u32;
         // Timing policy is local execution state, not serialized data. In
         // particular, untrusted bytes must not authorize variable-time work.
         proto.allow_variable_time = false;
-        proto
+        // The returned Protobuf is caller-owned; Poly::to_bytes guards it while
+        // encoding. All other temporary polynomial and byte copies are wiped.
+        std::mem::take(&mut *proto)
     }
 }
 
@@ -47,7 +64,7 @@ fn parse_proto(
     value: &Rq,
     ctx: &Arc<Context>,
     variable_time: bool,
-) -> Result<(Representation, Vec<u64>, bool)> {
+) -> Result<(Representation, Zeroizing<Vec<u64>>, bool)> {
     let repr = value.representation.try_into().map_err(|_| {
         PolynomialSerializationError::InvalidRepresentation {
             value: value.representation,
@@ -86,11 +103,11 @@ fn parse_proto(
     }
 
     let mut index = 0;
-    let mut power_basis_coefficients: Vec<u64> = Vec::with_capacity(degree * ctx.q.len());
+    let mut power_basis_coefficients = Zeroizing::new(Vec::with_capacity(degree * ctx.q.len()));
     for qi in ctx.q.iter() {
         let size = qi.serialization_length(degree);
-        power_basis_coefficients
-            .extend(qi.deserialize_vec(&value.coefficients[index..index + size])?);
+        let row = Zeroizing::new(qi.deserialize_vec(&value.coefficients[index..index + size])?);
+        power_basis_coefficients.extend_from_slice(&row);
         index += size;
     }
 
@@ -103,7 +120,7 @@ fn parse_proto(
 
 impl TryConvertFrom<&Rq> for Poly<PowerBasis> {
     fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        let (representation_from_proto, coefficients, variable_time) =
+        let (representation_from_proto, mut coefficients, variable_time) =
             parse_proto(value, ctx, variable_time)?;
         if representation_from_proto != Representation::PowerBasis {
             return Err(PolynomialSerializationError::RepresentationMismatch {
@@ -112,13 +129,13 @@ impl TryConvertFrom<&Rq> for Poly<PowerBasis> {
             }
             .into());
         }
-        Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)
+        Poly::<PowerBasis>::try_convert_from(std::mem::take(&mut *coefficients), ctx, variable_time)
     }
 }
 
 impl TryConvertFrom<&Rq> for Poly<Ntt> {
     fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        let (representation_from_proto, coefficients, variable_time) =
+        let (representation_from_proto, mut coefficients, variable_time) =
             parse_proto(value, ctx, variable_time)?;
         if representation_from_proto != Representation::Ntt {
             return Err(PolynomialSerializationError::RepresentationMismatch {
@@ -127,14 +144,18 @@ impl TryConvertFrom<&Rq> for Poly<Ntt> {
             }
             .into());
         }
-        let p = Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)?;
+        let p = Poly::<PowerBasis>::try_convert_from(
+            std::mem::take(&mut *coefficients),
+            ctx,
+            variable_time,
+        )?;
         Ok(p.into_ntt())
     }
 }
 
 impl TryConvertFrom<&Rq> for Poly<NttShoup> {
     fn try_convert_from(value: &Rq, ctx: &Arc<Context>, variable_time: bool) -> Result<Self> {
-        let (representation_from_proto, coefficients, variable_time) =
+        let (representation_from_proto, mut coefficients, variable_time) =
             parse_proto(value, ctx, variable_time)?;
         if representation_from_proto != Representation::NttShoup {
             return Err(PolynomialSerializationError::RepresentationMismatch {
@@ -143,7 +164,11 @@ impl TryConvertFrom<&Rq> for Poly<NttShoup> {
             }
             .into());
         }
-        let p = Poly::<PowerBasis>::try_convert_from(coefficients, ctx, variable_time)?;
+        let p = Poly::<PowerBasis>::try_convert_from(
+            std::mem::take(&mut *coefficients),
+            ctx,
+            variable_time,
+        )?;
         Ok(p.into_ntt_shoup())
     }
 }
@@ -506,6 +531,21 @@ mod tests {
     use std::{error::Error, sync::Arc};
 
     static MODULI: &[u64; 3] = &[1153, 4611686018326724609, 4611686018309947393];
+
+    #[test]
+    fn parsed_coefficient_storage_is_guarded() -> Result<(), Box<dyn Error>> {
+        use zeroize::{Zeroize, Zeroizing};
+
+        let ctx = Arc::new(Context::new(MODULI, 16)?);
+        let poly = Poly::<PowerBasis>::try_convert_from(&[7u64; 16], &ctx, false)?;
+        let proto = Rq::from(&poly);
+        let (_, mut coefficients, _) = super::parse_proto(&proto, &ctx, false)?;
+        let _: &Zeroizing<Vec<u64>> = &coefficients;
+        assert!(coefficients.iter().all(|&value| value == 7));
+        coefficients.zeroize();
+        assert!(coefficients.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn proto() -> Result<(), Box<dyn Error>> {

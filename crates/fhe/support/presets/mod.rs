@@ -20,7 +20,8 @@ pub mod insecure_128 {
     pub const NUM_PARTIES: usize = 19;
     /// Multiplicative depth supported by the design point.
     pub const MULT_DEPTH: u32 = 3;
-    /// Number of initial noise terms folded into `B_C`.
+    /// Upper bound on fresh ciphertexts summed before the modelled circuit
+    /// (`m` in `SmudgingConfig`).
     pub const MAX_CIPHERTEXTS: usize = 3;
     /// Statistical security parameter of the design point.
     pub const LAMBDA: usize = 2;
@@ -63,7 +64,9 @@ pub struct Preset {
     pub share_parameters: Option<Arc<BfvParameters>>,
     /// Whether the profile is intended for SIMD coverage.
     pub simd: bool,
-    /// Maximum number of summed ciphertexts supported by the profile.
+    /// Maximum number of fresh ciphertexts summed before the modelled
+    /// circuit supported by the profile (the `m` circuit-size input of
+    /// `SmudgingConfig`; not a count of outputs or decryptions).
     pub max_ciphertexts: usize,
     /// Default number of parties.
     pub num_parties: usize,

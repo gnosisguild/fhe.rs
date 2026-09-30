@@ -2,9 +2,9 @@ use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
-use crate::Result;
 use crate::bfv::{BfvParameters, CommonRandomPolyVec, KeySwitchingKey, SecretKey};
 use crate::lbfv::LBFVRelinearizationKey;
+use crate::{Error, Result};
 use fhe_math::rq::{NttShoup, Poly};
 use fhe_traits::FheParametrized;
 
@@ -20,15 +20,27 @@ use std::sync::Arc;
 ///
 /// Holds the private values that a party must commit to in order to prove
 /// correct construction of its relinearization-key contribution.  The witness
-/// must be kept confidential and **zeroized after use**.
+/// must be kept confidential; every field is a wipe-on-drop owner
+/// ([`Zeroizing`]), so dropping the witness — normally, on an early error,
+/// or during an unwind — erases `r` and both error vectors.
+///
+/// # Keeping the witness values guarded
+///
+/// Keep every error row inside its [`Zeroizing`] owner. Cloning a row yields
+/// a new guarded copy, but moving the inner polynomial out of a guard (for
+/// example with [`std::mem::replace`]) creates an unguarded secret copy that
+/// Rust will drop without wiping; zeroize any extracted value before it
+/// drops.
 pub struct RelinKeyWitness {
     /// Ephemeral randomness key used during RLK generation.
     /// Auto-zeroized when dropped.
     pub r: Zeroizing<SecretKey>,
     /// Per-row errors from `ksk_r_to_s`: `eᵢ` such that `d0ᵢ = eᵢ − sk·d1ᵢ + gᵢ·r`.
-    pub errors_d0: Vec<Poly<NttShoup>>,
+    /// Auto-zeroized when dropped; ownership transfers to the caller.
+    pub errors_d0: Vec<Zeroizing<Poly<NttShoup>>>,
     /// Per-row errors from `ksk_s_to_r`: `eᵢ` such that `d2ᵢ = eᵢ + r·aᵢ + gᵢ·sk`.
-    pub errors_d2: Vec<Poly<NttShoup>>,
+    /// Auto-zeroized when dropped; ownership transfers to the caller.
+    pub errors_d2: Vec<Zeroizing<Poly<NttShoup>>>,
 }
 
 /// A party's additive contribution to threshold l-BFV relinearization-key
@@ -55,6 +67,16 @@ impl RelinKeyShare {
         &self.ksk_r_to_s.c0
     }
 
+    /// Return the shared `d1` (URS) components in gadget-row order.
+    ///
+    /// These read-only rows allow comparison with a protocol's expected URS
+    /// without aggregating a singleton share. Matching rows do not authenticate
+    /// a contributor or prove that its secret-dependent components are correct.
+    #[must_use]
+    pub fn d1_components(&self) -> &[Poly<NttShoup>] {
+        &self.ksk_r_to_s.c1
+    }
+
     /// Return the secret-dependent `d2` components in gadget-row order.
     ///
     /// Each [`Poly<NttShoup>`] contains all RNS limbs for one row. These rows
@@ -65,6 +87,16 @@ impl RelinKeyShare {
     #[must_use]
     pub fn d2_components(&self) -> &[Poly<NttShoup>] {
         &self.ksk_s_to_r.c0
+    }
+
+    /// Return the shared `a` (CRS) components in gadget-row order.
+    ///
+    /// These read-only rows allow comparison with a protocol's expected CRS.
+    /// Matching rows do not authenticate a contributor or prove that its
+    /// secret-dependent components are correct.
+    #[must_use]
+    pub fn a_components(&self) -> &[Poly<NttShoup>] {
+        &self.ksk_s_to_r.c1
     }
 
     /// Return the ciphertext level used by this relinearization-key share.
@@ -80,6 +112,10 @@ impl RelinKeyShare {
     }
 
     /// Generate a relinearization-key contribution from shared seeds.
+    ///
+    /// The URS seed `d1_seed` and the CRS seed `a_seed` must be distinct: the
+    /// two reference strings must be generated independently, and identical
+    /// seeds are rejected before any share material is produced.
     pub fn contribute_with_seed<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         d1_seed: <ChaCha8Rng as SeedableRng>::Seed,
@@ -104,6 +140,12 @@ impl RelinKeyShare {
 
     /// Generate a relinearization-key contribution from explicit
     /// URS/CRS polynomials.
+    ///
+    /// The CRS `a_polys` and URS `d1_polys` must be generated independently.
+    /// Repeated rows within either vector and rows shared between the two
+    /// vectors are rejected before any share material is produced. The checks
+    /// compare concrete values only; they cannot certify independence of
+    /// deliberately correlated but unequal randomness.
     pub fn contribute_with_polys<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         d1_polys: Vec<Poly<NttShoup>>,
@@ -128,6 +170,30 @@ impl RelinKeyShare {
 
     /// Generate a relinearization-key contribution from shared CRP
     /// vectors.
+    ///
+    /// The key consumes exactly the first `#moduli − ciphertext_level` rows
+    /// of each vector — the same prefix convention as the public-key CRS/b
+    /// extraction — and converts them to `NttShoup`. Supported ciphertext
+    /// levels are those whose context retains at least two moduli
+    /// (`ciphertext_level < max_level`), with `key_level == 0`; the CRP rows
+    /// live at the level-0 context, and unsupported level combinations — a
+    /// nonzero key level, or the maximal level's single-modulus ciphertext
+    /// context — are rejected before any share material is produced.
+    ///
+    /// # Seed metadata policy
+    ///
+    /// Each vector's optional master seed is preserved on its key-switching
+    /// key only after the seed expansion is verified against **every consumed
+    /// concrete row**; a seed that contradicts any row is rejected instead of
+    /// silently accepted. Seedless vectors remain fully explicit, and the
+    /// concrete rows are always authoritative.
+    ///
+    /// # Reference-string validation
+    ///
+    /// The URS `crp_d1` and CRS `crp_a` vectors must be generated
+    /// independently; identical seeds, repeated rows within a vector, and rows
+    /// shared between the two vectors are rejected before any share material
+    /// is produced.
     pub fn contribute_with_crp<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         crp_d1: &CommonRandomPolyVec,
@@ -136,16 +202,7 @@ impl RelinKeyShare {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let d1_polys: Vec<Poly<NttShoup>> = crp_d1
-            .to_polys()
-            .into_iter()
-            .map(|p| p.into_ntt_shoup())
-            .collect();
-        let a_polys: Vec<Poly<NttShoup>> = crp_a
-            .to_polys()
-            .into_iter()
-            .map(|p| p.into_ntt_shoup())
-            .collect();
+        let (d1_polys, a_polys) = crp_prefixes(sk, crp_d1, crp_a, ciphertext_level)?;
 
         let (mut ksk_r_to_s, mut ksk_s_to_r) =
             LBFVRelinearizationKey::generate_components_with_polys(
@@ -157,9 +214,14 @@ impl RelinKeyShare {
                 rng,
             )?;
 
-        // Preserve the CRP master seeds as KSK metadata when present.
-        ksk_r_to_s.seed = crp_d1.seed();
-        ksk_s_to_r.seed = crp_a.seed();
+        // Preserve the CRP master seeds as KSK metadata only after the seed
+        // expansions are verified against every consumed concrete row.
+        if let Some(seed) = crp_d1.seed() {
+            ksk_r_to_s.attach_verified_seed(seed)?;
+        }
+        if let Some(seed) = crp_a.seed() {
+            ksk_s_to_r.attach_verified_seed(seed)?;
+        }
 
         Ok(Self {
             ksk_r_to_s,
@@ -170,6 +232,11 @@ impl RelinKeyShare {
     /// Like [`contribute_with_crp`](Self::contribute_with_crp) but also
     /// returns a [`RelinKeyWitness`] containing the ephemeral key `r` and the
     /// per-row error polynomials needed for ZK witness generation.
+    ///
+    /// The row-prefix selection and the seed-preservation policy are
+    /// identical to [`contribute_with_crp`](Self::contribute_with_crp): the
+    /// share carries a CRP master seed only when the seed expansion
+    /// reproduces every consumed concrete row.
     pub fn contribute_with_crp_and_witness<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         crp_d1: &CommonRandomPolyVec,
@@ -178,16 +245,7 @@ impl RelinKeyShare {
         key_level: usize,
         rng: &mut R,
     ) -> Result<(Self, RelinKeyWitness)> {
-        let d1_polys: Vec<Poly<NttShoup>> = crp_d1
-            .to_polys()
-            .into_iter()
-            .map(|p| p.into_ntt_shoup())
-            .collect();
-        let a_polys: Vec<Poly<NttShoup>> = crp_a
-            .to_polys()
-            .into_iter()
-            .map(|p| p.into_ntt_shoup())
-            .collect();
+        let (d1_polys, a_polys) = crp_prefixes(sk, crp_d1, crp_a, ciphertext_level)?;
 
         let (mut ksk_r_to_s, mut ksk_s_to_r, r, errors_d0, errors_d2) =
             LBFVRelinearizationKey::generate_components_with_polys_extended(
@@ -199,8 +257,12 @@ impl RelinKeyShare {
                 rng,
             )?;
 
-        ksk_r_to_s.seed = crp_d1.seed();
-        ksk_s_to_r.seed = crp_a.seed();
+        if let Some(seed) = crp_d1.seed() {
+            ksk_r_to_s.attach_verified_seed(seed)?;
+        }
+        if let Some(seed) = crp_a.seed() {
+            ksk_s_to_r.attach_verified_seed(seed)?;
+        }
 
         Ok((
             Self {
@@ -216,6 +278,44 @@ impl RelinKeyShare {
     }
 }
 
+/// Extract exactly the required leading rows of each CRP vector in
+/// `NttShoup` form.
+///
+/// A relinearization key at `ciphertext_level` consumes the first
+/// `#moduli − ciphertext_level` rows of the shared vectors; the level and
+/// the row counts are validated here, before any secret-dependent work runs.
+#[allow(clippy::type_complexity)]
+fn crp_prefixes(
+    sk: &SecretKey,
+    crp_d1: &CommonRandomPolyVec,
+    crp_a: &CommonRandomPolyVec,
+    ciphertext_level: usize,
+) -> Result<(Vec<Poly<NttShoup>>, Vec<Poly<NttShoup>>)> {
+    if ciphertext_level > sk.params.max_level() {
+        return Err(Error::InvalidLevel {
+            level: ciphertext_level,
+            min_level: 0,
+            max_level: sk.params.max_level(),
+        });
+    }
+    let required = sk.params.moduli().len() - ciphertext_level;
+    let prefix = |crp: &CommonRandomPolyVec, role: &str| -> Result<Vec<Poly<NttShoup>>> {
+        if crp.len() < required {
+            return Err(Error::DefaultError(format!(
+                "{role} CRP vector has {} rows but ciphertext level {ciphertext_level} requires {required}",
+                crp.len()
+            )));
+        }
+        Ok(crp
+            .as_slice()
+            .iter()
+            .take(required)
+            .map(|crp| crp.poly().clone().into_ntt_shoup())
+            .collect())
+    };
+    Ok((prefix(crp_d1, "URS")?, prefix(crp_a, "CRS")?))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
@@ -224,7 +324,10 @@ mod tests {
     use crate::bfv::{Encoding, Plaintext, SecretKey};
     use crate::support::presets::insecure;
     use crate::trlbfv::{LBFVPublicKey, PublicKeyShare, aggregate_relinearization_key};
-    use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
+    use fhe_math::rq::Ntt;
+    use fhe_traits::{
+        DeserializeParametrized, FheDecoder, FheDecrypter, FheEncoder, FheEncrypter, Serialize,
+    };
     use rand::{SeedableRng, rng};
     use rand_chacha::ChaCha8Rng;
 
@@ -264,7 +367,7 @@ mod tests {
         let joint_coeffs: Vec<i64> = (0..params.degree())
             .map(|d| sks.iter().map(|sk| sk.coeffs[d]).sum())
             .collect();
-        let joint_sk = SecretKey::new(joint_coeffs, &params);
+        let joint_sk = SecretKey::new(joint_coeffs, &params)?;
         let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
         assert_eq!(decoded.first(), Some(&9));
         Ok(())
@@ -303,7 +406,7 @@ mod tests {
         let joint_coeffs: Vec<i64> = (0..params.degree())
             .map(|d| sks.iter().map(|sk| sk.coeffs[d]).sum())
             .collect();
-        let joint_sk = SecretKey::new(joint_coeffs, &params);
+        let joint_sk = SecretKey::new(joint_coeffs, &params)?;
         let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
         assert_eq!(decoded.first(), Some(&4));
         Ok(())
@@ -352,13 +455,55 @@ mod tests {
             .map(|sk| PublicKeyShare::contribute_with_seed(sk, pk_seed, &mut rng))
             .collect::<Result<Vec<_>>>()?;
         let aggregated_pk: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
-        let rlk_shares = sks
+        let mut rlk_shares = sks
             .iter()
             .map(|sk| RelinKeyShare::contribute_with_seed(sk, d1_seed, rlk_a_seed, 0, 0, &mut rng))
             .collect::<Result<Vec<_>>>()?;
 
-        let result = aggregate_relinearization_key(&rlk_shares, &aggregated_pk);
-        assert!(result.is_err());
+        for _ in 0..2 {
+            assert_eq!(
+                aggregate_relinearization_key(&rlk_shares, &aggregated_pk).unwrap_err(),
+                crate::Error::Multiparty(crate::MultipartyError::PublicKeyCrsMismatch {
+                    row_index: 0,
+                })
+            );
+            rlk_shares.reverse();
+        }
+        Ok(())
+    }
+
+    /// The seeded contribution boundary validates the *generated* concrete
+    /// rows before the share is returned, exactly like every other
+    /// reference-string input.
+    ///
+    /// A genuine cross-seed row collision would require a ChaCha8 collision
+    /// and cannot be produced through caller-controlled inputs, so the
+    /// rejection branch of this gate is covered by the explicit-polynomial,
+    /// serialization, and aggregation tests; this test pins the acceptance
+    /// behaviour and the rows the gate runs on.
+    #[test]
+    fn seeded_contribution_validates_generated_rows() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx0 = params.context_at_level(0)?;
+
+        let d1_seed: <ChaCha8Rng as SeedableRng>::Seed = [10u8; 32];
+        let a_seed: <ChaCha8Rng as SeedableRng>::Seed = [11u8; 32];
+
+        let share = RelinKeyShare::contribute_with_seed(&sk, d1_seed, a_seed, 0, 0, &mut rng)?;
+
+        // The validated rows are exactly the seed-derived URS and CRS rows.
+        let expected_d1 = KeySwitchingKey::c1_from_seed(ctx0, d1_seed, params.moduli().len());
+        let expected_a = KeySwitchingKey::c1_from_seed(ctx0, a_seed, params.moduli().len());
+        assert_eq!(share.ksk_r_to_s.c1.as_ref(), expected_d1.as_slice());
+        assert_eq!(share.ksk_s_to_r.c1.as_ref(), expected_a.as_slice());
+
+        // Control: the accepted seeded share still round-trips and aggregates
+        // with an honest public key.
+        let restored = RelinKeyShare::from_bytes(&share.to_bytes(), &params)?;
+        assert_eq!(restored.ksk_r_to_s, share.ksk_r_to_s);
+        assert_eq!(restored.ksk_s_to_r, share.ksk_s_to_r);
         Ok(())
     }
 
@@ -370,6 +515,112 @@ mod tests {
         let public_key = LBFVPublicKey::new(&sk, &mut rng)?;
 
         assert!(aggregate_relinearization_key(&[], &public_key).is_err());
+        Ok(())
+    }
+
+    /// Share constructors must reject reference strings that are observably
+    /// reused: identical seeds, rows shared between the URS and CRS vectors,
+    /// and rows repeated within a vector.
+    #[test]
+    fn contribute_rejects_reused_and_repeated_reference_strings() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let ctx0 = params.context_at_level(0)?;
+
+        let same_seed: <ChaCha8Rng as SeedableRng>::Seed = [33u8; 32];
+        assert!(matches!(
+            RelinKeyShare::contribute_with_seed(&sk, same_seed, same_seed, 0, 0, &mut rng),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::IdenticalReferenceStringSeeds
+            ))
+        ));
+
+        // Independent CRS vector; URS vector colliding with it at a
+        // cross-index position.
+        let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
+        let mut colliding_polys =
+            KeySwitchingKey::c1_from_seed(ctx0, [44u8; 32], params.moduli().len());
+        colliding_polys[1] = crp_a.as_slice()[0].poly().clone().into_ntt_shoup();
+        assert!(matches!(
+            RelinKeyShare::contribute_with_polys(
+                &sk,
+                colliding_polys.clone(),
+                crp_a
+                    .to_polys()
+                    .iter()
+                    .map(|p| p.clone().into_ntt_shoup())
+                    .collect(),
+                0,
+                0,
+                &mut rng
+            ),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::OverlappingReferenceStringRows {
+                    crs_index: 0,
+                    urs_index: 1,
+                }
+            ))
+        ));
+
+        // Repeated row inside the URS vector.
+        let mut repeated = colliding_polys;
+        repeated[1] = repeated[0].clone();
+        assert!(matches!(
+            RelinKeyShare::contribute_with_polys(
+                &sk,
+                repeated,
+                crp_a
+                    .to_polys()
+                    .iter()
+                    .map(|p| p.clone().into_ntt_shoup())
+                    .collect(),
+                0,
+                0,
+                &mut rng
+            ),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::RepeatedReferenceStringRow {
+                    role: crate::ReferenceStringRole::Urs,
+                    first_index: 0,
+                    second_index: 1,
+                }
+            ))
+        ));
+
+        // CRP-vector path: the URS vector shares row 0 with the CRS vector.
+        let mut overlapping_polys: Vec<Poly<Ntt>> = (0..params.moduli().len())
+            .map(|_| Poly::<Ntt>::random(ctx0, &mut rng))
+            .collect();
+        overlapping_polys[0] = crp_a.as_slice()[0].poly().clone();
+        let crp_d1_overlapping = CommonRandomPolyVec::from_polys(&params, overlapping_polys, None)?;
+        assert!(matches!(
+            RelinKeyShare::contribute_with_crp(&sk, &crp_d1_overlapping, &crp_a, 0, 0, &mut rng),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::OverlappingReferenceStringRows {
+                    crs_index: 0,
+                    urs_index: 0,
+                }
+            ))
+        ));
+        assert!(matches!(
+            RelinKeyShare::contribute_with_crp_and_witness(
+                &sk,
+                &crp_d1_overlapping,
+                &crp_a,
+                0,
+                0,
+                &mut rng
+            ),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::OverlappingReferenceStringRows { .. }
+            ))
+        ));
+
+        // Control: independent CRP vectors are accepted and produce a working
+        // share (functional coverage lives in the aggregation tests).
+        let crp_d1 = CommonRandomPolyVec::new(&params, &mut rng)?;
+        assert!(RelinKeyShare::contribute_with_crp(&sk, &crp_d1, &crp_a, 0, 0, &mut rng).is_ok());
         Ok(())
     }
 
@@ -409,7 +660,7 @@ mod tests {
         let joint_coeffs: Vec<i64> = (0..params.degree())
             .map(|d| sks.iter().map(|sk| sk.coeffs[d]).sum())
             .collect();
-        let joint_sk = SecretKey::new(joint_coeffs, &params);
+        let joint_sk = SecretKey::new(joint_coeffs, &params)?;
         let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
         assert_eq!(decoded.first(), Some(&25));
         Ok(())
@@ -430,6 +681,18 @@ mod tests {
         assert_eq!(share.d2_components().len(), crp_a.len());
         assert_eq!(witness.errors_d0.len(), crp_d1.len());
         assert_eq!(witness.errors_d2.len(), crp_a.len());
+
+        // Witness error rows are wipe-on-drop owners and remain secret in
+        // time policy (compile-time pin of the guarded field types).
+        let errors_d0: &Vec<Zeroizing<Poly<NttShoup>>> = &witness.errors_d0;
+        let errors_d2: &Vec<Zeroizing<Poly<NttShoup>>> = &witness.errors_d2;
+        assert!(
+            errors_d0
+                .iter()
+                .chain(errors_d2.iter())
+                .all(|e| !e.allows_variable_time_computations())
+        );
+
         assert_eq!(share.ciphertext_level(), 0);
         assert_eq!(share.key_level(), 0);
         assert_eq!(share.d0_components()[0].ctx().moduli(), params.moduli());
@@ -440,6 +703,258 @@ mod tests {
         assert_eq!(restored.d2_components(), share.d2_components());
         assert_eq!(restored.ciphertext_level(), share.ciphertext_level());
         assert_eq!(restored.key_level(), share.key_level());
+        Ok(())
+    }
+
+    /// CRP contributions support nonzero ciphertext levels, preserve verified
+    /// seed metadata, stay explicit for seedless vectors, and keep the share
+    /// and witness constructors consistent.
+    #[test]
+    fn crp_contribution_nonzero_level_and_verified_seed_metadata() -> Result<()> {
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut ChaCha8Rng::from_seed([70u8; 32]));
+
+        let d1_seed: <ChaCha8Rng as SeedableRng>::Seed = [71u8; 32];
+        let a_seed: <ChaCha8Rng as SeedableRng>::Seed = [72u8; 32];
+        let crp_d1 = CommonRandomPolyVec::from_seed(&params, d1_seed)?;
+        let crp_a = CommonRandomPolyVec::from_seed(&params, a_seed)?;
+        let required = params.moduli().len() - 1;
+
+        // Witness constructor at ciphertext level 1.
+        let (share, witness): (RelinKeyShare, crate::trlbfv::RelinKeyWitness) =
+            RelinKeyShare::contribute_with_crp_and_witness(
+                &sk,
+                &crp_d1,
+                &crp_a,
+                1,
+                0,
+                &mut ChaCha8Rng::from_seed([73u8; 32]),
+            )?;
+        assert_eq!(share.ciphertext_level(), 1);
+        assert_eq!(share.key_level(), 0);
+        assert_eq!(share.d0_components().len(), required);
+        assert_eq!(share.d2_components().len(), required);
+        assert_eq!(witness.errors_d0.len(), required);
+        assert_eq!(witness.errors_d2.len(), required);
+        // Verified seed metadata is preserved on both key-switching keys.
+        assert_eq!(share.ksk_r_to_s.seed, Some(d1_seed));
+        assert_eq!(share.ksk_s_to_r.seed, Some(a_seed));
+
+        // The non-witness constructor produces the identical share for the
+        // same rng stream.
+        let plain_share = RelinKeyShare::contribute_with_crp(
+            &sk,
+            &crp_d1,
+            &crp_a,
+            1,
+            0,
+            &mut ChaCha8Rng::from_seed([73u8; 32]),
+        )?;
+        assert_eq!(plain_share, share);
+
+        // The seeded share round-trips through serialization.
+        let restored = RelinKeyShare::from_bytes(&share.to_bytes(), &params)?;
+        assert_eq!(restored, share);
+
+        // Seedless vectors holding the same rows stay fully explicit and
+        // carry identical polynomial material.
+        let crp_d1_seedless = CommonRandomPolyVec::from_polys(&params, crp_d1.to_polys(), None)?;
+        let crp_a_seedless = CommonRandomPolyVec::from_polys(&params, crp_a.to_polys(), None)?;
+        let explicit_share = RelinKeyShare::contribute_with_crp(
+            &sk,
+            &crp_d1_seedless,
+            &crp_a_seedless,
+            1,
+            0,
+            &mut ChaCha8Rng::from_seed([73u8; 32]),
+        )?;
+        assert!(explicit_share.ksk_r_to_s.seed.is_none());
+        assert!(explicit_share.ksk_s_to_r.seed.is_none());
+        assert_eq!(explicit_share.d0_components(), share.d0_components());
+        assert_eq!(explicit_share.d2_components(), share.d2_components());
+        Ok(())
+    }
+
+    /// Unsupported level combinations are rejected before any share material
+    /// is produced: CRP rows live at the level-0 context and the ciphertext
+    /// level must be within range.
+    #[test]
+    fn crp_contribution_rejects_unsupported_levels() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let crp_d1 = CommonRandomPolyVec::new(&params, &mut rng)?;
+        let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
+
+        // key_level != 0: the CRP rows live at the level-0 context.
+        assert!(RelinKeyShare::contribute_with_crp(&sk, &crp_d1, &crp_a, 0, 1, &mut rng).is_err());
+        assert!(
+            RelinKeyShare::contribute_with_crp_and_witness(&sk, &crp_d1, &crp_a, 0, 1, &mut rng)
+                .is_err()
+        );
+
+        // Ciphertext level beyond the maximum.
+        let beyond = params.max_level() + 1;
+        assert!(matches!(
+            RelinKeyShare::contribute_with_crp(&sk, &crp_d1, &crp_a, beyond, 0, &mut rng),
+            Err(crate::Error::InvalidLevel { .. })
+        ));
+        assert!(matches!(
+            RelinKeyShare::contribute_with_crp_and_witness(
+                &sk, &crp_d1, &crp_a, beyond, 0, &mut rng
+            ),
+            Err(crate::Error::InvalidLevel { .. })
+        ));
+        Ok(())
+    }
+
+    /// The maximal ciphertext level's single-modulus context is rejected
+    /// before any RNG use on both CRP contribution paths.
+    #[test]
+    fn max_level_single_modulus_ciphertext_rejected_before_rng() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let crp_d1 = CommonRandomPolyVec::new(&params, &mut rng)?;
+        let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
+        let max_level = params.max_level();
+
+        assert!(matches!(
+            RelinKeyShare::contribute_with_crp(
+                &sk,
+                &crp_d1,
+                &crp_a,
+                max_level,
+                0,
+                &mut crate::support::PanicOnUseRng,
+            ),
+            Err(crate::Error::DefaultError(message))
+                if message.contains("do not support key switching")
+        ));
+        assert!(matches!(
+            RelinKeyShare::contribute_with_crp_and_witness(
+                &sk,
+                &crp_d1,
+                &crp_a,
+                max_level,
+                0,
+                &mut crate::support::PanicOnUseRng,
+            ),
+            Err(crate::Error::DefaultError(message))
+                if message.contains("do not support key switching")
+        ));
+        Ok(())
+    }
+
+    /// Aggregated seeded CRP shares keep their verified seeds, reconstruct a
+    /// public key that compares equal to the seeded aggregated public key,
+    /// and serialize smaller than explicit equivalents built from the same
+    /// concrete rows.
+    #[test]
+    fn seeded_crp_aggregation_preserves_seeds_and_public_key_equivalence() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sks = [
+            SecretKey::random(&params, &mut rng),
+            SecretKey::random(&params, &mut rng),
+        ];
+
+        let a_seed: <ChaCha8Rng as SeedableRng>::Seed = [74u8; 32];
+        let d1_seed: <ChaCha8Rng as SeedableRng>::Seed = [75u8; 32];
+        let crp_a = CommonRandomPolyVec::from_seed(&params, a_seed)?;
+        let crp_d1 = CommonRandomPolyVec::from_seed(&params, d1_seed)?;
+
+        let pk_shares: Vec<PublicKeyShare> = sks
+            .iter()
+            .map(|sk| PublicKeyShare::contribute_with_crp(sk, &crp_a, &mut rng))
+            .collect::<Result<Vec<_>>>()?;
+        let aggregated_pk: LBFVPublicKey = pk_shares.into_iter().aggregate()?;
+        assert_eq!(aggregated_pk.seed, Some(a_seed));
+
+        let rlk_shares: Vec<RelinKeyShare> = sks
+            .iter()
+            .map(|sk| RelinKeyShare::contribute_with_crp(sk, &crp_d1, &crp_a, 0, 0, &mut rng))
+            .collect::<Result<Vec<_>>>()?;
+        let relin_key = aggregate_relinearization_key(&rlk_shares, &aggregated_pk)?;
+
+        // The aggregated key keeps the verified seeds: the reconstructed
+        // public key carries the CRS seed and compares equal to the seeded
+        // aggregated public key, seed metadata included.
+        let reconstructed = relin_key.reconstruct_public_key()?;
+        assert_eq!(reconstructed.seed(), Some(a_seed));
+        assert_eq!(reconstructed, aggregated_pk);
+
+        // Verified seed metadata shrinks the serialized operational key.
+        let crp_d1_seedless = CommonRandomPolyVec::from_polys(&params, crp_d1.to_polys(), None)?;
+        let crp_a_seedless = CommonRandomPolyVec::from_polys(&params, crp_a.to_polys(), None)?;
+        let seedless_rlk_shares: Vec<RelinKeyShare> = sks
+            .iter()
+            .map(|sk| {
+                RelinKeyShare::contribute_with_crp(
+                    sk,
+                    &crp_d1_seedless,
+                    &crp_a_seedless,
+                    0,
+                    0,
+                    &mut rng,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let seedless_key = aggregate_relinearization_key(&seedless_rlk_shares, &aggregated_pk)?;
+        assert!(
+            relin_key.to_bytes().len() < seedless_key.to_bytes().len(),
+            "seeded aggregate ({}) must serialize smaller than the explicit one ({})",
+            relin_key.to_bytes().len(),
+            seedless_key.to_bytes().len()
+        );
+
+        // The seeded aggregate still round-trips.
+        assert_eq!(
+            LBFVRelinearizationKey::from_bytes(&relin_key.to_bytes(), &params)?,
+            relin_key
+        );
+        Ok(())
+    }
+
+    /// Seeded CRP contributions aggregate into an operational key at a
+    /// nonzero ciphertext level and relinearize a level-1 square correctly.
+    #[test]
+    fn crp_contributions_aggregate_and_relinearize_at_nonzero_ciphertext_level() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sks = [
+            SecretKey::random(&params, &mut rng),
+            SecretKey::random(&params, &mut rng),
+        ];
+        let crp_a = CommonRandomPolyVec::from_seed(&params, [76u8; 32])?;
+        let crp_d1 = CommonRandomPolyVec::from_seed(&params, [77u8; 32])?;
+
+        let aggregated_pk: LBFVPublicKey = sks
+            .iter()
+            .map(|sk| PublicKeyShare::contribute_with_crp(sk, &crp_a, &mut rng))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .aggregate()?;
+        let rlk_shares: Vec<RelinKeyShare> = sks
+            .iter()
+            .map(|sk| RelinKeyShare::contribute_with_crp(sk, &crp_d1, &crp_a, 1, 0, &mut rng))
+            .collect::<Result<Vec<_>>>()?;
+        let relin_key = aggregate_relinearization_key(&rlk_shares, &aggregated_pk)?;
+        assert_eq!(relin_key.ciphertext_level(), 1);
+        assert_eq!(relin_key.key_level(), 0);
+
+        let plaintext = Plaintext::try_encode(&[3u64], Encoding::poly_at_level(1), &params)?;
+        let ciphertext = aggregated_pk.try_encrypt(&plaintext, &mut rng)?;
+        let mut square = &ciphertext * &ciphertext;
+        assert_eq!(square.level, 1);
+        relin_key.relinearizes(&mut square)?;
+
+        let joint_coeffs: Vec<i64> = (0..params.degree())
+            .map(|d| sks.iter().map(|sk| sk.coeffs[d]).sum())
+            .collect();
+        let joint_sk = SecretKey::new(joint_coeffs, &params)?;
+        let decoded = Vec::<u64>::try_decode(&joint_sk.try_decrypt(&square)?, Encoding::poly())?;
+        assert_eq!(decoded.first(), Some(&9));
         Ok(())
     }
 }
@@ -487,6 +1002,64 @@ impl DeserializeParametrized for RelinKeyShare {
             })
             .and_then(|ksk| KeySwitchingKey::try_convert_from(ksk, params))?;
 
+        // The two KSKs must describe one coherent contribution: matching
+        // parameters, levels, contexts, and decomposition. Without this gate,
+        // the URS and CRS rows would live in different contexts and could not
+        // be compared meaningfully.
+        if ksk_r_to_s.params != ksk_s_to_r.params {
+            return Err(SerializationError::InvalidFormat {
+                reason: "RelinKeyShare KSKs have mismatched parameters".to_string(),
+            }
+            .into());
+        }
+        if ksk_r_to_s.ciphertext_level != ksk_s_to_r.ciphertext_level
+            || ksk_r_to_s.ksk_level != ksk_s_to_r.ksk_level
+        {
+            return Err(SerializationError::InvalidFormat {
+                reason: "RelinKeyShare KSKs have mismatched levels".to_string(),
+            }
+            .into());
+        }
+        if ksk_r_to_s.ctx_ciphertext != ksk_s_to_r.ctx_ciphertext
+            || ksk_r_to_s.ctx_ksk != ksk_s_to_r.ctx_ksk
+        {
+            return Err(SerializationError::InvalidFormat {
+                reason: "RelinKeyShare KSKs have mismatched contexts".to_string(),
+            }
+            .into());
+        }
+        if ksk_r_to_s.log_base != ksk_s_to_r.log_base {
+            return Err(SerializationError::InvalidFormat {
+                reason: "RelinKeyShare KSKs have mismatched log_base".to_string(),
+            }
+            .into());
+        }
+
+        // The l-BFV contribution constructors reject single-modulus key and
+        // ciphertext contexts ("These parameters do not support key
+        // switching"), so a serialized share that decodes into such a layout
+        // — including the single-modulus decomposition (`log_base != 0`) the
+        // generic key-switching-key decoder admits — is rejected here
+        // instead of failing later during aggregation.
+        if ksk_r_to_s.ctx_ksk.moduli().len() == 1 || ksk_r_to_s.ctx_ciphertext.moduli().len() == 1 {
+            return Err(SerializationError::InvalidFormat {
+                reason: "RelinKeyShare key-switching contexts must have more than one modulus"
+                    .to_string(),
+            }
+            .into());
+        }
+
+        // Reference-string gate: the shared URS `d1` rows (ksk_r_to_s.c1) and
+        // CRS `a` rows (ksk_s_to_r.c1) must be distinct within each vector and
+        // disjoint across the two vectors. A serialized share built from
+        // reused reference-string randomness is rejected instead of being
+        // accepted into aggregation.
+        crate::reference_string::validate_reference_string_pair(
+            &ksk_r_to_s.ctx_ksk,
+            &ksk_s_to_r.c1,
+            &ksk_r_to_s.c1,
+        )?;
+
         Ok(Self {
             ksk_r_to_s,
             ksk_s_to_r,
@@ -495,7 +1068,7 @@ impl DeserializeParametrized for RelinKeyShare {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod proto_tests {
     use super::*;
 
@@ -553,6 +1126,82 @@ mod proto_tests {
         Ok(())
     }
 
+    /// A serialized share whose URS rows collide with or repeat across its CRS
+    /// rows must be rejected at deserialization time, and a share whose two
+    /// KSKs describe incoherent levels must not decode.
+    #[test]
+    fn serialized_share_rejects_reused_rows_and_incoherent_ksks() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+
+        // Seedless CRP vectors so the KSK c1 rows serialize inline.
+        let crp_a = CommonRandomPolyVec::new(&params, &mut rng)?;
+        let crp_d1 = CommonRandomPolyVec::new(&params, &mut rng)?;
+        let share = RelinKeyShare::contribute_with_crp(&sk, &crp_d1, &crp_a, 0, 0, &mut rng)?;
+
+        // Control: the honest payload round-trips.
+        let restored = RelinKeyShare::from_bytes(&share.to_bytes(), &params)?;
+        assert_eq!(restored.d0_components(), share.d0_components());
+        assert_eq!(restored.d2_components(), share.d2_components());
+
+        // Tamper: URS row 0 becomes a copy of CRS row 1.
+        let proto: LbfvRelinKeyShare = LbfvRelinKeyShare::decode(share.to_bytes().as_slice())
+            .expect("honest share payload decodes");
+        let contribution = proto.contribution.expect("contribution");
+        let mut tampered_rows = contribution.clone();
+        let crs_row = tampered_rows.ksk_s_to_r.as_ref().expect("ksk_s_to_r").c1[1].clone();
+        tampered_rows.ksk_r_to_s.as_mut().expect("ksk_r_to_s").c1[0] = crs_row;
+        let bytes = LbfvRelinKeyShare {
+            contribution: Some(tampered_rows),
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            RelinKeyShare::from_bytes(&bytes, &params),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::OverlappingReferenceStringRows {
+                    crs_index: 1,
+                    urs_index: 0,
+                }
+            ))
+        ));
+
+        // Tamper: repeat a row within the URS vector.
+        let mut repeated_rows = contribution.clone();
+        let urs_row = repeated_rows.ksk_r_to_s.as_ref().expect("ksk_r_to_s").c1[0].clone();
+        repeated_rows.ksk_r_to_s.as_mut().expect("ksk_r_to_s").c1[2] = urs_row;
+        let bytes = LbfvRelinKeyShare {
+            contribution: Some(repeated_rows),
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            RelinKeyShare::from_bytes(&bytes, &params),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::RepeatedReferenceStringRow {
+                    role: crate::ReferenceStringRole::Urs,
+                    first_index: 0,
+                    second_index: 2,
+                }
+            ))
+        ));
+
+        // Tamper: the two KSKs disagree on the key level; the share must not
+        // decode because the URS/CRS rows could not be compared coherently.
+        let mut mismatched_levels = contribution.clone();
+        mismatched_levels
+            .ksk_s_to_r
+            .as_mut()
+            .expect("ksk_s_to_r")
+            .ksk_level = 1;
+        let bytes = LbfvRelinKeyShare {
+            contribution: Some(mismatched_levels),
+        }
+        .encode_to_vec();
+        assert!(RelinKeyShare::from_bytes(&bytes, &params).is_err());
+
+        Ok(())
+    }
+
     #[test]
     fn contribution_and_operational_relin_key_wire_types_are_not_interchangeable() -> Result<()> {
         let mut rng = rng();
@@ -566,6 +1215,176 @@ mod proto_tests {
 
         assert!(RelinKeyShare::from_bytes(&operational.to_bytes(), &params).is_err());
         assert!(LBFVRelinearizationKey::from_bytes(&share.to_bytes(), &params).is_err());
+        Ok(())
+    }
+
+    /// Mutation tests for the share decoder: every field the contribution
+    /// constructors constrain (levels, contexts via levels, gadget-row
+    /// counts, and the decomposition base) must be rejected at decode time
+    /// with a typed error instead of surfacing later during aggregation.
+    #[test]
+    fn serialized_share_rejects_inconsistent_layouts() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let share =
+            RelinKeyShare::contribute_with_seed(&sk, [11u8; 32], [12u8; 32], 0, 0, &mut rng)?;
+
+        // Control: the honest payload round-trips.
+        assert_eq!(
+            RelinKeyShare::from_bytes(&share.to_bytes(), &params)?,
+            share
+        );
+        let proto: LbfvRelinKeyShare =
+            LbfvRelinKeyShare::decode(share.to_bytes().as_slice()).expect("valid share proto");
+        let decode_proto = |proto: &LbfvRelinKeyShare| -> Result<RelinKeyShare> {
+            RelinKeyShare::from_bytes(&proto.encode_to_vec(), &params)
+        };
+
+        // Tamper: truncate a gadget row; the decoder must enforce the
+        // constructor row count (one row per ciphertext-context modulus).
+        let mut row_count = proto.clone();
+        if let Some(ksk) = row_count
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_r_to_s.as_mut())
+        {
+            ksk.c0.pop();
+        }
+        assert!(matches!(
+            decode_proto(&row_count),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::WrongPolynomialCount {
+                    component: crate::SerializedPolynomialComponent::KeySwitchingKeyC0,
+                    expected: 3,
+                    actual: 2,
+                }
+            ))
+        ));
+
+        // Tamper: a nonzero decomposition base on a multi-modulus key
+        // context is a layout no l-BFV constructor produces.
+        let mut log_base = proto.clone();
+        if let Some(ksk) = log_base
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_r_to_s.as_mut())
+        {
+            ksk.log_base = 3;
+        }
+        if let Some(ksk) = log_base
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_s_to_r.as_mut())
+        {
+            ksk.log_base = 3;
+        }
+        assert!(matches!(
+            decode_proto(&log_base),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::InvalidKeySwitchingLogBase {
+                    log_base: 3,
+                    expected_log_base: 0,
+                }
+            ))
+        ));
+
+        // Tamper: moving both levels to the maximal level keeps the level
+        // ordering coherent but puts the key context in a single-modulus
+        // context; with the standard `log_base = 0` this is not a
+        // constructor layout.
+        let mut key_level = proto.clone();
+        if let Some(ksk) = key_level
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_r_to_s.as_mut())
+        {
+            ksk.ksk_level = params.max_level() as u32;
+            ksk.ciphertext_level = params.max_level() as u32;
+        }
+        if let Some(ksk) = key_level
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_s_to_r.as_mut())
+        {
+            ksk.ksk_level = params.max_level() as u32;
+            ksk.ciphertext_level = params.max_level() as u32;
+        }
+        assert!(matches!(
+            decode_proto(&key_level),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::InvalidKeySwitchingLogBase { log_base: 0, .. }
+            ))
+        ));
+
+        // Tamper: key levels above the ciphertext level are rejected by the
+        // key-switching-key decoder before any rows are inspected.
+        let mut level_order = proto.clone();
+        if let Some(ksk) = level_order
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_r_to_s.as_mut())
+        {
+            ksk.ksk_level = 1;
+        }
+        if let Some(ksk) = level_order
+            .contribution
+            .as_mut()
+            .and_then(|c| c.ksk_s_to_r.as_mut())
+        {
+            ksk.ksk_level = 1;
+        }
+        assert!(matches!(
+            decode_proto(&level_order),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::InvalidKeySwitchingLevelOrder {
+                    ciphertext_level: 0,
+                    key_level: 1,
+                }
+            ))
+        ));
+
+        // Tamper: a maximal ciphertext level (one-modulus ciphertext
+        // context) with matching row surgery is still a layout the l-BFV
+        // constructors reject, so the decoder must not accept it even though
+        // the row counts now cohere.
+        let mut single_modulus = proto.clone();
+        if let Some(contribution) = single_modulus.contribution.as_mut() {
+            if let Some(ksk) = contribution.ksk_r_to_s.as_mut() {
+                ksk.ciphertext_level = params.max_level() as u32;
+                ksk.c0.truncate(1);
+                ksk.c1.truncate(1);
+            }
+            if let Some(ksk) = contribution.ksk_s_to_r.as_mut() {
+                ksk.ciphertext_level = params.max_level() as u32;
+                ksk.c0.truncate(1);
+                ksk.c1.truncate(1);
+            }
+        }
+        assert!(matches!(
+            decode_proto(&single_modulus),
+            Err(crate::Error::SerializationError(
+                crate::SerializationError::InvalidFormat { reason }
+            )) if reason.contains("one modulus")
+        ));
+
+        Ok(())
+    }
+
+    /// Valid seeded shares round-trip at a nonzero ciphertext level too.
+    #[test]
+    fn serialized_share_roundtrips_nonzero_ciphertext_level() -> Result<()> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let share =
+            RelinKeyShare::contribute_with_seed(&sk, [14u8; 32], [15u8; 32], 1, 0, &mut rng)?;
+        assert_eq!(share.ciphertext_level(), 1);
+        assert_eq!(share.key_level(), 0);
+        assert_eq!(
+            RelinKeyShare::from_bytes(&share.to_bytes(), &params)?,
+            share
+        );
         Ok(())
     }
 }

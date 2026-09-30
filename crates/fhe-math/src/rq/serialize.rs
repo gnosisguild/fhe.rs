@@ -6,6 +6,7 @@ use super::{Context, Poly, RepresentationTag, traits::TryConvertFrom};
 use crate::{Error, PolynomialSerializationError, proto::rq::Rq};
 use fhe_traits::{DeserializeWithContext, MAX_SERIALIZED_BYTES, Serialize};
 use prost::Message;
+use zeroize::Zeroizing;
 
 fn check_size(actual: usize) -> Result<(), Error> {
     if actual > MAX_SERIALIZED_BYTES {
@@ -20,7 +21,9 @@ fn check_size(actual: usize) -> Result<(), Error> {
 
 impl<R: RepresentationTag> Serialize for Poly<R> {
     fn to_bytes(&self) -> Vec<u8> {
-        Rq::from(self).encode_to_vec()
+        // Only the returned wire bytes escape: the intermediate Protobuf copy
+        // may contain secret residues and must be wiped even during unwinding.
+        Zeroizing::new(Rq::from(self)).encode_to_vec()
     }
 }
 
@@ -33,11 +36,11 @@ where
 
     fn from_bytes(bytes: &[u8], ctx: &Arc<Context>) -> Result<Self, Self::Error> {
         check_size(bytes.len())?;
-        let rq: Rq =
-            Message::decode(bytes).map_err(|error| PolynomialSerializationError::Decode {
+        let rq =
+            Rq::decode_zeroizing(bytes).map_err(|error| PolynomialSerializationError::Decode {
                 message: error.to_string(),
             })?;
-        Poly::try_convert_from(&rq, ctx, false)
+        Poly::try_convert_from(&*rq, ctx, false)
     }
 }
 

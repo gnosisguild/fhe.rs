@@ -47,45 +47,13 @@ impl fmt::Display for FactorError {
 
 impl Error for FactorError {}
 
-/// # Overview
-/// This function takes a slice of `u64` integers (`moduli`) and determines the
-/// smallest prime factor among them. It can be used to determine the maximum
-/// number of parties that can be involved in a threshold RNS BFV Shamir secret
-/// sharing scheme, as the smallest prime factor of given moduli provides that
-/// upper bound.
-///
-/// The computations are performed in parallel using the Rayon library, making
-/// it efficient for larger input sets.
-///
-/// The function uses the [prime_factorization](https://docs.rs/prime_factorization/latest/prime_factorization/) Rust library that accepts
-/// up to 128 bit integers. This library makes use of a sequence of several
-/// prime factorization algorithms for better performance.
-///
-/// # Parameters
-///
-/// - `moduli`: A slice of `u64` values for which to compute the smallest prime
-///   factor. Each value can be prime or composite.
-///
-/// # Returns
-///
-/// Returns a `Result<u64, FactorError>`:
-/// - `Ok(u64)` containing the smallest prime factor found among all the
-///   provided moduli. If a modulus is prime, that modulus is considered as its
-///   own smallest prime factor.
-/// - `Err(FactorError)` if an error occurs, such as:
-///   - `FactorError::EmptyInput` if `moduli` is empty.
-///   - `FactorError::NoFactorsFound(m)` if a composite number `m` produces no
-///     factors.
-///   - `FactorError::NoResult` if no smallest factor could be determined
-///     (extremely unlikely).
+/// Find the smallest prime factor across `moduli`, factoring in parallel.
+/// A prime is its own smallest factor.
 ///
 /// # Errors
-///
-/// - If the provided slice is empty, it returns a `FactorError::EmptyInput`.
-/// - If factorization fails to find factors for a composite modulus, it returns
-///   `FactorError::NoFactorsFound(m)`.
-/// - If no result could be determined after processing (which should not happen
-///   for valid input), it returns `FactorError::NoResult`.
+/// Returns [`FactorError::EmptyInput`] for an empty slice,
+/// [`FactorError::NoFactorsFound`] when a value yields no factors, or
+/// [`FactorError::NoResult`] when no minimum can be determined.
 pub fn get_smallest_prime_factor(moduli: &[u64]) -> Result<u64, FactorError> {
     if moduli.is_empty() {
         return Err(FactorError::EmptyInput);
@@ -507,7 +475,7 @@ mod tests {
         assert!(sample_vec_cbd_f32(10, 17.0, &mut rng).is_err());
 
         // Invalid: non-half, non-integer values must be rejected rather than
-        // silently truncated (see issue #100)
+        // silently truncated.
         assert!(sample_vec_cbd_f32(10, 1.9, &mut rng).is_err());
         assert!(sample_vec_cbd_f32(10, 1.5, &mut rng).is_err());
         assert!(sample_vec_cbd_f32(10, 0.1, &mut rng).is_err());

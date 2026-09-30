@@ -13,6 +13,7 @@
 // We use the same parameters as in the paper to enable an apple-to-apple
 // comparison.
 
+#[path = "../support/examples/pir.rs"]
 mod pir;
 #[path = "../support/mod.rs"]
 mod support;
