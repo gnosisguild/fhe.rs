@@ -10,8 +10,7 @@
 //! call. The `j = i` term is omitted: `k_{i,i}` appears on both sides and
 //! cancels. The masks cancel when summed over `S`. Pairwise keys are 256-bit
 //! strings expected to be uniformly random, interpreted as BN254 scalar-field
-//! elements. `F` is
-//! Poseidon2 via the SAFE sponge API (`e3-safe`).
+//! elements. `F` is Poseidon2 via the SAFE sponge API (`e3-safe`).
 
 use crate::Error;
 use crate::bfv::Ciphertext;
@@ -96,7 +95,7 @@ impl PartyPrfKeys {
             }
         }
 
-        let mut digest = hash_context(&decryptors, ciphertext)?;
+        let digest = Zeroizing::new(hash_context(&decryptors, ciphertext)?);
         let ctx = ciphertext.params.context_at_level(ciphertext.level)?;
         let mut acc = Poly::<PowerBasis>::zero(ctx);
         acc.disallow_variable_time_computations();
@@ -122,7 +121,6 @@ impl PartyPrfKeys {
             positive.zeroize();
             negative.zeroize();
         }
-        digest.zeroize();
         Ok(acc)
     }
 
@@ -489,6 +487,21 @@ mod tests {
         let first = evaluate(&keys[0].keys_i_j[1], &digest, &ct).unwrap();
         let second = evaluate(&keys[0].keys_i_j[1], &digest, &ct).unwrap();
         assert_eq!(first.coefficients(), second.coefficients());
+    }
+
+    #[test]
+    fn mask_returns_error_for_incomplete_party_bundle() {
+        let mut rng = rng();
+        let ct = test_ciphertext(&mut rng);
+        let mut keys = simulated_committee_prf_keys(3, &mut rng);
+        let party = keys
+            .first_mut()
+            .expect("simulation helper must return the requested parties");
+        party.keys_i_j.truncate(2);
+
+        // Digest creation succeeds, then lookup of party 3's key fails. The
+        // Zeroizing digest owner must be dropped on this early-return path.
+        assert!(party.mask(&[1, 3], &ct).is_err());
     }
 
     #[test]

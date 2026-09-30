@@ -1734,6 +1734,17 @@ mod tests {
                 party_id: 1
             }))
         ));
+        for (party_id, decryptors) in [(0, vec![1, 2]), (1, vec![0, 2]), (3, vec![1, 2])] {
+            assert!(
+                crate::trbfv::DecryptionShare::from_parts(
+                    original.poly.clone(),
+                    party_id,
+                    decryptors,
+                    &ct,
+                )
+                .is_err()
+            );
+        }
         let other = part_dec(
             &manager,
             &ct,

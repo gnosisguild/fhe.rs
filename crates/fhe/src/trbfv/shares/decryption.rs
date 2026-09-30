@@ -31,14 +31,23 @@ impl DecryptionShare {
     /// Rehydrate a partial decryption after application transport.
     ///
     /// The digest `H(S, ct)` is recomputed from `decryptors` and `ciphertext`.
-    /// Authentication of the polynomial remains the application's
-    /// responsibility.
+    /// This rejects zero/duplicate IDs and requires `party_id` to belong to `S`.
+    /// Committee-size bounds and polynomial/ciphertext context compatibility are
+    /// checked later by [`ShareManager::decrypt_from_shares`](super::ShareManager::decrypt_from_shares),
+    /// which has the manager configuration needed for those checks. Authentication
+    /// of the polynomial remains the application's responsibility.
     pub fn from_parts(
         poly: Poly<PowerBasis>,
         party_id: usize,
         mut decryptors: Vec<usize>,
         ciphertext: &Ciphertext,
     ) -> Result<Self, Error> {
+        if party_id == 0 || decryptors.contains(&0) {
+            return Err(Error::malformed_shares(
+                party_id,
+                "party identifiers must be nonzero".to_string(),
+            ));
+        }
         decryptors.sort_unstable();
         if let Some(duplicate) = decryptors.windows(2).find_map(|pair| {
             let first = pair.first()?;
@@ -46,6 +55,12 @@ impl DecryptionShare {
             (first == second).then_some(*first)
         }) {
             return Err(Error::duplicate_party_id(duplicate));
+        }
+        if decryptors.binary_search(&party_id).is_err() {
+            return Err(Error::malformed_shares(
+                party_id,
+                "share party id must belong to the decryptor set".to_string(),
+            ));
         }
         let digest = context_digest(&decryptors, ciphertext)?;
         Ok(Self {

@@ -41,8 +41,8 @@ The public trBFV setup and decryption flow is:
 1. Create a `ShareManager` instance with BFV parameters.
 2. Generate and distribute Shamir shares for each party's secret contribution.
 3. Establish matching pairwise PRF keys in the application protocol. Each party
-   receives its own `2n` keys and rehydrates them with `PartyPrfKeys::from_transport`.
-   This is independent of `ShareManager`.
+   receives its own `2n` keys and rehydrates them with
+   `PartyPrfKeys::from_transport`. This is independent of `ShareManager`.
 4. Aggregate the received secret-key contributions for the same externally
    agreed party set.
 5. For a designated decryptor set `S` of size `threshold + 1`, each party in
