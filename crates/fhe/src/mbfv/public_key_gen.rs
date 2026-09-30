@@ -80,6 +80,7 @@ impl PublicKeyShare {
         crp: CommonRandomPoly,
         rng: &mut R,
     ) -> Result<(Self, PublicKeyShareIntermediates)> {
+        sk_share.validate()?;
         let params = sk_share.params.clone();
         let ctx = params.context_at_level(0)?;
         if crp.poly.ctx() != ctx {

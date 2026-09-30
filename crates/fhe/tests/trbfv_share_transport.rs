@@ -91,7 +91,7 @@ fn highest_canonical_residue_round_trips_exactly() {
             .collect();
 
         let secret_key = SecretKey::random(&share_parameters, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&row, Encoding::poly(), &share_parameters).unwrap();
         let ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
         let decoded = Vec::<u64>::try_decode(
@@ -138,7 +138,7 @@ fn undersized_transport_modulus_is_detectable_before_encoding() {
 
     let mut rng = support::presets::rng(11);
     let secret_key = SecretKey::random(&share_parameters, &mut rng);
-    let public_key = PublicKey::new(&secret_key, &mut rng);
+    let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
 
     let mut round_trip = |value: u64| -> u64 {
         let row = vec![value; share_parameters.degree()];

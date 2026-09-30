@@ -125,7 +125,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             *acc = acc.wrapping_add(*c);
         }
     }
-    let sk_joint = SecretKey::new(sum_coeffs, &params);
+    let sk_joint = SecretKey::new(sum_coeffs, &params)?;
 
     let pt_result = timeit!("Decrypt", sk_joint.try_decrypt(&ct_ab)?);
     let result = Vec::<u64>::try_decode(&pt_result, Encoding::poly())?;

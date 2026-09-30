@@ -22,7 +22,8 @@ use zeroize::{Zeroize, Zeroizing};
 pub struct SecretKey {
     /// The BFV parameters
     pub(crate) params: Arc<BfvParameters>,
-    /// The secret key coefficients
+    /// The secret key coefficients. Operations validate that the length still
+    /// matches the parameter degree after caller mutation.
     pub coeffs: Box<[i64]>,
 }
 
@@ -62,16 +63,44 @@ impl SecretKey {
     #[must_use]
     pub fn random<R: RngCore + CryptoRng>(params: &Arc<BfvParameters>, rng: &mut R) -> Self {
         let s_coefficients = sample_vec_cbd_f32(params.degree(), Self::SK_VARIANCE, rng).unwrap();
-        Self::new(s_coefficients, params)
+        Self::new(s_coefficients, params).unwrap()
     }
 
-    /// Generate a [`SecretKey`] from its coefficients.
-    #[must_use]
-    pub fn new(coeffs: Vec<i64>, params: &Arc<BfvParameters>) -> Self {
-        Self {
+    /// Construct a secret key with exactly one coefficient per ring degree.
+    ///
+    /// # Errors
+    /// Returns [`crate::SecretKeyError::InvalidCoefficientCount`] for a wrong
+    /// length. Rejected coefficients are wiped before being dropped.
+    ///
+    /// # Security
+    /// Coefficient magnitudes are not restricted: aggregated keys need not be
+    /// ternary. The caller must ensure their distribution and bounds satisfy
+    /// the security assumptions and noise budget of the chosen parameters.
+    pub fn new(coeffs: Vec<i64>, params: &Arc<BfvParameters>) -> Result<Self> {
+        let mut coeffs = Zeroizing::new(coeffs);
+        Self::validate_coefficient_count(coeffs.len(), params.degree())?;
+        // Boxing can shrink an overallocated vector and free an unwiped
+        // buffer. In that case, copy into the final owner and wipe the input.
+        let coeffs = if coeffs.capacity() == coeffs.len() {
+            std::mem::take(&mut *coeffs).into_boxed_slice()
+        } else {
+            Box::from(coeffs.as_slice())
+        };
+        Ok(Self {
             params: params.to_owned(),
-            coeffs: coeffs.into_boxed_slice(),
+            coeffs,
+        })
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        Self::validate_coefficient_count(self.coeffs.len(), self.params.degree())
+    }
+
+    fn validate_coefficient_count(actual: usize, expected: usize) -> Result<()> {
+        if actual != expected {
+            return Err(crate::SecretKeyError::InvalidCoefficientCount { actual, expected }.into());
         }
+        Ok(())
     }
 
     /// Measure the noise in a [`Ciphertext`].
@@ -125,6 +154,7 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Ciphertext> {
+        self.validate()?;
         let level = self.params.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
@@ -160,6 +190,7 @@ impl SecretKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<(Ciphertext, Zeroizing<Poly<Ntt>>, Zeroizing<Poly<Ntt>>)> {
+        self.validate()?;
         let level = self.params.level_of_context(p.ctx())?;
 
         let s = Zeroizing::new(
@@ -200,6 +231,7 @@ impl SecretKey {
         p: &Poly<Ntt>,
         rng: &mut R,
     ) -> Result<Ciphertext> {
+        self.validate()?;
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
 
@@ -213,6 +245,7 @@ impl SecretKey {
         p: &Poly<Ntt>,
         rng: &mut R,
     ) -> Result<(Ciphertext, Zeroizing<Poly<Ntt>>, Zeroizing<Poly<Ntt>>)> {
+        self.validate()?;
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
 
@@ -292,6 +325,7 @@ impl FheDecrypter<Plaintext, Ciphertext> for SecretKey {
     type Error = Error;
 
     fn try_decrypt(&self, ct: &Ciphertext) -> Result<Plaintext> {
+        self.validate()?;
         ct.validate_for(&self.params)?;
         self.params.validate_plaintext_level(ct.level)?;
         // Let's create a secret key with the ciphertext context
@@ -407,7 +441,7 @@ mod tests {
             (&fast_params, vec![520u64; fast_params.degree()]),
         ] {
             let sk = SecretKey::random(params, &mut rng);
-            let pk = PublicKey::new(&sk, &mut rng);
+            let pk = PublicKey::new(&sk, &mut rng)?;
             let pt = Plaintext::try_encode(&values, Encoding::poly(), params)?;
             let sk_ct: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
             assert_eq!(sk_ct.level, 0);
@@ -458,7 +492,7 @@ mod tests {
     fn debug_does_not_leak_coefficients() {
         // Use a distinctive sentinel value that will not appear in the params.
         let params = BfvParameters::default_arc(1, 16);
-        let sk = SecretKey::new(vec![987654321i64; params.degree()], &params);
+        let sk = SecretKey::new(vec![987654321i64; params.degree()], &params).unwrap();
         let debug = format!("{sk:?}");
         assert!(debug.contains("<redacted>"));
         assert!(

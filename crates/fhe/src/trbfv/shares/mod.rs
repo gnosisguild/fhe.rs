@@ -1012,7 +1012,7 @@ mod tests {
 
         // Setup: Generate keys and encrypt a plaintext
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
 
         let mut plaintext_data = vec![42u64, 10, 40];
         plaintext_data.resize(params.degree(), 0);
@@ -1109,7 +1109,7 @@ mod tests {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
         let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
         ciphertext.switch_down().unwrap();
@@ -1186,7 +1186,7 @@ mod tests {
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
 
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
         let ct = pk.try_encrypt(&plaintext, &mut rng).unwrap();
 
@@ -1215,7 +1215,7 @@ mod tests {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
         let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
         ciphertext.switch_down().unwrap();
@@ -1240,7 +1240,7 @@ mod tests {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
         let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
         ciphertext.c.pop();
@@ -1288,7 +1288,7 @@ mod tests {
             .generate_secret_key_shares(secret_key_poly, &mut rng)
             .unwrap()
             .into_transport();
-        let pk = PublicKey::new(&secret_key, &mut rng);
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
         let mut values = vec![42u64];
         values.resize(params.degree(), 0);
         let plaintext = Plaintext::try_encode(&values, Encoding::poly(), &params).unwrap();
@@ -1561,7 +1561,7 @@ mod tests {
         let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
 
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
         let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 

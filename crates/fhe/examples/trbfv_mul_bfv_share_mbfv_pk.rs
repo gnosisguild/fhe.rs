@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Share-encryption key pair under the second parameter set.
                 let secret_key_enc = SecretKey::random(&params_share_enc, &mut rng);
-                let public_key_enc = PublicKey::new(&secret_key_enc, &mut rng);
+                let public_key_enc = PublicKey::new(&secret_key_enc, &mut rng).unwrap();
 
                 let ctx0 = params_trbfv.context_at_level(0).unwrap();
                 Party {

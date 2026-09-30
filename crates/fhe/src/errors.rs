@@ -47,6 +47,10 @@ pub enum Error {
     #[error("Plaintext error: {0}")]
     Plaintext(#[from] PlaintextError),
 
+    /// A secret key has an invalid coefficient count.
+    #[error("Secret-key error: {0}")]
+    SecretKey(#[from] SecretKeyError),
+
     /// A plaintext encoding is invalid or unavailable.
     #[error("Encoding error: {0}")]
     Encoding(#[from] EncodingError),
@@ -145,6 +149,7 @@ pub enum CiphertextError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CiphertextOperation {
+    PublicKeyEncryption,
     Galois,
     EvaluationKey,
     Relinearization,
@@ -262,6 +267,15 @@ pub enum ThresholdError {
         /// The smallest modulus
         min_modulus: u64,
     },
+}
+
+/// Secret-key validation failures.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[expect(missing_docs, reason = "error variants are documented inline")]
+#[non_exhaustive]
+pub enum SecretKeyError {
+    #[error("Secret key has {actual} coefficients; expected {expected}")]
+    InvalidCoefficientCount { actual: usize, expected: usize },
 }
 
 /// Plaintext validation and conversion failures.
@@ -417,6 +431,27 @@ pub enum MultipartyError {
 
     #[error("Common random polynomial seed does not match polynomial at index {index}")]
     CommonRandomPolynomialSeedMismatch { index: usize },
+
+    /// Two relinearization-key shares disagree on a reference string. Indices
+    /// refer to the input slice, not authenticated party identities; neither
+    /// share is established as honest by this diagnostic.
+    #[error(
+        "Relinearization key share {share_index} has inconsistent {role:?} polynomials relative to share {reference_share_index}"
+    )]
+    ReferenceStringMismatch {
+        role: ReferenceStringRole,
+        share_index: usize,
+        reference_share_index: usize,
+    },
+
+    /// A relinearization-key share's CRS disagrees with the supplied public key.
+    #[error(
+        "Relinearization key share {share_index} CRS row {row_index} does not match the public key"
+    )]
+    PublicKeyCrsMismatch {
+        share_index: usize,
+        row_index: usize,
+    },
 
     #[error(
         "Reference strings must be generated independently: the CRS and URS seeds are identical"
@@ -656,6 +691,7 @@ pub enum SerializedField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SerializedPolynomialComponent {
+    PublicKeyCiphertext,
     KeySwitchingKeyC0,
     KeySwitchingKeyC1,
     RelinearizationKeyBVec,

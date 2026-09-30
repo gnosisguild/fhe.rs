@@ -28,7 +28,7 @@ fn representative_objects_round_trip_through_protobuf() {
     );
 
     let sk = SecretKey::random(&params, &mut rng);
-    let pk = PublicKey::new(&sk, &mut rng);
+    let pk = PublicKey::new(&sk, &mut rng).unwrap();
     let plaintext = Plaintext::try_encode(&[9_u64], Encoding::poly(), &params).unwrap();
     let ciphertext = pk.try_encrypt(&plaintext, &mut rng).unwrap();
     let ciphertext_bytes = ciphertext.to_bytes();
@@ -203,7 +203,7 @@ fn ciphertext_deserialization_rejects_truncation_and_parameter_mismatch() {
         .unwrap();
     let mut rng = support::presets::rng(66);
     let sk = SecretKey::random(&params, &mut rng);
-    let pk = PublicKey::new(&sk, &mut rng);
+    let pk = PublicKey::new(&sk, &mut rng).unwrap();
     let plaintext = Plaintext::try_encode(&[13_u64], Encoding::poly(), &params).unwrap();
     let ciphertext = pk.try_encrypt(&plaintext, &mut rng).unwrap();
     let bytes = ciphertext.to_bytes();

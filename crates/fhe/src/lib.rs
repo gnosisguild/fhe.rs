@@ -24,7 +24,7 @@ pub mod trlbfv;
 pub use errors::{
     CiphertextError, CiphertextOperation, DotProductError, EncodingError, Error,
     EvaluationKeyComponent, EvaluationKeyError, EvaluationOperation, MultipartyError,
-    ParameterSource, ParametersError, PlaintextError, ReferenceStringRole, Result,
+    ParameterSource, ParametersError, PlaintextError, ReferenceStringRole, Result, SecretKeyError,
     SerializationError, SerializedField, SerializedObject, SerializedPolynomialComponent,
     ThresholdError,
 };

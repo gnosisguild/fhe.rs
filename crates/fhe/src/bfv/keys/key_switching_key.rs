@@ -88,6 +88,7 @@ impl KeySwitchingKey {
         ksk_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
+        sk.validate()?;
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
 
@@ -104,6 +105,7 @@ impl KeySwitchingKey {
         ksk_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
+        sk.validate()?;
         if ciphertext_level < ksk_level {
             return Err(crate::EvaluationKeyError::InvalidLevelOrder {
                 ciphertext_level,
@@ -173,6 +175,7 @@ impl KeySwitchingKey {
         ksk_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
+        sk.validate()?;
         if ciphertext_level < ksk_level {
             return Err(crate::EvaluationKeyError::InvalidLevelOrder {
                 ciphertext_level,
@@ -274,6 +277,7 @@ impl KeySwitchingKey {
         ksk_level: usize,
         rng: &mut R,
     ) -> Result<(Self, Vec<Zeroizing<Poly<NttShoup>>>)> {
+        sk.validate()?;
         if ciphertext_level < ksk_level {
             return Err(crate::EvaluationKeyError::InvalidLevelOrder {
                 ciphertext_level,

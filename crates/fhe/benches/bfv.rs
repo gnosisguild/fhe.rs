@@ -70,7 +70,7 @@ pub fn bfv_benchmark(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("keygen_pk", format!("n={}/log(q)={}", params.degree(), q)),
             |b| {
-                b.iter(|| PublicKey::new(&sk, &mut rng));
+                b.iter(|| PublicKey::new(&sk, &mut rng).unwrap());
             },
         );
 

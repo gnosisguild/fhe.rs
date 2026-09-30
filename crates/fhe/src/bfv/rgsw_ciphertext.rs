@@ -95,6 +95,7 @@ impl FheEncrypter<Plaintext, RGSWCiphertext> for SecretKey {
         pt: &Plaintext,
         rng: &mut R,
     ) -> Result<RGSWCiphertext> {
+        self.validate()?;
         pt.validate_for(&self.params)?;
         let level = pt.level();
         let ctx = self.params.context_at_level(level)?;
