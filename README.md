@@ -65,8 +65,11 @@ This opt-in route requires trusted, authenticated delivery; the request itself
 does not authenticate a key. Its wire preflight enforces the authorized shape
 and rejects unknown fields at key scopes. Polynomial-row unknown fields are
 allowed only within fixed length slack. The bound limits encoded bytes, not
-peak memory; apply a tighter application budget when needed. Full contracts
-are documented on `EvaluationKeyDecodeRequest` and
+peak memory; apply a tighter application budget when needed. For scale, a
+degree-32768 inner-sum key with nine 62-bit moduli encodes to roughly 309 MB;
+its roundtrip test has used about 4 GiB of peak process memory with both
+original and decoded keys retained. Full contracts are documented on
+`EvaluationKeyDecodeRequest` and
 `EvaluationKey::from_bytes_with_request`.
 
 ## Development
