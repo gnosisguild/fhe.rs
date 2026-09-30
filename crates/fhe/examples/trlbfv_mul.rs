@@ -2,19 +2,9 @@
 // "Robust Multiparty Computation from Threshold Encryption Based on RLWE"
 // https://eprint.iacr.org/2024/1285
 //
-// Protocol (single key type, as in the paper):
-//   Each party holds sk_i. There is ONE public key: the l-BFV pk.
-//   - Encryption uses pk.c[0]  = (b₀, a₀)        (paper §3.1, B[0]/a[0])
-//   - Relinearization uses b_vec = [b₀,...,b_{l-1}]  (paper §5.2)
-//
-// Unlike trbfv_mul_bfv_share.rs this example has no separate mbfv PublicKeyShare,
-// no Shamir share transport, and no second parameter set — minimising the number
-// of distinct variables and operations (important for future Noir circuits).
-//
-// Decryption assembles the joint sk = Σ sk_i only to verify correctness.
-// In production this step would be replaced by threshold decryption.
-//
-//   Parameters: 3 parties, 1 multiplication, 5×51-bit primes, degree 16384, k=1000.
+// Three parties use the secure16384 test profile and one multiplication level.
+// No share transport or threshold decryption: the joint sk = Σ sk_i is assembled
+// locally only to check correctness, not as a production protocol.
 
 #![allow(clippy::indexing_slicing, missing_docs)]
 
@@ -65,11 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     //   d₀_i[j] = −sk_i · d₁_j + e₀_{i,j} + g_j · r_i   (ksk_r_to_s, uses crp_d1)
     //   d₂_i[j] =  r_i · a_j  + e₂_{i,j} + g_j · sk_i   (ksk_s_to_r, uses crp_a)
     // r_i is an ephemeral key sampled locally and discarded after this call.
-    // All parties use the same crp_a so every a_j is identical across
-    // parties, and crp_a is the CRP for both the pk halves and the RLK d₂
-    // rows. Building both halves together per sk_i (rather than two separate
-    // lists) is what makes the downstream paired aggregation well-formed:
-    // zipping separate lists would silently truncate to the shorter one.
+    // Form both halves from the same sk_i; do not zip separately filtered lists.
     let key_pairs: Vec<(PublicKeyShare, RelinKeyShare)> = sk_shares
         .iter()
         .map(|sk_i| -> fhe::Result<(PublicKeyShare, RelinKeyShare)> {
@@ -85,21 +71,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Phase 2 — aggregation ─────────────────────────────────────────────────
     println!("\n# Phase 2 — aggregation");
 
-    // Aggregate the paired (pk_share, rlk_share) contributions of ONE
-    // selected contributor set: the public key is summed from the PK halves
-    // and the relinearization key from the RLK halves of exactly these pairs,
-    // so the two operational keys are always built from same-length
-    // submissions. A one-sided omission cannot be passed directly to this
-    // API; constructing both halves together above also avoids silently
-    // truncating separate lists before aggregation.
-    //
-    // Pairing is a caller discipline, not a cryptographic guarantee: it does
-    // not verify same-secret consistency (a future in-library capability:
-    // cryptographic proof verification of the relevant PK/RLK relations,
-    // once a proof system is defined — the existing RelinKeyWitness is
-    // generation-side material, not a proof), and deliberately mispaired
-    // tuples are undetectable here. Contributor authentication, admission,
-    // and duplicate policing remain integrator responsibilities.
+    // Pairing prevents one-sided omissions, not malicious inputs. Authentication,
+    // duplicate policy, and same-secret proof verification are not provided.
     let (aggregated_pk, rlk) = timeit!(
         "paired pk + rlk aggregation",
         aggregate_key_pair(key_pairs)?

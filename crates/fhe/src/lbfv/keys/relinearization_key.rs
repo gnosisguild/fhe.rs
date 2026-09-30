@@ -613,38 +613,13 @@ impl LBFVRelinearizationKey {
         })
     }
 
-    /// Generate a new relinearization key. This relinearization key is
-    /// generated using the key switching keys from r to s and s to r, following
-    /// the l-BFV relinearization algorithm in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
-    /// The first key switching key is generated using the seed `d1_seed` and
-    /// the second key switching key is generated using the seed `a_seed`. If
-    /// `d1_seed` is not provided, a new seed is generated. The key in the paper
-    /// follows (d0,d1,d2). In our implementation, (d0,d1) is the key switching
-    /// key from r to s and (d2, a) is the key switching key from s to r. Note,
-    /// it should be (d2, -a), but we negate 'r' to counteract the effects of
-    /// a positive 'a' since we do not want to go into the code and negate 'a'
-    /// itself. We only use d2  anyways so a not used positive 'a' is not a big
-    /// deal. We get (r*a + e + sk*g, a).
+    /// Generate a leveled key using `pk`'s CRS and a seeded URS `d1`.
+    /// If `d1_seed` is absent, draw one from `rng`.
     ///
-    /// # Arguments
-    /// * `sk` - The secret key to use for key generation
-    /// * `a_seed` - The seed for the key switching key from s to r
-    /// * `d1_seed` - The seed for the key switching key from r to s
-    /// * `ciphertext_level` - The level of the ciphertext to relinearize
-    /// * `key_level` - The level of the key to use for relinearization; must
-    ///   be 0 (the public-key CRS/b extraction contract is level-0), rejected
-    ///   before any key material is produced otherwise
-    /// * `rng` - The random number generator to use for key generation
-    ///
-    /// # Reference-string validation
-    ///
-    /// The URS `d1` and the CRS `a` are two shared reference strings that the
-    /// protocol must generate independently. Identical `d1_seed` and `a_seed`
-    /// values are rejected before any key material is produced. When the
-    /// public key carries a CRS seed, it must differ from `d1_seed`. These
-    /// equality checks catch observably reused randomness; they cannot
-    /// certify independence of deliberately correlated but unequal
-    /// randomness, which remains a protocol responsibility.
+    /// Requires `key_level == 0` and a ciphertext context with at least two
+    /// moduli. CRS seed metadata is checked against all consumed rows; a seedless
+    /// public key uses explicit rows. CRS/URS reuse is rejected, but independent
+    /// generation remains a protocol requirement (see [`crate::lbfv`]).
     pub fn new_leveled<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         pk: &LBFVPublicKey,
@@ -726,44 +701,16 @@ impl LBFVRelinearizationKey {
         Self::from_components(ksk_r_to_s, ksk_s_to_r, b_vec)
     }
 
-    /// Generate a new leveled relinearization key using explicit d1 polynomials.
+    /// Generate a leveled key from explicit URS rows and `pk`'s concrete CRS.
     ///
-    /// This is the explicit URS path: the caller provides the `d1` polynomials
-    /// directly and the `a` (CRS) polynomials are extracted from the public key's
-    /// concrete ciphertext polynomials. The caller cannot supply an unrelated `a`.
+    /// `d1_polys` must contain exactly `#moduli - ciphertext_level` `NttShoup`
+    /// rows, with no repeats or overlap with the CRS. Requires `key_level == 0`
+    /// and a ciphertext context with at least two moduli. Invalid rows are
+    /// rejected before secret computation; see [`crate::lbfv`] for independence.
     ///
-    /// # Reference-string validation
-    ///
-    /// The caller-supplied URS `d1_polys` must be pairwise distinct and must
-    /// not share any row with the public key's CRS `a` rows (all row-pairs are
-    /// compared, so cross-index collisions are rejected too). Rows are
-    /// validated before any secret-dependent computation, and the assembled
-    /// key is validated again before it is returned. The checks compare
-    /// concrete values only: they reject observably reused randomness but
-    /// cannot certify independence of deliberately correlated yet unequal
-    /// randomness.
-    ///
-    /// # Arguments
-    /// * `sk` - The secret key to use for key generation.
-    /// * `pk` - The l-BFV public key whose concrete `a` polynomials are used as
-    ///   CRS material.
-    /// * `d1_polys` - The explicit URS `d1` polynomials (in `NttShoup` form):
-    ///   exactly `#moduli − ciphertext_level` rows, the rows this level
-    ///   consumes. Any other count is rejected before any secret-dependent
-    ///   computation runs.
-    /// * `ciphertext_level` - The ciphertext level to relinearize at;
-    ///   supported levels are those whose context retains at least two
-    ///   moduli (`ciphertext_level < max_level`); the maximal level's
-    ///   single-modulus ciphertext context is rejected before construction.
-    /// * `key_level` - Must be 0: the public-key CRS/b extraction contract is
-    ///   level-0, and a nonzero key level is rejected before construction.
-    /// * `rng` - RNG for ephemeral `r` and the errors.
-    ///
-    /// The key is always built from the concrete rows, and this constructor
-    /// attaches no seed metadata: both key-switching keys serialize with
-    /// explicit `c1` rows even when the public key carries a CRS seed. Use
-    /// [`new_leveled_with_crp`](Self::new_leveled_with_crp) or
-    /// [`new_leveled`](Self::new_leveled) for the seed-preserving paths.
+    /// Both key-switching keys serialize with explicit rows, even for seeded
+    /// public keys. Use [`Self::new_leveled_with_crp`] or [`Self::new_leveled`]
+    /// to preserve seed metadata.
     pub fn new_leveled_with_polys<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         pk: &LBFVPublicKey,
@@ -786,49 +733,13 @@ impl LBFVRelinearizationKey {
         Self::from_components(ksk_r_to_s, ksk_s_to_r, b_vec)
     }
 
-    /// Generate a new leveled relinearization key using a [`CommonRandomPolyVec`]
-    /// for the URS `d1` polynomials.
+    /// Generate a leveled key from a URS [`CommonRandomPolyVec`] and `pk`'s CRS.
     ///
-    /// This is the CRP-vector variant of [`new_leveled_with_polys`](Self::new_leveled_with_polys).
-    /// The key consumes exactly the first `#moduli − ciphertext_level` rows of
-    /// `crp_d1` — the same prefix convention as the public-key CRS/b
-    /// extraction — converts them to `NttShoup`, and extracts the CRS `a`
-    /// polynomials from the public key as usual. Supported ciphertext levels
-    /// are those whose context retains at least two moduli
-    /// (`ciphertext_level < max_level`), with `key_level == 0`; unsupported
-    /// level combinations — a nonzero key level, or the maximal level's
-    /// single-modulus ciphertext context — are rejected before construction,
-    /// matching the public-key extraction contract.
-    ///
-    /// # Seed metadata policy
-    ///
-    /// The URS vector's optional master seed is preserved on the URS
-    /// key-switching key, and the public key's optional CRS seed is preserved
-    /// on the CRS key-switching key, only after the seed expansion is verified
-    /// against **every consumed concrete row**; a seed that contradicts any
-    /// row is rejected instead of silently accepted. Seedless CRP vectors and
-    /// seedless public keys remain fully explicit, and the concrete rows are
-    /// always authoritative: untrusted seed metadata never substitutes for
-    /// polynomial validation.
-    ///
-    /// # Reference-string validation
-    ///
-    /// The URS vector must be independent of the public key's CRS: rows
-    /// shared between the two reference strings are rejected before any key
-    /// material is produced.
-    ///
-    /// # Arguments
-    /// * `sk` - The secret key for key generation.
-    /// * `pk` - The l-BFV public key whose concrete `a` polynomials are used as
-    ///   CRS material.
-    /// * `crp_d1` - A [`CommonRandomPolyVec`] providing the URS `d1` polynomials.
-    /// * `ciphertext_level` - The ciphertext level to relinearize at;
-    ///   supported levels are those whose context retains at least two
-    ///   moduli (`ciphertext_level < max_level`); the maximal level's
-    ///   single-modulus ciphertext context is rejected before construction.
-    /// * `key_level` - Must be 0 (the CRP rows and the public-key extraction
-    ///   contract live at the level-0 context).
-    /// * `rng` - RNG for ephemeral `r` and the errors.
+    /// Uses the first `#moduli - ciphertext_level` URS rows. Level and
+    /// reference-string requirements match [`Self::new_leveled_with_polys`].
+    /// Optional URS/CRS seeds are preserved only after verification against every
+    /// consumed concrete row; contradictory metadata is rejected. Seedless inputs
+    /// remain explicit. Validation precedes RNG use and secret computation.
     pub fn new_leveled_with_crp<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         pk: &LBFVPublicKey,
@@ -837,10 +748,7 @@ impl LBFVRelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        // Validate the level combination and the URS row count before any
-        // RNG or secret-dependent work. The explicit-polynomial public-key
-        // CRS extraction contract supports any ciphertext level with
-        // key_level == 0; the same contract applies here.
+        // Reject unsupported levels and row counts before RNG or secret work.
         if ciphertext_level > sk.params.max_level() {
             return Err(Error::InvalidLevel {
                 level: ciphertext_level,

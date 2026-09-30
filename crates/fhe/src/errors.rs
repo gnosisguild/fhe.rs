@@ -20,7 +20,7 @@ pub enum Error {
     #[error("Math library error: {0}")]
     MathError(#[from] fhe_math::Error),
 
-    /// Legacy catch-all error (deprecated).
+    /// An uncategorized error message.
     #[error("{0}")]
     DefaultError(String),
 

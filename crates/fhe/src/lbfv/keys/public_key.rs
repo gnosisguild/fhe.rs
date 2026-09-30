@@ -176,25 +176,9 @@ impl LBFVPublicKey {
 
     /// Build a public key from a [`SecretKey`] and explicit CRS polynomials `a_j`.
     ///
-    /// This is the core operational constructor: the caller supplies the shared
-    /// `a_j` CRS polynomials (as a slice of NTT polynomials) and an optional
-    /// compression seed, and the helper computes `b_j = -a_j·sk + e_j` for each
-    /// `j`, then delegates to [`from_parts`](Self::from_parts).
-    ///
-    /// # Arguments
-    /// * `sk` - The secret key.
-    /// * `a_polynomials` - The `l` shared CRS polynomials `a_j`. The rows must
-    ///   be pairwise distinct: the CRS is one reference string of the l-BFV
-    ///   key generation, and repeated rows are rejected before any
-    ///   secret-dependent computation runs.
-    /// * `seed` - Optional compression metadata seed. When `None`, the key
-    ///   carries no seed.
-    /// * `rng` - RNG for sampling the error polynomials `e_j`.
-    ///
-    /// The CRS must also be generated independently of any URS `d1` used for
-    /// relinearization-key generation; key-generation entry points reject
-    /// shared rows, but they cannot certify independence of deliberately
-    /// correlated yet unequal randomness.
+    /// Computes `b_j = -a_j * sk + e_j` for one pairwise-distinct CRS row per
+    /// modulus, then validates the key with [`Self::from_parts`]. `seed` is
+    /// optional compression metadata; CRS/URS independence follows [`crate::lbfv`].
     pub(crate) fn from_crs<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         a_polynomials: &[Poly<Ntt>],
@@ -261,23 +245,10 @@ impl LBFVPublicKey {
 
     /// Build an [`LBFVPublicKey`] from explicit `b` and `a` polynomials.
     ///
-    /// This is the on-chain URS constructor: the caller supplies the
-    /// polynomials directly rather than deriving them from a seed. Both vectors
-    /// are consumed because the resulting key owns the rows; [`Self::new_with_crp`]
-    /// borrows its shared CRS input because callers may reuse it across parties.
-    ///
-    /// # Arguments
-    /// * `b_polynomials` - The `l` b-polynomials `(b₀, …, bₗ₋₁)` where
-    ///   `bⱼ = -aⱼ·sk + eⱼ`.
-    /// * `a_polynomials` - The `l` shared CRS polynomials `(a₀, …, aₗ₋₁)`.
-    ///   These are the *concrete* shared-input polynomials whose equality must
-    ///   be verifiable across all contributions and between the public key and
-    ///   the relinearization key. Must be at the same context as the
-    ///   `b_polynomials`, and must be pairwise distinct: repeated CRS rows are
-    ///   rejected.
-    /// * `seed` - Optional CRS seed for backwards compatibility. When `None`,
-    ///   the key carries no seed and polynomial-level comparisons are the sole
-    ///   consistency check.
+    /// Consumes one `(b_j, a_j)` pair per modulus, all at the level-0 context.
+    /// CRS `a` rows must be pairwise distinct. Optional `seed` metadata must
+    /// reproduce all concrete CRS rows; seedless keys serialize explicitly.
+    /// Structural validation does not prove the relation `b_j = -a_j * sk + e_j`.
     pub fn from_parts(
         b_polynomials: Vec<Poly<Ntt>>,
         a_polynomials: Vec<Poly<Ntt>>,
@@ -588,23 +559,9 @@ impl LBFVPublicKey {
         Ok(ct)
     }
 
-    /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
-    ///
-    /// This method extracts the first l = # moduli - ciphertext level, c\[0\] components from each ciphertext in the public key,
-    /// mod switches them to the key level, and converts them to the specified representation.
-    ///
-    /// # Arguments
-    /// * `ciphertext_level` - The level of the ciphertext that will use these polynomials
-    /// * `key_level` - The level of the key that will be used (currently must be 0)
-    /// * `rep` - The desired representation for the output polynomials
-    ///
-    /// # Returns
-    /// * `Ok(Vec<Poly>)` - A vector of polynomials in the specified representation at the target level
-    /// * `Err` if:
-    ///   - The requested ciphertext level is greater than the maximum level
-    ///   - The key level is not 0 (current limitation)
-    ///   - The public key is not at level 0
-    ///   - Any polynomial operations fail during mod switching or representation changes
+    /// Extract the first `#moduli - ciphertext_level` public-key `b` rows.
+    /// Requires a level-0 public key, `key_level == 0`, and `rep == NttShoup`;
+    /// invalid levels, representations, or key structure return an error.
     // self.c[0..new_l] is always valid (self.c has self.l elements, new_l <= self.l)
     pub fn extract_b_polynomials(
         &self,
@@ -624,8 +581,6 @@ impl LBFVPublicKey {
             });
         }
 
-        // Note: this may seem redundant, but it's because in the future, we want to experiment with different key levels
-        // for the public key.
         if key_level != 0 {
             return Err(Error::InvalidLevel {
                 level: key_level,
@@ -648,8 +603,7 @@ impl LBFVPublicKey {
             ));
         }
 
-        // Note: key switching is redundant for now.
-        // Create switcher to mod switch from initial to final context (for when public key is at different level than ciphertext)
+        // Align extracted rows with the key context if switching is needed.
         let ciphertext_ctx = self.params.context_at_level(ciphertext_level)?;
         let switcher = Switcher::new(ciphertext_ctx, key_ctx)?;
 

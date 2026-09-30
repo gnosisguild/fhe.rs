@@ -130,18 +130,10 @@ unsafe impl Send for BfvParameters {}
 impl BfvParameters {
     /// Maximum number of ciphertext moduli a single parameter set may hold.
     ///
-    /// This count is a documented resource policy, not a security guarantee and
-    /// not a budget on total construction work: parameter construction builds a
-    /// ciphertext context, a cipher/plaintext bridge, and a multiplication
-    /// context per modulus-switching level, so the moduli count dominates the
-    /// cost of building parameters and of deserializing untrusted
-    /// protobuf-encoded ones. The cap is sized to keep the largest built-in
-    /// [`Self::default_parameters_128`] preset (degree 32768, 16 moduli) and
-    /// the supported large degree-16384 preset (9 moduli) constructible.
-    ///
-    /// Callers processing untrusted input must still bound the polynomial
-    /// degree and gate deserialized parameters before use; the global
-    /// serialized-byte cap (`fhe_traits::MAX_SERIALIZED_BYTES`) is unchanged.
+    /// A resource policy, not a security or total-work guarantee: each level
+    /// requires contexts and scalers. Applications accepting untrusted parameters
+    /// must also budget degree and construction cost. The cap admits all built-in
+    /// [`Self::default_parameters_128`] presets.
     pub const MAX_CIPHERTEXT_MODULI: usize = 16;
 
     /// Returns the underlying polynomial degree

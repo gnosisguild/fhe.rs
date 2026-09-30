@@ -770,8 +770,7 @@ mod tests {
         let a = params.plaintext();
         let q = fhe_math::zq::Modulus::new(a).unwrap();
         let mut a_vec = q.random_vec(params.degree(), &mut rng);
-        // Always exercise the centering boundary values, which previously made
-        // this test flaky when hit by chance.
+        // Exercise both centering boundary values deterministically.
         a_vec[0] = a / 2;
         a_vec[1] = a.div_ceil(2);
 

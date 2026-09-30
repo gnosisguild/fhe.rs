@@ -1,4 +1,4 @@
-//! Issue #252 regression tests: a plaintext modulus larger than `u64::MAX`
+//! A plaintext modulus larger than `u64::MAX`
 //! is supported by plain BFV, but the threshold entry points
 //! `SmudgingNoiseGenerator::new` and `ShareManager::decrypt_from_shares`
 //! reject it with a typed `ParametersError::UnsupportedPlaintextModulus`

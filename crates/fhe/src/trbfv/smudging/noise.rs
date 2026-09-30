@@ -37,24 +37,10 @@ pub struct SmudgingNoiseGenerator {
 impl SmudgingNoiseGenerator {
     /// Calculate the bound and create a noise generator.
     ///
-    /// Implements the trBFV security formula: `B_sm = 2^(lambda + 1) * d * B_C`
-    /// (`d` = polynomial degree). The union bound over the `d` coefficients a
-    /// single decryption reveals contributes the degree factor; the remaining
-    /// factor `2` beyond `2^lambda` is conservative slack in the hiding
-    /// policy, not a term of the correctness inequality (see issue #108).
-    /// Subject to the strict correctness constraint
-    /// `2 * (B_C + n * B_sm) < Delta` where `Delta = floor(Q / t)`.
-    ///
-    /// The initial ciphertext-noise bound is
-    /// `B_C^(0) = m * (B_fresh + Q mod t)`: the configuration's upper bound
-    /// on fresh ciphertexts added together before the modelled circuit, where
-    /// each of the up-to-`m` summed terms contributes at most its own fresh
-    /// decryption noise plus the plaintext-rounding term `Q mod t`. The
-    /// per-term fresh-ciphertext noise bound `B_fresh` is selected by the
-    /// configuration's [`FreshNoiseModel`](super::FreshNoiseModel): the model
-    /// must describe the encryption path that actually produced the input
-    /// ciphertexts (issue #250). Multiplicative depth then grows `B_C` with
-    /// the Prop. 20 recursion, independently of the model.
+    /// Uses `B_C[0] = m * (B_fresh + Q mod t)` and the paper's Prop. 20
+    /// multiplication recursion, then `B_sm = 2^(lambda + 1) * degree * B_C`.
+    /// Requires `2 * (B_C + n * B_sm) < floor(Q / t)` strictly.
+    /// See [`SmudgingConfig`] for circuit and noise-model assumptions.
     ///
     /// # Errors
     /// Returns error if:
@@ -81,10 +67,7 @@ impl SmudgingNoiseGenerator {
         if moduli.is_empty() {
             return Err(Error::smudging_bound_infeasible("moduli slice is empty"));
         }
-        // The bound arithmetic below (Delta and the Prop. 20 recursion) binds
-        // the plaintext modulus to a machine word, so a plaintext modulus
-        // larger than `u64` is rejected here, before any plaintext access or
-        // bound computation — including for depth-zero circuits (issue #252).
+        // Bound arithmetic requires a machine-word plaintext modulus, even at depth zero.
         let t_u64 = config.params.plaintext.as_u64().ok_or_else(|| {
             Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
                 reason: "threshold BFV smudging bound requires a u64 plaintext modulus".to_string(),
@@ -116,11 +99,6 @@ impl SmudgingNoiseGenerator {
         let variance = config.params.variance();
         let b_e = BigUint::from((2 * variance) as u64);
 
-        // B_fresh from the caller-selected fresh-noise model:
-        // BfvPublicKey:       d·1·‖e_ek‖ + B_enc + d·B_e·‖sk‖
-        // LbfvPublicKey:      d·(2·variance)·‖e_ek‖ + B_enc + d·B_e·‖sk‖
-        // BfvSecretKey:       B_e (no randomness u, single small error)
-        // Custom:             the caller-justified bound itself
         let b_fresh = config.fresh_noise_bound()?;
 
         // Q = product of all moduli
@@ -163,8 +141,6 @@ impl SmudgingNoiseGenerator {
                     .max()
                     .ok_or_else(|| Error::smudging_bound_infeasible("moduli slice is empty"))?,
             );
-            // Reuse the single validated machine-word plaintext modulus for
-            // the recursion coefficient `k` (issue #252).
             let k = BigUint::from(t_u64);
             let n_sk = BigUint::from(config.n as u64);
 
@@ -187,21 +163,9 @@ impl SmudgingNoiseGenerator {
             b_c_additive
         };
 
-        // --- Compute B_sm = 2^(lambda + 1) * d * B_C
-        //
-        // Statistical-hiding argument (issue #108): the integer smudging
-        // noise is uniform on `[-B_sm, B_sm]`, and one decryption reveals all
-        // `d` (= degree) coefficients of that noise at once. Hiding two
-        // honest noise shifts `x`, `y` with `|x|, |y| <= B_C` costs at most
-        // `min(1, 2 * B_C / (2 * B_sm + 1))` total variation distance per
-        // coefficient; the union bound over the `d` revealed coefficients
-        // multiplies this by the degree factor `d`. The remaining factor `2`
-        // beyond `2^lambda` is conservative slack in the policy, not a term
-        // of the correctness inequality. For `B_C > 0` the resulting
-        // single-transcript distance is numerically below `2^-(lambda + 1)`;
-        // `lambda` itself stays a caller-selected policy.
-        // Use BigUint shift to avoid usize → u32 truncation.
-        // `lambda` was already validated against MAX_LAMBDA above.
+        // The degree factor covers all revealed coefficients; the extra 2 is
+        // statistical-hiding slack, not part of the correctness inequality.
+        // Shift by the validated usize lambda without narrowing to u32.
         let two_pow_lambda_plus_one = BigUint::from(1_u64) << (lambda + 1);
         let b_sm = two_pow_lambda_plus_one * &d * &b_c;
 
@@ -262,18 +226,10 @@ fn limbs_mod(limbs: &[u64], qi: &Modulus) -> u64 {
 
 /// Freshly sampled smudging noise with private wipe-on-drop storage.
 ///
-/// The underlying polynomial is private and the owner is consumed by the
-/// smudging dealing operation
-/// ([`ShareManager::generate_smudging_shares`](crate::trbfv::ShareManager::generate_smudging_shares)).
-/// There is intentionally no `Clone`, `Copy`, coefficient accessor, or
-/// generic serialization: duplicating one-time noise across decryptions
-/// breaks the statistical hiding argument.
-///
-/// The owner also carries the binding of the generator that sampled it: the
-/// party count and the complete BFV parameter set. The dealing operation
-/// verifies this binding before accepting the noise, and the metadata is
-/// unreachable from outside the crate, so it cannot be mutated to make
-/// foreign noise look legitimate.
+/// Consumed by [`crate::trbfv::ShareManager::generate_smudging_shares`], which
+/// checks its immutable party-count and BFV-parameter binding. No cloning,
+/// coefficient access, or serialization is exposed: reusing this noise across
+/// decryptions breaks statistical hiding.
 ///
 /// ```compile_fail
 /// # use fhe::trbfv::{ShareManager, SmudgingNoise};
@@ -413,25 +369,10 @@ impl Drop for GuardedMatrix {
 impl SmudgingNoiseGenerator {
     /// Generate smudging noise using the calculated bound.
     ///
-    /// Each coefficient is sampled exactly uniformly from `[-B_sm, B_sm]`, as
-    /// specified for the smudging noise in the trBFV paper, and written
-    /// directly into RNS representation: with `M = 2 * B_sm + 1`, a candidate
-    /// `u` is drawn uniformly from `[0, M)` by rejection sampling into a
-    /// runtime-sized wipe-on-drop limb buffer, and the same accepted `u` is
-    /// reduced under every RNS modulus as
-    /// `(u mod q_i - B_sm mod q_i) mod q_i`.
-    ///
-    /// The secret-dependent arithmetic is constant-time: the rejection
-    /// comparison is branch-free, reductions use the modulus' Barrett
-    /// reduction instead of `u128` division, and the centered subtraction is
-    /// a constant-time modular addition. The rejection loop count depends
-    /// only on the RNG stream, never on the accepted values.
-    ///
-    /// # Returns
-    /// A non-cloneable owner of the sampled noise polynomial, consumed by
-    /// the smudging dealing operation. The owner records this generator's
-    /// party count and BFV parameters so the dealing operation can reject
-    /// noise sampled for a different committee or configuration.
+    /// Samples centered-uniform coefficients in `[-B_sm, B_sm]` into RNS form,
+    /// returning a one-time [`SmudgingNoise`] owner. Each accepted integer is
+    /// reduced under every modulus; secret arithmetic is constant-time.
+    /// Rejection count depends on the RNG stream, not accepted values.
     pub fn generate<R: RngCore + CryptoRng>(&self, rng: &mut R) -> Result<SmudgingNoise, Error> {
         let ctx = self.params.context_at_level(0)?;
         let degree = self.params.degree();
@@ -636,12 +577,7 @@ mod tests {
         assert_eq!(compute_b_enc(&variance).unwrap(), expected);
     }
 
-    /// Issue #255: the circuit size `m` is the worst fan-in of
-    /// fresh-ciphertext additions performed *before* the modelled circuit,
-    /// not a count of outputs or independent decryptions. A circuit with no
-    /// pre-sum (a single fresh ciphertext, or a pure product of fresh
-    /// ciphertexts) uses `m = 1`; the mixed circuit `(a + b) * c` uses
-    /// `m = 2` because its left branch sums two fresh ciphertexts.
+    /// Circuit size tracks fresh-input pre-sums, not outputs or decryptions.
     #[test]
     fn circuit_size_records_pre_sum_fan_in() {
         let params = small_params(&[62, 62, 62]);
@@ -778,9 +714,7 @@ mod tests {
 
     #[test]
     fn lambda_at_max_is_not_truncated() {
-        // Six moduli leave enough correctness budget for MAX_LAMBDA. The
-        // former secure8192 fixture rejected the configuration, skipping its
-        // only assertion.
+        // Six moduli leave enough correctness budget to exercise MAX_LAMBDA.
         let params = small_params(&[62; 6]);
         let config = SmudgingConfig::new(
             params.clone(),
@@ -1033,7 +967,7 @@ mod tests {
         (BigUint::from(1_u64) << (lambda + 1)) * &d * &b_c
     }
 
-    /// Issue #250 at depth zero: the l-BFV public-key path samples `u` with
+    /// At depth zero, the l-BFV public-key path samples `u` with
     /// `Poly::small(variance)` (support `2 * variance`), so its bound must be
     /// strictly larger than the ternary BFV public-key bound, and both must
     /// match the documented formula exactly.
@@ -1063,9 +997,7 @@ mod tests {
         assert_eq!(bound_bfv, expected_bound(&params, n, m, lambda, &ternary));
         assert_eq!(bound_lbfv, expected_bound(&params, n, m, lambda, &cbd));
 
-        // The u-support difference alone is material at depth 0 for this
-        // preset's arithmetic: the review of issue #250 estimated a ~2.9x
-        // fresh-bound underestimate.
+        // The wider u support more than doubles this profile's depth-zero bound.
         assert!(
             bound_lbfv > BigUint::from(2_u32) * &bound_bfv,
             "l-BFV bound {bound_lbfv} must exceed 2x the BFV bound {bound_bfv}"
@@ -1274,7 +1206,7 @@ mod tests {
     /// `n * (2 * variance)` must neither panic nor wrap into an understated
     /// public-key error bound: the bound is computed as a BigUint product, so
     /// the huge configuration is rejected by the feasibility checks with a
-    /// typed error instead (both public-key models, issue #250 review).
+    /// typed error instead for both public-key models.
     #[test]
     fn huge_party_count_does_not_truncate_public_key_error() {
         let params = small_params(&[62]);

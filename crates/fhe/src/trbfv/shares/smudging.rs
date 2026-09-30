@@ -104,14 +104,10 @@ impl std::fmt::Debug for SmudgingShare {
 /// One aggregate smudging share for one decryption.
 ///
 /// The owner is consumed by [`super::ShareManager::decryption_share`]. It is
-/// not serializable and has no public export or proof-witness accessor; an
-/// external crate cannot implement a consuming adapter for this opaque owner.
-/// Applications may transport individual [`SmudgingShare`] matrices and
-/// re-aggregate them after a restart, but that can recreate the same noise
-/// from copied data. The integrator must bind such material to one ciphertext
-/// and decryption domain and durably prevent reuse across retries and restarts.
-/// Proof-witness orchestration is likewise outside this crate's supported
-/// aggregate-owner API.
+/// not serializable and exposes no export or proof-witness accessor. Transported
+/// [`SmudgingShare`] matrices can recreate the same noise on re-aggregation;
+/// callers must bind them to one ciphertext/decryption domain and prevent replay
+/// durably across retries and restarts.
 ///
 /// ```compile_fail
 /// # use fhe::trbfv::AggregatedSmudgingShare;

@@ -1,34 +1,10 @@
 // Threshold BFV multiplication with distributed l-BFV RLK and encrypted share transport.
 //
-// Smudging noise is computed via the smudging machinery with
-// smudging configuration uses `num_parties` as the conservative RLK bound so the
-// accepted l-BFV participant count is explicit in the smudging bound. Paper-conforming
-// robustness requires odd n = 2t + 1; even n is accepted for compatibility but lies
-// outside the theorem.
-//
-// Two BFV parameter sets:
-//
-//   First set  (computation) — n=20, z=3, k=1000, d=16384, 5×51-bit moduli, λ=31.
-//
-//   Second set (share encryption) — k = q[0] of first set = max(q_i) ≈ 2^50,
-//              d=16384, 2×53-bit moduli. Exact share transport requires the
-//              share-encryption plaintext modulus k to exceed every transported
-//              canonical residue r ∈ [0, q_i): BFV encoding reduces coefficients
-//              modulo k, so a residue r ≥ k would silently wrap to r mod k in
-//              transit. This preset satisfies the requirement exactly by
-//              setting k = q[0] = max(q_i), so each share value lies in
-//              [0, q_i) ⊆ [0, k) and encodes directly as a BFV plaintext.
-//              BFV decrypt is correct because k ≈ 2^50 < q₀/2 ≈ 2^51  ✓
-//
-// Protocol:
-//  1. Each party generates: an l-BFV pk share, an l-BFV RLK share, Shamir shares of
-//     sk and smudging error, and a share-encryption BFV key pair (second set).
-//  2. Share-encryption public keys are published. Each party BFV-encrypts its Shamir
-//     shares for every receiver under the receiver's share-encryption key.
-//  3. Each receiver decrypts and aggregates the collected shares to reconstruct
-//     its Lagrange evaluation point of the combined secret key SK = Σ sk_j.
-//  4. Two values are encrypted under the aggregated l-BFV pk, multiplied and
-//     relinearized using the aggregated RLK, then threshold-decrypted by t+1 parties.
+// Uses secure16384 computation and transport profiles from support/presets.rs.
+// The transport plaintext modulus must be >= max(q_i), so canonical Shamir
+// residues encode without reduction. Smudging conservatively bounds all parties'
+// RLK contributions. Only odd committees match the paper's n = 2t + 1 model.
+// Local simulation only; see src/trbfv/README.md for the protocol boundary.
 
 #![allow(clippy::indexing_slicing, missing_docs)]
 
@@ -171,18 +147,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap()
                     .into_transport();
 
-                // Smudging noise shares (depth=3 multiplications, accepted
-                // l-BFV participant count = num_parties). The decrypted
-                // circuit is the pure product `((a×b)×c)×d` of four fresh
-                // ciphertexts with no pre-sum, so the tight circuit size is
-                // m=1 (each multiplication branch carries one fresh
-                // ciphertext's noise); m=3 is retained as an explicit
-                // conservative overprovision matching the secure16384 design
-                // point — overprovisioning only inflates the smudging bound.
-                // The multiplied ciphertexts are encrypted with the
-                // aggregated l-BFV public key, whose `Poly::small(variance)`
-                // encryption randomness the LbfvPublicKey model assumes
-                // (issue #250).
+                // Pure product ((a*b)*c)*d: depth 3, tight m=1. Use m=3 as a
+                // conservative overprovision for this profile, with the l-BFV
+                // model matching its wider encryption randomness.
                 let config = SmudgingConfig::new(
                     params_trbfv.clone(),
                     num_parties,
