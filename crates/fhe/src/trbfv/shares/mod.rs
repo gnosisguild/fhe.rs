@@ -1607,6 +1607,13 @@ mod tests {
             DecryptionShare::from_parts(Poly::<PowerBasis>::zero(ctx), party_id, decryptors, &ct)
                 .unwrap()
         };
+        let invalid_party_id = |party_id: usize, valid_party_id: usize, decryptors: Vec<usize>| {
+            let mut share = dummy(valid_party_id, decryptors);
+            // Model a malformed/deserialized share that bypassed `from_parts`;
+            // constructor-level validation is covered separately.
+            share.party_id = party_id;
+            share
+        };
         let decryptors = vec![1usize, 2, 3];
 
         let shares = vec![
@@ -1618,7 +1625,7 @@ mod tests {
         assert!(result.is_err());
 
         let shares = vec![
-            dummy(0, decryptors.clone()),
+            invalid_party_id(0, 1, decryptors.clone()),
             dummy(1, decryptors.clone()),
             dummy(2, decryptors.clone()),
         ];
@@ -1628,7 +1635,7 @@ mod tests {
         let shares = vec![
             dummy(1, decryptors.clone()),
             dummy(2, decryptors.clone()),
-            dummy(6, decryptors.clone()),
+            invalid_party_id(6, 1, decryptors.clone()),
         ];
         let result = manager.decrypt_from_shares(&shares, &ct);
         assert!(result.is_err());
