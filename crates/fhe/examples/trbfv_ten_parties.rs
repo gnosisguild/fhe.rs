@@ -1,15 +1,19 @@
-//! Threshold decryption of two independent ciphertexts.
+//! Two independent threshold decryptions with a ten-party committee.
 //!
-//! Committee PRF keys are sampled once. Each ciphertext is decrypted on its
-//! own: fresh local smudging, a digest `H(S, ct)`, and a mask `r_i^{S,ct}`
+//! Committee PRF keys are sampled once for this local simulation/trusted setup.
+//! A distributed deployment must establish matching keys and securely
+//! distribute each party's bundle externally. Each ciphertext is decrypted on
+//! its own: fresh local smudging, a digest `H(S, ct)`, and a mask `r_i^{S,ct}`
 //! from that digest. The two masks differ because the digest includes `ct`.
+//! Five of the ten parties participate, which is the minimum for threshold 4.
 //!
 //! ```text
-//! cargo run --release --example trbfv_two_ciphertexts
+//! cargo run --release --example trbfv_ten_parties
 //! ```
 //!
 //! Uses the insecure degree-128 profile so the Poseidon2 PRF finishes quickly.
-//! Not for production.
+//! The even-sized committee is also outside the current threshold theorem.
+//! This is a mechanics demo, not for production.
 
 #![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 
@@ -28,6 +32,10 @@ use fhe::{
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::{Array2, ArrayView};
 use rand::CryptoRng;
+
+const N_PARTIES: usize = 10;
+const THRESHOLD: usize = 4;
+const RECONSTRUCTING_PARTIES: usize = THRESHOLD + 1;
 
 fn encrypt_u64<R: CryptoRng>(value: u64, pk: &PublicKey, rng: &mut R) -> Ciphertext {
     let pt = Plaintext::try_encode(&[value], Encoding::poly(), &pk.params).unwrap();
@@ -66,16 +74,16 @@ fn decrypt_one(
 fn main() -> Result<(), Box<dyn Error>> {
     let preset = support::presets::insecure()?;
     let params = preset.parameters.clone();
-    let n = 3;
-    let threshold = 1;
     let num_ciphertexts = 2;
     let mut rng = rand::rng();
 
-    println!("# Two independent threshold decryptions");
-    println!("\tn = {n}, threshold = {threshold}, m = {num_ciphertexts}");
+    println!("# Two independent threshold decryptions with ten parties");
+    println!(
+        "\tn = {N_PARTIES}, threshold = {THRESHOLD}, decryptors = {RECONSTRUCTING_PARTIES}, m = {num_ciphertexts}"
+    );
     println!("\tPRF keys sampled once; each ciphertext gets its own H(S, ct) mask");
 
-    let manager = ShareManager::new(n, threshold, params.clone())?;
+    let manager = ShareManager::new(N_PARTIES, THRESHOLD, params.clone())?;
     let secret_key = SecretKey::random(&params, &mut rng);
     let public_key = PublicKey::new(&secret_key, &mut rng);
     let sk_poly = manager.coeffs_to_poly_level0(secret_key.coeffs.as_ref())?;
@@ -84,8 +92,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .into_transport();
 
     let degree = params.degree();
-    let mut sk_aggregates = Vec::with_capacity(n);
-    for party_index in 0..n {
+    let mut sk_aggregates = Vec::with_capacity(N_PARTIES);
+    for party_index in 0..N_PARTIES {
         let mut node_share = Array2::zeros((0, degree));
         for share in sk_shares.iter().take(params.moduli().len()) {
             node_share.push_row(ArrayView::from(share.row(party_index)))?;
@@ -96,10 +104,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    // Same committee keys for every ciphertext.
-    let prf_keys = PartyPrfKeys::generate_committee(n, &mut rng)?;
-    let reconstructing = vec![1usize, 2];
-    let config = SmudgingConfig::new(params.clone(), n, num_ciphertexts, preset.lambda)?;
+    // The first threshold + 1 parties reconstruct from the ten-party committee.
+    let reconstructing: Vec<usize> = (1..=RECONSTRUCTING_PARTIES).collect();
+    let prf_keys = PartyPrfKeys::generate_committee(N_PARTIES, &mut rng)?;
+    let config = SmudgingConfig::new(params.clone(), N_PARTIES, num_ciphertexts, preset.lambda)?;
     let generator = SmudgingNoiseGenerator::new(config)?;
 
     let ct_left = encrypt_u64(7, &public_key, &mut rng);
