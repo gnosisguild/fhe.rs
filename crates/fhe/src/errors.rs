@@ -215,13 +215,11 @@ pub enum ThresholdError {
     /// Smudging noise was sampled under a different committee or parameters
     /// than the share manager that consumes it.
     #[error(
-        "smudging noise was sampled for n = {actual_n}, lambda = {actual_lambda}, but the manager has n = {expected_n}"
+        "smudging noise was sampled for different BFV parameters or committee size (noise n = {actual_n}, manager n = {expected_n})"
     )]
-    SmudgingPolicyMismatch {
+    SmudgingConfigurationMismatch {
         /// Party count stamped on the noise
         actual_n: usize,
-        /// Statistical-security parameter stamped on the noise
-        actual_lambda: usize,
         /// Party count of the share manager
         expected_n: usize,
     },

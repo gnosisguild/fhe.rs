@@ -66,16 +66,11 @@ impl Error {
         })
     }
 
-    /// Create a smudging-policy mismatch error.
+    /// Create a smudging-configuration mismatch error.
     #[must_use]
-    pub fn smudging_policy_mismatch(
-        actual_n: usize,
-        actual_lambda: usize,
-        expected_n: usize,
-    ) -> Self {
-        Error::Threshold(ThresholdError::SmudgingPolicyMismatch {
+    pub fn smudging_configuration_mismatch(actual_n: usize, expected_n: usize) -> Self {
+        Error::Threshold(ThresholdError::SmudgingConfigurationMismatch {
             actual_n,
-            actual_lambda,
             expected_n,
         })
     }
@@ -166,15 +161,18 @@ mod tests {
             Error::Threshold(ThresholdError::SmudgingBoundInfeasible { .. })
         ));
 
-        let error = Error::smudging_policy_mismatch(1, 0, 3);
+        let error = Error::smudging_configuration_mismatch(1, 3);
         assert!(matches!(
             error,
-            Error::Threshold(ThresholdError::SmudgingPolicyMismatch {
+            Error::Threshold(ThresholdError::SmudgingConfigurationMismatch {
                 actual_n: 1,
-                actual_lambda: 0,
                 expected_n: 3,
             })
         ));
+        assert_eq!(
+            error.to_string(),
+            "Threshold error: smudging noise was sampled for different BFV parameters or committee size (noise n = 1, manager n = 3)"
+        );
 
         let error = Error::inconsistent_decryption_shares();
         assert!(matches!(

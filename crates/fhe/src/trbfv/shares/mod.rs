@@ -357,10 +357,9 @@ impl ShareManager {
         prf_keys: &PartyPrfKeys,
     ) -> Result<DecryptionShare, Error> {
         self.validate_ciphertext(ciphertext)?;
-        if !noise.matches_manager(self.n, &self.params) {
-            return Err(Error::smudging_policy_mismatch(
-                noise.policy_n(),
-                noise.policy_lambda(),
+        if !noise.matches_configuration(self.n, &self.params) {
+            return Err(Error::smudging_configuration_mismatch(
+                noise.committee_size(),
                 self.n,
             ));
         }
@@ -667,7 +666,6 @@ mod tests {
         SmudgingNoise::from_poly(
             Zeroizing::new(Poly::<PowerBasis>::zero(ctx)),
             n,
-            0,
             params.clone(),
         )
     }
@@ -1661,7 +1659,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decryption_share_rejects_mismatched_smudging_policy() {
+    fn test_decryption_share_rejects_mismatched_smudging_configuration() {
         let mut rng = rng();
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
@@ -1684,7 +1682,7 @@ mod tests {
                 &prf_keys[0],
             )
             .unwrap_err();
-        assert_eq!(err, Error::smudging_policy_mismatch(1, 0, 3));
+        assert_eq!(err, Error::smudging_configuration_mismatch(1, 3));
     }
 
     #[test]
