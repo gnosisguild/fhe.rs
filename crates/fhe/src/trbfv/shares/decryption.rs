@@ -36,9 +36,17 @@ impl DecryptionShare {
     pub fn from_parts(
         poly: Poly<PowerBasis>,
         party_id: usize,
-        decryptors: Vec<usize>,
+        mut decryptors: Vec<usize>,
         ciphertext: &Ciphertext,
     ) -> Result<Self, Error> {
+        decryptors.sort_unstable();
+        if let Some(duplicate) = decryptors.windows(2).find_map(|pair| {
+            let first = pair.first()?;
+            let second = pair.get(1)?;
+            (first == second).then_some(*first)
+        }) {
+            return Err(Error::duplicate_party_id(duplicate));
+        }
         let digest = context_digest(&decryptors, ciphertext)?;
         Ok(Self {
             poly,

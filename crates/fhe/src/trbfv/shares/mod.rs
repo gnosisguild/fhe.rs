@@ -1711,16 +1711,28 @@ mod tests {
             &prf_keys[0],
             &params,
         );
-        let (poly, party_id, decryptors) = original.clone().into_parts();
+        let (poly, party_id, mut decryptors) = original.clone().into_parts();
         assert_eq!(poly, original.poly);
         assert_eq!(party_id, 1);
         assert_eq!(decryptors.as_slice(), &reconstructing);
+        decryptors.reverse();
         let restored =
             crate::trbfv::DecryptionShare::from_parts(poly, party_id, decryptors, &ct).unwrap();
         assert_eq!(restored.poly, original.poly);
         assert_eq!(restored.party_id, original.party_id);
         assert_eq!(restored.decryptors, original.decryptors);
         assert_eq!(restored.digest, original.digest);
+        assert!(matches!(
+            crate::trbfv::DecryptionShare::from_parts(
+                original.poly.clone(),
+                original.party_id,
+                vec![1, 2, 1],
+                &ct,
+            ),
+            Err(Error::Threshold(ThresholdError::DuplicatePartyId {
+                party_id: 1
+            }))
+        ));
         let other = part_dec(
             &manager,
             &ct,
