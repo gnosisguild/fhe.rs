@@ -30,11 +30,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut product = &ct1 * &ct2_rgsw;
     let mut expected = &ct1 * &ct2;
 
-    println!("Noise in product: {}", unsafe {
+    println!("Noise in expected: {}", unsafe {
         sk.measure_noise(&expected)?
     });
     println!("Size of product: {} bytes", product.to_bytes().len());
-    println!("Noise in expected: {}", unsafe {
+    println!("Noise in product: {}", unsafe {
         sk.measure_noise(&product)?
     });
 

@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::{SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
+use fhe::trbfv::{
+    FreshNoiseModel, SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
+};
 use fhe_traits::{FheEncoder, FheEncrypter};
 use ndarray::Array2;
 use rand::SeedableRng;
@@ -67,7 +69,8 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
             })
             .collect();
 
-        let public_key = PublicKey::new(&secret_key, &mut setup_rng);
+        let public_key = PublicKey::new(&secret_key, &mut setup_rng)
+            .expect("public-key generation must succeed");
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params)
             .expect("plaintext encoding must succeed");
         let ciphertext: Arc<Ciphertext> = Arc::new(
@@ -76,8 +79,14 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
                 .expect("encryption must succeed"),
         );
         let prf_keys = support::examples::simulated_committee_prf_keys(party_count, &mut setup_rng);
-        let smudging_config = SmudgingConfig::new(params.clone(), party_count, 1, 0)
-            .expect("zero-security smudging configuration must be valid");
+        let smudging_config = SmudgingConfig::new(
+            params.clone(),
+            party_count,
+            1,
+            0,
+            FreshNoiseModel::BfvPublicKey,
+        )
+        .expect("zero-security smudging configuration must be valid");
         let smudging_generator =
             SmudgingNoiseGenerator::new(smudging_config).expect("smudging generator must be valid");
         let party_ids: Vec<_> = (1..=threshold + 1).collect();

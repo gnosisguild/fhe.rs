@@ -5,7 +5,9 @@ mod public_key;
 mod relinearization_key;
 mod secret_key;
 
-pub use evaluation_key::{EvaluationKey, EvaluationKeyBuilder};
+pub use evaluation_key::{
+    EvaluationKey, EvaluationKeyBuilder, EvaluationKeyDecodeRequest, GaloisKeySpec, SeedPolicy,
+};
 pub use galois_key::GaloisKey;
 pub use key_switching_key::KeySwitchingKey;
 pub use public_key::{EncryptionIntermediates, PublicKey, PublicKeyGenerationIntermediates};

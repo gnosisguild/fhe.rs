@@ -2,19 +2,9 @@
 // "Robust Multiparty Computation from Threshold Encryption Based on RLWE"
 // https://eprint.iacr.org/2024/1285
 //
-// Protocol (single key type, as in the paper):
-//   Each party holds sk_i. There is ONE public key: the l-BFV pk.
-//   - Encryption uses pk.c[0]  = (b₀, a₀)        (paper §3.1, B[0]/a[0])
-//   - Relinearization uses b_vec = [b₀,...,b_{l-1}]  (paper §5.2)
-//
-// Unlike trbfv_mul_bfv_share.rs this example has no separate mbfv PublicKeyShare,
-// no Shamir share transport, and no second parameter set — minimising the number
-// of distinct variables and operations (important for future Noir circuits).
-//
-// Decryption assembles the joint sk = Σ sk_i only to verify correctness.
-// In production this step would be replaced by threshold decryption.
-//
-//   Parameters: 3 parties, 1 multiplication, 5×51-bit primes, degree 16384, k=1000.
+// Three parties use the secure16384 test profile and one multiplication level.
+// No share transport or threshold decryption: the joint sk = Σ sk_i is assembled
+// locally only to check correctness, not as a production protocol.
 
 #![allow(clippy::indexing_slicing, missing_docs)]
 
@@ -24,10 +14,8 @@ mod support;
 use std::{error::Error, sync::Arc};
 
 use fhe::{
-    aggregate::AggregateIter,
     bfv::{self, CommonRandomPolyVec, Encoding, Plaintext, SecretKey},
-    lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
-    trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
+    trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_key_pair},
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use support::examples::util::timeit::timeit;
@@ -61,23 +49,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|_| SecretKey::random(&params, &mut rng))
         .collect();
 
-    // Each party computes its l-BFV pk contribution:
+    // Each party computes ONE paired contribution from its sk_i:
     //   pk_share_i = [(b_{0,i}, a₀), ..., (b_{l-1,i}, a_{l-1})]
-    //   where b_{j,i} = −a_j · sk_i + e_{j,i}
-    // All parties use the same crp_a so every a_j is identical across parties.
-    let pk_shares: Vec<PublicKeyShare> = sk_shares
-        .iter()
-        .map(|sk_i| PublicKeyShare::contribute_with_crp(sk_i, &crp_a, &mut rng))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Each party computes its RLK contribution (d₀_i, d₂_i):
+    //     where b_{j,i} = −a_j · sk_i + e_{j,i}
     //   d₀_i[j] = −sk_i · d₁_j + e₀_{i,j} + g_j · r_i   (ksk_r_to_s, uses crp_d1)
     //   d₂_i[j] =  r_i · a_j  + e₂_{i,j} + g_j · sk_i   (ksk_s_to_r, uses crp_a)
     // r_i is an ephemeral key sampled locally and discarded after this call.
-    // crp_a must equal the CRP used for pk_shares.
-    let rlk_shares: Vec<RelinKeyShare> = sk_shares
+    // Form both halves from the same sk_i; do not zip separately filtered lists.
+    let key_pairs: Vec<(PublicKeyShare, RelinKeyShare)> = sk_shares
         .iter()
-        .map(|sk_i| RelinKeyShare::contribute_with_crp(sk_i, &crp_d1, &crp_a, 0, 0, &mut rng))
+        .map(|sk_i| -> fhe::Result<(PublicKeyShare, RelinKeyShare)> {
+            Ok((
+                PublicKeyShare::contribute_with_crp(sk_i, &crp_a, &mut rng)?,
+                RelinKeyShare::contribute_with_crp(sk_i, &crp_d1, &crp_a, 0, 0, &mut rng)?,
+            ))
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     println!("  {} parties generated (pk_share, rlk_share)", num_parties);
@@ -85,25 +71,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Phase 2 — aggregation ─────────────────────────────────────────────────
     println!("\n# Phase 2 — aggregation");
 
-    // Aggregate l-BFV pk:  b_j = Σ_i b_{j,i} = −a_j · sk + e_j
-    // Result: a valid l-BFV pk for the joint sk = Σ sk_i.
-    //   c[0] = (b₀, a₀) — used for encryption  (paper: B[0], a[0])
-    //   c[j] for j>0    — b_j used for b_vec in the RLK
-    let aggregated_pk = timeit!(
-        "pk aggregation",
-        pk_shares.into_iter().aggregate::<LBFVPublicKey>()?
+    // Pairing prevents one-sided omissions, not malicious inputs. Authentication,
+    // duplicate policy, and same-secret proof verification are not provided.
+    let (aggregated_pk, rlk) = timeit!(
+        "paired pk + rlk aggregation",
+        aggregate_key_pair(key_pairs)?
     );
     let pk = &aggregated_pk;
-
-    // Aggregate RLK:
-    //   d₀[j] = Σ_i d₀_i[j] = −sk · d₁_j + e₀_j + r · g_j
-    //   d₂[j] = Σ_i d₂_i[j] =  r · a_j  + e₂_j + sk · g_j
-    // aggregated_pk supplies b_vec and enforces CRS consistency.
-    // Neither sk nor r is ever assembled in one place.
-    let rlk: LBFVRelinearizationKey = timeit!(
-        "rlk aggregation",
-        aggregate_relinearization_key(&rlk_shares, &aggregated_pk)?
-    );
     println!("  rlk l = {}", rlk.l()?);
 
     // ── Phase 3 — encryption via pk.c[0] ─────────────────────────────────────
@@ -151,7 +125,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             *acc = acc.wrapping_add(*c);
         }
     }
-    let sk_joint = SecretKey::new(sum_coeffs, &params);
+    let sk_joint = SecretKey::new(sum_coeffs, &params)?;
 
     let pt_result = timeit!("Decrypt", sk_joint.try_decrypt(&ct_ab)?);
     let result = Vec::<u64>::try_decode(&pt_result, Encoding::poly())?;

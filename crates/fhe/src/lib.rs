@@ -10,6 +10,7 @@ extern crate self as fhe;
 mod support;
 
 mod errors;
+mod reference_string;
 mod serialization;
 
 pub mod aggregate;
@@ -23,8 +24,9 @@ pub mod trlbfv;
 pub use errors::{
     CiphertextError, CiphertextOperation, DotProductError, EncodingError, Error,
     EvaluationKeyComponent, EvaluationKeyError, EvaluationOperation, MultipartyError,
-    ParameterSource, ParametersError, PlaintextError, Result, SerializationError, SerializedField,
-    SerializedObject, SerializedPolynomialComponent, ThresholdError,
+    ParameterSource, ParametersError, PlaintextError, ReferenceStringRole, Result, SecretKeyError,
+    SerializationError, SerializedField, SerializedObject, SerializedPolynomialComponent,
+    ThresholdError,
 };
 
 // Test the source code included in the README.

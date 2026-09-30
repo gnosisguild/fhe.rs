@@ -16,7 +16,10 @@ use std::{env, error::Error, sync::Arc};
 use fhe::{
     bfv::{Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{DecryptionShare, PartyPrfKeys, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{
+        DecryptionShare, FreshNoiseModel, PartyPrfKeys, ShareManager, SmudgingConfig,
+        SmudgingNoiseGenerator,
+    },
 };
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use rand_distr::{Distribution, Uniform};
@@ -92,8 +95,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         num_parties,
         &mut rng,
     ));
-    let smudging_config =
-        SmudgingConfig::new(params.clone(), num_parties, num_summed, lambda).unwrap();
+    let smudging_config = SmudgingConfig::new(
+        params.clone(),
+        num_parties,
+        num_summed,
+        lambda,
+        FreshNoiseModel::BfvPublicKey,
+    )
+    .unwrap();
     let smudging_generator = Arc::new(SmudgingNoiseGenerator::new(smudging_config).unwrap());
 
     // Set up shares for each party in parallel

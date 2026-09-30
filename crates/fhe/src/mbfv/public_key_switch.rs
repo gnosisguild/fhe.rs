@@ -40,6 +40,7 @@ impl PublicKeySwitchShare {
         ct: &Ciphertext,
         rng: &mut R,
     ) -> Result<Self> {
+        sk_share.validate()?;
         if sk_share.params != public_key.params {
             return Err(Error::ParameterMismatch {
                 left: crate::ParameterSource::SecretKey,
@@ -170,8 +171,8 @@ mod tests {
         let params = BfvParameters::default_arc(1, 8);
         let ctx = params.context_at_level(0).unwrap();
         let sk = SecretKey::random(&params, &mut rng);
-        let output = PublicKey::new(&sk, &mut rng);
-        let other_output = PublicKey::new(&sk, &mut rng);
+        let output = PublicKey::new(&sk, &mut rng).unwrap();
+        let other_output = PublicKey::new(&sk, &mut rng).unwrap();
         let ct = Ciphertext::new(
             vec![
                 fhe_math::rq::Poly::random(ctx, &mut rng),
@@ -250,7 +251,7 @@ mod tests {
 
                     // Key switch ct1 to a new keypair
                     let sk_out = SecretKey::random(&params, &mut rng);
-                    let pk_out = PublicKey::new(&sk_out, &mut rng);
+                    let pk_out = PublicKey::new(&sk_out, &mut rng).unwrap();
                     let ct2 = parties
                         .iter()
                         .map(|p| PublicKeySwitchShare::new(&p.sk_share, &pk_out, &ct1, &mut rng))

@@ -30,6 +30,7 @@ impl GaloisKey {
         galois_key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
+        sk.validate()?;
         let ctx_galois_key = sk.params.context_at_level(galois_key_level)?;
         let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
 

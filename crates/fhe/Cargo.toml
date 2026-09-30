@@ -104,10 +104,6 @@ name = "trbfv_add_bfv_share"
 required-features = ["experimental-mbfv"]
 
 [[example]]
-name = "trbfv_add_bfv_share_insecure"
-required-features = ["experimental-mbfv"]
-
-[[example]]
 name = "trbfv_ten_parties"
 
 [[test]]

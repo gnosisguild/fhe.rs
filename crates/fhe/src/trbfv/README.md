@@ -147,14 +147,17 @@ Let `d` be the polynomial ring degree, `ℓ` the number of CRT moduli,
 levels. The code uses `||sk||_∞ = n` and `B_e = 2 · variance` (the BFV
 error-polynomial variance, distinct from `error1_variance` used for `B_enc`).
 
-- **Fresh encryption noise:**
+- **Fresh encryption noise** (public-key models):
 
   ```text
-  ||e_ek||_∞ = n * (2 * variance)
-  B_fresh    = d * ||e_ek||_∞ + B_enc + d * B_e * ||sk||_∞
+  e_pk    = n * B_e
+  B_fresh = d * u_bound * e_pk + B_enc + d * B_e * ||sk||_∞
   ```
 
-  `B_enc` comes from the error sampler (see below).
+  `u_bound` is `1` for `BfvPublicKey` and `2 * variance` for
+  `LbfvPublicKey`. `B_enc` comes from the error sampler (see below).
+  `BfvSecretKey` uses `B_fresh = 2 * variance`; `Custom` uses the caller's
+  supplied bound.
 
 - **Initial bound** (additive circuit, `mult_depth = 0`):
 
@@ -199,6 +202,30 @@ error-polynomial variance, distinct from `error1_variance` used for `B_enc`).
 `fhe_math::rq::error_coefficient_bound(error1_variance)`. This shared helper
 selects the same CBD or uniform sampler as `Poly::conditional_error`, so the
 smudging bound tracks the encryption sampler's actual coefficient bound.
+
+### Fresh-noise model
+
+`SmudgingConfig::new(params, n, m, lambda, model)` requires an explicit model
+for the fresh ciphertexts entering the circuit. Choose the model that matches
+the actual encryption path:
+
+| `FreshNoiseModel` | Encryption path | Bound assumption |
+| ----------------- | --------------- | ---------------- |
+| `BfvPublicKey` | BFV public-key encryption, including aggregated MBFV keys | Ternary randomness (`u_bound = 1`) |
+| `LbfvPublicKey` | l-BFV public-key encryption, including aggregated keys | Small randomness (`u_bound = 2 * variance`) |
+| `BfvSecretKey` | BFV secret-key encryption | One small error (`B_fresh = 2 * variance`) |
+| `Custom(bound)` | External keys or samplers | Caller-justified positive `B_fresh` |
+
+For public-key models, `e_pk = n * B_e`, `B_e = 2 * variance`, and
+`B_fresh = d * u_bound * e_pk + B_enc + d * B_e * n`; `u_bound` is shown in
+the table. `BfvSecretKey` uses `B_fresh = 2 * variance` and `Custom` uses the
+provided bound.
+
+There is no default. The model and its arithmetic assumptions are trusted
+caller input; understated noise invalidates the guarantee. For mixed input
+paths, use the largest justified fresh-noise bound. The decryption API checks
+that sampled noise matches the manager's committee size and BFV parameters,
+but cannot verify the circuit, depth, `lambda`, or model.
 
 `SmudgingConfig::new` is fallible: it rejects zero parties, zero ciphertexts,
 and unsupported lambda values. Its fields are private; use accessors to inspect
@@ -279,6 +306,7 @@ Basic usage pattern:
 use fhe::trbfv::{
     PartyPrfKeyTransport, PartyPrfKeys, SecretKeyShare, ShareManager, SmudgingConfig,
     SmudgingNoiseGenerator,
+    FreshNoiseModel,
 };
 
 // Setup threshold scheme; each party holds its own manager instance
@@ -311,7 +339,11 @@ let secret_key_aggregate = share_manager.aggregate_secret_key_shares(
 // Designated set S. Each decrypting party samples local smudging and
 // computes PartDec.
 let config = SmudgingConfig::new(
-    params.clone(), n_parties, num_ciphertexts, lambda,
+    params.clone(),
+    n_parties,
+    num_ciphertexts,
+    lambda,
+    FreshNoiseModel::BfvPublicKey,
 )?.with_mult_depth(mult_depth);
 let generator = SmudgingNoiseGenerator::new(config)?;
 let es_noise = generator.generate(&mut rng)?;

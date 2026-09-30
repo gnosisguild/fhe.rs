@@ -25,8 +25,8 @@ use std::error::Error;
 use fhe::{
     bfv::{Ciphertext, Encoding, Plaintext, PublicKey, SecretKey},
     trbfv::{
-        AggregatedSecretKeyShare, PartyPrfKeys, SecretKeyShare, ShareManager, SmudgingConfig,
-        SmudgingNoiseGenerator,
+        AggregatedSecretKeyShare, FreshNoiseModel, PartyPrfKeys, SecretKeyShare, ShareManager,
+        SmudgingConfig, SmudgingNoiseGenerator,
     },
 };
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
@@ -85,7 +85,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let manager = ShareManager::new(N_PARTIES, THRESHOLD, params.clone())?;
     let secret_key = SecretKey::random(&params, &mut rng);
-    let public_key = PublicKey::new(&secret_key, &mut rng);
+    let public_key = PublicKey::new(&secret_key, &mut rng)?;
     let sk_poly = manager.coeffs_to_poly_level0(secret_key.coeffs.as_ref())?;
     let sk_shares = manager
         .generate_secret_key_shares(sk_poly, &mut rng)?
@@ -107,7 +107,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // The first threshold + 1 parties reconstruct from the ten-party committee.
     let reconstructing: Vec<usize> = (1..=RECONSTRUCTING_PARTIES).collect();
     let prf_keys = support::examples::simulated_committee_prf_keys(N_PARTIES, &mut rng);
-    let config = SmudgingConfig::new(params.clone(), N_PARTIES, num_ciphertexts, preset.lambda)?;
+    let config = SmudgingConfig::new(
+        params.clone(),
+        N_PARTIES,
+        num_ciphertexts,
+        preset.lambda,
+        FreshNoiseModel::BfvPublicKey,
+    )?;
     let generator = SmudgingNoiseGenerator::new(config)?;
 
     let ct_left = encrypt_u64(7, &public_key, &mut rng);

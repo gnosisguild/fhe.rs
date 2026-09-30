@@ -32,7 +32,10 @@ use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
     mbfv::{AggregateIter, PublicKeyShare as MBFVPublicKeyShare},
-    trbfv::{DecryptionShare, PartyPrfKeys, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{
+        DecryptionShare, FreshNoiseModel, PartyPrfKeys, ShareManager, SmudgingConfig,
+        SmudgingNoiseGenerator,
+    },
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -128,9 +131,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         num_parties,
         &mut rng,
     ));
-    let smudging_config = SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda)
-        .unwrap()
-        .with_mult_depth(preset.multiplicative_depth.unwrap());
+    let smudging_config = SmudgingConfig::new(
+        params_trbfv.clone(),
+        num_parties,
+        3,
+        lambda,
+        FreshNoiseModel::BfvPublicKey,
+    )
+    .unwrap()
+    .with_mult_depth(preset.multiplicative_depth.unwrap());
     let smudging_generator = Arc::new(SmudgingNoiseGenerator::new(smudging_config).unwrap());
     let num_moduli = params_trbfv.moduli().len();
 
@@ -174,7 +183,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Share-encryption key pair under the second parameter set.
                 let secret_key_enc = SecretKey::random(&params_share_enc, &mut rng);
-                let public_key_enc = PublicKey::new(&secret_key_enc, &mut rng);
+                let public_key_enc = PublicKey::new(&secret_key_enc, &mut rng).unwrap();
 
                 Party {
                     pk_share,

@@ -1,30 +1,26 @@
 # fhe.rs: Fully Homomorphic Encryption in Rust
 
-[![continuous integration](https://github.com/tlepoint/fhe.rs/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/tlepoint/fhe.rs/actions/workflows/rust.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![continuous integration](https://github.com/gnosisguild/fhe.rs/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/gnosisguild/fhe.rs/actions/workflows/rust.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-This repository contains the `fhe.rs` library, an experimental cryptographic library in Rust for Ring-LWE-based homomorphic encryption, developed by [Tancrède Lepoint](https://tancre.de).
-For more information about the library, see [fhe.rs](https://fhe.rs).
+`fhe.rs` is an experimental Rust library for Ring-LWE-based homomorphic
+encryption, developed by [Tancrède Lepoint](https://tancre.de). It implements
+leveled BFV, l-BFV operational keys, and threshold sharing and decryption.
+See [fhe.rs](https://fhe.rs) for more information.
 
-The library features:
+This project is separate from Zama's [tfhe-rs](https://github.com/zama-ai/tfhe-rs).
 
-* An implementation of a RNS-variant of the Brakerski-Fan-Vercauteren (BFV) homomorphic encryption scheme;
-* Performances comparable or better than state-of-the-art libraries in C++ and Go.
+## Crates
 
-> **Note**
-> This library is **not** related to the `tfhe-rs` library (a.k.a. `concrete`), Zama's fully homomorphic encryption in Rust, available at [tfhe.rs](https://github.com/zama-ai/tfhe-rs).
+| Crate | Purpose |
+| ----- | ------- |
+| [`fhe`](crates/fhe/README.md) | Encryption schemes, keys, and homomorphic operations |
+| [`fhe-math`](crates/fhe-math/README.md) | NTT, RNS, and polynomial arithmetic |
+| [`fhe-traits`](crates/fhe-traits/README.md) | Shared encryption and serialization interfaces |
+| [`fhe-util`](crates/fhe-util/README.md) | Sampling, primality, and modular arithmetic helpers |
 
-## fhe.rs crates
+## Installation
 
-`fhe.rs` is implemented using the Rust programming language. The ecosystem is composed of four public crates (packages):
-
-* [![fhe crate version](https://img.shields.io/crates/v/fhe.svg)](https://crates.io/crates/fhe) [`fhe`](https://crates.io/crates/fhe): This crate contains the implementations of the homomorphic encryption schemes;
-* [![fhe-math crate version](https://img.shields.io/crates/v/fhe-math.svg)](https://crates.io/crates/fhe-math) [`fhe-math`](https://crates.io/crates/fhe-math): This crate contains the core mathematical operations for the `fhe` crate;
-* [![fhe-traits crate version](https://img.shields.io/crates/v/fhe-traits.svg)](https://crates.io/crates/fhe-traits) [`fhe-traits`](https://crates.io/crates/fhe-traits): This crate contains traits for homomorphic encryption schemes;
-* [![fhe-util crate version](https://img.shields.io/crates/v/fhe-util.svg)](https://crates.io/crates/fhe-util) [`fhe-util`](https://crates.io/crates/fhe-util): This crate contains utility functions for the `fhe` crate.
-
-### Installation
-
-To install, add the following to your project's `Cargo.toml` file:
+The published crates are available on crates.io:
 
 ```toml
 [dependencies]
@@ -32,53 +28,75 @@ fhe = "0.4.1"
 fhe-traits = "0.4.1"
 ```
 
-## Minimum supported version / toolchain
+Repository builds require Rust **1.91.1** or newer (Rust 2024 edition).
+Use nightly for formatting.
 
-Rust **1.91.1** or newer (Rust 2024 edition).
+## Usage
 
-## ⚠️ Security / Stability
+See the [`fhe` README](crates/fhe/README.md) for a BFV example and Cargo features,
+and the [threshold BFV guide](crates/fhe/src/trbfv/README.md) for sharing,
+smudging, and decryption. Runnable examples are in
+[`crates/fhe/examples/`](crates/fhe/examples/).
 
-The implementations contained in the `fhe.rs` ecosystem have never been independently audited for security.
+## Security
 
-Use at your own risk.
+The library has not been independently audited. Use at your own risk.
+The `experimental-mbfv` feature exposes incomplete protocols and must not be
+used in production or to protect sensitive data.
 
-## Verification
+Threshold primitives are not a complete robust multiparty protocol.
+Applications must supply authenticated transport, participant and session
+binding, and replay prevention; see the [implementation boundary](crates/fhe/src/trbfv/README.md#implementation-boundary).
 
-The repository's normal verification commands are:
+Resource limits are not security guarantees. Applications accepting untrusted
+parameters must enforce their own degree, modulus-count, and construction-work
+budgets in addition to the library's parameter validation.
+
+### Serialization limits
+
+Protobuf-backed deserializers reject payloads above
+`fhe_traits::MAX_SERIALIZED_BYTES` (256 MiB) before decoding.
+For larger evaluation keys, `EvaluationKey::from_bytes_with_request` derives
+a bound from validated BFV parameters and a locally constructed
+`EvaluationKeyDecodeRequest`. Never derive that authorization from received
+bytes or a sender's size claims.
+
+This opt-in route requires trusted, authenticated delivery; the request itself
+does not authenticate a key. Its wire preflight enforces the authorized shape
+and rejects unknown fields at key scopes. Polynomial-row unknown fields are
+allowed only within fixed length slack. The bound limits encoded bytes, not
+peak memory; apply a tighter application budget when needed. For scale, a
+degree-32768 inner-sum key with nine 62-bit moduli encodes to roughly 309 MB;
+its roundtrip test has used about 4 GiB of peak process memory with both
+original and decoded keys retained. Full contracts are documented on
+`EvaluationKeyDecodeRequest` and
+`EvaluationKey::from_bytes_with_request`.
+
+## Development
 
 ```bash
 cargo test --workspace
-cargo check --workspace --all-targets --all-features
-cargo test --release --workspace --all-features
+cargo test --workspace --release --all-features
+cargo test --workspace --release --no-default-features
 cargo +nightly fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Protobuf schemas and their generated Rust sources are checked in. Normal builds
-compile the checked-in Rust sources and do not require `protoc`. A schema change
-must update its generated Rust source in the same change. Regenerate all sources
-with the pinned `prost-build` 0.14.4 and vendored `protoc` 31.1 toolchain by
-running:
+CI checks tests and doctests with all/no-default features, examples, benchmarks,
+formatting, Clippy, rustdoc, and generated Protobuf sources. Release integration
+tests include the larger threshold BFV and l-BFV end-to-end profiles.
+
+Test profiles and deterministic RNG helpers live in
+[`crates/fhe/support/mod.rs`](crates/fhe/support/mod.rs), outside the public API.
+`insecure` is for fast testing only. `secure8192` and `secure16384` exercise
+larger parameter sets; neither the names nor passing tests establish security.
+
+Protobuf schemas and generated Rust are checked in; normal builds do not
+require `protoc`. After a schema change, regenerate and commit the Rust sources:
 
 ```bash
 ./scripts/regenerate-protos.sh
 ```
 
-The test parameter profiles are named `insecure`, `secure8192`, and
-`secure16384`. The `insecure` profile provides fast breadth and negative
-coverage only: it uses the supplied degree-512 threshold parameters, degree-512
-DKG/share-transport parameters, lambda 2, and no multiplicative depth. The
-larger profiles exercise production-like parameter ranges but do not constitute
-a cryptographic security proof. Serialization is an unconditional part of the
-current crate API, so CI tests both default/no-default core builds and the
-all-features serialization boundary.
-
-The `bfv_default_128` smoke test selects a profile from the library's
-`default_parameters_128` table. It verifies BFV functionality for that profile;
-the test name is not an independent security claim.
-
-Repository-only profiles and deterministic RNG helpers live in
-`crates/fhe/support/mod.rs`, shared by the test, example, and benchmark targets
-without becoming part of the public `fhe` API. Fast profile and API checks are
-kept separate from the full threshold BFV and distributed l-BFV workflows in
-`crates/fhe/tests/trbfv_e2e.rs` and `crates/fhe/tests/trlbfv_e2e.rs`.
+The script pins `prost-build` 0.14.4 and vendored `protoc` 31.1.

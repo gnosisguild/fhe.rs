@@ -16,19 +16,15 @@ use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::trbfv::config::validate_threshold_config;
 use crate::trbfv::smudging::SmudgingNoise;
 use fhe_math::rq::traits::TryConvertFrom;
+use fhe_math::rq::{Context, Poly, PowerBasis};
 use fhe_math::zq::Modulus;
-use fhe_math::{
-    rns::{RnsContext, ScalingFactor},
-    rq::{Context, Poly, PowerBasis, scaler::Scaler},
-};
 use itertools::Itertools;
 use ndarray::{Array2, ArrayView2};
 use num_bigint::BigUint;
 use rand::{CryptoRng, RngCore};
-use rayon::prelude::*;
 use std::convert::TryFrom;
 use std::sync::Arc;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Manager for threshold BFV share operations.
 ///
@@ -40,7 +36,7 @@ use zeroize::Zeroizing;
 /// `threshold` is the degree `T` of the Shamir sharing polynomial, read as the
 /// maximum number of corrupted parties the deployment tolerates. Reconstruction
 /// requires `T + 1` shares. `ShareManager` enforces the trBFV invariants
-/// `n >= 3` and `T = (n - 1) / 2` (see [`validate_threshold_config`]).
+/// `n >= 3` and `T = (n - 1) / 2` (see `validate_threshold_config`).
 ///
 /// # Protocol Flow
 /// 1. Each party generates secret shares using secret sharing
@@ -127,14 +123,15 @@ impl ShareManager {
 }
 
 impl ShareManager {
-    /// Utility to create a Zeroizing<Poly> from coefficients.
+    /// Utility to create a `Zeroizing<Poly>` from coefficients.
     ///
     /// # Arguments
-    /// - `coeffs`: Coefficients that can be converted to Poly (Box<[i64]>, Array2<u64>, etc.)
+    /// - `coeffs`: Coefficients that can be converted to `Poly` (`Box<[i64]>`,
+    ///   `Array2<u64>`, etc.)
     /// - `ctx`: BFV context to use for the polynomial
     ///
     /// # Returns
-    /// A Zeroizing<Poly> in PowerBasis representation
+    /// A `Zeroizing<Poly<PowerBasis>>` in `PowerBasis` representation.
     pub fn coeffs_to_poly<T>(
         &self,
         coeffs: T,
@@ -392,32 +389,42 @@ impl ShareManager {
             });
         }
 
-        let mut c1sk = (&c1 * secret_key).into_power_basis();
+        // Keep the secret product guarded before multiplication and through
+        // the inverse NTT. The product is then guarded in coefficient form
+        // while applying the public per-modulus Lagrange weights.
+        let ctx = c1.ctx().clone();
+        let mut product = Zeroizing::new(c1);
+        product.disallow_variable_time_computations();
+        *product.as_mut() *= secret_key;
+        let replacement = Poly::zero(product.ctx());
+        let c1sk = std::mem::replace(product.as_mut(), replacement).into_power_basis();
+        let mut c1sk = Zeroizing::new(c1sk);
         c1sk.disallow_variable_time_computations();
-        let mut scaled = c1sk.coefficients().to_owned();
-        let ctx = c1.ctx();
+        let mut scaled = ZeroizingArray2(c1sk.coefficients().to_owned());
         for (row_index, modulus) in ctx.moduli_operators().iter().enumerate() {
             let weights = shamir.lagrange_weights(modulus, reconstructing_parties)?;
             let lambda = weights
                 .get(party_index)
                 .copied()
                 .ok_or_else(|| Error::invalid_party_id(party_id, self.n))?;
-            let mut row = scaled.row_mut(row_index);
+            let mut row = scaled.0.row_mut(row_index);
             let row_slice = row
                 .as_slice_mut()
                 .ok_or(fhe_math::Error::NonContiguousCoefficients)?;
             modulus.scalar_mul_vec(row_slice, lambda);
         }
-        c1sk.set_coefficients(scaled)?;
+        c1sk.as_mut()
+            .set_coefficients(std::mem::take(&mut scaled.0))?;
 
         let mask = prf_keys.mask(reconstructing_parties, ciphertext)?;
-        let mut d_share_poly = c1sk;
-        d_share_poly += es_i.as_ref();
-        d_share_poly += &mask;
+        let d_share_poly = std::mem::replace(c1sk.as_mut(), Poly::<PowerBasis>::zero(&ctx));
+        let mut d_share_poly = Zeroizing::new(d_share_poly);
+        *d_share_poly.as_mut() += es_i.as_ref();
+        *d_share_poly.as_mut() += &mask;
         let decryptors = super::prf::canonical_decryptors(reconstructing_parties);
         let digest = super::prf::context_digest(&decryptors, ciphertext)?;
         Ok(DecryptionShare {
-            poly: d_share_poly,
+            poly: std::mem::replace(d_share_poly.as_mut(), Poly::<PowerBasis>::zero(&ctx)),
             party_id,
             decryptors,
             digest,
@@ -445,13 +452,23 @@ impl ShareManager {
         decryption_shares: &[DecryptionShare],
         ciphertext: &Ciphertext,
     ) -> Result<Plaintext, Error> {
+        self.validate_ciphertext_parameters(ciphertext)?;
+        let par = ciphertext.params.clone();
+        let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
+            Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
+                reason: "threshold BFV decrypt_from_shares requires a u64 plaintext modulus"
+                    .to_string(),
+            })
+        })?;
+        self.params.validate_plaintext_level(ciphertext.level)?;
+
         if decryption_shares.len() != self.threshold + 1 {
             return Err(Error::share_count_mismatch(
                 decryption_shares.len(),
                 self.threshold + 1,
             ));
         }
-        self.validate_ciphertext(ciphertext)?;
+        self.validate_ciphertext_shape(ciphertext)?;
         let Some(first) = decryption_shares.first() else {
             return Err(Error::share_count_mismatch(0, self.threshold + 1));
         };
@@ -487,68 +504,56 @@ impl ShareManager {
             return Err(Error::inconsistent_decryption_shares());
         }
 
-        let mut result_poly = first.poly.clone();
+        let mut result_poly = Zeroizing::new(first.poly.clone());
         result_poly.disallow_variable_time_computations();
         for share in decryption_shares.iter().skip(1) {
-            result_poly += &share.poly;
+            *result_poly.as_mut() += &share.poly;
         }
 
         let mut c0 = ciphertext.c[0].clone();
         c0.disallow_variable_time_computations();
-        result_poly += &c0.into_power_basis();
+        *result_poly.as_mut() += &c0.into_power_basis();
 
-        let plaintext_ctx = Context::new_arc(&self.params.moduli()[..1], self.params.degree())
-            .map_err(Error::MathError)?;
-
-        let scalers: Result<Vec<_>, Error> = (0..self.params.moduli().len())
-            .into_par_iter()
-            .map(|i| {
-                let rns = RnsContext::new(&self.params.moduli()[..self.params.moduli().len() - i])
-                    .map_err(Error::MathError)?;
-                let ctx_i = Context::new_arc(
-                    &self.params.moduli()[..self.params.moduli().len() - i],
-                    self.params.degree(),
-                )
-                .map_err(Error::MathError)?;
-                Scaler::new(
-                    &ctx_i,
-                    &plaintext_ctx,
-                    ScalingFactor::new(&BigUint::from(self.params.plaintext()), rns.modulus())?,
-                )
-                .map_err(Error::MathError)
-            })
-            .collect();
-        let scalers = scalers?;
-
-        let par = ciphertext.params.clone();
-        let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
-            Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
-                reason: "threshold BFV decrypt_from_shares requires a u64 plaintext modulus"
-                    .to_string(),
-            })
-        })?;
-
+        let level = self.params.context_level_at(ciphertext.level)?;
         let d = Zeroizing::new(
             result_poly
-                .scale(&scalers[ciphertext.level])
+                .as_ref()
+                .scale(&level.cipher_plain_context.scaler)
                 .map_err(Error::MathError)?,
         );
-        let v = Zeroizing::new(
-            Vec::<u64>::try_from(d.as_ref())
+
+        let poly = if self.params.u64_decrypt_fast_path_is_exact() {
+            // 2t <= q_0: reducing through q_0 preserves every plaintext value.
+            let v = Zeroizing::new(
+                Vec::<u64>::try_from(d.as_ref())
+                    .map_err(Error::from)?
+                    .into_iter()
+                    .map(|vi| vi + ptxt_u64)
+                    .collect_vec(),
+            );
+            let mut w = Zeroizing::new(v[..par.degree()].to_vec());
+            let q = Modulus::new(par.moduli()[0]).map_err(Error::MathError)?;
+            q.reduce_vec(&mut w);
+            Modulus::new(ptxt_u64)
+                .map_err(Error::MathError)?
+                .reduce_vec(&mut w);
+            Poly::<PowerBasis>::try_convert_from(w.as_slice(), ciphertext.c[0].ctx(), false)?
+                .into_ntt()
+        } else {
+            // q_0 < 2t: lift through the plaintext-context modulus before
+            // reducing, as in secret-key decryption.
+            let v: Vec<BigUint> = Vec::<BigUint>::try_from(d.as_ref())
                 .map_err(Error::from)?
                 .into_iter()
-                .map(|vi| vi + ptxt_u64)
-                .collect_vec(),
-        );
-        let mut w = v[..par.degree()].to_vec();
-        let q = Modulus::new(par.moduli()[0]).map_err(Error::MathError)?;
-        q.reduce_vec(&mut w);
-        Modulus::new(ptxt_u64)
-            .map_err(Error::MathError)?
-            .reduce_vec(&mut w);
-
-        let poly =
-            Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt();
+                .map(|vi| vi + BigUint::from(ptxt_u64))
+                .collect_vec();
+            let mut w = v[..par.degree()].to_vec();
+            let q_poly = d.as_ref().ctx().modulus();
+            w.iter_mut().for_each(|wi| *wi %= q_poly);
+            par.plaintext.reduce_vec(&mut w);
+            Poly::<PowerBasis>::try_convert_from(w.as_slice(), ciphertext.c[0].ctx(), false)?
+                .into_ntt()
+        };
 
         let pt = Plaintext {
             params: par.clone(),
@@ -593,6 +598,16 @@ impl ShareManager {
             .into());
         }
         Ok(())
+    }
+}
+
+/// Wipe-on-drop owner for coefficient matrices copied while weighting a
+/// partial-decryption polynomial.
+struct ZeroizingArray2(Array2<u64>);
+
+impl Drop for ZeroizingArray2 {
+    fn drop(&mut self) {
+        self.0.iter_mut().for_each(Zeroize::zeroize);
     }
 }
 
@@ -657,13 +672,16 @@ mod tests {
     )]
     use super::*;
     use crate::ThresholdError;
-    use crate::bfv::{Encoding, PublicKey, SecretKey};
+    use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
     use crate::support::examples::simulated_committee_prf_keys;
     use crate::support::presets::{insecure, secure8192};
     use crate::trbfv::prf::PartyPrfKeys;
-    use crate::trbfv::smudging::{SmudgingConfig, SmudgingNoiseGenerator};
+    use crate::trbfv::smudging::{FreshNoiseModel, SmudgingConfig, SmudgingNoiseGenerator};
+    use fhe_math::rq::{Ntt, RepresentationTag};
     use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
     use rand::rng;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn zero_smudging(params: &Arc<BfvParameters>, n: usize) -> SmudgingNoise {
         let ctx = params.context_at_level(0).unwrap();
@@ -805,13 +823,14 @@ mod tests {
         let params = insecure().unwrap().parameters;
         let n = 5;
         let threshold = 2;
-        let generator =
-            SmudgingNoiseGenerator::new(SmudgingConfig::new(params.clone(), n, 1, 0).unwrap())
-                .unwrap();
+        let generator = SmudgingNoiseGenerator::new(
+            SmudgingConfig::new(params.clone(), n, 1, 0, FreshNoiseModel::BfvPublicKey).unwrap(),
+        )
+        .unwrap();
         let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
         let mut rng = rng();
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
         let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params).unwrap();
         let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
         let key_share = AggregatedSecretKeyShare::from_power_basis(
@@ -832,12 +851,13 @@ mod tests {
         let params = secure8192().unwrap().parameters;
         let n = 3;
         let mut rng = rng();
-        let config = SmudgingConfig::new(params.clone(), n, 1, 45).unwrap();
+        let config =
+            SmudgingConfig::new(params.clone(), n, 1, 45, FreshNoiseModel::BfvPublicKey).unwrap();
         let generator = SmudgingNoiseGenerator::new(config).unwrap();
         let manager = ShareManager::new(n, 1, params.clone()).unwrap();
         let noise = generator.generate(&mut rng).unwrap();
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
         let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params).unwrap();
         let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
         let key_share = AggregatedSecretKeyShare::from_power_basis(
@@ -891,7 +911,7 @@ mod tests {
 
         // Setup: Generate keys and encrypt a plaintext
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
 
         let mut plaintext_data = vec![42u64, 10, 40];
         plaintext_data.resize(params.degree(), 0);
@@ -954,12 +974,89 @@ mod tests {
     }
 
     #[test]
+    fn decrypt_from_shares_lifts_through_plaintext_context_when_q0_below_t() {
+        // q0 = 1153 < t = 4099 < Q = 1153 * 12289. Reducing only through
+        // q0 would truncate plaintext coefficients in [q0, t).
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(4099)
+            .set_moduli(&[1153, 12289])
+            .build_arc()
+            .unwrap();
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let values = vec![4098u64; params.degree()];
+        let pt = Plaintext::try_encode(&values, Encoding::poly(), &params).unwrap();
+        let ctx = params.context_at_level(0).unwrap();
+        let phase = pt.to_poly().unwrap();
+        let ciphertext = Ciphertext::new(vec![phase, Poly::<Ntt>::zero(ctx)], &params).unwrap();
+        let decryptors = vec![1, 2];
+        let shares = decryptors
+            .iter()
+            .copied()
+            .map(|party_id| {
+                DecryptionShare::from_parts(
+                    Poly::<PowerBasis>::zero(ctx),
+                    party_id,
+                    decryptors.clone(),
+                    &ciphertext,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let plaintext = manager.decrypt_from_shares(&shares, &ciphertext).unwrap();
+        assert_eq!(
+            Vec::<u64>::try_decode(&plaintext, Encoding::poly()).unwrap(),
+            values
+        );
+    }
+
+    struct PolyWipeProbe<R: RepresentationTag> {
+        poly: Poly<R>,
+        wiped: Arc<AtomicBool>,
+    }
+
+    impl<R: RepresentationTag> Zeroize for PolyWipeProbe<R> {
+        fn zeroize(&mut self) {
+            let had_data = self.poly.coefficients().iter().any(|&value| value != 0);
+            self.poly.zeroize();
+            self.wiped.store(
+                had_data && self.poly.coefficients().iter().all(|&value| value == 0),
+                Ordering::SeqCst,
+            );
+        }
+    }
+
+    #[test]
+    fn decryption_polynomial_guards_wipe_on_unwind() {
+        let params = insecure().unwrap().parameters;
+        let ctx = params.context_at_level(0).unwrap();
+        let mut rng = rng();
+
+        fn check<R: RepresentationTag>(poly: Poly<R>) {
+            let wiped = Arc::new(AtomicBool::new(false));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = Zeroizing::new(PolyWipeProbe {
+                    poly,
+                    wiped: Arc::clone(&wiped),
+                });
+                panic!("simulated unwind while a polynomial is guarded");
+            }));
+            assert!(result.is_err());
+            assert!(wiped.load(Ordering::SeqCst));
+        }
+
+        check(Poly::<Ntt>::random(ctx, &mut rng));
+        check(Poly::<PowerBasis>::random(ctx, &mut rng));
+    }
+
+    #[test]
     fn test_decryption_share_rejects_nonzero_ciphertext_level() {
         let mut rng = rng();
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
         let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
         ciphertext.switch_down().unwrap();
@@ -994,7 +1091,7 @@ mod tests {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
         let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
         ciphertext.switch_down().unwrap();
@@ -1024,7 +1121,7 @@ mod tests {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let secret_key = SecretKey::random(&params, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
+        let public_key = PublicKey::new(&secret_key, &mut rng).unwrap();
         let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
         let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
         ciphertext.c.pop();
@@ -1101,7 +1198,7 @@ mod tests {
         }
 
         // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
         let mut plaintext_data = vec![23u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
@@ -1194,7 +1291,7 @@ mod tests {
         }
 
         // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
         let mut plaintext_data = vec![32u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
@@ -1286,7 +1383,7 @@ mod tests {
         }
 
         // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
         let mut plaintext_data = vec![77u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
@@ -1381,7 +1478,7 @@ mod tests {
         }
 
         // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
         let mut plaintext_data = vec![55u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
@@ -1598,7 +1695,7 @@ mod tests {
         let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
 
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
         let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params).unwrap();
         let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
 
@@ -1675,7 +1772,7 @@ mod tests {
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
         let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params).unwrap();
         let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
         let key_share = AggregatedSecretKeyShare::from_power_basis(
@@ -1697,12 +1794,72 @@ mod tests {
     }
 
     #[test]
+    fn decryption_share_rejects_mismatched_smudging_context() {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let ciphertext = pk.try_encrypt(&plaintext, &mut rng).unwrap();
+        let secret_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_poly).clone());
+        let prf_keys = simulated_committee_prf_keys(manager.n(), &mut rng);
+
+        let other_context = params.context_at_level(1).unwrap();
+        let smudging = SmudgingNoise::from_poly(
+            Zeroizing::new(Poly::<PowerBasis>::zero(other_context)),
+            3,
+            params,
+        );
+        let result =
+            manager.decryption_share(&ciphertext, &key_share, 1, &[1, 2], smudging, &prf_keys[0]);
+
+        assert!(matches!(
+            result,
+            Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::Ciphertext,
+            })
+        ));
+    }
+
+    #[test]
+    fn decryption_share_rejects_noise_from_different_parameters() {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let other_params = secure8192().unwrap().parameters;
+        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
+        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
+        let ciphertext = pk.try_encrypt(&plaintext, &mut rng).unwrap();
+        let secret_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
+        let key_share = AggregatedSecretKeyShare::from_power_basis((*secret_poly).clone());
+        let prf_keys = simulated_committee_prf_keys(manager.n(), &mut rng);
+
+        let other_context = other_params.context_at_level(0).unwrap();
+        let smudging = SmudgingNoise::from_poly(
+            Zeroizing::new(Poly::<PowerBasis>::zero(other_context)),
+            3,
+            other_params,
+        );
+        let result =
+            manager.decryption_share(&ciphertext, &key_share, 1, &[1, 2], smudging, &prf_keys[0]);
+
+        assert_eq!(
+            result.unwrap_err(),
+            Error::smudging_configuration_mismatch(3, 3)
+        );
+    }
+
+    #[test]
     fn decryption_share_roundtrips_through_parts() {
         let mut rng = rng();
         let params = insecure().unwrap().parameters;
         let manager = ShareManager::new(3, 1, params.clone()).unwrap();
         let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng).unwrap();
         let pt = Plaintext::try_encode(&[7u64], Encoding::poly(), &params).unwrap();
         let ct = pk.try_encrypt(&pt, &mut rng).unwrap();
         let key_share = AggregatedSecretKeyShare::from_power_basis(
@@ -1819,7 +1976,7 @@ mod tests {
         }
 
         // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
+        let pk = PublicKey::new(&secret_key, &mut rng).unwrap();
         let mut plaintext_data = vec![22u64];
         plaintext_data.resize(params.degree(), 0);
         let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
