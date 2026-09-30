@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fhe::bfv::{Ciphertext, Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::{SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
+use fhe::trbfv::{
+    PartyPrfKeys, SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
+};
 use fhe_traits::{FheEncoder, FheEncrypter};
 use ndarray::Array2;
 use rand::SeedableRng;
@@ -75,8 +77,7 @@ fn bench_rns_shamir(criterion: &mut Criterion) {
                 .try_encrypt(&plaintext, &mut setup_rng)
                 .expect("encryption must succeed"),
         );
-        let prf_keys = manager
-            .generate_prf_keys(&mut setup_rng)
+        let prf_keys = PartyPrfKeys::generate_committee(party_count, &mut setup_rng)
             .expect("PRF keys must be generated");
         let smudging_config = SmudgingConfig::new(params.clone(), party_count, 1, 0)
             .expect("zero-security smudging configuration must be valid");

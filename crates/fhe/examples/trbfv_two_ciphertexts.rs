@@ -97,7 +97,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Same committee keys for every ciphertext.
-    let prf_keys = manager.generate_prf_keys(&mut rng)?;
+    let prf_keys = PartyPrfKeys::generate_committee(n, &mut rng)?;
     let reconstructing = vec![1usize, 2];
     let config = SmudgingConfig::new(params.clone(), n, num_ciphertexts, preset.lambda)?;
     let generator = SmudgingNoiseGenerator::new(config)?;

@@ -17,7 +17,8 @@
 //
 // Protocol:
 //  1. Each party generates: an l-BFV pk share, an l-BFV RLK share, Shamir shares of
-//     sk, committee PRF keys, and a share-encryption BFV key pair (second set).
+//     sk, and a share-encryption BFV key pair (second set). Committee PRF keys are
+//     sampled once and distributed to the parties.
 //  2. Share-encryption public keys are published. Each party BFV-encrypts its Shamir
 //     shares for every receiver under the receiver's share-encryption key.
 //  3. Each receiver decrypts and aggregates the collected shares to reconstruct
@@ -133,7 +134,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
-    let committee_prf_keys = Arc::new(share_manager.generate_prf_keys(&mut rng).unwrap());
+    let committee_prf_keys =
+        Arc::new(PartyPrfKeys::generate_committee(num_parties, &mut rng).unwrap());
     let smudging_config = SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda)
         .unwrap()
         .with_mult_depth(preset.multiplicative_depth.unwrap());

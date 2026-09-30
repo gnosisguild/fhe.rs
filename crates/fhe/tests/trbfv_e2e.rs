@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use fhe::bfv::{Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::{SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator};
+use fhe::trbfv::{
+    PartyPrfKeys, SecretKeyShare, ShareManager, SmudgingConfig, SmudgingNoiseGenerator,
+};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 use ndarray::Array2;
 
@@ -37,9 +39,7 @@ fn threshold_bfv_addition_decrypts_with_t_plus_one_shares() {
         .generate_secret_key_shares(secret_key_poly, &mut rng)
         .expect("secret key share generation")
         .into_transport();
-    let prf_keys = manager
-        .generate_prf_keys(&mut rng)
-        .expect("committee PRF keys");
+    let prf_keys = PartyPrfKeys::generate_committee(N, &mut rng).expect("committee PRF keys");
 
     let secret_key_shares_collected: Vec<Vec<SecretKeyShare>> = (0..N)
         .map(|receiver_idx| {

@@ -35,18 +35,25 @@ the paper. The following table is the boundary for callers and integrators:
 | Committee membership, accepted-party policy, and application lifecycle | Must be supplied externally. |
 | ZK proofs and application wire formats | Must be supplied externally. |
 
-The public `ShareManager` flow is:
+The public trBFV setup and decryption flow is:
 
 1. Create a `ShareManager` instance with BFV parameters.
 2. Generate and distribute Shamir shares for each party's secret contribution.
-3. Sample committee PRF keys (`ShareManager::generate_prf_keys`) and give each
-   party its `2n` keys. Applications that move keys across a transport boundary
-   use `PartyPrfKeys::into_transport` / `from_transport`.
+3. Sample committee PRF keys once with `PartyPrfKeys::generate_committee(n, rng)`
+   and securely distribute each party's `2n` keys. This is independent of
+   `ShareManager`. Applications that move keys across a transport boundary use
+   `PartyPrfKeys::into_transport` / `from_transport`.
 4. Aggregate the received secret-key contributions for the same externally
    agreed party set.
 5. For a designated decryptor set `S` of size `threshold + 1`, each party in
    `S` samples local smudging noise and computes a partial decryption.
 6. Sum the `|S|` partial decryptions (FinDec) to recover the plaintext.
+
+`PartyPrfKeys::generate_committee` returns all parties' key bundles to its
+caller. It is suitable for local simulations or a trusted setup; it performs no
+network exchange or secret sharing. Distributed applications must securely
+establish matching pairwise keys externally rather than invoking this factory
+independently on each node.
 
 The examples in `crates/fhe/examples/` simulate the external setup and share
 transport locally. They demonstrate the supported component flow, but they do
@@ -271,10 +278,10 @@ let secret_key_dealt = share_manager.generate_secret_key_shares(secret_key_poly,
 // Explicit application transport boundary; the dealt owner is consumed here.
 let secret_key_dealt = secret_key_dealt.into_transport();
 
-// Committee: sample PRF keys once and give party i its 2n keys.
-// Setup is external; this only samples and, at an application boundary,
-// transports already-sampled keys.
-let prf_keys = share_manager.generate_prf_keys(&mut rng)?;
+// Simulation or trusted setup: sample committee PRF keys once, independently
+// of ShareManager, and securely give party i its 2n keys. Distributed key
+// establishment is external; do not sample independently on each node.
+let prf_keys = PartyPrfKeys::generate_committee(n_parties, &mut rng)?;
 let transported = prf_keys[party_index].clone().into_transport();
 let prf_keys_i = PartyPrfKeys::from_transport(PartyPrfKeyMaterial::new(
     transported.party_id(),

@@ -107,7 +107,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let crp = CommonRandomPoly::new(&params_trbfv, &mut rng)?;
     let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
     let committee_prf_keys =
-        std::sync::Arc::new(share_manager.generate_prf_keys(&mut rng).unwrap());
+        std::sync::Arc::new(PartyPrfKeys::generate_committee(num_parties, &mut rng).unwrap());
     let smudging_config =
         SmudgingConfig::new(params_trbfv.clone(), num_parties, num_summed, lambda).unwrap();
     let smudging_generator =

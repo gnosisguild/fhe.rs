@@ -64,10 +64,32 @@ impl fmt::Debug for PartyPrfKeys {
 }
 
 impl PartyPrfKeys {
-    /// Sample the committee `n × n` key matrix and give each party its `2n`
-    /// keys.
+    /// Sample the committee `n × n` key matrix and return each party's `2n`
+    /// keys, independently of a [`crate::trbfv::ShareManager`].
+    ///
+    /// This factory returns all parties' key bundles to its caller. Use it once
+    /// for a local simulation or trusted setup, then securely distribute each
+    /// bundle to its owner. It performs no network exchange or secret sharing.
+    /// Distributed applications must establish matching pairwise keys externally;
+    /// independent calls on each node produce incompatible committee keys.
     ///
     /// Party indices are 1-based, matching Shamir evaluation points.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fhe::trbfv::PartyPrfKeys;
+    ///
+    /// let party_count = 9;
+    /// let mut rng = rand::rng();
+    /// let keys = PartyPrfKeys::generate_committee(party_count, &mut rng)?;
+    /// assert_eq!(keys.len(), party_count);
+    /// for (index, party_keys) in keys.iter().enumerate() {
+    ///     assert_eq!(party_keys.party_id(), index + 1);
+    ///     assert_eq!(party_keys.party_count(), party_count);
+    /// }
+    /// # Ok::<(), fhe::Error>(())
+    /// ```
     pub fn generate_committee<R: RngCore + CryptoRng>(
         party_count: usize,
         rng: &mut R,

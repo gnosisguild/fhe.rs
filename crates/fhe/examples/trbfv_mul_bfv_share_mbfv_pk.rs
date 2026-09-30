@@ -11,8 +11,9 @@
 //              BFV decrypt is correct because k ≈ 2^50 < q₀/2 ≈ 2^52.0000  ✓
 //
 // Protocol:
-//  1. Each party generates: trBFV key share, Shamir shares of sk, committee PRF keys,
-//     an l-BFV RLK share, and a share-encryption BFV key pair (second set).
+//  1. Each party generates: trBFV key share, Shamir shares of sk, an l-BFV RLK share,
+//     and a share-encryption BFV key pair (second set). Committee PRF keys are
+//     sampled once and distributed to the parties.
 //  2. Share-encryption public keys are published. Each party BFV-encrypts its Shamir
 //     shares for every receiver under the receiver's share-encryption key.
 //  3. Each receiver decrypts and aggregates the collected shares to reconstruct
@@ -123,7 +124,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let crp = CommonRandomPoly::new(&params_trbfv, &mut rng)?;
     let share_manager = ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
-    let committee_prf_keys = Arc::new(share_manager.generate_prf_keys(&mut rng).unwrap());
+    let committee_prf_keys =
+        Arc::new(PartyPrfKeys::generate_committee(num_parties, &mut rng).unwrap());
     let smudging_config = SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda)
         .unwrap()
         .with_mult_depth(preset.multiplicative_depth.unwrap());
