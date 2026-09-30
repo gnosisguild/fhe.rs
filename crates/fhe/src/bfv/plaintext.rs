@@ -21,7 +21,7 @@ enum PlaintextCoefficients {
 }
 
 /// A plaintext object, that encodes a vector according to a specific encoding.
-#[derive(Debug, Clone, Eq)]
+#[derive(Clone, Eq)]
 pub struct Plaintext {
     /// The parameters of the underlying BFV encryption scheme.
     pub(crate) params: Arc<BfvParameters>,
@@ -29,6 +29,16 @@ pub struct Plaintext {
     pub(crate) encoding: Option<Encoding>,
     /// Canonical plaintext representation.
     pub(crate) poly_ntt: Poly<Ntt>,
+}
+
+impl std::fmt::Debug for Plaintext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Plaintext")
+            .field("params", &self.params)
+            .field("encoding", &self.encoding)
+            .field("poly_ntt", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Zeroize for Plaintext {
@@ -62,7 +72,8 @@ impl Plaintext {
         }
         let level = self.level();
         let expected_ctx = params.context_at_level(level)?;
-        self.validate_context(level, expected_ctx)
+        self.validate_context(level, expected_ctx)?;
+        params.validate_plaintext_level(level)
     }
 
     #[inline]
@@ -78,7 +89,8 @@ impl Plaintext {
                 right: crate::ParameterSource::Parameters,
             });
         }
-        self.validate_context(expected_level, expected_ctx)
+        self.validate_context(expected_level, expected_ctx)?;
+        params.validate_plaintext_level(expected_level)
     }
 
     #[inline]
@@ -171,8 +183,9 @@ impl Plaintext {
         Ok(reordered)
     }
 
-    pub(crate) fn to_poly(&self) -> Poly<Ntt> {
-        let ctx_lvl = self.params.context_level_at(self.level()).unwrap();
+    pub(crate) fn to_poly(&self) -> Result<Poly<Ntt>> {
+        self.params.validate_plaintext_level(self.level())?;
+        let ctx_lvl = self.params.context_level_at(self.level())?;
         let ctx = &ctx_lvl.poly_context;
         let m = match self.coefficients() {
             PlaintextCoefficients::Small(values) => {
@@ -180,25 +193,30 @@ impl Plaintext {
                 let Some(modulus) = self.params.plaintext.small() else {
                     unreachable!("small plaintext values require the u64 modulus fast path");
                 };
-                let q_mod_t = ctx_lvl.cipher_plain_context.q_mod_t.to_u64().unwrap();
+                let q_mod_t = ctx_lvl
+                    .cipher_plain_context
+                    .q_mod_t
+                    .to_u64()
+                    .ok_or(crate::PlaintextError::ValueTooLargeForU64)?;
                 modulus.scalar_mul_vec(&mut values, q_mod_t);
-                Poly::<PowerBasis>::try_convert_from(values.as_slice(), ctx, false).unwrap()
+                Poly::<PowerBasis>::try_convert_from(values.as_slice(), ctx, false)?
             }
             PlaintextCoefficients::Large(mut values) => {
                 self.params
                     .plaintext
                     .scalar_mul_vec(&mut values, &ctx_lvl.cipher_plain_context.q_mod_t);
-                Poly::<PowerBasis>::try_convert_from(values.as_slice(), ctx, false).unwrap()
+                Poly::<PowerBasis>::try_convert_from(values.as_slice(), ctx, false)?
             }
         };
 
         let mut m = m.into_ntt();
         m *= &ctx_lvl.cipher_plain_context.delta;
-        m
+        Ok(m)
     }
 
     /// Generate a zero plaintext.
     pub fn zero(encoding: Encoding, params: &Arc<BfvParameters>) -> Result<Self> {
+        params.validate_plaintext_level(encoding.level)?;
         let ctx = params.context_at_level(encoding.level)?;
         let poly_ntt = Poly::<Ntt>::zero(ctx);
         Ok(Self {
@@ -486,14 +504,155 @@ impl FheDecoder<Plaintext> for Vec<i64> {
 #[cfg(test)]
 mod tests {
     use super::{Encoding, Plaintext};
-    use crate::bfv::parameters::{BfvParameters, BfvParametersBuilder};
+    use crate::bfv::{
+        PlaintextVec, PublicKey, SecretKey,
+        parameters::{BfvParameters, BfvParametersBuilder},
+    };
+    use crate::{Error as FheError, PlaintextError};
     use fhe_math::rq::{Ntt, Poly};
-    use fhe_traits::{FheDecoder, FheEncoder, FheEncoderVariableTime};
+    use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncoderVariableTime, FheEncrypter};
     use num_bigint::BigUint;
     use num_traits::Zero;
     use rand::rng;
     use std::error::Error;
     use zeroize::Zeroize;
+
+    #[test]
+    fn invalid_single_modulus_level_is_rejected_before_plaintext_conversion()
+    -> Result<(), Box<dyn Error>> {
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(4099)
+            .set_moduli(&[1153, 12289])
+            .build_arc()?;
+        let level = 1;
+        let invalid = FheError::Plaintext(PlaintextError::UnsupportedCiphertextLevel {
+            level,
+            ciphertext_modulus: BigUint::from(1153u64),
+            plaintext_modulus: BigUint::from(4099u64),
+        });
+        let values = vec![4098u64; params.degree()];
+
+        // All constructors reject the level before the length-16 u64 vector
+        // could be interpreted as a single-row canonical RNS matrix.
+        assert_eq!(
+            Plaintext::try_encode(&values, Encoding::poly_at_level(level), &params).unwrap_err(),
+            invalid
+        );
+        assert_eq!(
+            PlaintextVec::try_encode(values.as_slice(), Encoding::poly_at_level(level), &params)
+                .err()
+                .as_ref(),
+            Some(&invalid)
+        );
+        assert_eq!(
+            Plaintext::zero(Encoding::poly_at_level(level), &params).unwrap_err(),
+            invalid
+        );
+
+        // Exercise the fallible conversion and each operation with an invalid
+        // plaintext constructed only inside this crate (public constructors
+        // cannot create one). Infallible operator traits retain their usual
+        // precondition; callers handling untrusted input use try_add_plaintext.
+        let invalid_plaintext = Plaintext {
+            params: params.clone(),
+            encoding: Some(Encoding::poly_at_level(level)),
+            poly_ntt: Poly::<Ntt>::zero(params.context_at_level(level)?),
+        };
+        assert_eq!(invalid_plaintext.to_poly().unwrap_err(), invalid);
+
+        let mut rng = crate::support::presets::rng(239);
+        let sk = SecretKey::random(&params, &mut rng);
+        let pk = PublicKey::new(&sk, &mut rng)?;
+        let encrypted: crate::Result<crate::bfv::Ciphertext> =
+            sk.try_encrypt(&invalid_plaintext, &mut rng);
+        assert_eq!(encrypted.unwrap_err(), invalid);
+        assert_eq!(
+            pk.try_encrypt(&invalid_plaintext, &mut rng).unwrap_err(),
+            invalid
+        );
+        assert_eq!(
+            pk.try_encrypt_with_intermediates(&invalid_plaintext, &mut rng)
+                .err()
+                .as_ref(),
+            Some(&invalid)
+        );
+
+        // The seeded secret-key path reports the same typed errors; it used to
+        // panic on parameter mismatches.
+        assert_eq!(
+            sk.try_encrypt_with_seed(
+                &invalid_plaintext,
+                crate::support::presets::seed(7),
+                &mut rng
+            )
+            .unwrap_err(),
+            invalid
+        );
+        let other_params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(4099)
+            .set_moduli(&[1153, 12289])
+            .build_arc()?;
+        let other_plaintext = Plaintext::try_encode(
+            &vec![1u64; params.degree()],
+            Encoding::poly(),
+            &other_params,
+        )?;
+        assert!(matches!(
+            sk.try_encrypt_with_seed(&other_plaintext, crate::support::presets::seed(7), &mut rng),
+            Err(FheError::ParameterMismatch { .. })
+        ));
+
+        let valid =
+            Plaintext::try_encode(&vec![42u64; params.degree()], Encoding::poly(), &params)?;
+        let ct = pk.try_encrypt(&valid, &mut rng)?;
+        assert_eq!(
+            Vec::<u64>::try_decode(&sk.try_decrypt(&ct)?, Encoding::poly())?,
+            vec![42u64; params.degree()]
+        );
+        // The share-container constructor rejects the unsupported encoding
+        // level before the per-plaintext level checks would report a mismatch.
+        let wrapped = PlaintextVec::try_from_plaintexts(
+            vec![valid.clone()],
+            Encoding::poly_at_level(level),
+            &params,
+        );
+        assert_eq!(wrapped.err().as_ref(), Some(&invalid));
+        let high_values = vec![4098u64; params.degree()];
+        let high = Plaintext::try_encode(&high_values, Encoding::poly(), &params)?;
+        let high_ct: crate::bfv::Ciphertext = sk.try_encrypt(&high, &mut rng)?;
+        assert_eq!(
+            Vec::<u64>::try_decode(&sk.try_decrypt(&high_ct)?, Encoding::poly())?,
+            high_values
+        );
+        let mut switched = ct.clone();
+        switched.switch_down()?;
+        assert_eq!(
+            switched
+                .try_add_plaintext(&invalid_plaintext)
+                .err()
+                .as_ref(),
+            Some(&invalid)
+        );
+        assert_eq!(
+            switched
+                .try_sub_plaintext(&invalid_plaintext)
+                .err()
+                .as_ref(),
+            Some(&invalid)
+        );
+        assert_eq!(sk.try_decrypt(&switched).unwrap_err(), invalid);
+        assert_eq!(unsafe { sk.measure_noise(&switched) }.unwrap_err(), invalid);
+        // A supported level and valid plaintext addition remain usable.
+        let mut sum = ct;
+        sum.try_add_plaintext(&valid)?;
+        assert_eq!(
+            Vec::<u64>::try_decode(&sk.try_decrypt(&sum)?, Encoding::poly())?,
+            vec![84u64; params.degree()]
+        );
+        Ok(())
+    }
 
     #[test]
     fn try_encode() -> Result<(), Box<dyn Error>> {
@@ -621,8 +780,7 @@ mod tests {
         let a = params.plaintext();
         let q = fhe_math::zq::Modulus::new(a).unwrap();
         let mut a_vec = q.random_vec(params.degree(), &mut rng);
-        // Always exercise the centering boundary values, which previously made
-        // this test flaky when hit by chance.
+        // Exercise both centering boundary values deterministically.
         a_vec[0] = a / 2;
         a_vec[1] = a.div_ceil(2);
 

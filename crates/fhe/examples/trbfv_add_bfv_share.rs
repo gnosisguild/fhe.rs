@@ -14,7 +14,7 @@ use std::{env, error::Error, sync::Arc};
 use fhe::{
     bfv::{self, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey},
     mbfv::{AggregateIter, PublicKeyShare},
-    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{FreshNoiseModel, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
 };
 
 use fhe_math::rq::{Poly, PowerBasis};
@@ -36,7 +36,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let degree = params_trbfv.degree();
     println!("✓ trBFV parameters built successfully");
 
-    // BFV parameters for share encryption (plaintext must cover trBFV moduli)
+    // BFV parameters for share encryption. Exact transport requires the
+    // share-encryption plaintext modulus to exceed every transported canonical
+    // residue r ∈ [0, q_i), i.e. plaintext ≥ max(trBFV moduli); encoding
+    // reduces coefficients modulo the plaintext modulus, so a residue ≥ the
+    // plaintext modulus would silently wrap in transit.
     println!("\nBuilding BFV parameters for share encryption...");
     let params_bfv: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share encryption BFV)",
@@ -53,6 +57,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         plaintext_modulus_bfv
     );
     println!("  BFV ciphertext moduli: {:?}", params_bfv.moduli());
+
+    // Transport exactness guard: BFV encoding reduces coefficients modulo the
+    // share-encryption plaintext modulus, so it must keep plaintext ≥ max(q_i)
+    // or high canonical residues would silently wrap in transit.
+    let max_computation_modulus = params_trbfv.moduli().iter().copied().max().unwrap();
+    assert!(
+        plaintext_modulus_bfv >= max_computation_modulus,
+        "share-encryption plaintext modulus {plaintext_modulus_bfv} does not cover \
+         the largest computation modulus {max_computation_modulus}; transported \
+         Shamir residues would silently wrap"
+    );
 
     let args: Vec<String> = env::args().skip(1).collect();
 
@@ -77,12 +92,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let num_parties = cli.num_parties;
     let threshold = cli.threshold;
     let lambda = cli.lambda;
-
-    if threshold != (num_parties - 1) / 2 {
-        print_notice_and_exit(Some(
-            "Threshold must be exactly (num_parties - 1) / 2: maximal corruption tolerance with honest-majority reconstruction".to_string(),
-        ))
-    }
 
     // Lambda is caller-chosen policy: larger values give a stronger
     // statistical-hiding guarantee, bounded above by smudging's MAX_LAMBDA.
@@ -130,10 +139,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let decryption_share = Poly::<PowerBasis>::zero(ctx);
 
                 // Smudging noise shares: compute the bound with the smudging
-                // machinery, sample the noise, and deal it immediately.
-                let config =
-                    SmudgingConfig::new(params_trbfv.clone(), num_parties, num_summed, lambda)
-                        .unwrap();
+                // machinery, sample the noise, and deal it immediately. The
+                // summed ciphertexts are encrypted under the MBFV-aggregated
+                // BFV public key, so the fresh-noise model is BfvPublicKey.
+                let config = SmudgingConfig::new(
+                    params_trbfv.clone(),
+                    num_parties,
+                    num_summed,
+                    lambda,
+                    FreshNoiseModel::BfvPublicKey,
+                )
+                .unwrap();
                 let generator = SmudgingNoiseGenerator::new(config).unwrap();
                 let smudging_noise = generator.generate(&mut rng).unwrap();
                 let smudging_shares_transport = share_manager
@@ -142,7 +158,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .into_transport();
 
                 let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
-                let pk_bfv = PublicKey::new(&sk_bfv, &mut rng);
+                let pk_bfv = PublicKey::new(&sk_bfv, &mut rng).unwrap();
 
                 Party {
                     pk_share,

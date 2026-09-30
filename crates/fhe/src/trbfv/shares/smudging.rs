@@ -104,8 +104,17 @@ impl std::fmt::Debug for SmudgingShare {
 /// One aggregate smudging share for one decryption.
 ///
 /// The owner is consumed by [`super::ShareManager::decryption_share`]. It is
-/// not serializable by this type: applications that need transport must use
-/// an explicit consuming adapter at their protocol boundary.
+/// not serializable and exposes no export or proof-witness accessor. Transported
+/// [`SmudgingShare`] matrices can recreate the same noise on re-aggregation;
+/// callers must bind them to one ciphertext/decryption domain and prevent replay
+/// durably across retries and restarts.
+///
+/// ```compile_fail
+/// # use fhe::trbfv::AggregatedSmudgingShare;
+/// fn unsupported_export(share: AggregatedSmudgingShare) {
+///     let _ = share.into_transport();
+/// }
+/// ```
 ///
 /// ```compile_fail
 /// # use fhe::trbfv::AggregatedSmudgingShare;

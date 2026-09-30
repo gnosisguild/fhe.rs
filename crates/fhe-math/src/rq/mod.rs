@@ -124,6 +124,10 @@ impl SubstitutionExponent {
 }
 
 /// Struct that holds a polynomial for a specific context.
+///
+/// Serialization and deserialization wipe their internal coefficient copies.
+/// Returned wire bytes and polynomials are caller-owned: wrap secret values in
+/// [`Zeroizing`] and keep serialized secret bytes only as long as needed.
 #[derive(Debug, Clone)]
 pub struct Poly<R: RepresentationTag> {
     /// The context containing the polynomial's parameters

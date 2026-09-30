@@ -6,5 +6,5 @@
 mod bound;
 mod noise;
 
-pub use bound::{MAX_LAMBDA, SmudgingConfig};
+pub use bound::{FreshNoiseModel, MAX_LAMBDA, SmudgingConfig};
 pub use noise::{SmudgingNoise, SmudgingNoiseGenerator};

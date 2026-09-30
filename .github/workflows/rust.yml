@@ -1,4 +1,3 @@
-# https://github.com/actions-rs/meta/blob/master/recipes/quickstart.md
 name: Rust
 on:
   workflow_dispatch:
@@ -8,17 +7,17 @@ on:
       - main
       - core/main
 
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
 jobs:
   proto-drift:
     name: Protobuf generated-source drift
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+      - uses: dtolnay/rust-toolchain@stable
       - name: Regenerate Protobuf sources
         run: ./scripts/regenerate-protos.sh
       - name: Check generated sources
@@ -29,52 +28,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          profile: minimal
-          toolchain: nightly
-          override: true
           components: rustfmt
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
 
-  clippy-core:
-    name: Clippy (core)
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
+  clippy:
+    name: Clippy (${{ matrix.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core
+            features: --no-default-features
+          - name: all features
+            features: --all-features
     steps:
       - uses: actions/checkout@v6
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
+          components: clippy
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+        run: cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
 
-  clippy-serialization:
-    name: Clippy (all features)
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
+  doc:
+    name: Rustdoc (all features, warnings as errors)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build documentation
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
   test-workspace:
     name: Workspace unit tests and doctests (${{ matrix.features }})
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -82,113 +71,40 @@ jobs:
         features: [--no-default-features, --all-features]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+      - uses: dtolnay/rust-toolchain@stable
       - name: Run workspace unit tests
         run: cargo test --workspace --lib ${{ matrix.features }}
       - name: Run workspace doctests
         run: cargo test --workspace --doc ${{ matrix.features }}
 
-  test-toy:
-    name: Test toy profiles
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
+  # --tests discovers integration targets and also runs library tests in release.
+  test-integration:
+    name: Integration tests (${{ matrix.features }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-    steps:
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - uses: actions/checkout@v6
-      - name: Run toy and profile tests
-        run: cargo test -p fhe --release --no-default-features --test trbfv_profiles --test bfv_lbfv_trlbfv
-
-  test-representative:
-    name: Test representative profiles
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-    steps:
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - uses: actions/checkout@v6
-      - name: Run representative tests
-        run: cargo test -p fhe --release --all-features --test bfv_lbfv_trlbfv --test trbfv_profiles
-
-  test-bfv-default-128:
-    name: Test BFV default-128 profile
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
-    runs-on: ubuntu-latest
+      matrix:
+        features: [--no-default-features, --all-features]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - name: Run BFV default-128 smoke test
-        run: cargo test -p fhe --release --test bfv_default_128
-
-  test-serialization:
-    name: Test serialization boundary
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - name: Run serialization tests
-        run: cargo test -p fhe --release --all-features --test serialization
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run all workspace integration tests
+        run: cargo test --workspace --release --tests ${{ matrix.features }}
 
   examples-and-benches:
     name: Examples and benchmarks smoke test
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_TERM_COLOR: always
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
-          args: --workspace --all-targets --all-features
-      - uses: actions-rs/cargo@v1
-        with:
-          command: bench
-          args: -p fhe --benches --all-features --no-run
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile benchmarks
+        run: cargo bench -p fhe --benches --all-features --no-run
       - name: Run examples
         run: |
-          cargo run --release -p fhe --example bfv_basic
-          cargo run --release -p fhe --example bfv_mul
-          cargo run --release -p fhe --example bfv_ops
-          cargo run --release -p fhe --example mulpir
-          cargo run --release -p fhe --example pir
-          cargo run --release -p fhe --example rgsw
-          cargo run --release -p fhe --example sealpir
-          cargo run --release -p fhe --example trlbfv_mul
-          cargo run --release -p fhe --all-features --example trbfv_add
-          cargo run --release -p fhe --all-features --example trbfv_add_bfv_share
-          cargo run --release -p fhe --all-features --example trbfv_add_bfv_share_insecure
-          cargo run --release -p fhe --all-features --example trbfv_mul_bfv_share
-          cargo run --release -p fhe --all-features --example trbfv_mul_bfv_share_mbfv_pk
-          cargo run --release -p fhe --all-features --example voting
+          for example in bfv_basic bfv_mul bfv_ops mulpir rgsw sealpir trlbfv_mul; do
+            cargo run --release -p fhe --example "$example"
+          done
+          for example in trbfv_add trbfv_add_bfv_share trbfv_mul_bfv_share \
+            trbfv_mul_bfv_share_mbfv_pk voting; do
+            cargo run --release -p fhe --all-features --example "$example"
+          done

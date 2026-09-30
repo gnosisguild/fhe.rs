@@ -1,11 +1,9 @@
-//!
 //! Single-party l-BFV operational keys: [`LBFVPublicKey`] and
 //! [`LBFVRelinearizationKey`].
 //!
 //! The l-BFV (linear BFV) relinearization algorithm is described in [Robust
 //! Multiparty Computation from Threshold Encryption Based on
-//! RLWE](https://eprint.iacr.org/2024/1285.pdf). This module provides
-//! single-party l-BFV operational keys and their constructors.
+//! RLWE](https://eprint.iacr.org/2024/1285.pdf).
 //!
 //! Threshold/multiparty shares and aggregation live separately in
 //! [`crate::trlbfv`]. Contribution selection, authentication, and replay
@@ -16,6 +14,13 @@
 //! implementation's `l` equals the number of RNS moduli, which need not match
 //! the paper's gadget dimension because of the HPS optimisation
 //! (<https://eprint.iacr.org/2018/117>).
+//!
+//! # Independence of the reference strings
+//!
+//! Public-key CRS `a` and relinearization URS `d1` **must be generated
+//! independently**. Construction and deserialization reject identical seeds,
+//! repeated rows, and shared rows. These checks cannot detect unequal correlated
+//! randomness; independent generation remains a protocol responsibility.
 //!
 //! The l-BFV relinearization argument relies on the circular-security
 //! assumption inherited from the cited multi-key construction. This caveat

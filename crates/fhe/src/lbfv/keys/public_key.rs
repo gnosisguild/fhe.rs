@@ -58,9 +58,10 @@ pub struct LBFVPublicKey {
     /// The public key ciphertexts, one for each RNS modulus
     pub(crate) c: Vec<Ciphertext>,
     /// The decomposition size which is the number of RNS moduli (the l in lBFV).
-    /// Note while l in https://eprint.iacr.org/2024/1285.pdf is equal to the size
+    /// Note while l in <https://eprint.iacr.org/2024/1285.pdf> is equal to the size
     /// chosen of the Gadget vector, here it is equal the number of RNS moduli
-    /// as the library uses the optimization of https://eprint.iacr.org/2018/117.pdf
+    /// as the library uses the optimization of
+    /// <https://eprint.iacr.org/2018/117.pdf>
     pub(crate) l: usize,
     /// Optional compression metadata: the seed that generates the same
     /// concrete `a_j` CRS polynomials as those stored in `c`. When absent
@@ -118,13 +119,7 @@ impl LBFVPublicKey {
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Result<Self> {
-        if sk.coeffs.len() != sk.params.degree() {
-            return Err(Error::DefaultError(format!(
-                "Secret key has {} coefficients, expected {}",
-                sk.coeffs.len(),
-                sk.params.degree()
-            )));
-        }
+        sk.validate()?;
 
         let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
         let row_seeds = Self::derive_crs_row_seeds(&sk.params, seed);
@@ -141,6 +136,22 @@ impl LBFVPublicKey {
             c.push(ct);
         }
 
+        // The CRS rows are seed-derived, but the no-repeat reference-string
+        // invariant is enforced unconditionally before the key is returned.
+        // Rows are borrowed, not cloned.
+        let a_rows: Vec<&Poly<Ntt>> = c
+            .iter()
+            .map(|ct| {
+                ct.c.get(1).ok_or_else(|| {
+                    Error::DefaultError("Public-key ciphertext is missing a component".to_string())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        crate::reference_string::validate_no_repeated_rows(
+            crate::ReferenceStringRole::Crs,
+            a_rows,
+        )?;
+
         Ok(Self {
             params: sk.params.clone(),
             c,
@@ -152,6 +163,7 @@ impl LBFVPublicKey {
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a random
     /// seed.
     pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
+        sk.validate()?;
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
         Self::new_with_seed(sk, seed, rng)
@@ -159,30 +171,16 @@ impl LBFVPublicKey {
 
     /// Build a public key from a [`SecretKey`] and explicit CRS polynomials `a_j`.
     ///
-    /// This is the core operational constructor: the caller supplies the shared
-    /// `a_j` CRS polynomials (as a slice of NTT polynomials) and an optional
-    /// compression seed, and the helper computes `b_j = -a_j·sk + e_j` for each
-    /// `j`, then delegates to [`from_parts`](Self::from_parts).
-    ///
-    /// # Arguments
-    /// * `sk` - The secret key.
-    /// * `a_polynomials` - The `l` shared CRS polynomials `a_j`.
-    /// * `seed` - Optional compression metadata seed. When `None`, the key
-    ///   carries no seed.
-    /// * `rng` - RNG for sampling the error polynomials `e_j`.
+    /// Computes `b_j = -a_j * sk + e_j` for one pairwise-distinct CRS row per
+    /// modulus, then validates the key with [`Self::from_parts`]. `seed` is
+    /// optional compression metadata; CRS/URS independence follows [`crate::lbfv`].
     pub(crate) fn from_crs<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         a_polynomials: &[Poly<Ntt>],
         seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
         rng: &mut R,
     ) -> Result<Self> {
-        if sk.coeffs.len() != sk.params.degree() {
-            return Err(Error::DefaultError(format!(
-                "Secret key has {} coefficients, expected {}",
-                sk.coeffs.len(),
-                sk.params.degree()
-            )));
-        }
+        sk.validate()?;
 
         let l = sk.params.moduli().len();
         if a_polynomials.len() != l {
@@ -191,6 +189,12 @@ impl LBFVPublicKey {
                 a_polynomials.len()
             )));
         }
+
+        // Reject repeated CRS rows before any secret-dependent operation.
+        crate::reference_string::validate_no_repeated_rows(
+            crate::ReferenceStringRole::Crs,
+            a_polynomials,
+        )?;
 
         let ctx = sk.params.context_at_level(0)?;
         let s = Zeroizing::new(
@@ -230,22 +234,10 @@ impl LBFVPublicKey {
 
     /// Build an [`LBFVPublicKey`] from explicit `b` and `a` polynomials.
     ///
-    /// This is the on-chain URS constructor: the caller supplies the
-    /// polynomials directly rather than deriving them from a seed. Both vectors
-    /// are consumed because the resulting key owns the rows; [`Self::new_with_crp`]
-    /// borrows its shared CRS input because callers may reuse it across parties.
-    ///
-    /// # Arguments
-    /// * `b_polynomials` - The `l` b-polynomials `(b₀, …, bₗ₋₁)` where
-    ///   `bⱼ = -aⱼ·sk + eⱼ`.
-    /// * `a_polynomials` - The `l` shared CRS polynomials `(a₀, …, aₗ₋₁)`.
-    ///   These are the *concrete* shared-input polynomials whose equality must
-    ///   be verifiable across all contributions and between the public key and
-    ///   the relinearization key. Must be at the same context as the
-    ///   `b_polynomials`.
-    /// * `seed` - Optional CRS seed for backwards compatibility. When `None`,
-    ///   the key carries no seed and polynomial-level comparisons are the sole
-    ///   consistency check.
+    /// Consumes one `(b_j, a_j)` pair per modulus, all at the level-0 context.
+    /// CRS `a` rows must be pairwise distinct. Optional `seed` metadata must
+    /// reproduce all concrete CRS rows; seedless keys serialize explicitly.
+    /// Structural validation does not prove the relation `b_j = -a_j * sk + e_j`.
     pub fn from_parts(
         b_polynomials: Vec<Poly<Ntt>>,
         a_polynomials: Vec<Poly<Ntt>>,
@@ -264,6 +256,13 @@ impl LBFVPublicKey {
                 params.moduli().len()
             )));
         }
+
+        // The CRS rows form one reference string of the l-BFV key generation;
+        // reject repeated concrete rows before building any key material.
+        crate::reference_string::validate_no_repeated_rows(
+            crate::ReferenceStringRole::Crs,
+            &a_polynomials,
+        )?;
 
         let ctx0 = params.context_at_level(0)?;
         let mut c: Vec<Ciphertext> = Vec::with_capacity(l);
@@ -328,6 +327,52 @@ impl LBFVPublicKey {
                 row_seed
             })
             .collect()
+    }
+
+    /// Verify that `seed` deterministically expands to exactly the first
+    /// `count` concrete CRS rows of this public key.
+    ///
+    /// The seed is compression metadata and is never trusted over the
+    /// concrete polynomials: every row a caller is about to consume must
+    /// match its seed-derived value, and a contradiction is rejected instead
+    /// of silently accepted. The rows live at the level-0 context, so the
+    /// expansion is derived there regardless of any key level the caller
+    /// works at.
+    ///
+    /// Exactly `count` rows are verified: a count beyond the parameter
+    /// modulus list (which bounds the seed expansion) or beyond the stored
+    /// row vector is an error, never a partial verification that reports
+    /// success.
+    pub(crate) fn verify_crs_seed(
+        &self,
+        seed: <ChaCha8Rng as SeedableRng>::Seed,
+        count: usize,
+    ) -> Result<()> {
+        if count > self.params.moduli().len() || count > self.c.len() {
+            return Err(Error::DefaultError(format!(
+                "Cannot verify {count} CRS rows against {} parameter moduli and {} public-key rows",
+                self.params.moduli().len(),
+                self.c.len()
+            )));
+        }
+        let ctx0 = self.params.context_at_level(0)?;
+        for (j, (row_seed, ciphertext)) in Self::derive_crs_row_seeds(&self.params, seed)
+            .into_iter()
+            .zip(self.c.iter())
+            .take(count)
+            .enumerate()
+        {
+            let expected_a = Poly::<Ntt>::random_from_seed(ctx0, row_seed);
+            let actual_a = ciphertext.c.get(1).ok_or_else(|| {
+                Error::DefaultError("Public key is missing its a_j polynomial".to_string())
+            })?;
+            if expected_a != *actual_a {
+                return Err(Error::DefaultError(format!(
+                    "Public-key a_j at index {j} does not match its stored seed"
+                )));
+            }
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------------------
@@ -446,7 +491,7 @@ impl LBFVPublicKey {
         )?);
         let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         let b = ct
             .c
             .first()
@@ -503,23 +548,9 @@ impl LBFVPublicKey {
         Ok(ct)
     }
 
-    /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
-    ///
-    /// This method extracts the first l = # moduli - ciphertext level, c[0] components from each ciphertext in the public key,
-    /// mod switches them to the key level, and converts them to the specified representation.
-    ///
-    /// # Arguments
-    /// * `ciphertext_level` - The level of the ciphertext that will use these polynomials
-    /// * `key_level` - The level of the key that will be used (currently must be 0)
-    /// * `rep` - The desired representation for the output polynomials
-    ///
-    /// # Returns
-    /// * `Ok(Vec<Poly>)` - A vector of polynomials in the specified representation at the target level
-    /// * `Err` if:
-    ///   - The requested ciphertext level is greater than the maximum level
-    ///   - The key level is not 0 (current limitation)
-    ///   - The public key is not at level 0
-    ///   - Any polynomial operations fail during mod switching or representation changes
+    /// Extract the first `#moduli - ciphertext_level` public-key `b` rows.
+    /// Requires a level-0 public key, `key_level == 0`, and `rep == NttShoup`;
+    /// invalid levels, representations, or key structure return an error.
     // self.c[0..new_l] is always valid (self.c has self.l elements, new_l <= self.l)
     pub fn extract_b_polynomials(
         &self,
@@ -539,8 +570,6 @@ impl LBFVPublicKey {
             });
         }
 
-        // Note: this may seem redundant, but it's because in the future, we want to experiment with different key levels
-        // for the public key.
         if key_level != 0 {
             return Err(Error::InvalidLevel {
                 level: key_level,
@@ -563,8 +592,7 @@ impl LBFVPublicKey {
             ));
         }
 
-        // Note: key switching is redundant for now.
-        // Create switcher to mod switch from initial to final context (for when public key is at different level than ciphertext)
+        // Align extracted rows with the key context if switching is needed.
         let ciphertext_ctx = self.params.context_at_level(ciphertext_level)?;
         let switcher = Switcher::new(ciphertext_ctx, key_ctx)?;
 
@@ -629,7 +657,7 @@ impl FheEncrypter<Plaintext, Ciphertext> for LBFVPublicKey {
         )?);
         let e2 = Zeroizing::new(Poly::<Ntt>::small(ctx, self.params.variance, rng)?);
 
-        let m = Zeroizing::new(pt.to_poly());
+        let m = Zeroizing::new(pt.to_poly()?);
         let b = ct
             .c
             .first()
@@ -793,6 +821,24 @@ impl LBFVPublicKey {
             ciphertexts.push(ciphertext);
         }
 
+        // The explicit rows carry the concrete CRS; a row missing its `a`
+        // component is malformed and must not be silently skipped by the
+        // duplicate check below. Rows are borrowed, not cloned.
+        let a_rows: Vec<&Poly<Ntt>> = ciphertexts
+            .iter()
+            .map(|ciphertext| {
+                ciphertext.c.get(1).ok_or_else(|| {
+                    Error::SerializationError(SerializationError::InvalidFormat {
+                        reason: "LBFV public-key ciphertext is missing its a component".to_string(),
+                    })
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        crate::reference_string::validate_no_repeated_rows(
+            crate::ReferenceStringRole::Crs,
+            a_rows,
+        )?;
+
         let key = Self {
             params: params.clone(),
             c: ciphertexts,
@@ -889,7 +935,7 @@ mod tests {
             BfvParameters::default_arc(1, 8),
             insecure().unwrap().parameters,
         ] {
-            for level in 0..params.max_level() {
+            for level in 0..=params.max_level() {
                 for _ in 0..20 {
                     let sk = SecretKey::random(&params, &mut rng);
                     let pk = LBFVPublicKey::new(&sk, &mut rng)?;
@@ -902,7 +948,6 @@ mod tests {
                     let ct = pk.try_encrypt(&pt, &mut rng)?;
                     let pt2 = sk.try_decrypt(&ct)?;
 
-                    println!("Noise: {}", unsafe { sk.measure_noise(&ct)? });
                     assert_eq!(pt2, pt);
                 }
             }
@@ -987,7 +1032,7 @@ mod tests {
 
         let b = pk.c[0].c[0].clone();
         let a = pk.c[0].c[1].clone();
-        let m = pt.to_poly();
+        let m = pt.to_poly()?;
 
         let mut expected_c0 = u * &b;
         expected_c0 += e1;
@@ -1011,21 +1056,6 @@ mod tests {
         let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &other_params)?;
         assert!(pk.try_encrypt(&pt, &mut rng).is_err());
         assert!(pk.try_encrypt_with_intermediates(&pt, &mut rng).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn test_serialize() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let mut rng = rng();
-        for params in [
-            BfvParameters::default_arc(1, 8),
-            insecure().unwrap().parameters,
-        ] {
-            let sk = SecretKey::random(&params, &mut rng);
-            let pk = LBFVPublicKey::new(&sk, &mut rng)?;
-            let bytes = pk.to_bytes();
-            assert_eq!(pk, LBFVPublicKey::from_bytes(&bytes, &params)?);
-        }
         Ok(())
     }
 
@@ -1058,22 +1088,26 @@ mod tests {
     #[test]
     fn seeded_and_explicit_serialization_roundtrip() -> std::result::Result<(), Box<dyn Error>> {
         let mut rng = rng();
-        let params = insecure().unwrap().parameters;
-        let sk = SecretKey::random(&params, &mut rng);
-        let seeded = LBFVPublicKey::new(&sk, &mut rng)?;
-        let seeded_bytes = seeded.to_bytes();
-        assert_eq!(LBFVPublicKey::from_bytes(&seeded_bytes, &params)?, seeded);
+        for params in [
+            BfvParameters::default_arc(1, 8),
+            insecure().unwrap().parameters,
+        ] {
+            let sk = SecretKey::random(&params, &mut rng);
+            let seeded = LBFVPublicKey::new(&sk, &mut rng)?;
+            let seeded_bytes = seeded.to_bytes();
+            assert_eq!(LBFVPublicKey::from_bytes(&seeded_bytes, &params)?, seeded);
 
-        let b_polynomials = seeded.c.iter().map(|ct| ct.c[0].clone()).collect();
-        let a_polynomials = seeded.c.iter().map(|ct| ct.c[1].clone()).collect();
-        let explicit =
-            LBFVPublicKey::from_parts(b_polynomials, a_polynomials, params.clone(), None)?;
-        let explicit_bytes = explicit.to_bytes();
-        assert_eq!(
-            LBFVPublicKey::from_bytes(&explicit_bytes, &params)?,
-            explicit
-        );
-        assert!(seeded_bytes.len() < explicit_bytes.len());
+            let b_polynomials = seeded.c.iter().map(|ct| ct.c[0].clone()).collect();
+            let a_polynomials = seeded.c.iter().map(|ct| ct.c[1].clone()).collect();
+            let explicit =
+                LBFVPublicKey::from_parts(b_polynomials, a_polynomials, params.clone(), None)?;
+            let explicit_bytes = explicit.to_bytes();
+            assert_eq!(
+                LBFVPublicKey::from_bytes(&explicit_bytes, &params)?,
+                explicit
+            );
+            assert!(seeded_bytes.len() < explicit_bytes.len());
+        }
         Ok(())
     }
 
@@ -1179,6 +1213,82 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    /// A public key whose CRS vector contains the same concrete row twice must
+    /// be rejected: the CRS rows must be pairwise distinct.
+    #[test]
+    fn from_parts_rejects_repeated_crs_rows() -> std::result::Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+
+        let pk_seeded = LBFVPublicKey::new(&sk, &mut rng)?;
+        let b_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[0].clone()).collect();
+        let a_polys: Vec<Poly<Ntt>> = pk_seeded.c.iter().map(|ct| ct.c[1].clone()).collect();
+
+        // Control: the distinct rows are accepted (checked in
+        // `test_from_parts_roundtrip`); duplicating one row is not.
+        let mut repeated_a = a_polys.clone();
+        repeated_a[1] = repeated_a[0].clone();
+        assert!(matches!(
+            LBFVPublicKey::from_parts(b_polys.clone(), repeated_a, params.clone(), None),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::RepeatedReferenceStringRow {
+                    role: crate::ReferenceStringRole::Crs,
+                    first_index: 0,
+                    second_index: 1,
+                }
+            ))
+        ));
+
+        // The explicit-CRS constructor must reject the same input before any
+        // secret-dependent computation runs.
+        let mut repeated_from_crs = a_polys.clone();
+        repeated_from_crs[params.moduli().len() - 1] = repeated_from_crs[0].clone();
+        assert!(matches!(
+            LBFVPublicKey::from_crs(&sk, &repeated_from_crs, None, &mut rng),
+            Err(crate::Error::Multiparty(
+                crate::MultipartyError::RepeatedReferenceStringRow {
+                    role: crate::ReferenceStringRole::Crs,
+                    first_index: 0,
+                    second_index: _,
+                }
+            ))
+        ));
+        Ok(())
+    }
+
+    /// A serialized explicit public key whose CRS rows contain a duplicate is
+    /// rejected at deserialization time.
+    #[test]
+    fn explicit_serialized_pk_with_repeated_crs_rows_rejected()
+    -> std::result::Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let seeded = LBFVPublicKey::new(&sk, &mut rng)?;
+
+        let explicit = LBFVPublicKey::from_parts(
+            seeded.c.iter().map(|ct| ct.c[0].clone()).collect(),
+            seeded.c.iter().map(|ct| ct.c[1].clone()).collect(),
+            params.clone(),
+            None,
+        )?;
+        let mut proto = LBFVPublicKeyProto::from(&explicit);
+        let Some(rows) = proto
+            .explicit
+            .as_mut()
+            .map(|representation| &mut representation.c)
+        else {
+            return Err("expected explicit public-key representation".into());
+        };
+        // Copy row 0's concrete `a` bytes into row 1.
+        let a_bytes = rows[0].c[1].clone();
+        rows[1].c[1] = a_bytes;
+
+        assert!(LBFVPublicKey::from_bytes(&proto.encode_to_vec(), &params).is_err());
         Ok(())
     }
 
@@ -1342,6 +1452,46 @@ mod tests {
         let pt = Plaintext::try_encode(&[42u64], Encoding::poly(), &params)?;
         let ct = pk.try_encrypt(&pt, &mut rng)?;
         assert_eq!(sk.try_decrypt(&ct)?, pt);
+
+        Ok(())
+    }
+
+    /// `verify_crs_seed` must verify exactly `count` rows: a count beyond the
+    /// parameter modulus list — which bounds the seed expansion — is an error
+    /// even when the row vector was artificially oversized intra-crate, and a
+    /// count beyond the stored rows is an error too. A partial verification
+    /// must never report success.
+    #[test]
+    fn verify_crs_seed_rejects_counts_beyond_moduli_and_rows()
+    -> std::result::Result<(), Box<dyn Error>> {
+        let mut rng = rng();
+        let params = insecure().unwrap().parameters;
+        let sk = SecretKey::random(&params, &mut rng);
+        let seed: <ChaCha8Rng as SeedableRng>::Seed = [97u8; 32];
+        let pk = LBFVPublicKey::new_with_seed(&sk, seed, &mut rng)?;
+        let l = params.moduli().len();
+
+        // Controls: counts within both bounds verify and succeed.
+        assert!(pk.verify_crs_seed(seed, 1).is_ok());
+        assert!(pk.verify_crs_seed(seed, l).is_ok());
+
+        // A count beyond the parameter moduli is rejected...
+        assert!(pk.verify_crs_seed(seed, l + 1).is_err());
+
+        // ...including when the row vector was artificially oversized so the
+        // count would fit the rows: the seed expansion, not the row vector,
+        // bounds the verification, so an oversized count must not silently
+        // verify fewer rows and return `Ok`.
+        let mut oversized = pk.clone();
+        let extra_row = pk.c[0].clone();
+        oversized.c.push(extra_row);
+        assert_eq!(oversized.c.len(), l + 1);
+        assert!(oversized.verify_crs_seed(seed, l + 1).is_err());
+
+        // A count beyond the actual row count is rejected as well.
+        let mut truncated = pk.clone();
+        truncated.c.pop();
+        assert!(truncated.verify_crs_seed(seed, l).is_err());
 
         Ok(())
     }

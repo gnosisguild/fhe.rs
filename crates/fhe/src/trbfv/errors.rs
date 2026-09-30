@@ -1,7 +1,7 @@
 //! Error types for threshold BFV operations.
 //!
 //! The matchable variants live in [`crate::ThresholdError`]; the helpers here
-//! construct them wrapped in the crate-level [`Error`].
+//! construct them wrapped in the crate-level [`Error`](crate::Error).
 
 use crate::{Error, ThresholdError};
 
@@ -63,6 +63,18 @@ impl Error {
     pub fn smudging_bound_infeasible<S: Into<String>>(reason: S) -> Self {
         Error::Threshold(ThresholdError::SmudgingBoundInfeasible {
             reason: reason.into(),
+        })
+    }
+
+    /// Create a smudging-noise party-count mismatch error.
+    #[must_use]
+    pub fn smudging_noise_party_count_mismatch(
+        noise_parties: usize,
+        dealer_parties: usize,
+    ) -> Self {
+        Error::Threshold(ThresholdError::SmudgingNoisePartyCountMismatch {
+            noise_parties,
+            dealer_parties,
         })
     }
 
@@ -145,6 +157,19 @@ mod tests {
             error,
             Error::Threshold(ThresholdError::SmudgingBoundInfeasible { .. })
         ));
+
+        let error = Error::smudging_noise_party_count_mismatch(1, 5);
+        assert!(matches!(
+            error,
+            Error::Threshold(ThresholdError::SmudgingNoisePartyCountMismatch {
+                noise_parties: 1,
+                dealer_parties: 5
+            })
+        ));
+        assert_eq!(
+            error.to_string(),
+            "Threshold error: smudging noise party count 1 does not match dealer party count 5"
+        );
 
         let error = Error::party_count_exceeds_modulus(70000, 65537);
         assert!(matches!(

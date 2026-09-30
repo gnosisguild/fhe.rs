@@ -85,6 +85,7 @@ impl<'a, 'b> RelinKeyGenerator<'a, 'b> {
         crp: &'b CommonRandomPolyVec,
         rng: &mut R,
     ) -> Result<Self> {
+        sk_share.validate()?;
         let params = sk_share.params.clone();
         let ctx = params.context_at_level(0)?;
         if ctx.moduli().len() == 1 {

@@ -1,29 +1,10 @@
 // Threshold BFV multiplication with distributed l-BFV RLK and encrypted share transport.
 //
-// Smudging noise is computed via the smudging machinery with
-// smudging configuration uses `num_parties` as the conservative RLK bound so the
-// accepted l-BFV participant count is explicit in the smudging bound. Paper-conforming
-// robustness requires odd n = 2t + 1; even n is accepted for compatibility but lies
-// outside the theorem.
-//
-// Two BFV parameter sets:
-//
-//   First set  (computation) — n=20, z=3, k=1000, d=16384, 5×51-bit moduli, λ=31.
-//
-//   Second set (share encryption) — k = q[1] of first set ≈ 2^50, d=16384,
-//              2×53-bit moduli. Each Shamir share value lies in [0, q_i) ⊆ [0, k),
-//              so it encodes directly as a BFV plaintext.
-//              BFV decrypt is correct because k ≈ 2^50 < q₀/2 ≈ 2^52.0000  ✓
-//
-// Protocol:
-//  1. Each party generates: an l-BFV pk share, an l-BFV RLK share, Shamir shares of
-//     sk and smudging error, and a share-encryption BFV key pair (second set).
-//  2. Share-encryption public keys are published. Each party BFV-encrypts its Shamir
-//     shares for every receiver under the receiver's share-encryption key.
-//  3. Each receiver decrypts and aggregates the collected shares to reconstruct
-//     its Lagrange evaluation point of the combined secret key SK = Σ sk_j.
-//  4. Two values are encrypted under the aggregated l-BFV pk, multiplied and
-//     relinearized using the aggregated RLK, then threshold-decrypted by t+1 parties.
+// Uses secure16384 computation and transport profiles from support/presets.rs.
+// The transport plaintext modulus must be >= max(q_i), so canonical Shamir
+// residues encode without reduction. Smudging conservatively bounds all parties'
+// RLK contributions. Only odd committees match the paper's n = 2t + 1 model.
+// Local simulation only; see src/trbfv/README.md for the protocol boundary.
 
 #![allow(clippy::indexing_slicing, missing_docs)]
 
@@ -36,7 +17,7 @@ use fhe::{
     aggregate::AggregateIter,
     bfv::{self, Ciphertext, CommonRandomPolyVec, Encoding, Plaintext, PublicKey, SecretKey},
     lbfv::{LBFVPublicKey, LBFVRelinearizationKey},
-    trbfv::{ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
+    trbfv::{FreshNoiseModel, ShareManager, SmudgingConfig, SmudgingNoiseGenerator},
     trlbfv::{PublicKeyShare, RelinKeyShare, aggregate_relinearization_key},
 };
 use fhe_math::rq::{Poly, PowerBasis};
@@ -45,7 +26,7 @@ use ndarray::{Array, ArrayView};
 use rand_distr::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::time::Instant;
-use support::examples::trbfv::{TrbfvShares, parse_cli, print_notice_and_exit};
+use support::examples::trbfv::{TrbfvShares, parse_cli, print_notice_without_num_summed};
 use support::examples::util::timeit::timeit;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -65,8 +46,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // ── Second BFV parameter set (share encryption) ───────────────────────────
-    // The plaintext modulus equals the largest computation modulus, so every
-    // Shamir share fits as a BFV plaintext.
+    // The plaintext modulus equals the largest computation modulus
+    // (k = q[0] = max(q_i)), so every canonical Shamir share residue
+    // r ∈ [0, q_i) is strictly below k and encodes exactly.
     println!("\nBuilding share-encryption parameters (second set)...");
     let params_share_enc: Arc<bfv::BfvParameters> = timeit!(
         "Parameters generation (share enc)",
@@ -84,10 +66,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         plaintext_modulus_share_enc
     );
 
+    // Transport exactness guard: BFV encoding reduces coefficients modulo the
+    // share-encryption plaintext modulus k, so the profile must keep
+    // k ≥ max(q_i); otherwise high canonical residues would silently wrap.
+    let max_computation_modulus = params_trbfv.moduli().iter().copied().max().unwrap();
+    assert!(
+        plaintext_modulus_share_enc >= max_computation_modulus,
+        "share-encryption plaintext modulus {plaintext_modulus_share_enc} does not \
+         cover the largest computation modulus {max_computation_modulus}; \
+         transported Shamir residues would silently wrap"
+    );
+
     // ── CLI argument parsing ──────────────────────────────────────────────────
     let args: Vec<String> = env::args().skip(1).collect();
     if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
-        print_notice_and_exit(None)
+        print_notice_without_num_summed(None)
     }
 
     let cli = match parse_cli(
@@ -98,7 +91,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         None,
     ) {
         Ok(cli) => cli,
-        Err(error) => print_notice_and_exit(Some(error)),
+        Err(error) => print_notice_without_num_summed(Some(error)),
     };
     let num_parties = cli.num_parties;
     let threshold = cli.threshold;
@@ -154,11 +147,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap()
                     .into_transport();
 
-                // Smudging noise shares (m=3 initial noise terms, depth=3 multiplications,
-                // accepted l-BFV participant count = num_parties).
-                let config = SmudgingConfig::new(params_trbfv.clone(), num_parties, 3, lambda)
-                    .unwrap()
-                    .with_mult_depth(preset.multiplicative_depth.unwrap());
+                // Pure product ((a*b)*c)*d: depth 3, tight m=1. Use m=3 as a
+                // conservative overprovision for this profile, with the l-BFV
+                // model matching its wider encryption randomness.
+                let config = SmudgingConfig::new(
+                    params_trbfv.clone(),
+                    num_parties,
+                    3,
+                    lambda,
+                    FreshNoiseModel::LbfvPublicKey,
+                )
+                .unwrap()
+                .with_mult_depth(preset.multiplicative_depth.unwrap());
                 let generator = SmudgingNoiseGenerator::new(config).unwrap();
                 let smudging_noise = generator.generate(&mut rng).unwrap();
                 let smudging_shares_transport = share_manager
@@ -183,7 +183,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Share-encryption key pair under the second parameter set.
                 let secret_key_enc = SecretKey::random(&params_share_enc, &mut rng);
-                let public_key_enc = PublicKey::new(&secret_key_enc, &mut rng);
+                let public_key_enc = PublicKey::new(&secret_key_enc, &mut rng).unwrap();
 
                 let ctx0 = params_trbfv.context_at_level(0).unwrap();
                 Party {
@@ -217,8 +217,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ── Share encryption and transmission ─────────────────────────────────────
     // Each sender BFV-encrypts the share row it owes to each receiver under that
     // receiver's share-encryption public key (second parameter set). This is safe:
-    //   • k = q[1] ≥ q_i for all i → share values ∈ [0, q_i) ⊆ [0, k)
-    //   • k ≈ 2^57 < q₀/2 ≈ 2^59  → BFV decrypt is algebraically exact
+    //   • k = q[0] = max(q_i) → every canonical share residue r ∈ [0, q_i) is
+    //     strictly below k, so encoding is exact (no silent reduction mod k)
+    //   • k ≈ 2^50 < q₀/2 ≈ 2^51  → BFV decrypt is algebraically exact
     //
     // encrypted_shares[sender][receiver] = (Vec<Ciphertext>, Vec<Ciphertext>)
     //   first  vec: one ciphertext per modulus for the sk share row

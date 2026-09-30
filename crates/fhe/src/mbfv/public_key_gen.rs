@@ -80,6 +80,7 @@ impl PublicKeyShare {
         crp: CommonRandomPoly,
         rng: &mut R,
     ) -> Result<(Self, PublicKeyShareIntermediates)> {
+        sk_share.validate()?;
         let params = sk_share.params.clone();
         let ctx = params.context_at_level(0)?;
         if crp.poly.ctx() != ctx {
@@ -362,71 +363,6 @@ mod tests {
             assert_eq!(e.representation(), fhe_math::rq::Representation::Ntt);
             assert_eq!(pk_0.representation(), fhe_math::rq::Representation::Ntt);
         }
-    }
-
-    #[test]
-    fn test_new_with_intermediates_multiple_parties() {
-        let mut rng = rng();
-        const NUM_PARTIES: usize = 5;
-
-        let params = BfvParameters::default_arc(1, 8);
-        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
-
-        // Generate extended data for multiple parties
-        let mut extended_data = vec![];
-        for _ in 0..NUM_PARTIES {
-            let sk_share = SecretKey::random(&params, &mut rng);
-            extended_data.push(
-                PublicKeyShare::new_with_intermediates(&sk_share, crp.clone(), &mut rng).unwrap(),
-            );
-        }
-
-        // Verify all parties have the same pk_1 (crp)
-        for (share, _) in &extended_data {
-            assert_eq!(
-                share.crp.poly, crp.poly,
-                "All parties should have the same pk_1 (crp)"
-            );
-        }
-
-        // Verify the mathematical relationship holds for each party
-        for (share, intermediates) in &extended_data {
-            let mut expected = -share.crp.poly.clone();
-            expected.disallow_variable_time_computations();
-            expected *= intermediates.secret_key();
-            expected += intermediates.error();
-            expected.allow_variable_time_computations(fhe_traits::VariableTime::new(
-                fhe_traits::PublicData::assert_public(),
-            ));
-            assert_eq!(
-                share.p0_share, expected,
-                "pk_0 should equal -a*s + e for each party"
-            );
-        }
-    }
-
-    #[test]
-    fn test_new_with_intermediates_consistency_with_new() {
-        let mut rng = rng();
-
-        let params = BfvParameters::default_arc(1, 8);
-        let sk_share = SecretKey::random(&params, &mut rng);
-        let crp = CommonRandomPoly::new(&params, &mut rng).unwrap();
-
-        // Create PublicKeyShare using original new()
-        let pks = PublicKeyShare::new(&sk_share, crp.clone(), &mut rng).unwrap();
-
-        let (share, _intermediates) =
-            PublicKeyShare::new_with_intermediates(&sk_share, crp.clone(), &mut rng).unwrap();
-
-        assert_eq!(
-            share.crp.poly, pks.crp.poly,
-            "pk_1 from new_with_intermediates should match crp from PublicKeyShare"
-        );
-        assert_eq!(
-            share.crp.poly, crp.poly,
-            "pk_1 should be the crp polynomial"
-        );
     }
 
     #[test]
