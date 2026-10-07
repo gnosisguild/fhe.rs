@@ -101,7 +101,7 @@ pub struct BfvParameters {
     /// Error variance for e1 in threshold BFV (supports large values via `BigUint`).
     pub(crate) error1_variance: BigUint,
 
-    /// Precomputed contexts indexed by modulus-switching level.
+    /// Contexts indexed by modulus-switching level, with lazy multiplication tables.
     pub(crate) context_levels: Vec<ContextLevel>,
 
     /// NTT operator for SIMD plaintext operations, if possible
@@ -650,6 +650,9 @@ impl BfvParametersBuilder {
     }
 
     /// Build a new `BfvParameters`.
+    ///
+    /// Multiplication tables are initialized on the first ciphertext multiplication
+    /// at each level. Addition-only workloads do not construct these tables.
     pub fn build(&self) -> Result<BfvParameters> {
         self.validate_configuration()?;
 
@@ -750,7 +753,9 @@ impl BfvParametersBuilder {
         // Reverse to get correct order (level 0 first)
         cipher_plain_contexts.reverse();
 
-        // Create n+1 moduli of 62 bits for multiplication.
+        // Generate and validate the extension primes here so parameter construction
+        // retains its fallible contract. Their expensive per-level NTT tables remain
+        // deferred until multiplication.
         let mut extended_basis = Vec::with_capacity(moduli.len() + 1);
         let mut upper_bound = 1 << 62;
         while extended_basis.len() != moduli.len() + 1 {
@@ -764,42 +769,31 @@ impl BfvParametersBuilder {
                     })
                 })?;
             if !extended_basis.contains(&upper_bound) && !moduli.contains(&upper_bound) {
-                extended_basis.push(upper_bound)
+                extended_basis.push(upper_bound);
             }
         }
 
-        // Build a fully initialized context for each level. The vector index is
-        // the level, so lookups do not need to walk or initialize a chain.
+        let mul_params_source = Arc::new(MultiplicationParametersSource {
+            moduli: moduli.clone(),
+            plaintext: plaintext_big.clone(),
+            degree: self.degree,
+            extended_basis: extended_basis.into(),
+        });
+
+        // The vector index remains the level. Only multiplication data is deferred.
         let context_levels = cipher_plain_contexts
             .into_iter()
             .enumerate()
             .map(|(level, cipher_plain_context)| {
                 let poly_context = cipher_plain_context.ciphertext_context.clone();
-
-                // For the first multiplication, extend to a context that is
-                // approximately 60 bits larger.
-                let modulus_size = moduli_sizes[..moduli_sizes.len() - level]
-                    .iter()
-                    .sum::<usize>();
-                let n_moduli = (modulus_size + 60).div_ceil(62);
-                let mut multiplication_moduli = moduli[..moduli_sizes.len() - level].to_vec();
-                multiplication_moduli.extend_from_slice(&extended_basis[..n_moduli]);
-                let multiplication_context = Context::new_arc(&multiplication_moduli, self.degree)?;
-                let mul_params = MultiplicationParameters::new(
-                    &poly_context,
-                    &multiplication_context,
-                    ScalingFactor::one(),
-                    ScalingFactor::new(plaintext_big, poly_context.modulus()),
-                )?;
-
-                Ok(ContextLevel::new(
+                ContextLevel::new(
                     poly_context,
                     cipher_plain_context,
                     level,
-                    mul_params,
-                ))
+                    mul_params_source.clone(),
+                )
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
 
         // We use the same code as SEAL
         // https://github.com/microsoft/SEAL/blob/82b07db635132e297282649e2ab5908999089ad2/native/src/seal/batchencoder.cpp
@@ -882,6 +876,54 @@ impl Deserialize for BfvParameters {
     type Error = Error;
 }
 
+/// Immutable inputs used to construct multiplication tables on first use.
+#[derive(Debug)]
+pub(crate) struct MultiplicationParametersSource {
+    moduli: Vec<u64>,
+    plaintext: BigUint,
+    degree: usize,
+    extended_basis: Box<[u64]>,
+}
+
+impl PartialEq for MultiplicationParametersSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.moduli == other.moduli
+            && self.plaintext == other.plaintext
+            && self.degree == other.degree
+    }
+}
+
+impl Eq for MultiplicationParametersSource {}
+
+impl MultiplicationParametersSource {
+    #[expect(
+        clippy::expect_used,
+        reason = "the multiplication operator cannot return a parameter initialization error"
+    )]
+    pub(crate) fn build(&self, node: &ContextLevel) -> Result<MultiplicationParameters> {
+        let level_moduli = node.poly_context.moduli();
+        let modulus_size = level_moduli
+            .iter()
+            .map(|m| 64 - m.leading_zeros() as usize)
+            .sum::<usize>();
+        let n_moduli = (modulus_size + 60).div_ceil(62);
+        // Each ciphertext modulus has at most 62 bits. The basis has n+1 entries.
+        let extension = self
+            .extended_basis
+            .get(..n_moduli)
+            .expect("multiplication basis covers the validated ciphertext moduli");
+        let mut mul_moduli = level_moduli.to_vec();
+        mul_moduli.extend_from_slice(extension);
+        let mul_context = Context::new_arc(&mul_moduli, self.degree)?;
+        MultiplicationParameters::new(
+            &node.poly_context,
+            &mul_context,
+            ScalingFactor::one(),
+            ScalingFactor::new(&self.plaintext, node.poly_context.modulus()),
+        )
+    }
+}
+
 /// Multiplication parameters
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct MultiplicationParameters {
@@ -909,13 +951,145 @@ impl MultiplicationParameters {
 
 #[cfg(test)]
 mod tests {
-    use super::{BfvParameters, BfvParametersBuilder};
+    use super::{BfvParameters, BfvParametersBuilder, MultiplicationParameters};
+    use crate::bfv::{Ciphertext, Encoding, Plaintext, SecretKey};
     use crate::proto::bfv::{Parameters, parameters::PlaintextModulus as PlaintextModulusProto};
     use crate::{Error as FheError, ParametersError};
-    use fhe_traits::{Deserialize, Serialize};
+    use fhe_math::{rns::ScalingFactor, rq::Context, zq::primes::generate_prime};
+    use fhe_traits::{Deserialize, FheDecoder, FheDecrypter, FheEncoder, FheEncrypter, Serialize};
     use num_bigint::BigUint;
     use prost::Message;
     use std::error::Error;
+
+    #[test]
+    fn multiplication_tables_are_lazy_and_preserve_eager_values() -> Result<(), Box<dyn Error>> {
+        for sizes in [&[50, 50][..], &[62, 61, 50][..]] {
+            let params = BfvParametersBuilder::new()
+                .set_degree(16)
+                .set_plaintext_modulus(1153)
+                .set_moduli_sizes(sizes)
+                .build()?;
+            let bytes = params.to_bytes();
+            let decoded = BfvParameters::try_deserialize(&bytes)?;
+            assert!(
+                params
+                    .context_levels
+                    .iter()
+                    .all(|node| node.mul_params.get().is_none())
+            );
+
+            // Reference: the eager basis and per-level tables before this change.
+            let mut extended_basis = Vec::with_capacity(params.moduli.len() + 1);
+            let mut upper_bound = 1 << 62;
+            while extended_basis.len() != params.moduli.len() + 1 {
+                upper_bound = generate_prime(62, 2 * params.degree() as u64, upper_bound).unwrap();
+                if !extended_basis.contains(&upper_bound) && !params.moduli.contains(&upper_bound) {
+                    extended_basis.push(upper_bound);
+                }
+            }
+            assert_eq!(
+                params
+                    .context_levels
+                    .first()
+                    .unwrap()
+                    .mul_params_source
+                    .extended_basis
+                    .as_ref(),
+                extended_basis
+            );
+            for (level, node) in params.context_levels.iter().enumerate() {
+                assert!(node.mul_params.get().is_none());
+                let len = params.moduli.len() - level;
+                let modulus_size: usize = params.moduli_sizes.get(..len).unwrap().iter().sum();
+                let n_moduli = (modulus_size + 60).div_ceil(62);
+                let mut moduli = params.moduli.get(..len).unwrap().to_vec();
+                moduli.extend_from_slice(extended_basis.get(..n_moduli).unwrap());
+                let context = Context::new_arc(&moduli, params.degree())?;
+                let eager = MultiplicationParameters::new(
+                    &node.poly_context,
+                    &context,
+                    ScalingFactor::one(),
+                    ScalingFactor::new(params.plaintext_big(), node.poly_context.modulus()),
+                )?;
+                let lazy = node.mul_params();
+                assert_eq!(lazy, &eager);
+                assert!(std::ptr::eq(lazy, node.mul_params()));
+                assert_eq!(params.to_bytes(), bytes);
+                assert_eq!(params, decoded);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn addition_skips_tables_and_multiplication_initializes_only_its_level()
+    -> Result<(), Box<dyn Error>> {
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[50, 50, 50])
+            .build_arc()?;
+        let mut rng = rand::rng();
+        let sk = SecretKey::random(&params, &mut rng);
+        let pt = Plaintext::try_encode(&[2u64][..], Encoding::poly(), &params)?;
+        let ct: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
+        let sum = &ct + &ct;
+        let values = Vec::<u64>::try_decode(&sk.try_decrypt(&sum)?, Encoding::poly())?;
+        assert_eq!(values.first(), Some(&4));
+        assert!(
+            params
+                .context_levels
+                .iter()
+                .all(|node| node.mul_params.get().is_none())
+        );
+        for level in 0..=params.max_level() {
+            let mut switched = ct.clone();
+            switched.switch_to_level(level)?;
+            let product = &switched * &switched;
+            let values = Vec::<u64>::try_decode(&sk.try_decrypt(&product)?, Encoding::poly())?;
+            assert_eq!(values.first(), Some(&4));
+            for (index, node) in params.context_levels.iter().enumerate() {
+                assert_eq!(node.mul_params.get().is_some(), index <= level);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn multiplication_tables_are_shared_across_threads() -> Result<(), Box<dyn Error>> {
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(1153)
+            .set_moduli_sizes(&[50, 50])
+            .build()?;
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        params.context_levels.first().unwrap().mul_params()
+                    })
+                })
+                .collect();
+            for handle in handles {
+                assert!(std::ptr::eq(
+                    handle.join().unwrap(),
+                    params.context_levels.first().unwrap().mul_params(),
+                ));
+            }
+        });
+        assert!(
+            params
+                .context_levels
+                .last()
+                .unwrap()
+                .mul_params
+                .get()
+                .is_none()
+        );
+        Ok(())
+    }
 
     #[test]
     fn default() {

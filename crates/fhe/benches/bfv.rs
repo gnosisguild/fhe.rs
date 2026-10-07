@@ -7,12 +7,12 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fhe::bfv::{
-    BfvParameters, Ciphertext, Encoding, EvaluationKeyBuilder, Multiplicator, Plaintext, PublicKey,
-    RelinearizationKey, SecretKey,
+    BfvParameters, BfvParametersBuilder, Ciphertext, Encoding, EvaluationKeyBuilder, Multiplicator,
+    Plaintext, PublicKey, RelinearizationKey, SecretKey,
 };
 use fhe_math::rns::{RnsContext, ScalingFactor};
 use fhe_math::zq::primes::generate_prime;
-use fhe_traits::{FheEncoder, FheEncrypter};
+use fhe_traits::{DeserializeParametrized, FheEncoder, FheEncrypter, Serialize};
 use itertools::Itertools;
 use num_bigint::BigUint;
 use rand::rng;
@@ -290,5 +290,51 @@ pub fn bfv_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(bfv, bfv_benchmark);
+fn bfv_setup_and_decode(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bfv_setup_and_decode");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(300));
+    group.measurement_time(Duration::from_secs(1));
+    let mut rng = rng();
+    for degree in [512, 8192] {
+        // Benchmark fixtures, not recommended security parameters.
+        let mut builder = BfvParametersBuilder::new();
+        builder
+            .set_degree(degree)
+            .set_plaintext_modulus(65537)
+            .set_moduli_sizes(&[50, 50, 50]);
+        group.bench_function(BenchmarkId::new("parameters", degree), |b| {
+            b.iter(|| std::hint::black_box(&builder).build().unwrap());
+        });
+        let params = builder.build_arc().unwrap();
+        let sk = SecretKey::random(&params, &mut rng);
+        let pt = Plaintext::try_encode(&[1u64][..], Encoding::poly(), &params).unwrap();
+        let seeded: Ciphertext = sk.try_encrypt(&pt, &mut rng).unwrap();
+        let bytes = Ciphertext::new(seeded.to_vec(), &params)
+            .unwrap()
+            .to_bytes();
+        group.bench_function(BenchmarkId::new("decode_ntt_round_trip", degree), |b| {
+            b.iter(|| {
+                Ciphertext::from_bytes(std::hint::black_box(&bytes), &params)
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.to_power_basis())
+                    .collect::<Vec<_>>()
+            });
+        });
+        group.bench_function(BenchmarkId::new("decode_direct", degree), |b| {
+            b.iter(|| {
+                Ciphertext::power_basis_from_bytes_if_canonical(
+                    std::hint::black_box(&bytes),
+                    &params,
+                )
+                .unwrap()
+                .unwrap()
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(bfv, bfv_benchmark, bfv_setup_and_decode);
 criterion_main!(bfv);

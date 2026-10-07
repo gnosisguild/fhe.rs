@@ -3,7 +3,7 @@
 use crate::bfv::{parameters::BfvParameters, traits::TryConvertFrom};
 use crate::proto::bfv::Ciphertext as CiphertextProto;
 use crate::{Error, Result, SerializationError};
-use fhe_math::rq::{Context, Ntt, Poly};
+use fhe_math::rq::{Context, Ntt, Poly, PowerBasis};
 use fhe_traits::{
     DeserializeParametrized, DeserializeWithContext, FheCiphertext, FheParametrized, Serialize,
 };
@@ -44,6 +44,43 @@ impl DerefMut for Ciphertext {
 }
 
 impl Ciphertext {
+    /// Reads two canonical level-zero components without an NTT round trip.
+    ///
+    /// This opt-in decoder accepts unseeded ciphertexts with exactly two
+    /// NTT-tagged components. Each component must match the parameter degree and
+    /// contain only coefficients in `[0, q)` for its respective modulus.
+    /// Returns `None` for encodings that require the standard decoder.
+    /// Malformed protobuf data and invalid coefficient lengths return an error.
+    ///
+    /// As in the standard ciphertext decoder, the returned public components
+    /// permit variable-time computations. Wire data cannot grant this permission.
+    pub fn power_basis_from_bytes_if_canonical(
+        bytes: &[u8],
+        par: &Arc<BfvParameters>,
+    ) -> Result<Option<Vec<Poly<PowerBasis>>>> {
+        let value: CiphertextProto = Message::decode(bytes).map_err(|_| {
+            Error::SerializationError(SerializationError::Decode {
+                object: crate::SerializedObject::Ciphertext,
+            })
+        })?;
+        if value.level != 0 || !value.seed.is_empty() || value.c.len() != 2 {
+            return Ok(None);
+        }
+        let context = par.context_at_level(0)?;
+        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
+        let mut components = Vec::with_capacity(2);
+        for bytes in value.c {
+            let Some(mut component) =
+                Poly::<Ntt>::power_basis_from_bytes_if_canonical(&bytes, context)?
+            else {
+                return Ok(None);
+            };
+            component.allow_variable_time_computations(variable_time);
+            components.push(component);
+        }
+        Ok(Some(components))
+    }
+
     /// Create a ciphertext from a vector of polynomials.
     /// A ciphertext must contain at least two polynomials, and all polynomials
     /// must be in Ntt representation and with the same context.
@@ -326,8 +363,87 @@ mod tests {
     use fhe_traits::{
         DeserializeParametrized, FheDecoder, FheDecrypter, FheEncoder, FheEncrypter, Serialize,
     };
+    use prost::Message;
     use rand::rng;
     use std::error::Error as StdError;
+
+    #[test]
+    fn direct_power_basis_decode_matches_public_ciphertext_decoder() -> Result<(), Box<dyn StdError>>
+    {
+        let mut rng = rng();
+        for params in [
+            BfvParameters::default_arc(1, 16),
+            BfvParameters::default_arc(3, 512),
+        ] {
+            let sk = SecretKey::random(&params, &mut rng);
+            let pt = Plaintext::try_encode(&[1u64, 0, 3][..], Encoding::poly(), &params)?;
+            let seeded: Ciphertext = sk.try_encrypt(&pt, &mut rng)?;
+            assert!(!CiphertextProto::from(&seeded).seed.is_empty());
+            assert!(
+                Ciphertext::power_basis_from_bytes_if_canonical(&seeded.to_bytes(), &params)?
+                    .is_none()
+            );
+
+            let ct = Ciphertext::new(seeded.to_vec(), &params)?;
+            let bytes = ct.to_bytes();
+            let direct = Ciphertext::power_basis_from_bytes_if_canonical(&bytes, &params)?.unwrap();
+            let standard = Ciphertext::from_bytes(&bytes, &params)?;
+            assert_eq!(direct.len(), standard.len());
+            for (power, ntt) in direct.iter().zip(standard.iter()) {
+                assert_eq!(power, &ntt.to_power_basis());
+                assert!(power.allows_variable_time_computations());
+            }
+            let reconstructed =
+                Ciphertext::new(direct.into_iter().map(|p| p.into_ntt()).collect(), &params)?;
+            assert_eq!(reconstructed.to_bytes(), bytes);
+            assert_eq!(sk.try_decrypt(&reconstructed)?, sk.try_decrypt(&standard)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn direct_power_basis_decode_preserves_fallbacks() -> Result<(), Box<dyn StdError>> {
+        let params = BfvParameters::default_arc(2, 16);
+        let zero = fhe_math::rq::Poly::<fhe_math::rq::Ntt>::zero(params.context_at_level(0)?);
+        let ct = Ciphertext::new(vec![zero.clone(), zero.clone()], &params)?;
+        let proto = CiphertextProto::from(&ct);
+        for count in [0, 1, 3] {
+            let mut other = proto.clone();
+            other.c = vec![zero.to_bytes(); count];
+            assert!(
+                Ciphertext::power_basis_from_bytes_if_canonical(&other.encode_to_vec(), &params)?
+                    .is_none()
+            );
+        }
+        for level in [1, u32::MAX] {
+            let mut other = proto.clone();
+            other.level = level;
+            assert!(
+                Ciphertext::power_basis_from_bytes_if_canonical(&other.encode_to_vec(), &params)?
+                    .is_none()
+            );
+        }
+        let mut other = proto.clone();
+        other.seed = vec![0; 32];
+        assert!(
+            Ciphertext::power_basis_from_bytes_if_canonical(&other.encode_to_vec(), &params)?
+                .is_none()
+        );
+        let mut other = proto.clone();
+        *other.c.last_mut().unwrap() = zero.to_power_basis().to_bytes();
+        assert!(
+            Ciphertext::power_basis_from_bytes_if_canonical(&other.encode_to_vec(), &params)?
+                .is_none()
+        );
+        let mut other = proto;
+        *other.c.last_mut().unwrap() = vec![255];
+        assert!(
+            Ciphertext::power_basis_from_bytes_if_canonical(&other.encode_to_vec(), &params)
+                .is_err()
+        );
+        assert!(Ciphertext::power_basis_from_bytes_if_canonical(&[255], &params).is_err());
+        Ok(())
+    }
 
     #[test]
     fn proto_conversion() -> Result<(), Box<dyn StdError>> {
