@@ -251,6 +251,13 @@ pub struct SmudgingBoundCalculator {
 }
 
 impl SmudgingBoundCalculator {
+    /// Binding for the additional local-noise sampler. The legacy calculator
+    /// remains the single source of the smudging bound.
+    #[cfg(feature = "synchronized-decryption")]
+    pub(crate) fn synchronized_binding(&self) -> (&Arc<BfvParameters>, usize) {
+        (&self.config.params, self.config.n)
+    }
+
     /// Create a new bound calculator with defaults:
     /// - `accepted_participant_count = config.n`
     /// - no injected initial ciphertext noise bound.

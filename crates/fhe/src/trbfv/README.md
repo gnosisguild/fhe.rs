@@ -22,6 +22,86 @@ The module follows a modular design with clear separation of concerns:
 - `threshold.rs` - Main TRBFV coordinator struct
 - `config.rs` - Parameter validation
 - `errors.rs` - Threshold-specific error types
+- `synchronized/` - Additional designated-decryptor API, enabled by the
+  `synchronized-decryption` Cargo feature
+
+## Opt-in synchronized decryption
+
+The `synchronized-decryption` feature adds `trbfv::synchronized` based on
+[On Threshold Fully Homomorphic Encryption with Synchronized Decryptors](https://eprint.iacr.org/2026/031)
+(Colin de Verdière–Passelègue–Stehlé 2026), extracted from PRs #276 and #280.
+Enable it when selecting this protocol:
+
+```toml
+fhe = { git = "https://github.com/gnosisguild/fhe.rs", branch = "main", features = ["synchronized-decryption"] }
+```
+
+`TRBFV`, `ShareManager`, the shared-smudging decryption methods, and their
+transport formats retain their existing behavior. Interfold can continue using
+them while synchronized-decryption circuits and integration are developed.
+The new module is independent of the `experimental-mbfv` feature. Its PRF
+dependencies (`ark-ff` and pinned `e3-safe`) are activated only by the new feature.
+
+### Reuse key sharing, select a decryption protocol
+
+1. Use `ShareManager::generate_secret_shares_from_poly` and
+   `aggregate_collected_shares` as before. Convert each recipient's aggregate
+   to NTT form and keep it in a `Zeroizing<Poly<Ntt>>` owner.
+2. Construct `synchronized::SynchronizedDecryptor::new(n, threshold, params)`.
+3. Establish matching pairwise keys externally. Import each party's bundle
+   through `PartyPrfKeyTransport::new` and `PartyPrfKeys::from_transport`.
+   The vectors `keys_i_j` and `keys_j_i` use paper indices, not message
+   directions: the first vector's evaluations are added, the second subtracted.
+4. Agree on a designated set `S` of exactly `threshold + 1` distinct parties
+   before producing any partial decryptions. `S` may change for a later
+   decryption; key shares and pairwise keys are reusable within their key epoch.
+5. Create `synchronized::SmudgingNoiseGenerator` from the existing
+   `SmudgingBoundCalculatorConfig` or `SmudgingBoundCalculator`. `Lambda` and
+   the bound/circuit assumptions are the same as in the legacy calculator.
+   Here `m` is the fresh-input addition fan-in, not the number of independent
+   decryptions. Sample new noise for every party and every partial-decryption
+   call. Each noise owner is consumed by the call and wiped on drop.
+6. Call `SynchronizedDecryptor::decryption_share` for each designated party,
+   then `decrypt_from_shares` with the resulting typed `DecryptionShare`s.
+
+PartDec computes `lambda_i * c1 * sk_i + e_i + r_i`; FinDec adds the partial
+decryptions and `c0`. Local noise is added **after** weighting the key term.
+The masks cancel over the agreed set, so smudging is never Shamir-shared or
+multiplied by reconstruction weights. The API accepts level-zero, two-component
+BFV ciphertexts and plaintext moduli fitting in `u64`.
+
+`DecryptionShare::into_parts` / `from_parts` provide an application transport
+boundary. Reconstruction rejects inconsistent sets/ciphertexts, duplicate or
+missing parties, and malformed polynomials. Noise must match the full BFV
+parameter set and committee size. Protocol-specific errors are available as
+`Error::SynchronizedDecryption(SynchronizedDecryptionError::...)`.
+
+The context digest and PRF encoding match `dev-sync-dec` at `8c58831`; a fixed
+reference-vector regression test guards that compatibility. The digest binds
+the set and ciphertext coefficients, not the application session, key epoch or
+parameter negotiation. Applications authenticate these separately, establish
+matching pairwise keys, prevent replay, and supply any proofs of correct
+decryption. `from_parts` recomputes the digest from caller-supplied context; it
+does not authenticate or prove the received polynomial.
+
+### Example and tests
+
+```bash
+cargo run --release --example trbfv_sync_dec --features synchronized-decryption
+cargo test -p fhe --features synchronized-decryption
+cargo test -p fhe --release --features synchronized-decryption --test trbfv_sync_dec
+```
+
+The example uses the existing sharing API, simulates committee-key setup in
+one process, and decrypts two ciphertexts with fresh local noise. Its small
+parameters demonstrate mechanics only. The release integration tests also
+exercise degree 8192.
+
+The legacy and synchronized APIs will be consolidated after Interfold's
+synchronized-decryption circuits and main-branch integration are ready. That
+migration must update callers and proof/transport bindings before making the
+new protocol the default and retiring the old entry points. Follow-up:
+[#285](https://github.com/gnosisguild/fhe.rs/issues/285).
 
 ## Noise and Correctness Formulas (Urban–Rambaud 2024)
 

@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [default, all]
+        features: [default, synchronized-decryption, all]
     steps:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
@@ -30,7 +30,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: check
-          args: --workspace ${{ matrix.features == 'all' && '--all-features' || '' }}
+          args: --workspace ${{ matrix.features == 'all' && '--all-features' || matrix.features == 'synchronized-decryption' && '--features synchronized-decryption' || '' }}
 
   test:
     name: Test Suite (${{ matrix.features }})
@@ -41,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [default, all]
+        features: [default, synchronized-decryption, all]
     steps:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
@@ -51,7 +51,7 @@ jobs:
           toolchain: stable
           override: true
       - uses: actions/checkout@v6
-       - uses: actions-rs/cargo@v1
-         with:
-           command: test
-           args: --release --workspace ${{ matrix.features == 'all' && '--all-features' || '' }}
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --release --workspace ${{ matrix.features == 'all' && '--all-features' || matrix.features == 'synchronized-decryption' && '--features synchronized-decryption' || '' }}
