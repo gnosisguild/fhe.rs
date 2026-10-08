@@ -11,6 +11,9 @@ pub mod shamir;
 pub mod shares;
 /// Smudging abstractions and implementations
 pub mod smudging;
+/// Opt-in threshold decryption with designated decryptors and PRF masks.
+#[cfg(feature = "synchronized-decryption")]
+pub mod synchronized;
 /// Main threshold BFV orchestrator
 pub mod threshold;
 

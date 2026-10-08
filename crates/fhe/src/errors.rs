@@ -74,6 +74,11 @@ pub enum Error {
     /// Indicates a threshold BFV error.
     #[error("Threshold error: {0}")]
     Threshold(#[from] ThresholdError),
+
+    /// An error specific to the opt-in synchronized-decryption protocol.
+    #[cfg(feature = "synchronized-decryption")]
+    #[error("Synchronized decryption error: {0}")]
+    SynchronizedDecryption(#[from] crate::trbfv::synchronized::SynchronizedDecryptionError),
 }
 
 /// Identifies the role of an object in a parameter mismatch.
