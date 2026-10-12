@@ -80,8 +80,10 @@ missing parties, and malformed polynomials. Noise must match the full BFV
 parameter set and committee size. Protocol-specific errors are available as
 `Error::SynchronizedDecryption(SynchronizedDecryptionError::...)`.
 
-The context digest and PRF encoding match `dev-sync-dec` at `8c58831`; a fixed
-reference-vector regression test guards that compatibility. The digest binds
+The context digest absorbs power-basis ciphertext residues, low degree first.
+That order matches the Interfold decryption circuit. `dev-sync-dec` at `8c58831`
+absorbed NTT residues, so its reference vector does not describe this digest.
+A fixed regression test guards the power-basis encoding. The digest binds
 the set and ciphertext coefficients, not the application session, key epoch or
 parameter negotiation. Applications authenticate these separately, establish
 matching pairwise keys, prevent replay, and supply any proofs of correct
