@@ -61,6 +61,10 @@ dependencies (`ark-ff` and pinned `e3-safe`) are activated only by the new featu
    Here `m` is the fresh-input addition fan-in, not the number of independent
    decryptions. Sample new noise for every party and every partial-decryption
    call. Each noise owner is consumed by the call and wiped on drop.
+   Proof-producing callers that already sampled the centered integers can wrap
+   them with `SmudgingNoise::from_signed_coefficients` (or
+   `SmudgingNoiseGenerator::from_signed_coefficients`) and keep the integers
+   for the witness.
 6. Call `SynchronizedDecryptor::decryption_share` for each designated party,
    then `decrypt_from_shares` with the resulting typed `DecryptionShare`s.
 

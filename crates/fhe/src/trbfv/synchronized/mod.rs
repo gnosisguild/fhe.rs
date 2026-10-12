@@ -52,6 +52,9 @@ pub enum SynchronizedDecryptionError {
     /// Shares refer to different designated sets or ciphertexts.
     #[error("decryption shares refer to inconsistent designated sets or ciphertexts")]
     InconsistentDecryptionShares,
+    /// A caller-supplied coefficient has absolute value larger than `B_sm`.
+    #[error("a smudging coefficient is outside [-B_sm, B_sm]")]
+    SmudgingCoefficientOutOfBound,
 }
 
 /// Decrypts BFV ciphertexts using a designated set of `threshold + 1` parties.

@@ -9,7 +9,7 @@ use fhe::bfv::{
     BfvParameters, BfvParametersBuilder, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey,
 };
 use fhe::trbfv::synchronized::{
-    DecryptionShare, PartyPrfKeyTransport, PartyPrfKeys, SmudgingNoiseGenerator,
+    DecryptionShare, PartyPrfKeyTransport, PartyPrfKeys, SmudgingNoise, SmudgingNoiseGenerator,
     SynchronizedDecryptionError, SynchronizedDecryptor,
 };
 use fhe::trbfv::{Lambda, ShareManager, SmudgingBoundCalculatorConfig, TRBFV};
@@ -482,6 +482,30 @@ fn reconstruction_lifts_through_the_plaintext_context_when_q0_is_small() {
             values
         );
     }
+}
+
+#[test]
+fn decryption_share_accepts_noise_from_signed_coefficients() {
+    let mut f = Fixture::new(3);
+    let ct = f.encrypt(9);
+    let ids = [1usize, 2];
+    let bound = f.noise.smudging_bound().clone();
+    let coeffs = vec![num_bigint::BigInt::from(0); f.params.degree()];
+    let shares: Vec<_> = ids
+        .iter()
+        .map(|&id| {
+            let noise =
+                SmudgingNoise::from_signed_coefficients(3, f.params.clone(), &bound, &coeffs)
+                    .unwrap();
+            f.decryptor
+                .decryption_share(&ct, &f.shares[id - 1], id, &ids, noise, &f.keys[id - 1])
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        f.decryptor.decrypt_from_shares(&shares, &ct).unwrap(),
+        f.sk.try_decrypt(&ct).unwrap()
+    );
 }
 
 #[test]
