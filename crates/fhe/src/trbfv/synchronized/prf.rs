@@ -1,7 +1,8 @@
 //! Poseidon2/SAFE committee masks, extracted from PRs #276 and #280.
 //!
 //! `r_i = sum_{j in S, j != i} (F_{k_i_j}(H(S, ct)) - F_{k_j_i}(H(S, ct)))`.
-//! Domain separators, field encoding and coefficient order match `dev-sync-dec`.
+//! The context digest absorbs each ciphertext polynomial in power-basis form,
+//! low degree first. That is the coefficient order used by the Interfold circuit.
 
 use crate::Error;
 use crate::bfv::Ciphertext;
@@ -376,7 +377,9 @@ fn context_absorb_input(
     input.push(field_from_usize(ciphertext.level)?);
     input.push(field_from_usize(ciphertext.c.len())?);
     for poly in &ciphertext.c {
-        let coefficients = poly.coefficients();
+        // Ciphertext storage is NTT. The circuit hashes power-basis residues.
+        let power = poly.clone().into_power_basis();
+        let coefficients = power.coefficients();
         input.push(field_from_usize(coefficients.nrows())?);
         input.push(field_from_usize(coefficients.ncols())?);
         for row in coefficients.rows() {
