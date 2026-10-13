@@ -75,10 +75,10 @@ pub enum Error {
     #[error("Threshold error: {0}")]
     Threshold(#[from] ThresholdError),
 
-    /// An error specific to the opt-in synchronized-decryption protocol.
-    #[cfg(feature = "synchronized-decryption")]
+    /// An error specific to the synchronized decryption protocol.
+    #[cfg(feature = "threshold-decryption")]
     #[error("Synchronized decryption error: {0}")]
-    SynchronizedDecryption(#[from] crate::trbfv::synchronized::SynchronizedDecryptionError),
+    SynchronizedDecryption(#[from] crate::trbfv::SynchronizedDecryptionError),
 }
 
 /// Identifies the role of an object in a parameter mismatch.

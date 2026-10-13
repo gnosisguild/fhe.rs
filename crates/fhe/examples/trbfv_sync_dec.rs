@@ -1,16 +1,18 @@
-//! Two decryptions with existing main key sharing and opt-in synchronized decryption.
+//! Two decryptions with Shamir key sharing and synchronized decryption.
 //!
-//! Run: `cargo run --release --example trbfv_sync_dec --features synchronized-decryption`.
+//! Run: `cargo run --release --example trbfv_sync_dec --features threshold-decryption`.
 //! Small demonstration parameters only; committee keys are generated in one process.
 
 #![allow(clippy::indexing_slicing)]
 
-#[path = "support/synchronized.rs"]
-mod support;
+#[path = "support/simulated_key_setup.rs"]
+mod simulated_key_setup;
 
 use fhe::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
-use fhe::trbfv::synchronized::{SmudgingNoiseGenerator, SynchronizedDecryptor};
-use fhe::trbfv::{Lambda, ShareManager, SmudgingBoundCalculatorConfig};
+use fhe::trbfv::{
+    Lambda, ShareManager, SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator,
+    SynchronizedDecryptor,
+};
 use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,8 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let decryptor = SynchronizedDecryptor::new(n, threshold, params.clone())?;
     let secret_key = SecretKey::random(&params, &mut rng);
     let public_key = PublicKey::new(&secret_key, &mut rng);
-    let shares = support::share_key(&mut manager, &secret_key, &mut rng)?;
-    let keys = support::simulated_committee_prf_keys(n, &mut rng)?;
+    let shares = simulated_key_setup::share_key(&mut manager, &secret_key, &mut rng)?;
+    let keys = simulated_key_setup::simulated_committee_prf_keys(n, &mut rng)?;
     // Each ciphertext is independently encrypted: addition fan-in m = 1.
     let generator = SmudgingNoiseGenerator::new(SmudgingBoundCalculatorConfig::new(
         params.clone(),

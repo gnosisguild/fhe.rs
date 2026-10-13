@@ -1,21 +1,14 @@
+//! Shamir key sharing, polynomial conversion, and share aggregation.
+
 use crate::Error;
-/// Share collection and management for threshold BFV.
-///
-/// This module provides the ShareManager struct that handles aggregation of secret shares
-/// and computation of decryption shares in the threshold BFV scheme.
-use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
-use crate::trbfv::config::validate_threshold_config;
+use crate::bfv::BfvParameters;
+use crate::trbfv::config::validate_sharing_parameters;
 use crate::trbfv::shamir::ShamirSecretSharing;
 use fhe_math::rq::traits::TryConvertFrom;
+use fhe_math::rq::{Context, Poly, PowerBasis};
 use fhe_math::zq::Modulus;
-use fhe_math::{
-    rns::{RnsContext, ScalingFactor},
-    rq::{Context, Ntt, Poly, PowerBasis, scaler::Scaler},
-};
-use itertools::Itertools;
 use ndarray::Array2;
 use num_bigint::BigInt;
-use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -24,25 +17,18 @@ use std::convert::TryFrom;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-/// Manager for threshold BFV share operations.
-///
-/// ShareManager coordinates the collection and processing of secret shares in the threshold BFV scheme.
-/// It handles both the aggregation of collected shares and the computation of decryption shares.
+/// Manager for threshold BFV key-share operations.
 ///
 /// # Threshold semantics
 ///
 /// `threshold` is the degree `T` of the Shamir sharing polynomial, read as the
 /// maximum number of corrupted parties the deployment tolerates. Reconstruction
-/// requires `T + 1` shares. As a trBFV type, `ShareManager` enforces the same
-/// invariants as [`TRBFV`](crate::trbfv::TRBFV): `n >= 3` and `T = (n - 1) / 2`
-/// (see [`validate_threshold_config`]).
+/// requires `T + 1` shares. Configuration requires `n >= 3` and
+/// `T = (n - 1) / 2` (see [`validate_threshold_config`](super::config::validate_threshold_config)).
 ///
-/// # Protocol Flow
-/// 1. Each party generates secret shares using secret sharing
-/// 2. Parties exchange shares through secure channels
-/// 3. ShareManager aggregates collected shares to reconstruct partial secrets
-/// 4. During decryption, ShareManager computes decryption shares from ciphertext
-/// 5. Finally, threshold number of decryption shares are combined to decrypt
+/// Each party deals its key contribution, exchanges shares through secure
+/// channels, and aggregates the received matrices into its share of the joint
+/// secret. Keep the NTT conversion in a zeroizing owner for decryption.
 #[derive(Debug)]
 pub struct ShareManager {
     /// Number of parties in the threshold scheme (must be `>= 3`)
@@ -72,23 +58,7 @@ impl ShareManager {
     /// modulus (the MPC protocol assumes the Shamir evaluation points `1..=n`
     /// are distinct units modulo every modulus).
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
-        // Enforce the same `n >= 3` and `T = (n - 1) / 2` invariants as TRBFV.
-        validate_threshold_config(n, threshold)?;
-
-        //Note that in case we consider in the future using qi's that are not prime numbers (so
-        //they would be only satisfying the condition of being coprime to each other which is
-        //sufficient for Greco etc), we can use the utility get_smallest_prime_factor implemented
-        //in crates/fhe-util/src/lib.rs
-
-        let min_modulus = params
-            .moduli()
-            .iter()
-            .min()
-            .ok_or(fhe_math::Error::EmptyModuli)?;
-        if n >= usize::try_from(*min_modulus).unwrap_or(usize::MAX) {
-            return Err(Error::party_count_exceeds_modulus(n, *min_modulus));
-        }
-
+        validate_sharing_parameters(n, threshold, &params)?;
         Ok(Self {
             n,
             threshold,
@@ -96,14 +66,14 @@ impl ShareManager {
         })
     }
 
-    /// Utility to create a Zeroizing<Poly> from coefficients.
+    /// Create a `Zeroizing<Poly>` from coefficients.
     ///
     /// # Arguments
-    /// - `coeffs`: Coefficients that can be converted to Poly (Box<[i64]>, Array2<u64>, etc.)
+    /// - `coeffs`: Coefficients convertible to `Poly`, such as `&[i64]` or `Array2<u64>`.
     /// - `ctx`: BFV context to use for the polynomial
     ///
     /// # Returns
-    /// A Zeroizing<Poly> in PowerBasis representation
+    /// A `Zeroizing<Poly>` in `PowerBasis` representation
     pub fn coeffs_to_poly<T>(
         &self,
         coeffs: T,
@@ -232,7 +202,7 @@ impl ShareManager {
     /// # Arguments
     /// - `sk_sss_collected`: One share matrix per contributing party (at most `n`;
     ///   fewer is allowed, e.g. when some parties aborted during dealing).
-    ///   Each Array2<u64> has one row per modulus and one column per coefficient.
+    ///   Each `Array2<u64>` has one row per modulus and one column per coefficient.
     ///
     /// # Returns
     /// A polynomial representing the aggregated secret key material
@@ -319,259 +289,6 @@ impl ShareManager {
         sum_poly.set_coefficients(sum);
         Ok(sum_poly)
     }
-
-    /// Compute decryption share from ciphertext and secret/smudging polynomials.
-    ///
-    /// This function computes a party's contribution to the threshold decryption process.
-    /// Each party uses their aggregated key and noise shares to compute a decryption share.
-    ///
-    /// # Arguments
-    /// - `ciphertext`: The ciphertext to decrypt (contains c0, c1 polynomials)
-    /// - `sk_i`: This party's aggregated share of the joint secret key (output of
-    ///   [`ShareManager::aggregate_collected_shares`]), not a party's own secret key
-    /// - `es_i`: This party's aggregated share of the joint smudging noise,
-    ///   aggregated the same way from the dealt noise shares
-    ///
-    /// # Returns
-    /// A decryption share polynomial that contributes to the final decryption
-    #[allow(clippy::indexing_slicing)] // BFV ciphertext always has exactly 2 components
-    pub fn decryption_share(
-        &self,
-        ciphertext: Arc<Ciphertext>,
-        sk_i: Poly<Ntt>,
-        es_i: Poly<PowerBasis>,
-    ) -> Result<Poly<PowerBasis>, Error> {
-        if ciphertext.params != self.params {
-            return Err(Error::ParameterMismatch {
-                left: crate::ParameterSource::Ciphertext,
-                right: crate::ParameterSource::Parameters,
-            });
-        }
-        if ciphertext.level != 0 {
-            return Err(Error::InvalidLevel {
-                level: ciphertext.level,
-                min_level: 0,
-                max_level: 0,
-            });
-        }
-        // A degree-2 (unrelinearized) ciphertext has 3 components; silently
-        // ignoring c[2] would produce a wrong plaintext.
-        if ciphertext.c.len() != 2 {
-            return Err(crate::CiphertextError::InvalidPolynomialCount {
-                operation: crate::CiphertextOperation::MultipartyKeySwitch,
-                actual: ciphertext.c.len(),
-                expected: 2,
-            }
-            .into());
-        }
-        let mut c0 = ciphertext.c[0].clone();
-        c0.disallow_variable_time_computations();
-        let c0 = c0.into_power_basis();
-        let mut c1 = ciphertext.c[1].clone();
-        c1.disallow_variable_time_computations();
-        let mut sk_i = sk_i;
-        sk_i.disallow_variable_time_computations();
-        let mut es_i = es_i;
-        es_i.disallow_variable_time_computations();
-        if sk_i.ctx() != c1.ctx() || es_i.ctx() != c0.ctx() {
-            return Err(Error::ParameterMismatch {
-                left: crate::ParameterSource::Polynomial,
-                right: crate::ParameterSource::Ciphertext,
-            });
-        }
-        let c1sk = (&c1 * &sk_i).into_power_basis();
-        let d_share_poly = c0 + c1sk + es_i;
-        Ok(d_share_poly)
-    }
-
-    /// Decrypt ciphertext from collected decryption shares.
-    ///
-    /// This function performs the final step of threshold decryption by combining
-    /// decryption shares from exactly `threshold + 1` parties to reconstruct the plaintext.
-    ///
-    /// # Arguments
-    /// - `d_share_polys`: Exactly `threshold + 1` decryption shares
-    /// - `reconstructing_parties`: The 1-based party indices the shares came from, in
-    ///   the same order as `d_share_polys`; indices must be distinct and in `1..=n`
-    /// - `ciphertext`: The original ciphertext being decrypted
-    ///
-    /// # Returns
-    /// The decrypted plaintext
-    // All indexing is on vectors built with known sizes matching the index ranges
-    #[allow(clippy::indexing_slicing)]
-    pub fn decrypt_from_shares(
-        &self,
-        d_share_polys: Vec<Poly<PowerBasis>>,
-        reconstructing_parties: Vec<usize>,
-        ciphertext: Arc<Ciphertext>,
-    ) -> Result<Plaintext, Error> {
-        if ciphertext.params != self.params {
-            return Err(Error::ParameterMismatch {
-                left: crate::ParameterSource::Ciphertext,
-                right: crate::ParameterSource::Parameters,
-            });
-        }
-        if ciphertext.level != 0 {
-            return Err(Error::InvalidLevel {
-                level: ciphertext.level,
-                min_level: 0,
-                max_level: 0,
-            });
-        }
-        // Reconstruction consumes exactly threshold + 1 shares; requiring
-        // exactness (rather than truncating extras) avoids silently depending
-        // on the order of the provided shares.
-        if d_share_polys.len() != self.threshold + 1 {
-            return Err(Error::share_count_mismatch(
-                d_share_polys.len(),
-                self.threshold + 1,
-            ));
-        }
-        // The number of reconstructing parties must match the provided shares
-        if reconstructing_parties.len() != d_share_polys.len() {
-            return Err(Error::share_count_mismatch(
-                reconstructing_parties.len(),
-                d_share_polys.len(),
-            ));
-        }
-        // Shamir x-coordinates are 1-based, bounded by n, and must be distinct:
-        // index 0 would evaluate the sharing polynomial at the secret itself,
-        // and duplicates make the Lagrange denominators non-invertible.
-        let mut seen = vec![false; self.n + 1];
-        for &idx in &reconstructing_parties {
-            if idx == 0 || idx > self.n {
-                return Err(Error::invalid_party_id(idx, self.n));
-            }
-            if seen[idx] {
-                return Err(Error::duplicate_party_id(idx));
-            }
-            seen[idx] = true;
-        }
-        // Validate share polynomial shapes before indexing into them: each
-        // share must carry all RNS rows and all coefficient columns.
-        let expected_shape = (self.params.moduli().len(), self.params.degree());
-        for (i, d_share_poly) in d_share_polys.iter().enumerate() {
-            if d_share_poly.coefficients().dim() != expected_shape {
-                return Err(Error::malformed_shares(
-                    reconstructing_parties[i],
-                    format!(
-                        "decryption share has shape {:?}, expected {expected_shape:?}",
-                        d_share_poly.coefficients().dim()
-                    ),
-                ));
-            }
-        }
-        let recovered: Result<Vec<Vec<u64>>, Error> = (0..self.params.moduli().len())
-            .into_par_iter()
-            .map(|m| {
-                let shamir_ss = ShamirSecretSharing::new(
-                    self.threshold,
-                    self.n,
-                    BigInt::from(self.params.moduli[m]),
-                );
-
-                // Parallelize coefficient recovery within each modulus
-                (0..self.params.degree())
-                    .into_par_iter()
-                    .map(|i| -> Result<u64, Error> {
-                        let mut shamir_open_vec_mod: Vec<(usize, BigInt)> =
-                            Vec::with_capacity(self.threshold + 1);
-                        for (party_idx, d_share_poly) in
-                            reconstructing_parties.iter().zip(d_share_polys.iter())
-                        {
-                            let coeffs = d_share_poly.coefficients();
-                            let coeff_arr = coeffs.row(m);
-                            let coeff = coeff_arr[i];
-                            // Use provided party indices directly as the Shamir x-coordinates
-                            let coeff_formatted = (*party_idx, BigInt::from(coeff));
-                            shamir_open_vec_mod.push(coeff_formatted);
-                        }
-                        let shamir_result = shamir_ss.recover(&shamir_open_vec_mod)?;
-                        shamir_result.to_u64().ok_or_else(|| {
-                            Error::malformed_shares(
-                                0,
-                                "recovered Shamir coefficient does not fit in u64".to_string(),
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<u64>, Error>>()
-            })
-            .collect();
-        let m_data: Vec<u64> = recovered?.into_iter().flatten().collect();
-
-        // scale result poly
-        let arr_matrix =
-            Array2::from_shape_vec((self.params.moduli().len(), self.params.degree()), m_data)
-                .map_err(|_| {
-                    Error::malformed_shares(
-                        0,
-                        "Failed to assemble recovered coefficients".to_string(),
-                    )
-                })?;
-        let ctx = self.params.context_at_level(0)?;
-        let mut result_poly = Poly::<PowerBasis>::zero(ctx);
-        result_poly.set_coefficients(arr_matrix);
-
-        let plaintext_ctx = Context::new_arc(&self.params.moduli()[..1], self.params.degree())
-            .map_err(Error::MathError)?;
-
-        let scalers: Result<Vec<_>, Error> = (0..self.params.moduli().len())
-            .into_par_iter()
-            .map(|i| {
-                let rns = RnsContext::new(&self.params.moduli()[..self.params.moduli().len() - i])
-                    .map_err(Error::MathError)?;
-                let ctx_i = Context::new_arc(
-                    &self.params.moduli()[..self.params.moduli().len() - i],
-                    self.params.degree(),
-                )
-                .map_err(Error::MathError)?;
-                Scaler::new(
-                    &ctx_i,
-                    &plaintext_ctx,
-                    ScalingFactor::new(&BigUint::from(self.params.plaintext()), rns.modulus()),
-                )
-                .map_err(Error::MathError)
-            })
-            .collect();
-        let scalers = scalers?;
-
-        let par = ciphertext.params.clone();
-        let ptxt_u64 = par.plaintext.as_u64().ok_or_else(|| {
-            Error::ParametersError(crate::ParametersError::UnsupportedPlaintextModulus {
-                reason: "threshold BFV decrypt_from_shares requires a u64 plaintext modulus"
-                    .to_string(),
-            })
-        })?;
-
-        let d = Zeroizing::new(
-            result_poly
-                .scale(&scalers[ciphertext.level])
-                .map_err(Error::MathError)?,
-        );
-        let v = Zeroizing::new(
-            Vec::<u64>::try_from(d.as_ref())
-                .map_err(Error::from)?
-                .into_iter()
-                .map(|vi| vi + ptxt_u64)
-                .collect_vec(),
-        );
-        let mut w = v[..par.degree()].to_vec();
-        let q = Modulus::new(par.moduli()[0]).map_err(Error::MathError)?;
-        q.reduce_vec(&mut w);
-        Modulus::new(ptxt_u64)
-            .map_err(Error::MathError)?
-            .reduce_vec(&mut w);
-
-        let poly =
-            Poly::<PowerBasis>::try_convert_from(&w, ciphertext.c[0].ctx(), false)?.into_ntt();
-
-        let pt = Plaintext {
-            params: par.clone(),
-            encoding: None,
-            poly_ntt: poly,
-        };
-        Ok(pt)
-    }
 }
 
 #[cfg(test)]
@@ -584,9 +301,7 @@ impl ShareManager {
 mod tests {
     use super::*;
     use crate::ThresholdError;
-    use crate::bfv::{BfvParametersBuilder, Encoding, PublicKey, SecretKey};
-    use fhe_traits::{FheDecoder, FheEncoder, FheEncrypter};
-    use rand::rng;
+    use crate::bfv::BfvParametersBuilder;
 
     fn test_params() -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
@@ -595,6 +310,66 @@ mod tests {
             .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
             .build_arc()
             .unwrap()
+    }
+
+    #[test]
+    fn distributed_key_shares_reconstruct_the_aggregate_for_arbitrary_parties() {
+        use rand::SeedableRng;
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(17)
+            .set_moduli(&[97, 193])
+            .build_arc()
+            .unwrap();
+        let mut manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(285);
+        let dealt: Vec<_> = (1..=5i64)
+            .map(|value| {
+                let coefficients = vec![value; params.degree()];
+                let poly = manager
+                    .coeffs_to_poly_level0(coefficients.as_slice())
+                    .unwrap();
+                let shares = manager
+                    .generate_secret_shares_from_poly(poly, &mut rng)
+                    .unwrap();
+                for (row, matrix) in shares.iter().enumerate() {
+                    assert_eq!(matrix.dim(), (5, params.degree()));
+                    assert!(
+                        matrix
+                            .iter()
+                            .all(|&coefficient| coefficient < params.moduli()[row])
+                    );
+                }
+                shares
+            })
+            .collect();
+        let ids = [5, 2, 4];
+        let aggregates: Vec<_> = ids
+            .iter()
+            .map(|&id| {
+                let matrices: Vec<_> = dealt
+                    .iter()
+                    .map(|sender| {
+                        Array2::from_shape_fn(
+                            (params.moduli().len(), params.degree()),
+                            |(row, column)| sender[row][[id - 1, column]],
+                        )
+                    })
+                    .collect();
+                manager.aggregate_collected_shares(&matrices).unwrap()
+            })
+            .collect();
+        for (row, &q) in params.moduli().iter().enumerate() {
+            let shamir = ShamirSecretSharing::new(2, 5, BigInt::from(q));
+            for column in 0..params.degree() {
+                let shares: Vec<_> = ids
+                    .iter()
+                    .zip(&aggregates)
+                    .map(|(&id, poly)| (id, BigInt::from(poly.coefficients()[[row, column]])))
+                    .collect();
+                assert_eq!(shamir.recover(&shares).unwrap(), BigInt::from(15));
+            }
+        }
     }
 
     #[test]
@@ -710,466 +485,6 @@ mod tests {
         let bigints = vec![BigInt::from(1), BigInt::from(2)]; // Too few
         let result = manager.bigints_to_poly(&bigints);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_decryption_share_computation() {
-        let mut rng = rng();
-        let params = test_params();
-        let n = 3;
-        // ShareManager now enforces T = (n - 1) / 2, so the minimal valid
-        // configuration is (n = 3, threshold = 1), requiring two shares.
-        let threshold = 1;
-        let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
-
-        // Setup: Generate keys and encrypt a plaintext
-        let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-
-        let mut plaintext_data = vec![42u64, 100, 400];
-        plaintext_data.resize(params.degree(), 0);
-        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
-        let ct: Arc<Ciphertext> = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
-
-        // Generate polynomials for decryption share.
-        let mut sk_poly = manager.coeffs_to_poly_level0(sk.coeffs.as_ref()).unwrap();
-        let ctx = params.context_at_level(0).unwrap();
-        let variable_time = fhe_traits::VariableTime::new(fhe_traits::PublicData::assert_public());
-        sk_poly.allow_variable_time_computations(variable_time);
-        let mut es_poly = Poly::<PowerBasis>::zero(ctx);
-        es_poly.allow_variable_time_computations(variable_time);
-        assert!(ct.c[1].allows_variable_time_computations());
-
-        // Compute decryption share.
-        let decryption_share = manager
-            .decryption_share(ct.clone(), (*sk_poly).clone().into_ntt(), es_poly)
-            .unwrap();
-        assert!(!decryption_share.allows_variable_time_computations());
-
-        // This test uses the full secret as the "aggregate" for both parties;
-        // two identical values at distinct Shamir x-coordinates reconstruct the
-        // same value needed for plaintext recovery.
-        let shares = vec![decryption_share.clone(), decryption_share];
-
-        // Parties are 1-based; reconstruction needs threshold + 1 = 2 shares.
-        let reconstructing = vec![1, 2];
-        let result = manager.decrypt_from_shares(shares, reconstructing, ct);
-        let plaintext_found = result.expect("Failed to decrypt from shares");
-
-        let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
-            .expect("Decoding plaintext failed");
-
-        assert_eq!(decoded, plaintext_data);
-    }
-
-    #[test]
-    fn test_decryption_share_rejects_nonzero_ciphertext_level() {
-        let mut rng = rng();
-        let params = test_params();
-        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
-        let secret_key = SecretKey::random(&params, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
-        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
-        let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
-        ciphertext.switch_down().unwrap();
-
-        let secret_poly = manager
-            .coeffs_to_poly_level0(secret_key.coeffs.as_ref())
-            .unwrap();
-        let context = params.context_at_level(0).unwrap();
-        let result = manager.decryption_share(
-            Arc::new(ciphertext),
-            (*secret_poly).clone().into_ntt(),
-            Poly::<PowerBasis>::zero(context),
-        );
-
-        assert_eq!(
-            result,
-            Err(Error::InvalidLevel {
-                level: 1,
-                min_level: 0,
-                max_level: 0,
-            })
-        );
-    }
-
-    #[test]
-    fn test_decrypt_from_shares_rejects_nonzero_ciphertext_level() {
-        let mut rng = rng();
-        let params = test_params();
-        let manager = ShareManager::new(3, 1, params.clone()).unwrap();
-        let secret_key = SecretKey::random(&params, &mut rng);
-        let public_key = PublicKey::new(&secret_key, &mut rng);
-        let plaintext = Plaintext::try_encode(&[42u64], Encoding::poly(), &params).unwrap();
-        let mut ciphertext = public_key.try_encrypt(&plaintext, &mut rng).unwrap();
-        ciphertext.switch_down().unwrap();
-
-        let context = params.context_at_level(0).unwrap();
-        let shares = vec![Poly::<PowerBasis>::zero(context)];
-        let result = manager.decrypt_from_shares(shares, vec![1], Arc::new(ciphertext));
-
-        assert_eq!(
-            result,
-            Err(Error::InvalidLevel {
-                level: 1,
-                min_level: 0,
-                max_level: 0,
-            })
-        );
-    }
-
-    #[test]
-    fn test_threshold_decryption_workflow() {
-        let mut rng = rng();
-        let params = test_params();
-        let n = 3;
-        let threshold = 1;
-
-        let ctx = params.context_at_level(0).unwrap();
-
-        // Setup multiple share managers (simulating different parties)
-        let mut managers: Vec<ShareManager> = (0..n)
-            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
-            .collect();
-
-        // One party generates the secret key and secret shares it among the other parties
-        let secret_key = SecretKey::random(&params, &mut rng);
-
-        let sk_poly = managers[0]
-            .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
-            .unwrap();
-
-        let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
-
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = vec![vec![], vec![], vec![]];
-
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
-
-        for i in 0..n {
-            let mut node_share_m = Array2::zeros((0, params.degree()));
-            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
-                    .unwrap();
-            }
-            sk_sss_collected[i].push(node_share_m);
-
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
-        }
-
-        // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
-        let mut plaintext_data = vec![123u64];
-        plaintext_data.resize(params.degree(), 0);
-        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
-        let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
-
-        // Each party generates their decryption share
-        let mut decryption_shares = Vec::new();
-
-        //Testing for decryption between parties 0 and 1
-        //TODO Add tests for decyption between different parties than the first ones
-        for i in 0..(threshold + 1) {
-            let ctx = params.context_at_level(0).unwrap();
-            //Setting smuding noise to be zero in this test
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
-
-            let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
-                .unwrap();
-            decryption_shares.push(share);
-        }
-
-        // Verify we have enough shares
-        assert_eq!(decryption_shares.len(), threshold + 1);
-
-        // Test decrypt_from_shares with parties 1 and 2 reconstructing
-        let reconstructing = vec![1, 2];
-        let result =
-            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
-        assert!(result.is_ok());
-
-        // Test if we had correct decyption
-        let plaintext_found = result.expect("Failed to decrypt from shares");
-        let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
-            .expect("Decoding plaintext failed");
-
-        assert_eq!(decoded, plaintext_data);
-    }
-
-    #[test]
-    fn test_threshold_decryption_workflow_arbitrary_parties_small() {
-        let mut rng = rng();
-        let params = test_params();
-        let n = 5;
-        let threshold = 2; // need 3 parties
-
-        let ctx = params.context_at_level(0).unwrap();
-
-        // Setup multiple share managers (simulating different parties)
-        let mut managers: Vec<ShareManager> = (0..n)
-            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
-            .collect();
-
-        // One party generates the secret key and secret shares it among the other parties
-        let secret_key = SecretKey::random(&params, &mut rng);
-
-        let sk_poly = managers[0]
-            .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
-            .unwrap();
-
-        let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
-
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> =
-            vec![vec![], vec![], vec![], vec![], vec![]];
-
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
-
-        for i in 0..n {
-            let mut node_share_m = Array2::zeros((0, params.degree()));
-            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
-                    .unwrap();
-            }
-            sk_sss_collected[i].push(node_share_m);
-
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
-        }
-
-        // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
-        let mut plaintext_data = vec![321u64];
-        plaintext_data.resize(params.degree(), 0);
-        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
-        let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
-
-        // Choose arbitrary reconstructing parties (1-based indices): {2, 4, 5}
-        // Corresponding 0-based indices in vectors: {1, 3, 4}
-        let chosen_indices = vec![1usize, 3usize, 4usize];
-        let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
-
-        // Each chosen party generates their decryption share
-        let mut decryption_shares = Vec::new();
-        for &i in &chosen_indices {
-            let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
-            let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
-                .unwrap();
-            decryption_shares.push(share);
-        }
-
-        // Verify we have enough shares
-        assert_eq!(decryption_shares.len(), threshold + 1);
-
-        // Test decrypt_from_shares with selected parties
-        let result =
-            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
-        assert!(result.is_ok());
-
-        // Validate plaintext
-        let plaintext_found = result.expect("Failed to decrypt from shares");
-        let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
-            .expect("Decoding plaintext failed");
-        assert_eq!(decoded, plaintext_data);
-    }
-
-    #[test]
-    fn test_threshold_decryption_workflow_arbitrary_parties_large() {
-        let mut rng = rng();
-        let params = test_params();
-        let n = 20;
-        let threshold = 9; // (n - 1) / 2 for n = 20; need 10 parties
-
-        let ctx = params.context_at_level(0).unwrap();
-
-        // Setup multiple share managers (simulating different parties)
-        let mut managers: Vec<ShareManager> = (0..n)
-            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
-            .collect();
-
-        // One party generates the secret key and secret shares it among the other parties
-        let secret_key = SecretKey::random(&params, &mut rng);
-
-        let sk_poly = managers[0]
-            .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
-            .unwrap();
-
-        let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
-
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
-
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
-
-        for i in 0..n {
-            let mut node_share_m = Array2::zeros((0, params.degree()));
-            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
-                    .unwrap();
-            }
-            sk_sss_collected[i].push(node_share_m);
-
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
-        }
-
-        // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
-        let mut plaintext_data = vec![777u64];
-        plaintext_data.resize(params.degree(), 0);
-        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
-        let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
-
-        // Choose arbitrary reconstructing parties (1-based indices):
-        // {2,4,5,7,11,13,15,17,19,20}
-        // Corresponding 0-based indices: {1,3,4,6,10,12,14,16,18,19}
-        let chosen_indices = vec![
-            1usize, 3usize, 4usize, 6usize, 10usize, 12usize, 14usize, 16usize, 18usize, 19usize,
-        ];
-        let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
-
-        // Each chosen party generates their decryption share
-        let mut decryption_shares = Vec::new();
-        for &i in &chosen_indices {
-            let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
-            let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
-                .unwrap();
-            decryption_shares.push(share);
-        }
-
-        // Verify we have enough shares
-        assert_eq!(decryption_shares.len(), threshold + 1);
-
-        // Test decrypt_from_shares with selected parties
-        let result =
-            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
-        assert!(result.is_ok());
-
-        // Validate plaintext
-        let plaintext_found = result.expect("Failed to decrypt from shares");
-        let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
-            .expect("Decoding plaintext failed");
-        assert_eq!(decoded, plaintext_data);
-    }
-
-    #[test]
-    fn test_threshold_decryption_wrong_indices_fails() {
-        let mut rng = rng();
-        let params = test_params();
-        let n = 10;
-        let threshold = 4; // need 5 parties
-
-        let ctx = params.context_at_level(0).unwrap();
-
-        // Setup multiple share managers (simulating different parties)
-        let mut managers: Vec<ShareManager> = (0..n)
-            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
-            .collect();
-
-        // One party generates the secret key and secret shares it among the other parties
-        let secret_key = SecretKey::random(&params, &mut rng);
-
-        let sk_poly = managers[0]
-            .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
-            .unwrap();
-
-        let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
-
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
-
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
-
-        for i in 0..n {
-            let mut node_share_m = Array2::zeros((0, params.degree()));
-            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
-                    .unwrap();
-            }
-            sk_sss_collected[i].push(node_share_m);
-
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
-        }
-
-        // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
-        let mut plaintext_data = vec![555u64];
-        plaintext_data.resize(params.degree(), 0);
-        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
-        let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
-
-        // Choose 5 fixed distinct parties (0-based): {0,2,3,6,8}
-        let chosen_indices: Vec<usize> = vec![0usize, 2usize, 3usize, 6usize, 8usize];
-        let reconstructing_correct: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
-
-        // Each chosen party generates their decryption share
-        let mut decryption_shares = Vec::new();
-        for &i in &chosen_indices {
-            let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
-            let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
-                .unwrap();
-            decryption_shares.push(share);
-        }
-
-        // Verify we have enough shares
-        assert_eq!(decryption_shares.len(), threshold + 1);
-
-        // Decrypt with correct indices -> should succeed and match plaintext
-        let result_ok = managers[0].decrypt_from_shares(
-            decryption_shares.clone(),
-            reconstructing_correct.clone(),
-            ct.clone(),
-        );
-        assert!(result_ok.is_ok());
-        let plaintext_found_ok =
-            result_ok.expect("Failed to decrypt from shares with correct indices");
-        let decoded_ok: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found_ok, Encoding::poly())
-            .expect("Decoding plaintext failed");
-        assert_eq!(decoded_ok, plaintext_data);
-
-        // Prepare wrong indices: replace one correct index with a non-selected party
-        // Pick a fixed non-selected party: 5 (0-based), which is not in chosen_indices
-        let non_selected: usize = 5;
-
-        let mut reconstructing_wrong = reconstructing_correct.clone();
-        reconstructing_wrong[0] = non_selected + 1; // introduce an incorrect party id (1-based)
-
-        // Decrypt with wrong indices -> should not match plaintext (but may still return Ok)
-        let result_bad = managers[0].decrypt_from_shares(
-            decryption_shares.clone(),
-            reconstructing_wrong,
-            ct.clone(),
-        );
-        assert!(result_bad.is_ok());
-        let plaintext_found_bad =
-            result_bad.expect("Decryption unexpectedly failed with wrong indices");
-        let decoded_bad: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found_bad, Encoding::poly())
-            .expect("Decoding plaintext failed");
-        assert_ne!(
-            decoded_bad, plaintext_data,
-            "Decryption should not match with wrong indices"
-        );
     }
 
     #[test]
@@ -1302,127 +617,5 @@ mod tests {
             reason.contains("row 1") && reason.contains("column 5"),
             "row/column context missing from reason: {reason}"
         );
-    }
-
-    #[test]
-    fn test_decrypt_from_shares_rejects_invalid_party_indices() {
-        let mut rng = rng();
-        let params = test_params();
-        let n = 5;
-        let threshold = 2; // needs exactly 3 shares
-        let manager = ShareManager::new(n, threshold, params.clone()).unwrap();
-
-        let sk = SecretKey::random(&params, &mut rng);
-        let pk = PublicKey::new(&sk, &mut rng);
-        let pt = Plaintext::try_encode(&[1u64], Encoding::poly(), &params).unwrap();
-        let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
-
-        let ctx = params.context_at_level(0).unwrap();
-        let shares: Vec<Poly<PowerBasis>> = (0..3).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
-
-        // Duplicate index
-        let result = manager.decrypt_from_shares(shares.clone(), vec![1, 2, 2], ct.clone());
-        assert!(result.is_err());
-
-        // Index 0 (would evaluate the sharing polynomial at the secret)
-        let result = manager.decrypt_from_shares(shares.clone(), vec![0, 1, 2], ct.clone());
-        assert!(result.is_err());
-
-        // Index > n
-        let result = manager.decrypt_from_shares(shares.clone(), vec![1, 2, 6], ct.clone());
-        assert!(result.is_err());
-
-        // Wrong share count: more than threshold + 1 is rejected
-        let four: Vec<Poly<PowerBasis>> = (0..4).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
-        let result = manager.decrypt_from_shares(four, vec![1, 2, 3, 4], ct.clone());
-        assert!(result.is_err());
-
-        // Fewer than threshold + 1 is rejected
-        let two: Vec<Poly<PowerBasis>> = (0..2).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
-        let result = manager.decrypt_from_shares(two, vec![1, 2], ct);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_threshold_decryption_random_party_order() {
-        let mut rng = rng();
-        let params = test_params();
-        let n = 15;
-        let threshold = 7; // need 8 parties
-
-        let ctx = params.context_at_level(0).unwrap();
-
-        // Setup multiple share managers (simulating different parties)
-        let mut managers: Vec<ShareManager> = (0..n)
-            .map(|_| ShareManager::new(n, threshold, params.clone()).unwrap())
-            .collect();
-
-        // One party generates the secret key and secret shares it among the other parties
-        let secret_key = SecretKey::random(&params, &mut rng);
-
-        let sk_poly = managers[0]
-            .coeffs_to_poly_level0(secret_key.coeffs.clone().as_ref())
-            .unwrap();
-
-        let sk_sss = managers[0]
-            .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
-
-        let mut sk_sss_collected: Vec<Vec<Array2<u64>>> = (0..n).map(|_| vec![]).collect();
-
-        let mut sk_poly_sums: Vec<Poly<PowerBasis>> =
-            (0..n).map(|_| Poly::<PowerBasis>::zero(ctx)).collect();
-
-        for i in 0..n {
-            let mut node_share_m = Array2::zeros((0, params.degree()));
-            for sk_sss_m in sk_sss.iter().take(params.moduli().len()) {
-                node_share_m
-                    .push_row(ndarray::ArrayView::from(sk_sss_m.row(i)))
-                    .unwrap();
-            }
-            sk_sss_collected[i].push(node_share_m);
-
-            let share_slice: &[Array2<u64>] = &sk_sss_collected[i];
-            sk_poly_sums[i] = managers[i].aggregate_collected_shares(share_slice).unwrap();
-        }
-
-        // Create a test ciphertext
-        let pk = PublicKey::new(&secret_key, &mut rng);
-        let mut plaintext_data = vec![222u64];
-        plaintext_data.resize(params.degree(), 0);
-        let pt = Plaintext::try_encode(&plaintext_data, Encoding::poly(), &params).unwrap();
-        let ct = Arc::new(pk.try_encrypt(&pt, &mut rng).unwrap());
-
-        // Choose non-increasing reconstructing parties (0-based) of size threshold+1
-        // Example: {9,10,14,7,5,3,2,1} => (1-based) {10,11,15,8,6,4,3,2}
-        let chosen_indices = vec![
-            9usize, 10usize, 14usize, 7usize, 5usize, 3usize, 2usize, 1usize,
-        ];
-        let reconstructing: Vec<usize> = chosen_indices.iter().map(|x| x + 1).collect();
-
-        // Each chosen party generates their decryption share in the same (non-increasing) order
-        let mut decryption_shares = Vec::new();
-        for &i in &chosen_indices {
-            let ctx = params.context_at_level(0).unwrap();
-            let es_poly = Poly::<PowerBasis>::zero(ctx);
-            let share = managers[i]
-                .decryption_share(ct.clone(), sk_poly_sums[i].clone().into_ntt(), es_poly)
-                .unwrap();
-            decryption_shares.push(share);
-        }
-
-        // Verify we have enough shares
-        assert_eq!(decryption_shares.len(), threshold + 1);
-
-        // Test decrypt_from_shares with non-increasing party order
-        let result =
-            managers[0].decrypt_from_shares(decryption_shares.clone(), reconstructing, ct.clone());
-        assert!(result.is_ok());
-
-        // Validate plaintext
-        let plaintext_found = result.expect("Failed to decrypt from shares");
-        let decoded: Vec<u64> = Vec::<u64>::try_decode(&plaintext_found, Encoding::poly())
-            .expect("Decoding plaintext failed");
-        assert_eq!(decoded, plaintext_data);
     }
 }

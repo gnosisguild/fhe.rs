@@ -2,17 +2,17 @@
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
-#[path = "../examples/support/synchronized.rs"]
-mod support;
+#[path = "../examples/support/simulated_key_setup.rs"]
+mod simulated_key_setup;
 
 use fhe::bfv::{
     BfvParameters, BfvParametersBuilder, Ciphertext, Encoding, Plaintext, PublicKey, SecretKey,
 };
-use fhe::trbfv::synchronized::{
-    DecryptionShare, PartyPrfKeyTransport, PartyPrfKeys, SmudgingNoiseGenerator,
-    SynchronizedDecryptionError, SynchronizedDecryptor,
+use fhe::trbfv::{
+    DecryptionShare, Lambda, PartyPrfKeyTransport, PartyPrfKeys, ShareManager,
+    SmudgingBoundCalculatorConfig, SmudgingNoiseGenerator, SynchronizedDecryptionError,
+    SynchronizedDecryptor,
 };
-use fhe::trbfv::{Lambda, ShareManager, SmudgingBoundCalculatorConfig, TRBFV};
 use fhe::{Error, ThresholdError};
 use fhe_math::rq::{Ntt, Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -48,8 +48,8 @@ impl Fixture {
         let mut manager = ShareManager::new(n, (n - 1) / 2, params.clone()).unwrap();
         let decryptor = SynchronizedDecryptor::new(n, (n - 1) / 2, params.clone()).unwrap();
         let sk = SecretKey::random(&params, &mut rng);
-        let shares = support::share_key(&mut manager, &sk, &mut rng).unwrap();
-        let keys = support::simulated_committee_prf_keys(n, &mut rng).unwrap();
+        let shares = simulated_key_setup::share_key(&mut manager, &sk, &mut rng).unwrap();
+        let keys = simulated_key_setup::simulated_committee_prf_keys(n, &mut rng).unwrap();
         let noise = SmudgingNoiseGenerator::new(
             SmudgingBoundCalculatorConfig::new(params.clone(), n, 2, Lambda::secure(40).unwrap())
                 .unwrap(),
@@ -91,13 +91,11 @@ impl Fixture {
 }
 
 #[test]
-fn existing_sharing_supports_both_decryption_protocols_and_repeated_ciphertexts() {
+fn existing_sharing_supports_synchronized_repeated_decryptions() {
     let mut f = Fixture::new(5);
     let a = f.encrypt(3);
     let b = f.encrypt(7);
     let sum = &a + &b;
-    let legacy = TRBFV::new(5, 2, f.params.clone()).unwrap();
-    let ctx = f.params.context_at_level(0).unwrap().clone();
     for ids in [[1, 2, 3], [5, 2, 4], [3, 5, 1]] {
         for ct in [&a, &b, &sum] {
             let mut partials = f.partials(ct, &ids);
@@ -105,25 +103,10 @@ fn existing_sharing_supports_both_decryption_protocols_and_repeated_ciphertexts(
             let found = f.decryptor.decrypt_from_shares(&partials, ct).unwrap();
             let expected = f.sk.try_decrypt(ct).unwrap();
             assert_eq!(found, expected);
-            // The legacy API and signatures remain usable in the same build.
-            // Zero shared noise isolates reconstruction parity; fresh nonzero
-            // local smudging is used by the synchronized path above.
-            let old = ids
-                .iter()
-                .map(|&id| {
-                    legacy
-                        .decryption_share(
-                            Arc::new(ct.clone()),
-                            (*f.shares[id - 1]).clone(),
-                            Poly::<PowerBasis>::zero(&ctx),
-                        )
-                        .unwrap()
-                })
-                .collect();
+            // Repeat even the same ciphertext with newly sampled local noise.
+            let again = f.partials(ct, &ids);
             assert_eq!(
-                legacy
-                    .decrypt(old, ids.to_vec(), Arc::new(ct.clone()))
-                    .unwrap(),
+                f.decryptor.decrypt_from_shares(&again, ct).unwrap(),
                 expected
             );
         }
@@ -237,7 +220,7 @@ fn partial_decryption_validates_ids_keys_and_noise_binding() {
             )
             .is_err()
     );
-    let wrong_keys = support::simulated_committee_prf_keys(5, &mut f.rng).unwrap();
+    let wrong_keys = simulated_key_setup::simulated_committee_prf_keys(5, &mut f.rng).unwrap();
     assert!(
         f.decryptor
             .decryption_share(
