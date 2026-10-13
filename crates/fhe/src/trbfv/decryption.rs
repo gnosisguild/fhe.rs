@@ -1,4 +1,4 @@
-//! Opt-in decryption with synchronized decryptors (feature `synchronized-decryption`).
+//! Partial decryption, share transport, and final reconstruction.
 //!
 //! Implements PartDec/FinDec from Colin de Verdière–Passelègue–Stehlé 2026
 //! ([ePrint 2026/031](https://eprint.iacr.org/2026/031)). A designated set `S`
@@ -7,7 +7,6 @@
 //!
 //! Use the existing [`ShareManager`](crate::trbfv::ShareManager) to deal and aggregate
 //! secret-key shares. Its aggregate, converted to NTT form, is reusable here.
-//! The legacy [`TRBFV`](crate::trbfv::TRBFV) and shared-smudging APIs remain available.
 //! See the `trbfv_sync_dec` example for both setup and repeated decryptions.
 //!
 //! The application supplies matching pairwise keys, authenticated transport,
@@ -15,18 +14,13 @@
 //! prevention. The digest binds `S` and ciphertext coefficients; it is not a
 //! proof of correct partial decryption or a distributed key-setup protocol.
 
-mod arithmetic;
-mod decryption;
-mod prf;
-mod smudging;
-
-pub use decryption::DecryptionShare;
-pub use prf::{PRF_KEY_LEN, PartyPrfKeyTransport, PartyPrfKeys, PrfKey};
-pub use smudging::{SmudgingNoise, SmudgingNoiseGenerator};
-
+use super::arithmetic::{SecretMatrix, lagrange_weight, validate_decryptors, validate_matrix};
+use super::config::{plaintext_modulus, validate_ciphertext, validate_sharing_parameters};
+use super::errors::SynchronizedDecryptionError;
+use super::prf::{self, ContextDigest, PartyPrfKeys, context_digest};
+use super::smudging::SmudgingNoise;
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
 use crate::{Error, ParameterSource};
-use arithmetic::{SecretMatrix, lagrange_weight, validate_decryptors, validate_matrix};
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::rq::{Ntt, Poly, PowerBasis};
 use fhe_math::zq::Modulus;
@@ -34,28 +28,6 @@ use num_bigint::BigUint;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
-
-/// Errors specific to the additional synchronized-decryption protocol.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum SynchronizedDecryptionError {
-    /// Noise was sampled for different BFV parameters or committee size.
-    #[error(
-        "smudging noise parameters or committee size differ (noise n = {actual_n}, decryptor n = {expected_n})"
-    )]
-    SmudgingConfigurationMismatch {
-        /// Committee size used by the sampler.
-        actual_n: usize,
-        /// Committee size used by the decryptor.
-        expected_n: usize,
-    },
-    /// Shares refer to different designated sets or ciphertexts.
-    #[error("decryption shares refer to inconsistent designated sets or ciphertexts")]
-    InconsistentDecryptionShares,
-    /// A caller-supplied coefficient has absolute value larger than `B_sm`.
-    #[error("a smudging coefficient is outside [-B_sm, B_sm]")]
-    SmudgingCoefficientOutOfBound,
-}
 
 /// Decrypts BFV ciphertexts using a designated set of `threshold + 1` parties.
 ///
@@ -72,7 +44,7 @@ pub struct SynchronizedDecryptor {
 impl SynchronizedDecryptor {
     /// Validate a configuration compatible with the existing Shamir sharing API.
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
-        super::ShareManager::new(n, threshold, params.clone())?;
+        validate_sharing_parameters(n, threshold, &params)?;
         plaintext_modulus(&params)?;
         Ok(Self {
             n,
@@ -310,45 +282,72 @@ impl SynchronizedDecryptor {
     }
 }
 
-fn plaintext_modulus(params: &BfvParameters) -> Result<u64, Error> {
-    params.plaintext.as_u64().ok_or_else(|| {
-        crate::ParametersError::UnsupportedPlaintextModulus {
-            reason: "synchronized decryption requires a u64 plaintext modulus".to_string(),
-        }
-        .into()
-    })
+/// A synchronized partial decryption bound to a party, designated set and ciphertext.
+///
+/// These shares are combined by [`SynchronizedDecryptor::decrypt_from_shares`].
+/// These are locally weighted partials, not Shamir polynomial evaluations.
+#[derive(Clone)]
+pub struct DecryptionShare {
+    poly: Poly<PowerBasis>,
+    party_id: usize,
+    decryptors: Vec<usize>,
+    digest: ContextDigest,
 }
 
-fn validate_ciphertext(ciphertext: &Ciphertext) -> Result<(), Error> {
-    if ciphertext.level != 0 {
-        return Err(Error::InvalidLevel {
-            level: ciphertext.level,
-            min_level: 0,
-            max_level: 0,
-        });
+impl std::fmt::Debug for DecryptionShare {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DecryptionShare")
+            .field("party_id", &self.party_id)
+            .finish_non_exhaustive()
     }
-    if ciphertext.c.len() != 2 {
-        return Err(crate::CiphertextError::InvalidPolynomialCount {
-            operation: crate::CiphertextOperation::MultipartyKeySwitch,
-            actual: ciphertext.c.len(),
-            expected: 2,
+}
+
+impl DecryptionShare {
+    /// Rehydrate an application-transported partial decryption.
+    ///
+    /// Rejects zero/duplicate IDs and requires the owner to belong to the set.
+    /// The ciphertext digest is recomputed; it does not authenticate the supplied
+    /// polynomial. Applications must authenticate its sender, ciphertext, set and
+    /// key epoch. Reconstruction checks committee bounds and polynomial validity.
+    pub fn from_parts(
+        poly: Poly<PowerBasis>,
+        party_id: usize,
+        mut decryptors: Vec<usize>,
+        ciphertext: &Ciphertext,
+    ) -> Result<Self, Error> {
+        if party_id == 0 || decryptors.contains(&0) {
+            return Err(Error::malformed_shares(
+                party_id,
+                "party identifiers must be nonzero".to_string(),
+            ));
         }
-        .into());
-    }
-    let ctx = ciphertext.params.context_at_level(0)?;
-    for poly in &ciphertext.c {
-        if poly.ctx() != ctx {
-            return Err(Error::ParameterMismatch {
-                left: ParameterSource::Polynomial,
-                right: ParameterSource::Ciphertext,
-            });
+        decryptors.sort_unstable();
+        for (&first, &second) in decryptors.iter().zip(decryptors.iter().skip(1)) {
+            if first == second {
+                return Err(Error::duplicate_party_id(first));
+            }
         }
-        validate_matrix(
-            poly.coefficients(),
-            ciphertext.params.moduli(),
-            ciphertext.params.degree(),
-            0,
-        )?;
+        if decryptors.binary_search(&party_id).is_err() {
+            return Err(Error::malformed_shares(
+                party_id,
+                "share party must belong to the decryptor set".to_string(),
+            ));
+        }
+        let digest = context_digest(&decryptors, ciphertext)?;
+        let mut canonical = Poly::<PowerBasis>::zero(poly.ctx());
+        canonical.set_coefficients(poly.coefficients().to_owned());
+        Ok(Self {
+            poly: canonical,
+            party_id,
+            decryptors,
+            digest,
+        })
     }
-    Ok(())
+
+    /// Consume this share into polynomial, 1-based owner ID and designated set.
+    #[must_use]
+    pub fn into_parts(self) -> (Poly<PowerBasis>, usize, Vec<usize>) {
+        (self.poly, self.party_id, self.decryptors)
+    }
 }

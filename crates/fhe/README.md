@@ -21,10 +21,12 @@ fhe = "0.4.1"
 ## Cargo features
 
 * `tfhe-ntt` enables the accelerated NTT implementation from `tfhe-ntt`.
-* `synchronized-decryption` exposes `trbfv::synchronized`, an additional
+* `threshold-decryption` enables the `trbfv` decryption API, the canonical
   designated-decryptor API using fresh local noise and pairwise PRF masks.
-  It is disabled by default and adds the pinned Interfold `e3-safe` dependency.
-  See the [threshold guide](src/trbfv/README.md#opt-in-synchronized-decryption)
+  It is enabled by default on this development branch for the planned breaking
+  **0.5** release and adds `ark-ff` and the pinned Interfold `e3-safe` dependency.
+  Disable default features for core BFV/key sharing without these dependencies.
+  See the [migration guide](src/trbfv/README.md#migrating-from-04-to-05)
   and `trbfv_sync_dec` example.
 * `experimental-mbfv` exposes the incomplete multiparty BFV APIs. These APIs
   have additional unresolved security requirements and must not be used in

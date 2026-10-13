@@ -1,9 +1,11 @@
-//! One-time local smudging using the existing bound calculator.
+//! Fresh local smudging noise with configuration binding and zeroizing ownership.
 
-use super::arithmetic::SecretMatrix;
+use super::{SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
 use crate::Error;
 use crate::bfv::BfvParameters;
-use crate::trbfv::{SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
+use crate::trbfv::arithmetic::SecretMatrix;
+use crate::trbfv::config::plaintext_modulus;
+use crate::trbfv::errors::SynchronizedDecryptionError;
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_math::zq::Modulus;
 use ndarray::Array2;
@@ -14,7 +16,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 /// Local-noise sampler for synchronized partial decryption.
 ///
-/// Reuses the legacy bound calculator and [`Lambda`](crate::trbfv::Lambda)
+/// Reuses the bound calculator and [`Lambda`](crate::trbfv::Lambda)
 /// policy. Samples exact centered-uniform coefficients directly into guarded
 /// RNS storage. The bound remains `2^(lambda + 1) * degree * B_C`, with strict
 /// correctness `2 * (B_C + n * B_sm) < floor(Q / t)`.
@@ -29,7 +31,7 @@ impl SmudgingNoiseGenerator {
     /// Calculate a bound for the supplied circuit and BFV configuration.
     ///
     /// The configuration's key/noise bounds must describe the actual encryption
-    /// path. This constructor preserves the legacy calculator's assumptions.
+    /// path. This constructor preserves the calculator's assumptions.
     pub fn new(config: SmudgingBoundCalculatorConfig) -> Result<Self, Error> {
         Self::from_bound_calculator(SmudgingBoundCalculator::new(config))
     }
@@ -41,8 +43,8 @@ impl SmudgingNoiseGenerator {
     /// and statistical policy; the noise owner binds the committee and full BFV
     /// parameters, not ciphertext-noise provenance.
     pub fn from_bound_calculator(calculator: SmudgingBoundCalculator) -> Result<Self, Error> {
-        let (params, committee_size) = calculator.synchronized_binding();
-        super::plaintext_modulus(params)?;
+        let (params, committee_size) = calculator.noise_parameters();
+        plaintext_modulus(params)?;
         let smudging_bound = calculator.calculate_sm_bound()?;
         Ok(Self {
             params: params.clone(),
@@ -126,9 +128,7 @@ impl SmudgingNoiseGenerator {
     pub fn wrap_signed_coefficients(&self, coeffs: &[BigInt]) -> Result<SmudgingNoise, Error> {
         for coeff in coeffs {
             if coeff.magnitude() > &self.smudging_bound {
-                return Err(
-                    super::SynchronizedDecryptionError::SmudgingCoefficientOutOfBound.into(),
-                );
+                return Err(SynchronizedDecryptionError::SmudgingCoefficientOutOfBound.into());
             }
         }
         let ctx = self.params.context_at_level(0)?;
@@ -144,17 +144,17 @@ impl SmudgingNoiseGenerator {
 /// Fresh local noise, bound to its committee and BFV parameters and wiped on drop.
 ///
 /// This owner has no public coefficient access or transport representation.
-/// It is consumed by [`SynchronizedDecryptor::decryption_share`](super::SynchronizedDecryptor::decryption_share).
+/// It is consumed by [`SynchronizedDecryptor::decryption_share`](crate::trbfv::SynchronizedDecryptor::decryption_share).
 ///
 /// ```compile_fail
-/// use fhe::trbfv::synchronized::SmudgingNoise;
+/// use fhe::trbfv::SmudgingNoise;
 /// fn duplicate(noise: &SmudgingNoise) -> SmudgingNoise {
 ///     noise.clone()
 /// }
 /// ```
 ///
 /// ```compile_fail
-/// use fhe::trbfv::synchronized::{PartyPrfKeys, SmudgingNoise, SynchronizedDecryptor};
+/// use fhe::trbfv::{PartyPrfKeys, SmudgingNoise, SynchronizedDecryptor};
 /// use fhe::bfv::Ciphertext;
 /// use fhe_math::rq::{Ntt, Poly};
 /// fn reuse(d: &SynchronizedDecryptor, ct: &Ciphertext, sk: &Poly<Ntt>, noise: SmudgingNoise, keys: &PartyPrfKeys) {
@@ -169,11 +169,11 @@ pub struct SmudgingNoise {
 }
 
 impl SmudgingNoise {
-    pub(super) fn into_poly(self) -> Zeroizing<Poly<PowerBasis>> {
+    pub(in crate::trbfv) fn into_poly(self) -> Zeroizing<Poly<PowerBasis>> {
         self.poly
     }
 
-    pub(super) fn matches_configuration(
+    pub(in crate::trbfv) fn matches_configuration(
         &self,
         committee_size: usize,
         params: &BfvParameters,
@@ -181,7 +181,7 @@ impl SmudgingNoise {
         self.committee_size == committee_size && self.params.as_ref() == params
     }
 
-    pub(super) fn committee_size(&self) -> usize {
+    pub(in crate::trbfv) fn committee_size(&self) -> usize {
         self.committee_size
     }
 }
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn uses_legacy_bound_and_binds_full_parameters() {
+    fn uses_shared_bound_calculator_and_binds_full_parameters() {
         let params = params();
         let config =
             SmudgingBoundCalculatorConfig::new(params.clone(), 3, 2, Lambda::secure(40).unwrap())
@@ -337,7 +337,7 @@ mod tests {
             assert!(matches!(
                 err,
                 Error::SynchronizedDecryption(
-                    crate::trbfv::synchronized::SynchronizedDecryptionError::SmudgingCoefficientOutOfBound
+                    SynchronizedDecryptionError::SmudgingCoefficientOutOfBound
                 )
             ));
         }

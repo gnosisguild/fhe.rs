@@ -1,9 +1,10 @@
-//! Poseidon2/SAFE committee masks, extracted from PRs #276 and #280.
+//! Pairwise PRF keys and cancelling Poseidon2/SAFE committee masks.
 //!
 //! `r_i = sum_{j in S, j != i} (F_{k_i_j}(H(S, ct)) - F_{k_j_i}(H(S, ct)))`.
 //! The context digest absorbs each ciphertext polynomial in power-basis form,
 //! low degree first. That is the coefficient order used by the Interfold circuit.
 
+use super::config::validate_ciphertext;
 use crate::Error;
 use crate::bfv::Ciphertext;
 use ark_ff::{PrimeField, Zero};
@@ -81,7 +82,7 @@ impl PartyPrfKeys {
         decryptors: &[usize],
         ciphertext: &Ciphertext,
     ) -> Result<Poly<PowerBasis>, Error> {
-        super::validate_ciphertext(ciphertext)?;
+        validate_ciphertext(ciphertext)?;
         let decryptors = canonical_decryptors(decryptors);
         for &party_id in &decryptors {
             if party_id == 0 || party_id > self.committee_size {
@@ -283,7 +284,7 @@ pub(super) fn context_digest(
     decryptors: &[usize],
     ciphertext: &Ciphertext,
 ) -> Result<ContextDigest, Error> {
-    super::validate_ciphertext(ciphertext)?;
+    validate_ciphertext(ciphertext)?;
     hash_context(&canonical_decryptors(decryptors), ciphertext)
 }
 
