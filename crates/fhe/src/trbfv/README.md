@@ -61,6 +61,12 @@ dependencies (`ark-ff` and pinned `e3-safe`) are activated only by the new featu
    Here `m` is the fresh-input addition fan-in, not the number of independent
    decryptions. Sample new noise for every party and every partial-decryption
    call. Each noise owner is consumed by the call and wiped on drop.
+   Proof-producing callers can use
+   `SmudgingNoiseGenerator::wrap_signed_coefficients` with integers freshly and
+   independently sampled uniformly in `[-B_sm, B_sm]`. Wrapping validates the
+   length and bound, not freshness or uniformity. Callers retain the integers
+   for the witness and are responsible for erasing their copies when no longer
+   needed.
 6. Call `SynchronizedDecryptor::decryption_share` for each designated party,
    then `decrypt_from_shares` with the resulting typed `DecryptionShare`s.
 
@@ -76,8 +82,10 @@ missing parties, and malformed polynomials. Noise must match the full BFV
 parameter set and committee size. Protocol-specific errors are available as
 `Error::SynchronizedDecryption(SynchronizedDecryptionError::...)`.
 
-The context digest and PRF encoding match `dev-sync-dec` at `8c58831`; a fixed
-reference-vector regression test guards that compatibility. The digest binds
+The context digest absorbs power-basis ciphertext residues, low degree first.
+That order matches the Interfold decryption circuit. `dev-sync-dec` at `8c58831`
+absorbed NTT residues, so its reference vector does not describe this digest.
+A fixed regression test guards the power-basis encoding. The digest binds
 the set and ciphertext coefficients, not the application session, key epoch or
 parameter negotiation. Applications authenticate these separately, establish
 matching pairwise keys, prevent replay, and supply any proofs of correct

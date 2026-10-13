@@ -7,7 +7,7 @@ use crate::trbfv::{SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_math::zq::Modulus;
 use ndarray::Array2;
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint};
 use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
@@ -112,6 +112,32 @@ impl SmudgingNoiseGenerator {
     #[must_use]
     pub fn smudging_bound(&self) -> &BigUint {
         &self.smudging_bound
+    }
+
+    /// Wrap caller-sampled centered coefficients using this generator's configuration.
+    ///
+    /// `coeffs` must have length `params.degree()`, with each magnitude at most
+    /// [`Self::smudging_bound`]. They are reduced into the level-0 RNS context.
+    /// Callers must freshly and independently sample each integer uniformly in
+    /// `[-B_sm, B_sm]` for every partial-decryption call; wrapping checks bounds,
+    /// not the sampling distribution or freshness. Callers retain any integers
+    /// needed for a proof witness and are responsible for erasing their copies
+    /// when no longer needed. Use [`Self::generate`] if no witness is needed.
+    pub fn wrap_signed_coefficients(&self, coeffs: &[BigInt]) -> Result<SmudgingNoise, Error> {
+        for coeff in coeffs {
+            if coeff.magnitude() > &self.smudging_bound {
+                return Err(
+                    super::SynchronizedDecryptionError::SmudgingCoefficientOutOfBound.into(),
+                );
+            }
+        }
+        let ctx = self.params.context_at_level(0)?;
+        let poly = Poly::<PowerBasis>::from_bigints(coeffs, ctx)?;
+        Ok(SmudgingNoise {
+            poly,
+            committee_size: self.committee_size,
+            params: self.params.clone(),
+        })
     }
 }
 
@@ -267,6 +293,58 @@ mod tests {
         );
         assert!(!noise.matches_configuration(3, &other));
         assert!(noise.poly.coefficients().iter().any(|&v| v != 0));
+    }
+
+    #[test]
+    fn wrap_signed_coefficients_reduces_signed_endpoints_into_rns() {
+        let params = params();
+        let generator = SmudgingNoiseGenerator {
+            params: params.clone(),
+            committee_size: 3,
+            smudging_bound: BigUint::from(5u32),
+        };
+        let mut coeffs = vec![BigInt::from(0); params.degree()];
+        coeffs[0] = BigInt::from(5);
+        coeffs[1] = BigInt::from(-5);
+        coeffs[2] = BigInt::from(1);
+        let noise = generator.wrap_signed_coefficients(&coeffs).unwrap();
+        assert!(noise.matches_configuration(3, &params));
+        assert!(!noise.matches_configuration(5, &params));
+        for (column, coeff) in coeffs.iter().enumerate() {
+            for (row, &qi) in params.moduli().iter().enumerate() {
+                let qi = BigInt::from(qi);
+                let expected = ((coeff % &qi) + &qi) % &qi;
+                assert_eq!(
+                    expected,
+                    BigInt::from(noise.poly.coefficients()[[row, column]])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_signed_coefficients_rejects_out_of_bound_and_malformed_lengths() {
+        let params = params();
+        let generator = SmudgingNoiseGenerator {
+            params: params.clone(),
+            committee_size: 3,
+            smudging_bound: BigUint::from(5u32),
+        };
+        let mut coeffs = vec![BigInt::from(0); params.degree()];
+        for value in [6, -6] {
+            coeffs[0] = BigInt::from(value);
+            let err = generator.wrap_signed_coefficients(&coeffs).unwrap_err();
+            assert!(matches!(
+                err,
+                Error::SynchronizedDecryption(
+                    crate::trbfv::synchronized::SynchronizedDecryptionError::SmudgingCoefficientOutOfBound
+                )
+            ));
+        }
+        for length in [0, params.degree() - 1, params.degree() + 1] {
+            let coeffs = vec![BigInt::from(0); length];
+            assert!(generator.wrap_signed_coefficients(&coeffs).is_err());
+        }
     }
 
     #[test]
