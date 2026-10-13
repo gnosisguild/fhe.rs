@@ -1,10 +1,10 @@
-//! Local simulation support, not a distributed key-establishment protocol.
+//! Simulated pairwise PRF-key setup and Shamir secret-key distribution.
+//! These helpers run locally, not as a distributed key-establishment protocol.
 
 #![allow(clippy::indexing_slicing)]
 
 use fhe::bfv::SecretKey;
-use fhe::trbfv::ShareManager;
-use fhe::trbfv::synchronized::{PRF_KEY_LEN, PartyPrfKeyTransport, PartyPrfKeys};
+use fhe::trbfv::{PRF_KEY_LEN, PartyPrfKeyTransport, PartyPrfKeys, ShareManager};
 use fhe_math::rq::{Ntt, Poly};
 use ndarray::Array2;
 use rand::{CryptoRng, RngCore};
@@ -33,7 +33,7 @@ pub fn simulated_committee_prf_keys<R: RngCore + CryptoRng>(
         .collect()
 }
 
-/// Use the unchanged main API to deal one key and assemble its recipient shares.
+/// Deal one secret key and assemble its recipient shares for a local simulation.
 pub fn share_key<R: RngCore + CryptoRng>(
     manager: &mut ShareManager,
     key: &SecretKey,

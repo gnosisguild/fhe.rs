@@ -7,47 +7,64 @@ threshold decryption with additive and limited multiplicative support via
 distributed *l*-BFV relinearization keys. It is **not** the complete robust
 protocol from the paper: there is no distributed key generation, no broadcast
 channel, no FLSS (function-linear secret sharing), and no GURS (guaranteed
-uniform random string) generation. The smudging exchange is assumed to have
-already happened out of band.
+uniform random string) generation. Applications establish and authenticate
+pairwise PRF keys out of band; smudging noise is sampled locally, never shared.
 
 This module enables distributed decryption between `n` parties without necessarily involving all of them: any `threshold + 1` of the `n` parties can decrypt a ciphertext, while any coalition of at most `threshold` parties learns nothing. The threshold must be exactly `(n-1)/2` (integer division), the maximal corruption tolerance under an honest majority — see `config.rs` for the derivation.
 
 ## Architecture
 
-The module follows a modular design with clear separation of concerns:
+Public types are available directly from `fhe::trbfv`. Each implementation
+module has one responsibility:
 
-- `shamir.rs` - Shamir Secret Sharing implementation with field operations and polynomial interpolation
-- `smudging.rs` - Smudging noise generation with optimal variance calculation using arbitrary precision arithmetic  
-- `shares.rs` - Share aggregation and decryption operations management
-- `threshold.rs` - Main TRBFV coordinator struct
-- `config.rs` - Parameter validation
-- `errors.rs` - Threshold-specific error types
-- `synchronized/` - Additional designated-decryptor API, enabled by the
-  `synchronized-decryption` Cargo feature
-
-## Opt-in synchronized decryption
-
-The `synchronized-decryption` feature adds `trbfv::synchronized` based on
-[On Threshold Fully Homomorphic Encryption with Synchronized Decryptors](https://eprint.iacr.org/2026/031)
-(Colin de Verdière–Passelègue–Stehlé 2026), extracted from PRs #276 and #280.
-Enable it when selecting this protocol:
-
-```toml
-fhe = { git = "https://github.com/gnosisguild/fhe.rs", branch = "main", features = ["synchronized-decryption"] }
+```text
+trbfv/
+├── mod.rs              # Public exports
+├── config.rs           # Shared parameter and ciphertext validation
+├── errors.rs           # Threshold and decryption errors
+├── shamir.rs           # Shamir secret-sharing arithmetic
+├── shares.rs           # Key-share generation, conversion, and aggregation
+├── arithmetic.rs       # Internal interpolation weights and guarded buffers
+├── decryption.rs       # Partial shares, transport boundary, and reconstruction
+├── prf.rs              # Pairwise PRF keys, context digest, and cancelling masks
+└── smudging/
+    ├── mod.rs          # Smudging exports
+    ├── bounds.rs       # Lambda, circuit-noise bounds, and correctness budget
+    └── noise.rs        # Fresh-noise generation and one-use ownership
 ```
 
-`TRBFV`, `ShareManager`, the shared-smudging decryption methods, and their
-transport formats retain their existing behavior. Interfold can continue using
-them while synchronized-decryption circuits and integration are developed.
-The new module is independent of the `experimental-mbfv` feature. Its PRF
-dependencies (`ark-ff` and pinned `e3-safe`) are activated only by the new feature.
+The bound calculator determines `B_sm`; the noise generator uses that bound;
+the decryptor consumes the generated noise. The `threshold-decryption`
+feature enables decryption, PRF masks, and noise generation. Key sharing and
+bound calculation remain available without it.
 
-### Reuse key sharing, select a decryption protocol
+## Synchronized decryption (default)
+
+The `threshold-decryption` feature enables threshold decryption based on
+[On Threshold Fully Homomorphic Encryption with Synchronized Decryptors](https://eprint.iacr.org/2026/031)
+(Colin de Verdière–Passelègue–Stehlé 2026). It is enabled by default on this
+development branch for the planned **breaking 0.5 release**. The manifests
+remain at 0.4.1 until release preparation; published 0.4.1 is unchanged.
+
+```toml
+# Development checkout with synchronized decryption enabled by default:
+fhe = { path = "path/to/fhe.rs/crates/fhe" }
+# Core BFV and Shamir key sharing only, without the optional PRF dependencies:
+# fhe = { path = "path/to/fhe.rs/crates/fhe", default-features = false }
+```
+
+The module is independent of `experimental-mbfv`. Its PRF dependencies
+(`ark-ff` and pinned `e3-safe`) remain optional and are activated only by
+`threshold-decryption`. Import `SynchronizedDecryptor`, `SmudgingNoiseGenerator`,
+`SmudgingNoise`, `PartyPrfKeys`, `PartyPrfKeyTransport`, and `DecryptionShare`
+directly from `fhe::trbfv`.
+
+### Setup and decryption
 
 1. Use `ShareManager::generate_secret_shares_from_poly` and
    `aggregate_collected_shares` as before. Convert each recipient's aggregate
    to NTT form and keep it in a `Zeroizing<Poly<Ntt>>` owner.
-2. Construct `synchronized::SynchronizedDecryptor::new(n, threshold, params)`.
+2. Construct `SynchronizedDecryptor::new(n, threshold, params)`.
 3. Establish matching pairwise keys externally. Import each party's bundle
    through `PartyPrfKeyTransport::new` and `PartyPrfKeys::from_transport`.
    The vectors `keys_i_j` and `keys_j_i` use paper indices, not message
@@ -55,9 +72,9 @@ dependencies (`ark-ff` and pinned `e3-safe`) are activated only by the new featu
 4. Agree on a designated set `S` of exactly `threshold + 1` distinct parties
    before producing any partial decryptions. `S` may change for a later
    decryption; key shares and pairwise keys are reusable within their key epoch.
-5. Create `synchronized::SmudgingNoiseGenerator` from the existing
+5. Create `SmudgingNoiseGenerator` from
    `SmudgingBoundCalculatorConfig` or `SmudgingBoundCalculator`. `Lambda` and
-   the bound/circuit assumptions are the same as in the legacy calculator.
+   the calculator's bound/circuit assumptions are unchanged.
    Here `m` is the fresh-input addition fan-in, not the number of independent
    decryptions. Sample new noise for every party and every partial-decryption
    call. Each noise owner is consumed by the call and wiped on drop.
@@ -95,9 +112,9 @@ does not authenticate or prove the received polynomial.
 ### Example and tests
 
 ```bash
-cargo run --release --example trbfv_sync_dec --features synchronized-decryption
-cargo test -p fhe --features synchronized-decryption
-cargo test -p fhe --release --features synchronized-decryption --test trbfv_sync_dec
+cargo run --release --example trbfv_sync_dec
+cargo test -p fhe
+cargo test -p fhe --release --features experimental-mbfv --test trbfv_secure_e2e
 ```
 
 The example uses the existing sharing API, simulates committee-key setup in
@@ -105,16 +122,49 @@ one process, and decrypts two ciphertexts with fresh local noise. Its small
 parameters demonstrate mechanics only. The release integration tests also
 exercise degree 8192.
 
-The legacy and synchronized APIs will be consolidated after Interfold's
-synchronized-decryption circuits and main-branch integration are ready. That
-migration must update callers and proof/transport bindings before making the
-new protocol the default and retiring the old entry points. Follow-up:
-[#285](https://github.com/gnosisguild/fhe.rs/issues/285).
+## Migrating from 0.4 to 0.5
+
+The legacy shared-smudging protocol is retired, not deprecated behind a second
+feature. Update callers and their proof/transport bindings together:
+
+| Removed API | Replacement |
+| --- | --- |
+| `TRBFV::new` / `trbfv::threshold::TRBFV` | `ShareManager::new` for setup; `SynchronizedDecryptor::new` for decryption |
+| `TRBFV` key-sharing/aggregation wrappers | The corresponding `ShareManager` methods |
+| `TRBFV::generate_smudging_error` / `generate_smudging_error_with_participant_count` | `SmudgingNoiseGenerator::new(config)` or `from_bound_calculator(calculator)`, then `generate` per partial call; use the calculator's accepted-participant-count builder for RLK accounting |
+| `trbfv::smudging::SmudgingNoiseGenerator::new(params, bound)` (arbitrary bound) | `trbfv::SmudgingNoiseGenerator::new(config)` (calculated bound, consumed local-noise owner) |
+| `ShareManager::decryption_share` / `TRBFV::decryption_share` | `SynchronizedDecryptor::decryption_share` with a designated set, fresh `SmudgingNoise`, and external `PartyPrfKeys` |
+| `ShareManager::decrypt_from_shares` / `TRBFV::decrypt` | `SynchronizedDecryptor::decrypt_from_shares(&[DecryptionShare], &Ciphertext)` |
+| `trbfv::synchronized::*` imports | `trbfv::*` imports; the nested namespace is removed |
+| Cargo feature `synchronized-decryption` | `threshold-decryption`, enabled by default |
+
+**Transport incompatibility:** legacy partials include `c0` and require Shamir
+interpolation after collection. Synchronized partials already weight the key
+term locally, do **not** include `c0`, and carry set/ciphertext metadata. Sum
+exactly one typed share from each designated party and add `c0` once. Never
+apply post-share Lagrange weighting, feed legacy shares to the new aggregator,
+or transport/deal smudging noise. Use `DecryptionShare::into_parts` / `from_parts`
+for the new application transport boundary.
+
+Key shares remain reusable and unchanged. Agree on exactly `threshold + 1`
+distinct party IDs, matching pairwise keys, BFV parameters, ciphertext, and
+authenticated session/key epoch **before** producing partials. Pairwise key
+establishment, authenticated transport, replay prevention and proofs remain
+application responsibilities; the example helper only simulates external setup.
+
+**Witness API:** retain freshly and independently sampled centered integers for
+the proof witness, and pass them through the generator's
+`wrap_signed_coefficients`. Bound/length validation does not prove freshness or
+uniform sampling, and caller copies must be erased separately. Callers using
+the earlier `from_signed_coefficients` API must migrate to
+`generator.wrap_signed_coefficients(&coeffs)`. The generator supplies the
+parameters, committee size, and calculated bound. The power-basis PRF digest
+is unchanged by this consolidation.
 
 ## Noise and Correctness Formulas (Urban–Rambaud 2024)
 
 This section summarises the formulas implemented in
-[`smudging.rs`](smudging.rs).  See the paper for full derivations.
+[`smudging/bounds.rs`](smudging/bounds.rs). See the paper for full derivations.
 
 ### Delta and the strict correctness inequality
 
@@ -131,6 +181,10 @@ where
 
 Equality (`>=`) is **rejected**: a smudging bound that merely meets &Delta; does
 not guarantee correct decryption.
+
+Only `|S| = threshold + 1` parties add local noise in synchronized decryption,
+so their worst-case sum is `|S| * B_sm`. The calculator retains the conservative
+`n * B_sm` correctness budget; `n` is not the number of partials to collect.
 
 ### Ciphertext noise recursion (multiplicative circuits)
 
@@ -162,7 +216,7 @@ Let `mult_depth` be the number of multiplication levels.
   union bound over the coefficients adds a factor `d`, and `2^(lambda + 1)`
   keeps the constant-`2` convention of the correctness inequality. The older
   `B&#x209b;&#x2098; = 2^lambda &middot; B&#x1d9c;` form only bounds the statistical distance for
-  a *single* coefficient and is not what [`smudging.rs`](smudging.rs)
+  a *single* coefficient and is not what [`smudging/bounds.rs`](smudging/bounds.rs)
   implements.
 
 ### Sampler-specific `B_enc`
@@ -184,12 +238,12 @@ also revalidates these counts before performing the bound computation.
 
 ## Known Limitations
 
-### One-time pre-shared noise
+### Fresh local noise
 
-Smudging noise generated by [`TRBFV::generate_smudging_error`] and
-[`TRBFV::generate_smudging_error_with_participant_count`] is **one-time
-material** that must never be reused across decryptions.  The current API does
-**not** track or enforce consumption — callers are responsible for freshness.
+Every partial-decryption call consumes a non-cloneable, zeroizing
+`SmudgingNoise` owner, including on validation failure. Sample independently
+for every call, even when repeating the same ciphertext and designated set.
+The witness-wrapping API cannot enforce how caller-supplied integers were sampled.
 
 ### Even-`n` party counts
 
@@ -219,36 +273,37 @@ computational-security bound or a claim about bit-security.  See the
 
 ## Usage
 
-For a complete working example demonstrating multi-party setup, share distribution, and threshold decryption, see [`examples/trbfv_add.rs`](../../examples/trbfv_add.rs). A variant that transports the Shamir shares encrypted under per-party BFV keys is in [`examples/trbfv_add_bfv_share.rs`](../../examples/trbfv_add_bfv_share.rs). A multiplicative example using distributed *l*-BFV relinearization keys is in [`examples/trbfv_mul_bfv_share.rs`](../../examples/trbfv_mul_bfv_share.rs).
+See [`trbfv_add.rs`](../../examples/trbfv_add.rs) for distributed key setup and
+synchronized addition/decryption, and [`trbfv_add_bfv_share.rs`](../../examples/trbfv_add_bfv_share.rs)
+for BFV-encrypted key-share transport. The `_insecure` variant also encrypts
+key shares but explicitly uses insecure statistical noise. These local
+simulations are not a complete robust or authenticated protocol.
 
 The example can be run with configurable parameters (threshold must equal `(num_parties - 1) / 2`):
 ```bash
-cargo run --release --example trbfv_add -- --num_parties=10 --threshold=4
+cargo run --release --example trbfv_add --features experimental-mbfv -- --num_parties=10 --threshold=4
 ```
 
 Basic usage pattern:
 
 ```rust
-use fhe::trbfv::TRBFV;
+use fhe::trbfv::{ShareManager, SynchronizedDecryptor, SmudgingNoiseGenerator};
 
-// Setup threshold scheme
-let trbfv = TRBFV::new(n_parties, threshold, params.clone())?;
-
-// Each party: deal secret shares of its key and smudging noise contributions
-let sk_shares = trbfv.generate_secret_shares_from_poly(sk_poly, &mut rng)?;
-let es_coeffs = trbfv.generate_smudging_error(num_ciphertexts, mult_depth, lambda, &mut rng)?;
-
-// Each party: aggregate the share matrices received from the other parties
-// into its share of the joint secret key (and likewise for the noise)
-let sk_poly_sum = trbfv.aggregate_collected_shares(&collected_sk_shares)?;
-let es_poly_sum = trbfv.aggregate_collected_shares(&collected_es_shares)?;
-
-// Each decrypting party: compute a decryption share from its aggregated shares
-let d_share = trbfv.decryption_share(ciphertext.clone(), sk_poly_sum.into_ntt(), es_poly_sum)?;
-
-// Combine exactly threshold + 1 decryption shares; reconstructing_parties
-// holds the 1-based indices of the parties the shares came from
-let plaintext = trbfv.decrypt(d_share_polys, reconstructing_parties, ciphertext)?;
+let mut manager = ShareManager::new(n_parties, threshold, params.clone())?;
+let key_shares = manager.generate_secret_shares_from_poly(sk_poly, &mut rng)?;
+// Securely exchange key shares only, then aggregate each recipient's matrices.
+let key = zeroize::Zeroizing::new(
+    manager.aggregate_collected_shares(&collected_key_shares)?.into_ntt()
+);
+let decryptor = SynchronizedDecryptor::new(n_parties, threshold, params)?;
+let generator = SmudgingNoiseGenerator::new(bound_config)?;
+// prf_keys were established externally; designated contains exactly T + 1 IDs.
+let partial = decryptor.decryption_share(
+    &ciphertext, &key, party_id, &designated,
+    generator.generate(&mut rng)?, &prf_keys,
+)?;
+// Collect typed partials for the agreed set: sum them and add c0 once.
+let plaintext = decryptor.decrypt_from_shares(&partials, &ciphertext)?;
 ```
 
 ## Security Considerations

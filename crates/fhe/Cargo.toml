@@ -15,8 +15,9 @@ workspace = true
 bench = false # Disable default bench (we use criterion)
 
 [features]
+default = ["threshold-decryption"]
 experimental-mbfv = []
-synchronized-decryption = ["dep:ark-ff", "dep:e3-safe"]
+threshold-decryption = ["dep:ark-ff", "dep:e3-safe"]
 tfhe-ntt = ["fhe-math/tfhe-ntt"]
 
 [dependencies]
@@ -94,24 +95,24 @@ required-features = ["experimental-mbfv"]
 
 [[example]]
 name = "trbfv_add"
-required-features = ["experimental-mbfv"]
+required-features = ["experimental-mbfv", "threshold-decryption"]
 
 [[example]]
 name = "trbfv_add_bfv_share"
-required-features = ["experimental-mbfv"]
+required-features = ["experimental-mbfv", "threshold-decryption"]
 
 [[example]]
 name = "trbfv_add_bfv_share_insecure"
-required-features = ["experimental-mbfv"]
+required-features = ["experimental-mbfv", "threshold-decryption"]
 
 [[test]]
 name = "trbfv_secure_e2e"
-required-features = ["experimental-mbfv"]
+required-features = ["experimental-mbfv", "threshold-decryption"]
 
 [[example]]
 name = "trbfv_sync_dec"
-required-features = ["synchronized-decryption"]
+required-features = ["threshold-decryption"]
 
 [[test]]
 name = "trbfv_sync_dec"
-required-features = ["synchronized-decryption"]
+required-features = ["threshold-decryption"]

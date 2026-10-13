@@ -1,4 +1,4 @@
-//! Local validation and public interpolation weights for synchronized decryption.
+//! Internal polynomial validation, public interpolation weights, and secret buffers.
 
 use crate::Error;
 use fhe_math::zq::Modulus;

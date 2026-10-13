@@ -2,15 +2,19 @@
 
 #![allow(clippy::indexing_slicing, clippy::expect_used, clippy::unwrap_used)]
 
+#[path = "../examples/support/simulated_key_setup.rs"]
+#[allow(dead_code)]
+mod simulated_key_setup;
+
 use std::sync::Arc;
 
 use fhe::bfv::{
     self, BfvParameters, Ciphertext, CommonRandomPoly, Encoding, Plaintext, PublicKey, SecretKey,
 };
 use fhe::mbfv::{AggregateIter, PublicKeyShare};
-use fhe::trbfv::smudging::SmudgingNoiseGenerator;
 use fhe::trbfv::{
-    Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig, TRBFV,
+    DecryptionShare, Lambda, ShareManager, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+    SmudgingNoiseGenerator, SynchronizedDecryptor,
 };
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
@@ -60,42 +64,33 @@ fn dkg_params() -> Arc<BfvParameters> {
 enum NoiseMode {
     /// Each party samples its smudging contribution uniformly in [-B_sm, B_sm].
     Random,
-    /// Each party's smudging contribution is +B_sm on every coefficient, so
-    /// the aggregated noise is exactly n * B_sm: the correctness boundary.
+    /// Each designated party adds +/-B_sm on every coefficient. The aggregate
+    /// local noise is exactly +/-|S| * B_sm; the bound conservatively budgets n.
     WorstCase,
 }
 
 fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
     let params_trbfv = trbfv_params();
     let params_dkg = dkg_params();
-    let trbfv = TRBFV::new(NUM_PARTIES, THRESHOLD, params_trbfv.clone()).unwrap();
-
-    // Worst-case noise needs the bound itself.
-    let smudging_bound = match noise_mode {
-        NoiseMode::Random => None,
-        NoiseMode::WorstCase => {
-            let config = SmudgingBoundCalculatorConfig::new(
-                params_trbfv.clone(),
-                NUM_PARTIES,
-                NUM_SUMMED,
-                Lambda::secure(LAMBDA).unwrap(),
-            )
-            .unwrap();
-            let bound = SmudgingBoundCalculator::new(config)
-                .calculate_sm_bound()
-                .expect("secure_8192 parameters must admit a smudging bound");
-            Some(BigInt::from(bound))
-        }
-    };
+    let manager = ShareManager::new(NUM_PARTIES, THRESHOLD, params_trbfv.clone()).unwrap();
+    let decryptor =
+        SynchronizedDecryptor::new(NUM_PARTIES, THRESHOLD, params_trbfv.clone()).unwrap();
+    let noise = SmudgingNoiseGenerator::new(
+        SmudgingBoundCalculatorConfig::new(
+            params_trbfv.clone(),
+            NUM_PARTIES,
+            NUM_SUMMED,
+            Lambda::secure(LAMBDA).unwrap(),
+        )
+        .unwrap(),
+    )
+    .expect("secure_8192 parameters must admit a smudging bound");
 
     struct Party {
         pk_share: PublicKeyShare,
         sk_sss: Vec<Array2<u64>>,
-        esi_sss: Vec<Array2<u64>>,
         sk_sss_collected: Vec<Array2<u64>>,
-        es_sss_collected: Vec<Array2<u64>>,
         sk_poly_sum: Poly<PowerBasis>,
-        es_poly_sum: Poly<PowerBasis>,
         // Per-party BFV keys (DKG preset) for encrypted share transport.
         sk_dkg: SecretKey,
         pk_dkg: PublicKey,
@@ -117,24 +112,8 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
             let sk_poly = share_manager
                 .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
                 .unwrap();
-            let sk_sss = trbfv
+            let sk_sss = share_manager
                 .generate_secret_shares_from_poly(sk_poly, &mut rng)
-                .unwrap();
-
-            let esi_coeffs: Vec<BigInt> = match &smudging_bound {
-                None => trbfv
-                    .generate_smudging_error(
-                        NUM_SUMMED,
-                        0,
-                        Lambda::secure(LAMBDA).unwrap(),
-                        &mut rng,
-                    )
-                    .unwrap(),
-                Some(bound) => vec![bound.clone(); DEGREE],
-            };
-            let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
-            let esi_sss = share_manager
-                .generate_secret_shares_from_poly(esi_poly, &mut rng)
                 .unwrap();
 
             let sk_dkg = SecretKey::random(&params_dkg, &mut rng);
@@ -144,11 +123,8 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
             Party {
                 pk_share,
                 sk_sss,
-                esi_sss,
                 sk_sss_collected: Vec::with_capacity(NUM_PARTIES),
-                es_sss_collected: Vec::with_capacity(NUM_PARTIES),
                 sk_poly_sum: Poly::<PowerBasis>::zero(ctx),
-                es_poly_sum: Poly::<PowerBasis>::zero(ctx),
                 sk_dkg,
                 pk_dkg,
             }
@@ -159,8 +135,8 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
     // under the receiver's DKG public key.
     let pk_dkg_list: Vec<PublicKey> = parties.iter().map(|p| p.pk_dkg.clone()).collect();
 
-    // encrypted_shares[sender][receiver] = (sk share cts, esi share cts), one ct per modulus.
-    let encrypted_shares: Vec<Vec<(Vec<Ciphertext>, Vec<Ciphertext>)>> = parties
+    // encrypted_shares[sender][receiver] = key share cts, one ct per modulus.
+    let encrypted_shares: Vec<Vec<Vec<Ciphertext>>> = parties
         .par_iter()
         .map(|party| {
             pk_dkg_list
@@ -182,19 +158,23 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                             })
                             .collect()
                     };
-                    (encrypt_rows(&party.sk_sss), encrypt_rows(&party.esi_sss))
+                    encrypt_rows(&party.sk_sss)
                 })
                 .collect()
         })
         .collect();
 
+    let dealt: Vec<_> = parties
+        .iter_mut()
+        .map(|party| std::mem::take(&mut party.sk_sss))
+        .collect();
     // Each receiver decrypts the share rows addressed to it and collects them.
     parties
         .par_iter_mut()
         .enumerate()
         .for_each(|(receiver_idx, party)| {
             for sender_encrypted in encrypted_shares.iter() {
-                let (encrypted_sk_shares, encrypted_esi_shares) = &sender_encrypted[receiver_idx];
+                let encrypted_sk_shares = &sender_encrypted[receiver_idx];
 
                 let decrypt_rows = |cts: &[Ciphertext], sk: &SecretKey| -> Array2<u64> {
                     let mut rows = Array::zeros((0, DEGREE));
@@ -208,18 +188,18 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
                 };
 
                 let sk_rows = decrypt_rows(encrypted_sk_shares, &party.sk_dkg);
-                let es_rows = decrypt_rows(encrypted_esi_shares, &party.sk_dkg);
+                // Verify every encrypted transport row, not just the final tally.
+                let sender_idx = party.sk_sss_collected.len();
+                for (row, expected) in dealt[sender_idx].iter().enumerate() {
+                    assert_eq!(sk_rows.row(row), expected.row(receiver_idx));
+                }
                 party.sk_sss_collected.push(sk_rows);
-                party.es_sss_collected.push(es_rows);
             }
         });
 
     parties.par_iter_mut().for_each(|party| {
-        party.sk_poly_sum = trbfv
+        party.sk_poly_sum = manager
             .aggregate_collected_shares(&party.sk_sss_collected)
-            .unwrap();
-        party.es_poly_sum = trbfv
-            .aggregate_collected_shares(&party.es_sss_collected)
             .unwrap();
     });
 
@@ -250,28 +230,49 @@ fn run_threshold_sum_e2e(noise_mode: NoiseMode) {
     let reconstructing: Vec<usize> = (1..=NUM_PARTIES).filter(|i| i % 2 == 0).collect();
     assert_eq!(reconstructing.len(), THRESHOLD + 1);
 
-    let d_share_polys: Vec<Poly<PowerBasis>> = reconstructing
+    // Simulated external setup; applications establish/authenticate these keys.
+    let keys = simulated_key_setup::simulated_committee_prf_keys(NUM_PARTIES, &mut rng).unwrap();
+    let key_shares: Vec<_> = parties
         .iter()
-        .map(|&party_id| {
-            let party = &parties[party_id - 1];
-            trbfv
-                .decryption_share(
-                    tally.clone(),
-                    party.sk_poly_sum.clone().into_ntt(),
-                    party.es_poly_sum.clone(),
-                )
-                .unwrap()
-        })
+        .map(|party| zeroize::Zeroizing::new(party.sk_poly_sum.clone().into_ntt()))
         .collect();
-
-    let decrypted = trbfv.decrypt(d_share_polys, reconstructing, tally).unwrap();
-    let result_vec = Vec::<u64>::try_decode(&decrypted, Encoding::poly()).unwrap();
-
-    let expected: u64 = numbers.iter().sum();
-    assert_eq!(
-        result_vec[0], expected,
-        "threshold decryption returned a wrong sum"
-    );
+    // Reuse key shares, never noise. Exercise both signed worst-case endpoints.
+    for sign in [-1, 1] {
+        let partials: Vec<DecryptionShare> = reconstructing
+            .iter()
+            .map(|&party_id| {
+                let local_noise = match noise_mode {
+                    NoiseMode::Random => noise.generate(&mut rng).unwrap(),
+                    NoiseMode::WorstCase => noise
+                        .wrap_signed_coefficients(&vec![
+                            BigInt::from(sign)
+                                * BigInt::from(
+                                    noise.smudging_bound().clone()
+                                );
+                            DEGREE
+                        ])
+                        .unwrap(),
+                };
+                decryptor
+                    .decryption_share(
+                        &tally,
+                        &key_shares[party_id - 1],
+                        party_id,
+                        &reconstructing,
+                        local_noise,
+                        &keys[party_id - 1],
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let decrypted = decryptor.decrypt_from_shares(&partials, &tally).unwrap();
+        let result_vec = Vec::<u64>::try_decode(&decrypted, Encoding::poly()).unwrap();
+        assert_eq!(
+            result_vec[0],
+            numbers.iter().sum::<u64>(),
+            "threshold decryption returned a wrong sum"
+        );
+    }
 }
 
 #[test]
@@ -310,14 +311,14 @@ fn trbfv_smudging_bound_is_feasible_for_secure_8192_preset() {
         Lambda::secure(LAMBDA).unwrap(),
     )
     .unwrap();
-    let bound = SmudgingBoundCalculator::new(config)
+    let bound = SmudgingBoundCalculator::new(config.clone())
         .calculate_sm_bound()
         .unwrap();
 
     // The bound must be strictly positive.
     assert!(bound > BigUint::from(0_u64));
 
-    let generator = SmudgingNoiseGenerator::new(params, bound.clone());
+    let generator = SmudgingNoiseGenerator::new(config).unwrap();
     assert_eq!(generator.smudging_bound(), &bound);
 }
 

@@ -1,9 +1,32 @@
 //! Error types for threshold BFV operations.
 //!
-//! The matchable variants live in [`crate::ThresholdError`]; the helpers here
-//! construct them wrapped in the crate-level [`Error`].
+//! General variants live in [`crate::ThresholdError`]; the helpers here wrap
+//! them in the crate-level [`Error`](crate::Error). Decryption-specific variants are defined here.
 
 use crate::{Error, ThresholdError};
+
+/// Errors specific to synchronized decryption.
+#[cfg(feature = "threshold-decryption")]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SynchronizedDecryptionError {
+    /// Noise was sampled for different BFV parameters or committee size.
+    #[error(
+        "smudging noise parameters or committee size differ (noise n = {actual_n}, decryptor n = {expected_n})"
+    )]
+    SmudgingConfigurationMismatch {
+        /// Committee size used by the sampler.
+        actual_n: usize,
+        /// Committee size used by the decryptor.
+        expected_n: usize,
+    },
+    /// Shares refer to different designated sets or ciphertexts.
+    #[error("decryption shares refer to inconsistent designated sets or ciphertexts")]
+    InconsistentDecryptionShares,
+    /// A caller-supplied coefficient has absolute value larger than `B_sm`.
+    #[error("a smudging coefficient is outside [-B_sm, B_sm]")]
+    SmudgingCoefficientOutOfBound,
+}
 
 /// Helper functions to create threshold-specific errors using the general Error types.
 impl Error {
