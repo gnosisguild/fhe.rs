@@ -114,19 +114,30 @@ impl SmudgingNoiseGenerator {
         &self.smudging_bound
     }
 
-    /// Wrap caller-sampled centered coefficients using this generator's bound.
+    /// Wrap caller-sampled centered coefficients using this generator's configuration.
     ///
-    /// Proof-producing callers sample the integers once, keep them for the
-    /// witness, and pass the returned owner into
-    /// [`SynchronizedDecryptor::decryption_share`](super::SynchronizedDecryptor::decryption_share).
-    /// Callers that do not need the integers should use [`Self::generate`].
-    pub fn from_signed_coefficients(&self, coeffs: &[BigInt]) -> Result<SmudgingNoise, Error> {
-        SmudgingNoise::from_signed_coefficients(
-            self.committee_size,
-            self.params.clone(),
-            &self.smudging_bound,
-            coeffs,
-        )
+    /// `coeffs` must have length `params.degree()`, with each magnitude at most
+    /// [`Self::smudging_bound`]. They are reduced into the level-0 RNS context.
+    /// Callers must freshly and independently sample each integer uniformly in
+    /// `[-B_sm, B_sm]` for every partial-decryption call; wrapping checks bounds,
+    /// not the sampling distribution or freshness. Callers retain any integers
+    /// needed for a proof witness and are responsible for erasing their copies
+    /// when no longer needed. Use [`Self::generate`] if no witness is needed.
+    pub fn wrap_signed_coefficients(&self, coeffs: &[BigInt]) -> Result<SmudgingNoise, Error> {
+        for coeff in coeffs {
+            if coeff.magnitude() > &self.smudging_bound {
+                return Err(
+                    super::SynchronizedDecryptionError::SmudgingCoefficientOutOfBound.into(),
+                );
+            }
+        }
+        let ctx = self.params.context_at_level(0)?;
+        let poly = Poly::<PowerBasis>::from_bigints(coeffs, ctx)?;
+        Ok(SmudgingNoise {
+            poly,
+            committee_size: self.committee_size,
+            params: self.params.clone(),
+        })
     }
 }
 
@@ -158,38 +169,6 @@ pub struct SmudgingNoise {
 }
 
 impl SmudgingNoise {
-    /// Wrap already-sampled centered integers as local smudging noise.
-    ///
-    /// `coeffs` must have length `params.degree()`. Each `|coeff|` must be at
-    /// most `bound`. The polynomial is the level-0 RNS reduction via
-    /// [`Poly::from_bigints`]. This owner still has no public coefficient
-    /// access; the caller keeps the integers if a proof needs them.
-    pub fn from_signed_coefficients(
-        committee_size: usize,
-        params: Arc<BfvParameters>,
-        bound: &BigUint,
-        coeffs: &[BigInt],
-    ) -> Result<Self, Error> {
-        super::plaintext_modulus(&params)?;
-        if committee_size == 0 {
-            return Err(Error::invalid_party_count(0, 1));
-        }
-        for coeff in coeffs {
-            if coeff.magnitude() > bound {
-                return Err(
-                    super::SynchronizedDecryptionError::SmudgingCoefficientOutOfBound.into(),
-                );
-            }
-        }
-        let ctx = params.context_at_level(0)?;
-        let poly = Poly::<PowerBasis>::from_bigints(coeffs, ctx)?;
-        Ok(Self {
-            poly,
-            committee_size,
-            params,
-        })
-    }
-
     pub(super) fn into_poly(self) -> Zeroizing<Poly<PowerBasis>> {
         self.poly
     }
@@ -317,16 +296,20 @@ mod tests {
     }
 
     #[test]
-    fn from_signed_coefficients_reduces_into_rns_and_rejects_out_of_bound() {
+    fn wrap_signed_coefficients_reduces_signed_endpoints_into_rns() {
         let params = params();
-        let bound = BigUint::from(5u32);
+        let generator = SmudgingNoiseGenerator {
+            params: params.clone(),
+            committee_size: 3,
+            smudging_bound: BigUint::from(5u32),
+        };
         let mut coeffs = vec![BigInt::from(0); params.degree()];
         coeffs[0] = BigInt::from(5);
         coeffs[1] = BigInt::from(-5);
         coeffs[2] = BigInt::from(1);
-        let noise =
-            SmudgingNoise::from_signed_coefficients(3, params.clone(), &bound, &coeffs).unwrap();
+        let noise = generator.wrap_signed_coefficients(&coeffs).unwrap();
         assert!(noise.matches_configuration(3, &params));
+        assert!(!noise.matches_configuration(5, &params));
         for (column, coeff) in coeffs.iter().enumerate() {
             for (row, &qi) in params.moduli().iter().enumerate() {
                 let qi = BigInt::from(qi);
@@ -337,28 +320,31 @@ mod tests {
                 );
             }
         }
+    }
 
-        coeffs[0] = BigInt::from(6);
-        let err = SmudgingNoise::from_signed_coefficients(3, params.clone(), &bound, &coeffs)
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            Error::SynchronizedDecryption(
-                crate::trbfv::synchronized::SynchronizedDecryptionError::SmudgingCoefficientOutOfBound
-            )
-        ));
-
+    #[test]
+    fn wrap_signed_coefficients_rejects_out_of_bound_and_malformed_lengths() {
+        let params = params();
         let generator = SmudgingNoiseGenerator {
             params: params.clone(),
             committee_size: 3,
-            smudging_bound: bound,
+            smudging_bound: BigUint::from(5u32),
         };
-        coeffs[0] = BigInt::from(5);
-        let wrapped = generator.from_signed_coefficients(&coeffs).unwrap();
-        assert!(wrapped.matches_configuration(3, &params));
-
-        let short = vec![BigInt::from(0); params.degree() - 1];
-        assert!(generator.from_signed_coefficients(&short).is_err());
+        let mut coeffs = vec![BigInt::from(0); params.degree()];
+        for value in [6, -6] {
+            coeffs[0] = BigInt::from(value);
+            let err = generator.wrap_signed_coefficients(&coeffs).unwrap_err();
+            assert!(matches!(
+                err,
+                Error::SynchronizedDecryption(
+                    crate::trbfv::synchronized::SynchronizedDecryptionError::SmudgingCoefficientOutOfBound
+                )
+            ));
+        }
+        for length in [0, params.degree() - 1, params.degree() + 1] {
+            let coeffs = vec![BigInt::from(0); length];
+            assert!(generator.wrap_signed_coefficients(&coeffs).is_err());
+        }
     }
 
     #[test]
