@@ -549,13 +549,12 @@ checksum = "780955b8b195a21ab8e4ac6b60dd1dbdcec1dc6c51c0617964b08c81785e12c9"
 
 [[package]]
 name = "e3-safe"
-version = "0.17.0"
-source = "git+https://github.com/theinterfold/interfold?rev=fb5f14198c6ec812b23020079024695043fa6ee5#fb5f14198c6ec812b23020079024695043fa6ee5"
+version = "0.20.0-dev.2"
+source = "git+https://github.com/theinterfold/interfold?rev=ab6b9c943b6d23eda8d0ba5f2efd9039635acfa4#ab6b9c943b6d23eda8d0ba5f2efd9039635acfa4"
 dependencies = [
  "ark-bn254",
  "ark-ff",
  "hex",
- "risc0-bigint2",
  "sha3",
  "taceo-poseidon2",
 ]
@@ -885,12 +884,6 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-
-[[package]]
-name = "include_bytes_aligned"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ee796ad498c8d9a1d68e477df8f754ed784ef875de1414ebdaf169f70a6a784"
 
 [[package]]
 name = "indexmap"
@@ -1584,16 +1577,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "risc0-bigint2"
-version = "1.4.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b87f5f7494a2242cead2750b7ce2b8522c1be83dee268479f1c12ed521eaf595"
-dependencies = [
- "include_bytes_aligned",
- "stability",
-]
-
-[[package]]
 name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1714,16 +1697,6 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
-
-[[package]]
-name = "stability"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d904e7009df136af5297832a3ace3370cd14ff1546a232f4f185036c2736fcac"
-dependencies = [
- "quote",
- "syn 2.0.119",
-]
 
 [[package]]
 name = "strsim"
