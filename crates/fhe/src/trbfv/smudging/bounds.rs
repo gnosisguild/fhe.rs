@@ -1,23 +1,13 @@
+//! Smudging bounds and statistical-security policy (Urban–Rambaud 2024, Appendix C).
+//!
+//! Computes the coefficient bound and checks the BFV correctness budget.
+//! Sampling and ownership of noise belong to the sibling `noise` module.
+
 use crate::Error;
-/// Threshold BFV Smudging Noise Generation (Urban–Rambaud 2024, Appendix C).
-///
-/// This module provides variance calculation and smudging noise generation for threshold BFV.
-/// Variance calculations use arbitrary precision arithmetic, while noise generation uses
-/// optimized standard library sampling since cryptographic variances always exceed i64 bounds.
-///
-/// Key features:
-/// - Arbitrary precision variance calculation using BigUint
-/// - Efficient noise generation using standard uniform sampling
-/// - Statistical security parameter λ (see [`Lambda`] and [`MIN_SECURE_LAMBDA`])
-/// - Correctness enforced via strict `2 * (B_C + n * B_sm) < Delta` with `Delta = floor(Q / t)`
-/// - Multiplicative-depth noise recursion via Prop.&nbsp;20
-/// - Distributed RLK error accounting via `accepted_participant_count * B_e`
-/// - Sampler-aligned `B_enc` (CBD support for small variance, `sqrt(3*var)` for large)
 use crate::bfv::BfvParameters;
 
-use num_bigint::{BigInt, BigUint};
+use num_bigint::BigUint;
 use num_traits::ToPrimitive;
-use rand::{CryptoRng, RngCore};
 use std::sync::Arc;
 
 /// Minimum statistical security parameter accepted for production use.
@@ -89,7 +79,7 @@ impl Lambda {
     }
 }
 
-/// Configuration for calculating optimal smudging variance in threshold BFV.
+/// Configuration for calculating the smudging coefficient bound in threshold BFV.
 ///
 /// All parameters use arbitrary precision arithmetic to handle cryptographically large values.
 #[non_exhaustive]
@@ -157,7 +147,7 @@ fn compute_delta(q: &BigUint, t: &BigUint) -> BigUint {
 }
 
 impl SmudgingBoundCalculatorConfig {
-    /// Create a new variance calculator configuration with standard parameters.
+    /// Create a bound-calculator configuration with standard parameters.
     ///
     /// # Arguments
     /// * `params` - BFV parameters
@@ -229,14 +219,14 @@ impl SmudgingBoundCalculatorConfig {
 /// - `Delta = floor(Q / t)` (exact plaintext scaling factor, not `Q/(2t)`).
 /// - Strict correctness inequality: `2 * (B_C + n * B_sm) < Delta`.
 /// - Sampler-aligned `B_enc` (CBD support for small variance, `sqrt(3*var)` for large).
-/// - Distributed RLK error accounting via [`with_accepted_participant_count`].
-/// - Injectible initial ciphertext noise bound via [`with_initial_ciphertext_noise_bound`].
+/// - Distributed RLK error accounting via [`Self::with_accepted_participant_count`].
+/// - Caller-supplied ciphertext noise bound via [`Self::with_initial_ciphertext_noise_bound`].
 ///
 /// ## Limitations (not enforced by this API)
 ///
-/// - **One-time noise:** Generated `B_sm`-bounded smudging noise is pre-shared
-///   material that must not be reused across decryptions. This API does not
-///   track consumption.
+/// - **One-time noise:** The calculator only computes a bound. Callers must
+///   sample fresh local noise for every partial decryption; the synchronized
+///   generator provides a consumed, zeroizing owner.
 /// - **Even `n`:** Accepted for backwards compatibility, but the paper's `n = 2t+1`
 ///   theorem (odd `n`) does not cover even party counts.
 #[derive(Debug)]
@@ -251,6 +241,12 @@ pub struct SmudgingBoundCalculator {
 }
 
 impl SmudgingBoundCalculator {
+    /// Configuration binding for the local-noise sampler.
+    #[cfg(feature = "threshold-decryption")]
+    pub(super) fn noise_parameters(&self) -> (&Arc<BfvParameters>, usize) {
+        (&self.config.params, self.config.n)
+    }
+
     /// Create a new bound calculator with defaults:
     /// - `accepted_participant_count = config.n`
     /// - no injected initial ciphertext noise bound.
@@ -302,7 +298,7 @@ impl SmudgingBoundCalculator {
     /// Returns error if:
     /// - Inputs are invalid (zero n/m, empty moduli, zero plaintext, zero variance)
     /// - Accepted participant count is zero or exceeds n
-    /// - Lambda exceeds [`MAX_FEASIBLE_LAMBDA`]
+    /// - Lambda exceeds the supported maximum of 256
     /// - `2 * B_C >= Delta` (circuit too deep or parameters too small)
     /// - `2 * (B_C + n * B_sm) >= Delta` (security requirement infeasible)
     pub fn calculate_sm_bound(&self) -> Result<BigUint, Error> {
@@ -443,78 +439,10 @@ impl SmudgingBoundCalculator {
     }
 }
 
-/// Smudging noise generator using simple uniform sampling.
-///
-/// Since calculated variances (180+ bits) always exceed i64 bounds, we directly
-/// use maximum safe sampling range without arbitrary precision overhead.
-#[derive(Debug)]
-pub struct SmudgingNoiseGenerator {
-    params: Arc<BfvParameters>,
-    smudging_bound: BigUint,
-}
-
-impl SmudgingNoiseGenerator {
-    /// Create a new noise generator with calculated variance.
-    #[must_use]
-    pub fn new(params: Arc<BfvParameters>, smudging_bound: BigUint) -> Self {
-        Self {
-            params,
-            smudging_bound,
-        }
-    }
-
-    /// Create a noise generator from a smudging bound calculator.
-    pub fn from_bound_calculator(calculator: SmudgingBoundCalculator) -> Result<Self, Error> {
-        let params = calculator.config.params.clone();
-        let smudging_bound = calculator.calculate_sm_bound()?;
-        Ok(Self::new(params, smudging_bound))
-    }
-
-    /// Generate smudging error coefficients using the calculated bound.
-    ///
-    /// The coefficients are sampled uniformly from `[-B_sm, B_sm]`, as
-    /// specified for the smudging noise in the trBFV paper.
-    ///
-    /// # Returns
-    /// A vector of uniformly sampled BigInt coefficients
-    pub fn generate_smudging_error<R: RngCore + CryptoRng>(
-        &self,
-        rng: &mut R,
-    ) -> Result<Vec<BigInt>, Error> {
-        let degree = self.params.degree();
-        Ok(self.sample_uniform_coefficients(degree, rng))
-    }
-
-    /// Sample uniform coefficients from `[-bound, bound]`.
-    fn sample_uniform_coefficients<R: RngCore + CryptoRng>(
-        &self,
-        count: usize,
-        rng: &mut R,
-    ) -> Vec<BigInt> {
-        let bound = BigInt::from(self.smudging_bound.clone());
-        fhe_math::rq::sample_uniform_coefficients_bigint(&bound, count, rng)
-    }
-
-    /// Get the polynomial degree.
-    #[must_use]
-    pub fn degree(&self) -> usize {
-        self.params.degree()
-    }
-
-    /// Get the smudging variance.
-    #[must_use]
-    pub fn smudging_bound(&self) -> &BigUint {
-        &self.smudging_bound
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bfv::BfvParametersBuilder;
-    use num_traits::Signed;
-    use num_traits::Zero;
-    use rand::rng;
     use std::str::FromStr;
 
     fn test_params() -> Arc<BfvParameters> {
@@ -841,114 +769,6 @@ mod tests {
                     msg.contains("Delta") || msg.contains("strict inequality"),
                     "unexpected error: {msg}"
                 );
-            }
-        }
-    }
-
-    #[test]
-    fn test_smudging_noise_generator_creation() {
-        let params = test_params();
-        let bound = BigUint::from(12345u64);
-        let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
-
-        assert_eq!(generator.params, params);
-        assert_eq!(generator.smudging_bound, bound);
-        assert_eq!(generator.degree(), params.degree());
-        assert_eq!(generator.smudging_bound(), &bound);
-    }
-
-    #[test]
-    fn test_smudging_noise_generator_from_calculator() {
-        let params = test_params();
-        let config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), 3, 1, Lambda::secure(80).unwrap())
-                .unwrap();
-        let calculator = SmudgingBoundCalculator::new(config);
-
-        let result = SmudgingNoiseGenerator::from_bound_calculator(calculator);
-
-        match result {
-            Ok(generator) => {
-                assert_eq!(generator.params, params);
-                assert_eq!(generator.degree(), params.degree());
-                assert!(generator.smudging_bound() > &BigUint::from(0u64));
-            }
-            Err(e) => {
-                assert!(!e.to_string().is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn test_noise_generation_small_bound() {
-        let mut rng = rng();
-        let params = test_params();
-        let bound = BigUint::from(1000u64);
-        let generator = SmudgingNoiseGenerator::new(params.clone(), bound);
-
-        let result = generator.generate_smudging_error(&mut rng);
-        assert!(result.is_ok());
-
-        let coefficients = result.unwrap();
-        assert_eq!(coefficients.len(), params.degree());
-
-        for coeff in &coefficients {
-            assert!(coeff.abs() <= BigInt::from(1000u64));
-        }
-    }
-
-    #[test]
-    fn test_noise_generation_zero_bound() {
-        let mut rng = rng();
-        let params = test_params();
-        let bound = BigUint::from(0u64);
-        let generator = SmudgingNoiseGenerator::new(params.clone(), bound);
-
-        let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
-        assert_eq!(coefficients.len(), params.degree());
-        assert!(coefficients.iter().all(|x| x.is_zero()));
-    }
-
-    #[test]
-    fn test_noise_generation_large_bound() {
-        let mut rng = rng();
-        let params = test_params();
-        let large_bound = BigUint::from_str("123456789012345678901234567890").unwrap();
-        let generator = SmudgingNoiseGenerator::new(params.clone(), large_bound.clone());
-
-        let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
-        assert_eq!(coefficients.len(), params.degree());
-
-        let non_zero_count = coefficients.iter().filter(|x| !x.is_zero()).count();
-        assert!(non_zero_count > coefficients.len() / 4);
-
-        for coeff in &coefficients {
-            assert!(coeff.abs() <= BigInt::from(large_bound.clone()));
-        }
-    }
-
-    #[test]
-    fn test_realistic_parameters_workflow() {
-        let mut rng = rng();
-        let params = test_params();
-        let n = 3;
-        let m = 1;
-
-        let config =
-            SmudgingBoundCalculatorConfig::new(params.clone(), n, m, Lambda::secure(80).unwrap())
-                .unwrap();
-        let calculator = SmudgingBoundCalculator::new(config);
-
-        let bound_result = calculator.calculate_sm_bound();
-
-        match bound_result {
-            Ok(bound) => {
-                let generator = SmudgingNoiseGenerator::new(params.clone(), bound.clone());
-                let coefficients = generator.generate_smudging_error(&mut rng).unwrap();
-                assert_eq!(coefficients.len(), params.degree());
-            }
-            Err(_) => {
-                // Acceptable for some parameter sets
             }
         }
     }

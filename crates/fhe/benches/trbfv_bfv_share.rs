@@ -1,9 +1,10 @@
-//! Benchmarks for threshold BFV share operations.
+//! Size and timing benchmarks for Shamir key-share transport only.
+//! Synchronized decryption samples noise locally; there are no noise shares.
 use criterion::{Criterion, criterion_group, criterion_main};
 use fhe::bfv::CommonRandomPoly;
 use fhe::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
 use fhe::mbfv::PublicKeyShare;
-use fhe::trbfv::{Lambda, ShareManager, TRBFV};
+use fhe::trbfv::ShareManager;
 use fhe_traits::{FheDecoder, FheDecrypter, FheEncoder, FheEncrypter};
 use rand::rng as make_rng;
 use std::sync::Arc;
@@ -71,14 +72,9 @@ fn bench_data_sizes(c: &mut Criterion) {
     // Generate Common Reference Polynomial
     let crp = CommonRandomPoly::new(&params_trbfv, &mut make_rng()).unwrap();
 
-    // Setup trBFV
-    let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
-
     // Generate parties with threshold BFV keys and BFV encryption keys
     println!("\n📊 Generating party keys...");
     let mut parties = Vec::new();
-    let mut all_sk_shares = Vec::new();
-    let mut all_esi_shares = Vec::new();
 
     for _party_id in 0..num_parties {
         let mut rng = make_rng();
@@ -94,26 +90,15 @@ fn bench_data_sizes(c: &mut Criterion) {
             .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
             .unwrap();
 
-        let sk_sss = trbfv
+        let sk_sss = share_manager
             .generate_secret_shares_from_poly(sk_poly, &mut rng)
-            .unwrap();
-
-        // Generate smudging error shares
-        let esi_coeffs = trbfv
-            .generate_smudging_error(100, 0, Lambda::secure(80).unwrap(), &mut rng)
-            .unwrap();
-        let esi_poly = share_manager.bigints_to_poly(&esi_coeffs).unwrap();
-        let esi_sss = share_manager
-            .generate_secret_shares_from_poly(esi_poly, &mut rng)
             .unwrap();
 
         // Generate BFV keys for share encryption
         let sk_bfv = SecretKey::random(&params_bfv, &mut rng);
         let pk_bfv = PublicKey::new(&sk_bfv, &mut make_rng());
 
-        all_sk_shares.push(sk_sss.clone());
-        all_esi_shares.push(esi_sss.clone());
-        parties.push((sk_share, pk_share, sk_bfv, pk_bfv, sk_sss, esi_sss));
+        parties.push((sk_share, pk_share, sk_bfv, pk_bfv, sk_sss));
     }
 
     // Calculate Shamir share sizes
@@ -146,7 +131,7 @@ fn bench_data_sizes(c: &mut Criterion) {
     let mut encrypted_shares_count = 0;
     let mut total_encrypted_size = 0;
 
-    for (_, _, _, _, sk_sss, esi_sss) in parties.iter() {
+    for (_, _, _, _, sk_sss) in parties.iter() {
         for (receiver_idx, receiver_party) in parties.iter().enumerate().take(num_parties) {
             let receiver_pk = &receiver_party.3;
             let mut rng = make_rng();
@@ -160,19 +145,6 @@ fn bench_data_sizes(c: &mut Criterion) {
                 let _ct = receiver_pk.try_encrypt(&pt, &mut rng).unwrap();
 
                 // Estimate ciphertext size (2 polynomials × degree × moduli × 8 bytes)
-                let ct_size = 2 * degree * moduli_bfv.len() * 8;
-                total_encrypted_size += ct_size;
-                encrypted_shares_count += 1;
-            }
-
-            // Encrypt esi shares
-            for esi_sss_m in esi_sss.iter().take(num_moduli) {
-                let share_row = esi_sss_m.row(receiver_idx);
-                let share_vec: Vec<u64> = share_row.to_vec();
-
-                let pt = Plaintext::try_encode(&share_vec, Encoding::poly(), &params_bfv).unwrap();
-                let _ct = receiver_pk.try_encrypt(&pt, &mut rng).unwrap();
-
                 let ct_size = 2 * degree * moduli_bfv.len() * 8;
                 total_encrypted_size += ct_size;
                 encrypted_shares_count += 1;
@@ -197,11 +169,11 @@ fn bench_data_sizes(c: &mut Criterion) {
 
     println!("\n📦 BFV Encrypted Share Sizes:");
     println!(
-        "  - Total encrypted shares: {} ({} parties × {} receivers × {} moduli × 2 share types)",
+        "  - Total encrypted key shares: {} ({} parties × {} receivers × {} moduli)",
         encrypted_shares_count, num_parties, num_parties, num_moduli
     );
     println!(
-        "  - Encryptions per party: {} ({} receivers × {} moduli × 2 share types)",
+        "  - Encryptions per party: {} ({} receivers × {} moduli)",
         encrypted_shares_count / num_parties,
         num_parties,
         num_moduli
@@ -215,7 +187,7 @@ fn bench_data_sizes(c: &mut Criterion) {
     );
     let broadcast_size_per_party = total_encrypted_size / num_parties;
     println!(
-        "  - Broadcast size per party: {} ({} parties × {} moduli × 2 share types × {})",
+        "  - Broadcast size per party: {} ({} parties × {} moduli × {})",
         format_bytes(broadcast_size_per_party),
         num_parties,
         num_moduli,
@@ -386,17 +358,16 @@ fn bench_timing_operations(c: &mut Criterion) {
     // Benchmark: Generate Shamir shares
     let mut rng = make_rng();
     let sk_share = SecretKey::random(&params_trbfv, &mut rng);
-    let trbfv = TRBFV::new(num_parties, threshold, params_trbfv.clone()).unwrap();
 
     group.bench_function("generate_shamir_shares", |b| {
-        let share_manager =
+        let mut share_manager =
             ShareManager::new(num_parties, threshold, params_trbfv.clone()).unwrap();
         let sk_poly = share_manager
             .coeffs_to_poly_level0(sk_share.coeffs.clone().as_ref())
             .unwrap();
 
         b.iter(|| {
-            trbfv
+            share_manager
                 .generate_secret_shares_from_poly(sk_poly.clone(), &mut rng)
                 .unwrap()
         });

@@ -1,5 +1,16 @@
-//! The Threshold BFV scheme, as described by Antoine Urban and Matthieu Rambaud.
-//! in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
+//! Threshold BFV with Shamir key sharing and synchronized decryption.
+//!
+//! Decryption uses a designated set, fresh local noise, and pairwise PRF masks from
+//! [Colin de Verdière–Passelègue–Stehlé 2026](https://eprint.iacr.org/2026/031).
+//! The `threshold-decryption` feature is enabled by default; disabling it
+//! retains core BFV and key sharing without the optional PRF dependencies.
+
+#[cfg(feature = "threshold-decryption")]
+mod arithmetic;
+#[cfg(feature = "threshold-decryption")]
+mod decryption;
+#[cfg(feature = "threshold-decryption")]
+mod prf;
 
 /// Configuration and validation for threshold BFV
 pub mod config;
@@ -9,15 +20,20 @@ pub mod errors;
 pub mod shamir;
 /// Share collection and management
 pub mod shares;
-/// Smudging abstractions and implementations
+/// Smudging bounds, statistical-security policy, and fresh local noise
 pub mod smudging;
-/// Main threshold BFV orchestrator
-pub mod threshold;
 
 // Re-export main types for convenience
+#[cfg(feature = "threshold-decryption")]
+pub use decryption::{DecryptionShare, SynchronizedDecryptor};
+#[cfg(feature = "threshold-decryption")]
+pub use errors::SynchronizedDecryptionError;
+#[cfg(feature = "threshold-decryption")]
+pub use prf::{PRF_KEY_LEN, PartyPrfKeyTransport, PartyPrfKeys, PrfKey};
 pub use shamir::ShamirSecretSharing;
 pub use shares::ShareManager;
 pub use smudging::{
     Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
 };
-pub use threshold::TRBFV;
+#[cfg(feature = "threshold-decryption")]
+pub use smudging::{SmudgingNoise, SmudgingNoiseGenerator};

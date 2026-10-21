@@ -32,6 +32,19 @@ fhe = "0.4.1"
 fhe-traits = "0.4.1"
 ```
 
+### Upcoming 0.5 threshold-decryption migration
+
+This development branch prepares the next **breaking release, 0.5** (crate
+versions are not bumped here). Synchronized threshold decryption is enabled by
+default; the legacy `TRBFV` coordinator and shared-smudging decryption APIs are
+retired. Key sharing remains in `ShareManager`. See the
+[migration guide](crates/fhe/src/trbfv/README.md#migrating-from-04-to-05) before
+updating callers, decryption transports, or proof bindings.
+
+Use `default-features = false` for the core BFV/key-sharing build without the
+optional threshold-decryption PRF dependencies. These changes do not alter
+the published 0.4.1 release.
+
 ## Minimum supported version / toolchain
 
 Rust **1.91.1** or newer (Rust 2024 edition).

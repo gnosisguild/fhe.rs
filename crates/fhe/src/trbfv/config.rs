@@ -1,7 +1,9 @@
-/// Configuration and validation for threshold BFV.
-///
-/// This module provides configuration validation logic for threshold BFV operations.
+//! Shared parameter and ciphertext validation for threshold BFV.
+
 use crate::Error;
+use crate::bfv::BfvParameters;
+#[cfg(feature = "threshold-decryption")]
+use crate::bfv::Ciphertext;
 
 /// Validates threshold configuration parameters.
 ///
@@ -47,9 +49,91 @@ pub fn validate_threshold_config(n: usize, threshold: usize) -> Result<(), Error
     Ok(())
 }
 
+/// Shared key-sharing/decryption validation: Shamir points must be distinct
+/// units under every (prime) BFV modulus.
+pub(super) fn validate_sharing_parameters(
+    n: usize,
+    threshold: usize,
+    params: &BfvParameters,
+) -> Result<(), Error> {
+    validate_threshold_config(n, threshold)?;
+    let min_modulus = params
+        .moduli()
+        .iter()
+        .min()
+        .ok_or(fhe_math::Error::EmptyModuli)?;
+    if n >= usize::try_from(*min_modulus).unwrap_or(usize::MAX) {
+        return Err(Error::party_count_exceeds_modulus(n, *min_modulus));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "threshold-decryption")]
+pub(super) fn plaintext_modulus(params: &BfvParameters) -> Result<u64, Error> {
+    params.plaintext.as_u64().ok_or_else(|| {
+        crate::ParametersError::UnsupportedPlaintextModulus {
+            reason: "synchronized decryption requires a u64 plaintext modulus".to_string(),
+        }
+        .into()
+    })
+}
+
+#[cfg(feature = "threshold-decryption")]
+pub(super) fn validate_ciphertext(ciphertext: &Ciphertext) -> Result<(), Error> {
+    if ciphertext.level != 0 {
+        return Err(Error::InvalidLevel {
+            level: ciphertext.level,
+            min_level: 0,
+            max_level: 0,
+        });
+    }
+    if ciphertext.c.len() != 2 {
+        return Err(crate::CiphertextError::InvalidPolynomialCount {
+            operation: crate::CiphertextOperation::MultipartyKeySwitch,
+            actual: ciphertext.c.len(),
+            expected: 2,
+        }
+        .into());
+    }
+    let ctx = ciphertext.params.context_at_level(0)?;
+    for poly in &ciphertext.c {
+        if poly.ctx() != ctx {
+            return Err(Error::ParameterMismatch {
+                left: crate::ParameterSource::Polynomial,
+                right: crate::ParameterSource::Ciphertext,
+            });
+        }
+        super::arithmetic::validate_matrix(
+            poly.coefficients(),
+            ciphertext.params.moduli(),
+            ciphertext.params.degree(),
+            0,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn sharing_parameters_require_distinct_evaluation_points() {
+        let params = crate::bfv::BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(2)
+            .set_moduli(&[17])
+            .build_arc()
+            .unwrap();
+        assert!(validate_sharing_parameters(16, 7, &params).is_ok());
+        assert!(matches!(
+            validate_sharing_parameters(17, 8, &params),
+            Err(Error::Threshold(
+                crate::ThresholdError::PartyCountExceedsModulus { .. }
+            ))
+        ));
+    }
 
     #[test]
     fn test_valid_threshold_config() {
