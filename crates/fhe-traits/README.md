@@ -8,7 +8,7 @@ This crate provides common abstractions for parameters, plaintext and ciphertext
 
 ```toml
 [dependencies]
-fhe-traits = "0.4.1"
+fhe-traits = "0.5.0"
 ```
 
 ## Testing
