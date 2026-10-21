@@ -42,9 +42,8 @@ bound calculation remain available without it.
 
 The `threshold-decryption` feature enables threshold decryption based on
 [On Threshold Fully Homomorphic Encryption with Synchronized Decryptors](https://eprint.iacr.org/2026/031)
-(Colin de Verdière–Passelègue–Stehlé 2026). It is enabled by default on this
-development branch for the planned **breaking 0.5 release**. The manifests
-remain at 0.4.1 until release preparation; published 0.4.1 is unchanged.
+(Colin de Verdière–Passelègue–Stehlé 2026). It is enabled by default in the
+**breaking 0.5 release**.
 
 ```toml
 # Development checkout with synchronized decryption enabled by default:

@@ -28,22 +28,20 @@ To install, add the following to your project's `Cargo.toml` file:
 
 ```toml
 [dependencies]
-fhe = "0.4.1"
-fhe-traits = "0.4.1"
+fhe = "0.5.0"
+fhe-traits = "0.5.0"
 ```
 
-### Upcoming 0.5 threshold-decryption migration
+### 0.5 threshold-decryption migration
 
-This development branch prepares the next **breaking release, 0.5** (crate
-versions are not bumped here). Synchronized threshold decryption is enabled by
-default; the legacy `TRBFV` coordinator and shared-smudging decryption APIs are
-retired. Key sharing remains in `ShareManager`. See the
+Release **0.5** is a **breaking release**. Synchronized threshold decryption is
+enabled by default; the legacy `TRBFV` coordinator and shared-smudging
+decryption APIs are retired. Key sharing remains in `ShareManager`. See the
 [migration guide](crates/fhe/src/trbfv/README.md#migrating-from-04-to-05) before
 updating callers, decryption transports, or proof bindings.
 
 Use `default-features = false` for the core BFV/key-sharing build without the
-optional threshold-decryption PRF dependencies. These changes do not alter
-the published 0.4.1 release.
+optional threshold-decryption PRF dependencies.
 
 ## Minimum supported version / toolchain
 
