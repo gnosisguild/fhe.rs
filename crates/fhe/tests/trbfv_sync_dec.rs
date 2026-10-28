@@ -381,8 +381,9 @@ fn rejects_nonzero_levels_and_unrelinearized_ciphertexts() {
 #[test]
 fn prf_power_basis_reference_vector() {
     // Fixed NTT storage avoids coupling the fixture to BFV encryption RNGs.
-    // The digest absorbs the power-basis image of those residues. The older
-    // dev-sync-dec 8c58831 vector hashed the NTT residues and does not apply.
+    // The digest absorbs the checked commitment of the power-basis image, and
+    // evaluation uses the eval-x3 split. The previous vector hashed every
+    // power-basis coefficient and squeezed one residue per coefficient.
     let params = BfvParametersBuilder::new()
         .set_degree(8)
         .set_plaintext_modulus(17)
@@ -405,12 +406,12 @@ fn prf_power_basis_reference_vector() {
     .unwrap();
     let expected = [
         [
-            52534, 10163, 28151, 52807, 5238, 63673, 55848, 33749, 96294, 70599, 3822, 71735,
-            29132, 20165, 76778, 9623,
+            21790, 1128, 51639, 5091, 53337, 41025, 56557, 55533, 95087, 76641, 81589, 27049,
+            80409, 77197, 98631, 93683,
         ],
         [
-            13003, 55374, 37386, 12730, 60299, 1864, 9689, 31788, 18395, 44090, 110867, 42954,
-            85557, 94524, 37911, 105066,
+            43747, 64409, 13898, 60446, 12200, 24512, 8980, 10004, 19602, 38048, 33100, 87640,
+            34280, 37492, 16058, 21006,
         ],
     ];
     for (party_id, expected) in [1, 3].into_iter().zip(expected) {

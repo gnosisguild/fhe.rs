@@ -1,8 +1,12 @@
 //! Pairwise PRF keys and cancelling Poseidon2/SAFE committee masks.
 //!
 //! `r_i = sum_{j in S, j != i} (F_{k_i_j}(H(S, ct)) - F_{k_j_i}(H(S, ct)))`.
-//! The context digest absorbs each ciphertext polynomial in power-basis form,
-//! low degree first. That is the coefficient order used by the Interfold circuit.
+//! The context digest absorbs one checked commitment to the ciphertext. That
+//! commitment packs each power-basis row centered and high degree first, then
+//! hashes the two component hashes, matching the Interfold circuit. Evaluation
+//! squeezes `ceil(N/3)` field elements per limb and splits each one into three
+//! residues of that limb's modulus. The third residue is the accepted
+//! statistical gap.
 
 use super::config::validate_ciphertext;
 use crate::Error;
@@ -10,8 +14,10 @@ use crate::bfv::Ciphertext;
 use ark_ff::{PrimeField, Zero};
 use e3_safe::{ABSORB_FLAG, Field, SQUEEZE_FLAG, SafeSponge};
 use fhe_math::rq::{Poly, PowerBasis};
-use fhe_math::zq::Modulus;
+use ndarray::Array2;
+use num_bigint::BigUint;
 use std::fmt;
+use std::ops::{Add, Mul};
 use zeroize::{Zeroize, Zeroizing};
 use zeroize_derive::{Zeroize as ZeroizeFields, ZeroizeOnDrop};
 
@@ -20,8 +26,9 @@ pub const PRF_KEY_LEN: usize = 32;
 const SAFE_LENGTH_MASK: u32 = 0x7FFF_FFFF;
 const DIGEST_LEN: usize = 2;
 pub(super) type ContextDigest = [Field; DIGEST_LEN];
-const CTX_DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2/ctx";
-const EVAL_DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2/eval";
+const CTX_DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2/ctx-cmt";
+const EVAL_DOMAIN_SEPARATOR_LABEL: &[u8] = b"fhe.rs/trbfv/prf/poseidon2/eval-x3";
+const CIPHERTEXT_DOMAIN_SEPARATOR_LABEL: &[u8] = b"CIPHERTEXT";
 
 /// A uniformly sampled 256-bit key, mapped into the BN254 scalar field internally.
 #[derive(Clone, ZeroizeFields, ZeroizeOnDrop)]
@@ -327,37 +334,32 @@ fn evaluate(
     ciphertext: &Ciphertext,
 ) -> Result<Poly<PowerBasis>, Error> {
     let ctx = ciphertext.params.context_at_level(ciphertext.level)?;
-    let moduli = ctx.moduli_operators();
-    let degree = ciphertext.params.degree();
-    let coefficient_count = moduli
+    let moduli = ctx.moduli();
+    let degree = ctx.degree;
+    let groups = degree.div_ceil(3);
+    let squeezed_len = moduli
         .len()
-        .checked_mul(degree)
+        .checked_mul(groups)
         .ok_or_else(|| Error::malformed_shares(0, "PRF output dimensions overflow".to_string()))?;
     let mut input = Zeroizing::new(Vec::with_capacity(1 + DIGEST_LEN));
     input.push(Field::from_le_bytes_mod_order(&key.0));
     input.extend_from_slice(digest);
-    let squeezed = sponge_absorb_squeeze(EVAL_DOMAIN_SEPARATOR_LABEL, input, coefficient_count)?;
+    let squeezed = sponge_absorb_squeeze(EVAL_DOMAIN_SEPARATOR_LABEL, input, squeezed_len)?;
 
-    let mut coefficients =
-        super::arithmetic::SecretMatrix(ndarray::Array2::zeros((moduli.len(), degree)));
-    for (row_index, modulus) in moduli.iter().enumerate() {
-        for column_index in 0..degree {
+    let mut coefficients = super::arithmetic::SecretMatrix(Array2::zeros((moduli.len(), degree)));
+    for (row_index, &modulus) in moduli.iter().enumerate() {
+        for group in 0..groups {
             let field_index = row_index
-                .checked_mul(degree)
-                .and_then(|offset| offset.checked_add(column_index))
+                .checked_mul(groups)
+                .and_then(|offset| offset.checked_add(group))
                 .ok_or_else(|| {
                     Error::malformed_shares(0, "PRF output index overflow".to_string())
                 })?;
             let field = squeezed.get(field_index).ok_or_else(|| {
                 Error::malformed_shares(0, "PRF output index out of range".to_string())
             })?;
-            let coefficient = coefficients
-                .0
-                .get_mut((row_index, column_index))
-                .ok_or_else(|| {
-                    Error::malformed_shares(0, "PRF output index out of range".to_string())
-                })?;
-            *coefficient = field_to_residue(field, modulus);
+            let residues = split_three(field, modulus)?;
+            write_residues(&mut coefficients.0, row_index, group, residues, degree)?;
         }
     }
     let mut poly = Poly::<PowerBasis>::zero(ctx);
@@ -370,32 +372,355 @@ fn context_absorb_input(
     decryptors: &[usize],
     ciphertext: &Ciphertext,
 ) -> Result<Vec<Field>, Error> {
-    let mut input = Vec::new();
+    let (commitment, limbs, degree) = ciphertext_commitment(ciphertext)?;
+    let mut input = Vec::with_capacity(decryptors.len().saturating_add(6));
     input.push(field_from_usize(decryptors.len())?);
     for &party_id in decryptors {
         input.push(field_from_usize(party_id)?);
     }
+    // C6 opens a level-zero ciphertext with exactly two components.
     input.push(field_from_usize(ciphertext.level)?);
     input.push(field_from_usize(ciphertext.c.len())?);
-    for poly in &ciphertext.c {
-        // Ciphertext storage is NTT. The circuit hashes power-basis residues.
-        let power = poly.clone().into_power_basis();
-        let coefficients = power.coefficients();
-        input.push(field_from_usize(coefficients.nrows())?);
-        input.push(field_from_usize(coefficients.ncols())?);
-        for row in coefficients.rows() {
-            for &value in row {
-                input.push(Field::from(value));
-            }
-        }
-    }
+    input.push(field_from_usize(limbs)?);
+    input.push(field_from_usize(degree)?);
+    input.push(commitment);
     Ok(input)
 }
 
-fn field_to_residue(field: &Field, modulus: &Modulus) -> u64 {
-    let mut acc = 0u64;
-    for &limb in field.into_bigint().as_ref().iter().rev() {
-        acc = modulus.reduce_u128((u128::from(acc) << 64) | u128::from(limb));
+/// Checked ciphertext commitment of the power-basis polynomials.
+///
+/// The bit width is the centered modulus bit of the full parameter set, the
+/// same width C6 uses for `compute_ciphertext_commitment_checked`. Each row is
+/// stored low degree first, reversed to high degree first, centered, and
+/// packed with the circuit's shifted digit encoding.
+fn ciphertext_commitment(ciphertext: &Ciphertext) -> Result<(Field, usize, usize), Error> {
+    if ciphertext.c.len() != 2 {
+        return Err(Error::malformed_shares(
+            0,
+            "PRF ciphertext must have two components".to_string(),
+        ));
     }
-    acc
+    let ctx = ciphertext.params.context_at_level(ciphertext.level)?;
+    let first = ciphertext
+        .c
+        .first()
+        .ok_or_else(|| Error::malformed_shares(0, "PRF ciphertext is missing c0".to_string()))?
+        .clone()
+        .into_power_basis();
+    let second = ciphertext
+        .c
+        .get(1)
+        .ok_or_else(|| Error::malformed_shares(0, "PRF ciphertext is missing c1".to_string()))?
+        .clone()
+        .into_power_basis();
+    if first.coefficients().shape() != second.coefficients().shape()
+        || first.coefficients().nrows() != ctx.moduli().len()
+        || first.coefficients().ncols() != ctx.degree
+    {
+        return Err(Error::malformed_shares(
+            0,
+            "PRF ciphertext components do not share the level context".to_string(),
+        ));
+    }
+    let bit = modulus_bit(ciphertext.params.moduli())?;
+    let commit0 = commit_power_basis(&first, bit)?;
+    let commit1 = commit_power_basis(&second, bit)?;
+    let squeezed = sponge_absorb_squeeze(
+        CIPHERTEXT_DOMAIN_SEPARATOR_LABEL,
+        Zeroizing::new(vec![commit0, commit1]),
+        1,
+    )?;
+    let commitment = squeezed
+        .first()
+        .copied()
+        .ok_or_else(|| Error::malformed_shares(0, "ciphertext commitment is empty".to_string()))?;
+    Ok((
+        commitment,
+        first.coefficients().nrows(),
+        first.coefficients().ncols(),
+    ))
+}
+
+fn commit_power_basis(poly: &Poly<PowerBasis>, bit: u32) -> Result<Field, Error> {
+    let moduli = poly.ctx().moduli();
+    if poly.coefficients().nrows() != moduli.len() {
+        return Err(Error::malformed_shares(
+            0,
+            "PRF polynomial rows do not match its moduli".to_string(),
+        ));
+    }
+    let mut payload = Vec::new();
+    for (row, &modulus) in poly.coefficients().outer_iter().zip(moduli.iter()) {
+        let coefficients = row.as_slice().ok_or_else(|| {
+            Error::malformed_shares(0, "PRF polynomial row is not contiguous".to_string())
+        })?;
+        payload.extend(pack_centered_row(coefficients, modulus, bit)?);
+    }
+    let squeezed = sponge_absorb_squeeze(
+        CIPHERTEXT_DOMAIN_SEPARATOR_LABEL,
+        Zeroizing::new(payload),
+        1,
+    )?;
+    squeezed
+        .first()
+        .copied()
+        .ok_or_else(|| Error::malformed_shares(0, "polynomial commitment is empty".to_string()))
+}
+
+/// Bit width of centered residues, matching `compute_modulus_bit`.
+fn modulus_bit(moduli: &[u64]) -> Result<u32, Error> {
+    let max_q = moduli
+        .iter()
+        .copied()
+        .max()
+        .ok_or_else(|| Error::malformed_shares(0, "PRF modulus set is empty".to_string()))?;
+    let bound = max_q.saturating_sub(1) / 2;
+    Ok((u64::BITS - bound.leading_zeros()).max(1))
+}
+
+/// High-degree-first centered packing. Digits and the running carrier use the
+/// same field operations as Noir `pack_checked`.
+fn pack_centered_row(
+    low_degree_first: &[u64],
+    modulus: u64,
+    bit: u32,
+) -> Result<Vec<Field>, Error> {
+    let nibble_bits = bit.div_ceil(4) * 4;
+    let slot_bits = nibble_bits + 4;
+    if slot_bits == 0 || slot_bits > 254 {
+        return Err(Error::malformed_shares(
+            0,
+            "PRF ciphertext packing width does not fit a field element".to_string(),
+        ));
+    }
+    let group = (254 / slot_bits) as usize;
+    if group < 2 {
+        return Err(Error::malformed_shares(
+            0,
+            "PRF ciphertext packing group is smaller than two".to_string(),
+        ));
+    }
+    let base = 1u128.checked_shl(nibble_bits).ok_or_else(|| {
+        Error::malformed_shares(0, "PRF ciphertext packing base overflows".to_string())
+    })?;
+    let radix = 1u128.checked_shl(slot_bits).ok_or_else(|| {
+        Error::malformed_shares(0, "PRF ciphertext packing radix overflows".to_string())
+    })?;
+    let radix_field = field_from_u128(radix);
+    let mut high_degree_first: Vec<u64> = low_degree_first.iter().copied().rev().collect();
+    let padded = high_degree_first.len().div_ceil(group) * group;
+    high_degree_first.resize(padded, 0);
+
+    let mut carriers = Vec::with_capacity(high_degree_first.len() / group);
+    for chunk in high_degree_first.chunks(group) {
+        let mut acc = Field::zero();
+        for &value in chunk {
+            let digit = centered_digit(value, modulus, base, radix)?;
+            acc = acc.mul(radix_field).add(field_from_u128(digit));
+        }
+        carriers.push(acc);
+    }
+    Ok(carriers)
+}
+
+fn centered_digit(value: u64, modulus: u64, base: u128, radix: u128) -> Result<u128, Error> {
+    if modulus < 2 || value >= modulus {
+        return Err(Error::malformed_shares(
+            0,
+            "PRF ciphertext coefficient is outside its modulus".to_string(),
+        ));
+    }
+    let negative = if modulus.is_multiple_of(2) {
+        value >= modulus / 2
+    } else {
+        value > modulus / 2
+    };
+    let digit = if negative {
+        base + u128::from(value) - u128::from(modulus)
+    } else {
+        base + u128::from(value)
+    };
+    if digit >= radix {
+        return Err(Error::malformed_shares(
+            0,
+            "PRF ciphertext digit does not fit its packing slot".to_string(),
+        ));
+    }
+    Ok(digit)
+}
+
+fn field_from_u128(value: u128) -> Field {
+    Field::from_le_bytes_mod_order(&value.to_le_bytes())
+}
+
+/// Split one canonical field element into three residues of the same modulus.
+///
+/// `r0 = x mod q`, `r1 = floor(x/q) mod q`, `r2 = floor(x/q^2) mod q`.
+/// `floor(x/q^3)` is discarded. That is the accepted statistical gap; a raw
+/// 64-bit window is not used.
+fn split_three(field: &Field, modulus: u64) -> Result<[u64; 3], Error> {
+    if modulus < 2 {
+        return Err(Error::malformed_shares(
+            0,
+            "PRF residue modulus is smaller than 2".to_string(),
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    for (index, limb) in field.into_bigint().as_ref().iter().enumerate() {
+        let start = index.checked_mul(8).ok_or_else(|| {
+            Error::malformed_shares(0, "PRF field limb index overflow".to_string())
+        })?;
+        let end = start.checked_add(8).ok_or_else(|| {
+            Error::malformed_shares(0, "PRF field limb index overflow".to_string())
+        })?;
+        let slot = bytes.get_mut(start..end).ok_or_else(|| {
+            Error::malformed_shares(0, "PRF field integer does not fit 32 bytes".to_string())
+        })?;
+        slot.copy_from_slice(&limb.to_le_bytes());
+    }
+    let integer = BigUint::from_bytes_le(&bytes);
+    bytes.zeroize();
+    let q = BigUint::from(modulus);
+    let remainder0 = &integer % &q;
+    let quotient0 = &integer / &q;
+    let remainder1 = &quotient0 % &q;
+    let quotient1 = &quotient0 / &q;
+    let remainder2 = &quotient1 % &q;
+    Ok([
+        biguint_to_u64(&remainder0)?,
+        biguint_to_u64(&remainder1)?,
+        biguint_to_u64(&remainder2)?,
+    ])
+}
+
+fn biguint_to_u64(value: &BigUint) -> Result<u64, Error> {
+    let bytes = value.to_bytes_le();
+    if bytes.len() > 8 {
+        return Err(Error::malformed_shares(
+            0,
+            "PRF residue does not fit in one coefficient".to_string(),
+        ));
+    }
+    let mut encoded = [0u8; 8];
+    encoded
+        .get_mut(..bytes.len())
+        .ok_or_else(|| Error::malformed_shares(0, "PRF residue encoding overflow".to_string()))?
+        .copy_from_slice(&bytes);
+    Ok(u64::from_le_bytes(encoded))
+}
+
+fn write_residues(
+    coefficients: &mut Array2<u64>,
+    row: usize,
+    group: usize,
+    residues: [u64; 3],
+    degree: usize,
+) -> Result<(), Error> {
+    for (offset, residue) in residues.into_iter().enumerate() {
+        let column = group
+            .checked_mul(3)
+            .and_then(|start| start.checked_add(offset))
+            .ok_or_else(|| {
+                Error::malformed_shares(0, "PRF coefficient index overflow".to_string())
+            })?;
+        if column >= degree {
+            break;
+        }
+        let slot = coefficients.get_mut((row, column)).ok_or_else(|| {
+            Error::malformed_shares(0, "PRF output index out of range".to_string())
+        })?;
+        *slot = residue;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
+    use super::*;
+    use crate::bfv::{BfvParametersBuilder, Encoding, Plaintext, PublicKey, SecretKey};
+    use fhe_traits::{FheEncoder, FheEncrypter};
+    use rand::{RngCore, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn one_field_element_splits_into_three_residues() {
+        let q = 65537u64;
+        let qq = u128::from(q) * u128::from(q);
+        let x = 3u128 + 5 * u128::from(q) + 7 * qq;
+        let field = Field::from_le_bytes_mod_order(&x.to_le_bytes());
+        assert_eq!(split_three(&field, q).unwrap(), [3, 5, 7]);
+
+        let truncated = qq * u128::from(q) + 4;
+        let field = Field::from_le_bytes_mod_order(&truncated.to_le_bytes());
+        assert_eq!(split_three(&field, q).unwrap(), [4, 0, 0]);
+    }
+
+    #[test]
+    fn centered_digits_match_the_circuit_shift() {
+        // Modulus 5, nibble width 4, base 16. 4 is the negative residue -1.
+        assert_eq!(centered_digit(4, 5, 16, 256).unwrap(), 15);
+        assert_eq!(centered_digit(1, 5, 16, 256).unwrap(), 17);
+        assert_eq!(centered_digit(0, 5, 16, 256).unwrap(), 16);
+        assert_eq!(modulus_bit(&[65537]).unwrap(), 16);
+    }
+
+    fn matching_keys(party_count: usize, rng: &mut ChaCha8Rng) -> Vec<PartyPrfKeys> {
+        let mut pairwise = vec![vec![[0u8; PRF_KEY_LEN]; party_count]; party_count];
+        for row in &mut pairwise {
+            for key in row.iter_mut() {
+                rng.fill_bytes(key);
+            }
+        }
+        (0..party_count)
+            .map(|owner| {
+                let keys_i_j = pairwise[owner].clone();
+                let keys_j_i = (0..party_count).map(|peer| pairwise[peer][owner]).collect();
+                PartyPrfKeys::from_transport(
+                    PartyPrfKeyTransport::new(owner + 1, party_count, keys_i_j, keys_j_i).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn masks_sum_to_zero_and_bind_the_ciphertext() {
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(17)
+            .set_moduli_sizes(&[50, 50, 50])
+            .build_arc()
+            .unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(276_280);
+        let secret = SecretKey::random(&params, &mut rng);
+        let public = PublicKey::new(&secret, &mut rng);
+        let first = {
+            let plaintext = Plaintext::try_encode(&[1u64], Encoding::poly(), &params).unwrap();
+            public.try_encrypt(&plaintext, &mut rng).unwrap()
+        };
+        let second = {
+            let plaintext = Plaintext::try_encode(&[2u64], Encoding::poly(), &params).unwrap();
+            public.try_encrypt(&plaintext, &mut rng).unwrap()
+        };
+        let keys = matching_keys(3, &mut rng);
+        let decryptors = [1usize, 2, 3];
+        let ctx = first.params.context_at_level(first.level).unwrap();
+        let mut total = Poly::<PowerBasis>::zero(ctx);
+        for key in &keys {
+            let mask = key.mask(&decryptors, &first).unwrap();
+            total += &mask;
+        }
+        assert!(
+            total
+                .coefficients()
+                .iter()
+                .all(|coefficient| *coefficient == 0)
+        );
+        assert_ne!(
+            context_digest(&decryptors, &first).unwrap(),
+            context_digest(&decryptors, &second).unwrap()
+        );
+    }
 }
