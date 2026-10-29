@@ -14,8 +14,8 @@ use crate::bfv::Ciphertext;
 use ark_ff::{PrimeField, Zero};
 use e3_safe::{ABSORB_FLAG, Field, SQUEEZE_FLAG, SafeSponge};
 use fhe_math::rq::{Poly, PowerBasis};
+use fhe_math::zq::Modulus;
 use ndarray::Array2;
-use num_bigint::BigUint;
 use std::fmt;
 use std::ops::{Add, Mul};
 use zeroize::{Zeroize, Zeroizing};
@@ -394,6 +394,15 @@ fn context_absorb_input(
 /// stored low degree first, reversed to high degree first, centered, and
 /// packed with the circuit's shifted digit encoding.
 fn ciphertext_commitment(ciphertext: &Ciphertext) -> Result<(Field, usize, usize), Error> {
+    // The packing width is the full modulus chain. That matches the opened
+    // ciphertext only at level 0; a dropped modulus would be an unverifiable mask.
+    if ciphertext.level != 0 {
+        return Err(Error::InvalidLevel {
+            level: ciphertext.level,
+            min_level: 0,
+            max_level: 0,
+        });
+    }
     if ciphertext.c.len() != 2 {
         return Err(Error::malformed_shares(
             0,
@@ -557,56 +566,88 @@ fn field_from_u128(value: u128) -> Field {
 ///
 /// `r0 = x mod q`, `r1 = floor(x/q) mod q`, `r2 = floor(x/q^2) mod q`.
 /// `floor(x/q^3)` is discarded. That is the accepted statistical gap; a raw
-/// 64-bit window is not used.
+/// 64-bit window is not used. Each step is a fixed four-limb Barrett division,
+/// and the quotient buffers are wiped before return.
 fn split_three(field: &Field, modulus: u64) -> Result<[u64; 3], Error> {
-    if modulus < 2 {
+    if modulus < 2 || (modulus >> 62) != 0 {
         return Err(Error::malformed_shares(
             0,
-            "PRF residue modulus is smaller than 2".to_string(),
+            "PRF residue modulus is outside the Barrett range".to_string(),
         ));
     }
-    let mut bytes = [0u8; 32];
-    for (index, limb) in field.into_bigint().as_ref().iter().enumerate() {
-        let start = index.checked_mul(8).ok_or_else(|| {
-            Error::malformed_shares(0, "PRF field limb index overflow".to_string())
-        })?;
-        let end = start.checked_add(8).ok_or_else(|| {
-            Error::malformed_shares(0, "PRF field limb index overflow".to_string())
-        })?;
-        let slot = bytes.get_mut(start..end).ok_or_else(|| {
-            Error::malformed_shares(0, "PRF field integer does not fit 32 bytes".to_string())
-        })?;
-        slot.copy_from_slice(&limb.to_le_bytes());
+    Modulus::new(modulus).map_err(|_| {
+        Error::malformed_shares(
+            0,
+            "PRF residue modulus is outside the Barrett range".to_string(),
+        )
+    })?;
+    let mu = barrett_mu(modulus);
+    let mut limbs = [0u64; 4];
+    for (slot, limb) in limbs.iter_mut().zip(field.into_bigint().as_ref()) {
+        *slot = *limb;
     }
-    let integer = BigUint::from_bytes_le(&bytes);
-    bytes.zeroize();
-    let q = BigUint::from(modulus);
-    let remainder0 = &integer % &q;
-    let quotient0 = &integer / &q;
-    let remainder1 = &quotient0 % &q;
-    let quotient1 = &quotient0 / &q;
-    let remainder2 = &quotient1 % &q;
-    Ok([
-        biguint_to_u64(&remainder0)?,
-        biguint_to_u64(&remainder1)?,
-        biguint_to_u64(&remainder2)?,
-    ])
+    let (mut quotient0, remainder0) = quot_rem_limbs(&limbs, modulus, mu);
+    limbs.zeroize();
+    let (mut quotient1, remainder1) = quot_rem_limbs(&quotient0, modulus, mu);
+    quotient0.zeroize();
+    let (mut quotient2, remainder2) = quot_rem_limbs(&quotient1, modulus, mu);
+    quotient1.zeroize();
+    quotient2.zeroize();
+    Ok([remainder0, remainder1, remainder2])
 }
 
-fn biguint_to_u64(value: &BigUint) -> Result<u64, Error> {
-    let bytes = value.to_bytes_le();
-    if bytes.len() > 8 {
-        return Err(Error::malformed_shares(
-            0,
-            "PRF residue does not fit in one coefficient".to_string(),
-        ));
+/// `floor(2^128 / modulus)` for a public modulus. The secret path does not build this.
+fn barrett_mu(modulus: u64) -> u128 {
+    let div = u128::MAX / u128::from(modulus);
+    let rem = u128::MAX % u128::from(modulus);
+    div + u128::from(rem == u128::from(modulus) - 1)
+}
+
+/// `cond` selects `on_true`. The mask is the same select used by `fhe_math`.
+fn ct_select(on_true: u64, on_false: u64, cond: bool) -> u64 {
+    let mask = -(i64::from(cond)) as u64;
+    let diff = on_true ^ on_false;
+    (diff & mask) ^ on_false
+}
+
+/// Quotient and remainder of one `u128` window. The Barrett estimate is corrected by at most one.
+fn quot_rem_u128(value: u128, modulus: u64, mu: u128) -> (u64, u64) {
+    let a_lo = value as u64;
+    let a_hi = (value >> 64) as u64;
+    let mu_lo = mu as u64;
+    let mu_hi = (mu >> 64) as u64;
+    let mut low_product = Zeroizing::new((u128::from(a_lo) * u128::from(mu_lo)) >> 64);
+    let mut high_low = Zeroizing::new(u128::from(a_hi) * u128::from(mu_lo));
+    let mut low_high = Zeroizing::new(u128::from(a_lo) * u128::from(mu_hi));
+    let mut estimate = Zeroizing::new(
+        ((*low_high + *high_low + *low_product) >> 64) + u128::from(a_hi) * u128::from(mu_hi),
+    );
+    low_product.zeroize();
+    high_low.zeroize();
+    low_high.zeroize();
+    let mut lazy = Zeroizing::new((value - *estimate * u128::from(modulus)) as u64);
+    let over = *lazy >= modulus;
+    let remainder = ct_select(lazy.wrapping_sub(modulus), *lazy, over);
+    let quotient = (*estimate as u64).wrapping_add(u64::from(over));
+    estimate.zeroize();
+    lazy.zeroize();
+    (quotient, remainder)
+}
+
+fn quot_rem_limbs(limbs: &[u64; 4], modulus: u64, mu: u128) -> ([u64; 4], u64) {
+    let mut quotient = [0u64; 4];
+    let mut remainder = 0u64;
+    for index in (0..4).rev() {
+        let limb = limbs.get(index).copied().unwrap_or(0);
+        let mut window = Zeroizing::new((u128::from(remainder) << 64) | u128::from(limb));
+        let (next_quotient, next_remainder) = quot_rem_u128(*window, modulus, mu);
+        window.zeroize();
+        if let Some(slot) = quotient.get_mut(index) {
+            *slot = next_quotient;
+        }
+        remainder = next_remainder;
     }
-    let mut encoded = [0u8; 8];
-    encoded
-        .get_mut(..bytes.len())
-        .ok_or_else(|| Error::malformed_shares(0, "PRF residue encoding overflow".to_string()))?
-        .copy_from_slice(&bytes);
-    Ok(u64::from_le_bytes(encoded))
+    (quotient, remainder)
 }
 
 fn write_residues(
@@ -655,6 +696,59 @@ mod tests {
         let truncated = qq * u128::from(q) + 4;
         let field = Field::from_le_bytes_mod_order(&truncated.to_le_bytes());
         assert_eq!(split_three(&field, q).unwrap(), [4, 0, 0]);
+    }
+
+    #[test]
+    fn fixed_width_division_matches_integer_division() {
+        use num_bigint::BigUint;
+
+        let integer_from = |limbs: &[u64; 4]| {
+            limbs
+                .iter()
+                .enumerate()
+                .fold(BigUint::from(0u8), |acc, (index, limb)| {
+                    acc + (BigUint::from(*limb) << (64 * index))
+                })
+        };
+        for (modulus, limbs) in [
+            (65_537u64, [3, 0, 0, 0]),
+            (65_537, [u64::MAX, u64::MAX, u64::MAX, 0x3fff]),
+            (0x0800_0000_00db_4001, [1, 2, 3, 4]),
+            (0x0800_0000_00db_4001, [u64::MAX, 0, u64::MAX, 0x1_2345]),
+        ] {
+            let mu = barrett_mu(modulus);
+            let (quotient, remainder) = quot_rem_limbs(&limbs, modulus, mu);
+            let integer = integer_from(&limbs);
+            let divisor = BigUint::from(modulus);
+            assert_eq!(BigUint::from(remainder), &integer % &divisor);
+            assert_eq!(integer_from(&quotient), &integer / &divisor);
+        }
+    }
+
+    #[test]
+    fn short_ciphertext_keeps_the_polynomial_count_error() {
+        let params = BfvParametersBuilder::new()
+            .set_degree(16)
+            .set_plaintext_modulus(17)
+            .set_moduli_sizes(&[50, 50, 50])
+            .build_arc()
+            .unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(276_280);
+        let secret = SecretKey::random(&params, &mut rng);
+        let public = PublicKey::new(&secret, &mut rng);
+        let plaintext = Plaintext::try_encode(&[1u64], Encoding::poly(), &params).unwrap();
+        let mut ciphertext = public.try_encrypt(&plaintext, &mut rng).unwrap();
+        ciphertext.c.pop();
+
+        let error = context_digest(&[1, 2], &ciphertext).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Ciphertext(crate::CiphertextError::InvalidPolynomialCount {
+                actual: 1,
+                expected: 2,
+                ..
+            })
+        ));
     }
 
     #[test]
