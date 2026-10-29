@@ -14,7 +14,6 @@ use crate::bfv::Ciphertext;
 use ark_ff::{PrimeField, Zero};
 use e3_safe::{ABSORB_FLAG, Field, SQUEEZE_FLAG, SafeSponge};
 use fhe_math::rq::{Poly, PowerBasis};
-use fhe_math::zq::Modulus;
 use ndarray::Array2;
 use std::fmt;
 use std::ops::{Add, Mul};
@@ -89,6 +88,17 @@ impl PartyPrfKeys {
         decryptors: &[usize],
         ciphertext: &Ciphertext,
     ) -> Result<Poly<PowerBasis>, Error> {
+        Ok(self.mask_with_digest(decryptors, ciphertext)?.0)
+    }
+
+    /// Mask and the checked context digest from the same validation.
+    ///
+    /// Share generation stores this digest instead of hashing the ciphertext again.
+    pub(super) fn mask_with_digest(
+        &self,
+        decryptors: &[usize],
+        ciphertext: &Ciphertext,
+    ) -> Result<(Poly<PowerBasis>, ContextDigest), Error> {
         validate_ciphertext(ciphertext)?;
         let decryptors = canonical_decryptors(decryptors);
         for &party_id in &decryptors {
@@ -118,9 +128,9 @@ impl PartyPrfKeys {
             *acc.as_mut() += positive.as_ref();
             *acc.as_mut() -= negative.as_ref();
         }
-        Ok(std::mem::replace(
-            acc.as_mut(),
-            Poly::<PowerBasis>::zero(ctx),
+        Ok((
+            std::mem::replace(acc.as_mut(), Poly::<PowerBasis>::zero(ctx)),
+            *digest,
         ))
     }
 
@@ -348,6 +358,7 @@ fn evaluate(
 
     let mut coefficients = super::arithmetic::SecretMatrix(Array2::zeros((moduli.len(), degree)));
     for (row_index, &modulus) in moduli.iter().enumerate() {
+        let mu = barrett_mu(modulus);
         for group in 0..groups {
             let field_index = row_index
                 .checked_mul(groups)
@@ -358,7 +369,7 @@ fn evaluate(
             let field = squeezed.get(field_index).ok_or_else(|| {
                 Error::malformed_shares(0, "PRF output index out of range".to_string())
             })?;
-            let residues = split_three(field, modulus)?;
+            let residues = split_three(field, modulus, mu)?;
             write_residues(&mut coefficients.0, row_index, group, residues, degree)?;
         }
     }
@@ -568,20 +579,13 @@ fn field_from_u128(value: u128) -> Field {
 /// `floor(x/q^3)` is discarded. That is the accepted statistical gap; a raw
 /// 64-bit window is not used. Each step is a fixed four-limb Barrett division,
 /// and the quotient buffers are wiped before return.
-fn split_three(field: &Field, modulus: u64) -> Result<[u64; 3], Error> {
+fn split_three(field: &Field, modulus: u64, mu: u128) -> Result<[u64; 3], Error> {
     if modulus < 2 || (modulus >> 62) != 0 {
         return Err(Error::malformed_shares(
             0,
             "PRF residue modulus is outside the Barrett range".to_string(),
         ));
     }
-    Modulus::new(modulus).map_err(|_| {
-        Error::malformed_shares(
-            0,
-            "PRF residue modulus is outside the Barrett range".to_string(),
-        )
-    })?;
-    let mu = barrett_mu(modulus);
     let mut limbs = [0u64; 4];
     for (slot, limb) in limbs.iter_mut().zip(field.into_bigint().as_ref()) {
         *slot = *limb;
@@ -691,11 +695,11 @@ mod tests {
         let qq = u128::from(q) * u128::from(q);
         let x = 3u128 + 5 * u128::from(q) + 7 * qq;
         let field = Field::from_le_bytes_mod_order(&x.to_le_bytes());
-        assert_eq!(split_three(&field, q).unwrap(), [3, 5, 7]);
+        assert_eq!(split_three(&field, q, barrett_mu(q)).unwrap(), [3, 5, 7]);
 
         let truncated = qq * u128::from(q) + 4;
         let field = Field::from_le_bytes_mod_order(&truncated.to_le_bytes());
-        assert_eq!(split_three(&field, q).unwrap(), [4, 0, 0]);
+        assert_eq!(split_three(&field, q, barrett_mu(q)).unwrap(), [4, 0, 0]);
     }
 
     #[test]
@@ -816,5 +820,111 @@ mod tests {
             context_digest(&decryptors, &first).unwrap(),
             context_digest(&decryptors, &second).unwrap()
         );
+    }
+
+    fn small_key(value: u64) -> [u8; PRF_KEY_LEN] {
+        let mut key = [0u8; PRF_KEY_LEN];
+        key[..8].copy_from_slice(&value.to_le_bytes());
+        key
+    }
+
+    /// Party `owner` (1-based) with the directed integer keys the Noir tail fixture uses.
+    fn directed_owner_keys(owner: usize, committee: usize) -> PartyPrfKeys {
+        let keys_i_j = (0..committee)
+            .map(|peer| small_key((10 * owner + peer + 1) as u64))
+            .collect();
+        let keys_j_i = (0..committee)
+            .map(|peer| small_key((10 * (peer + 1) + owner) as u64))
+            .collect();
+        PartyPrfKeys::from_transport(
+            PartyPrfKeyTransport::new(owner, committee, keys_i_j, keys_j_i).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn zero_ciphertext(degree: usize) -> crate::bfv::Ciphertext {
+        let params = BfvParametersBuilder::new()
+            .set_degree(degree)
+            .set_plaintext_modulus(2)
+            .set_moduli(&[65_537, 134_217_089])
+            .build_arc()
+            .unwrap();
+        let zero = Poly::<PowerBasis>::zero(params.context_at_level(0).unwrap());
+        crate::bfv::Ciphertext::new(vec![zero.clone().into_ntt(), zero.into_ntt()], &params)
+            .unwrap()
+    }
+
+    /// High-degree-first rows, matching the Noir polynomial layout.
+    fn noir_rows(mask: &Poly<PowerBasis>) -> Vec<Vec<u64>> {
+        let coefficients = mask.coefficients();
+        (0..coefficients.nrows())
+            .map(|row| {
+                (0..coefficients.ncols())
+                    .rev()
+                    .map(|column| coefficients[(row, column)])
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn directed_zero_ciphertext_masks_cover_both_tails() {
+        let keys = directed_owner_keys(1, 5);
+        let decryptors = [1usize, 3, 5];
+        for degree in [8usize, 16] {
+            let ciphertext = zero_ciphertext(degree);
+            let mask = keys.mask(&decryptors, &ciphertext).unwrap();
+            let rows = noir_rows(&mask);
+            assert_eq!(rows.len(), 2, "two CRT limbs");
+            assert!(
+                rows.iter().flatten().any(|coefficient| *coefficient != 0),
+                "distinct directed keys must not cancel on a zero ciphertext"
+            );
+            assert!(
+                rows[0].iter().any(|coefficient| *coefficient != 0),
+                "narrow limb mask is zero"
+            );
+            assert!(
+                rows[1].iter().any(|coefficient| *coefficient != 0),
+                "wide limb mask is zero"
+            );
+            let (narrow, wide): (&[u64], &[u64]) = if degree == 8 {
+                (
+                    &[7412, 28446, 17326, 56383, 51908, 9857, 47608, 9856],
+                    &[
+                        59_089_007, 10_188_786, 19_792_890, 84_831_172, 83_697_486, 28_164_971,
+                        62_327_969, 44_838_048,
+                    ],
+                )
+            } else {
+                (
+                    &[
+                        48718, 6878, 57133, 17990, 39729, 57523, 29682, 7705, 10869, 14453, 23457,
+                        2980, 19081, 56811, 9272, 16409,
+                    ],
+                    &[
+                        115_302_108,
+                        10_993_617,
+                        14_115_167,
+                        119_191_885,
+                        23_150_975,
+                        69_758_970,
+                        60_656_832,
+                        47_568_370,
+                        90_572_515,
+                        45_489_300,
+                        126_981_637,
+                        110_588_325,
+                        30_204_511,
+                        68_133_202,
+                        124_128_057,
+                        13_397_114,
+                    ],
+                )
+            };
+            assert!(degree == 8 || degree == 16);
+            assert_eq!(rows[0].as_slice(), narrow);
+            assert_eq!(rows[1].as_slice(), wide);
+        }
     }
 }

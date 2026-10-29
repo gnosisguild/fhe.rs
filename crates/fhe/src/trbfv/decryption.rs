@@ -149,12 +149,12 @@ impl SynchronizedDecryptor {
         // Main's setter drops the old allocation without wiping it.
         product.zeroize();
         product.set_coefficients(std::mem::take(&mut weighted.0));
-        let mask = Zeroizing::new(prf_keys.mask(decryptors, ciphertext)?);
+        let (mask, digest) = prf_keys.mask_with_digest(decryptors, ciphertext)?;
+        let mask = Zeroizing::new(mask);
         let noise = noise.into_poly();
         *product.as_mut() += noise.as_ref();
         *product.as_mut() += mask.as_ref();
         let decryptors = prf::canonical_decryptors(decryptors);
-        let digest = prf::context_digest(&decryptors, ciphertext)?;
         Ok(DecryptionShare {
             poly: std::mem::replace(product.as_mut(), Poly::<PowerBasis>::zero(ctx)),
             party_id,
