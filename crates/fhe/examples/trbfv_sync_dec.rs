@@ -1,6 +1,6 @@
 //! Two decryptions with Shamir key sharing and synchronized decryption.
 //!
-//! Run: `cargo run --release --example trbfv_sync_dec --features threshold-decryption`.
+//! Run: `cargo run --release --example trbfv_sync_dec --features synchronized-decryption`.
 //! Small demonstration parameters only; committee keys are generated in one process.
 
 #![allow(clippy::indexing_slicing)]

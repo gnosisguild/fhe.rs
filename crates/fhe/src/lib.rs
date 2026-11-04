@@ -22,3 +22,7 @@ pub use errors::{
 #[macro_use]
 extern crate doc_comment;
 doctest!("../README.md");
+
+#[cfg(doctest)]
+#[doc = include_str!("trbfv/README.md")]
+mod trbfv_guide {}

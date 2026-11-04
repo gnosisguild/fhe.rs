@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
     println!("Size of product: {} bytes", product.to_bytes().len());
     println!("Noise in expected: {}", unsafe {
-        sk.measure_noise(&product)?
+        sk.measure_noise(&expected)?
     });
 
     product.switch_to_level(product.max_switchable_level())?;
@@ -46,12 +46,26 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let pt_prod = sk.try_decrypt(&product)?;
     let pt_exp = sk.try_decrypt(&expected)?;
-    assert_eq!(pt_prod, pt_exp);
+    // The product and reference have different modulus levels, so compare
+    // decoded messages rather than their internal polynomial representations.
     let decoded = Vec::<u64>::try_decode(&pt_prod, Encoding::simd())?;
+    let decoded_reference = Vec::<u64>::try_decode(&pt_exp, Encoding::simd())?;
+    assert_eq!(decoded, decoded_reference);
+    let mut expected_values: Vec<u64> = v1.iter().zip(&v2).map(|(&a, &b)| a * b).collect();
+    expected_values.resize(params.degree(), 0);
+    assert_eq!(decoded, expected_values);
     println!(
         "RGSW external product successful: {:?}",
         &decoded[..v1.len()]
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn modulus_switched_external_product_example() -> Result<(), Box<dyn std::error::Error>> {
+        super::main()
+    }
 }

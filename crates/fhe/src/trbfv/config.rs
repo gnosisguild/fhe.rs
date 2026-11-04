@@ -1,9 +1,96 @@
-//! Shared parameter and ciphertext validation for threshold BFV.
+//! Common parameter and ciphertext validation for threshold BFV.
 
 use crate::Error;
-use crate::bfv::BfvParameters;
-#[cfg(feature = "threshold-decryption")]
-use crate::bfv::Ciphertext;
+use crate::bfv::{BfvParameters, Ciphertext};
+use ndarray::ArrayView2;
+use std::sync::Arc;
+
+/// Validated configuration for synchronized, pairwise-PRF decryption.
+///
+/// Noise/circuit assumptions remain configured through
+/// [`super::SmudgingBoundCalculatorConfig`].
+#[cfg(feature = "synchronized-decryption")]
+#[derive(Debug, Clone)]
+pub struct SynchronizedDecryptionConfig {
+    n: usize,
+    threshold: usize,
+    params: Arc<BfvParameters>,
+}
+
+#[cfg(feature = "synchronized-decryption")]
+impl SynchronizedDecryptionConfig {
+    /// Validate the same parameters as [`super::SynchronizedDecryptor::new`].
+    pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
+        validate_sharing_parameters(n, threshold, &params)?;
+        plaintext_modulus(&params)?;
+        Ok(Self {
+            n,
+            threshold,
+            params,
+        })
+    }
+
+    /// Total committee size.
+    #[must_use]
+    pub fn committee_size(&self) -> usize {
+        self.n
+    }
+
+    /// Shamir polynomial degree; reconstruction needs one more share.
+    #[must_use]
+    pub fn threshold(&self) -> usize {
+        self.threshold
+    }
+
+    /// Underlying BFV parameters.
+    #[must_use]
+    pub fn params(&self) -> &Arc<BfvParameters> {
+        &self.params
+    }
+}
+
+/// Validated configuration for the SS smudging protocol.
+///
+/// This is deliberately distinct from the synchronized configuration. It uses
+/// the common Shamir sharing validation, without the synchronized constructor's
+/// additional early plaintext-modulus check. Noise/circuit assumptions belong
+/// to [`super::SmudgingBoundCalculatorConfig`].
+#[derive(Debug, Clone)]
+pub struct SsSmudgingDecryptionConfig {
+    n: usize,
+    threshold: usize,
+    params: Arc<BfvParameters>,
+}
+
+impl SsSmudgingDecryptionConfig {
+    /// Validate the same parameters as the Shamir share manager.
+    pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
+        validate_sharing_parameters(n, threshold, &params)?;
+        Ok(Self {
+            n,
+            threshold,
+            params,
+        })
+    }
+
+    /// Total committee size, not the number of reconstructing parties.
+    #[must_use]
+    pub fn committee_size(&self) -> usize {
+        self.n
+    }
+
+    /// Shamir polynomial degree; reconstruction needs one more share.
+    #[must_use]
+    pub fn threshold(&self) -> usize {
+        self.threshold
+    }
+
+    /// Underlying BFV parameters.
+    #[must_use]
+    pub fn params(&self) -> &Arc<BfvParameters> {
+        &self.params
+    }
+}
 
 /// Validates threshold configuration parameters.
 ///
@@ -49,7 +136,7 @@ pub fn validate_threshold_config(n: usize, threshold: usize) -> Result<(), Error
     Ok(())
 }
 
-/// Shared key-sharing/decryption validation: Shamir points must be distinct
+/// Common key-sharing/decryption validation: Shamir points must be distinct
 /// units under every (prime) BFV modulus.
 pub(super) fn validate_sharing_parameters(
     n: usize,
@@ -68,7 +155,7 @@ pub(super) fn validate_sharing_parameters(
     Ok(())
 }
 
-#[cfg(feature = "threshold-decryption")]
+#[cfg(feature = "synchronized-decryption")]
 pub(super) fn plaintext_modulus(params: &BfvParameters) -> Result<u64, Error> {
     params.plaintext.as_u64().ok_or_else(|| {
         crate::ParametersError::UnsupportedPlaintextModulus {
@@ -78,7 +165,6 @@ pub(super) fn plaintext_modulus(params: &BfvParameters) -> Result<u64, Error> {
     })
 }
 
-#[cfg(feature = "threshold-decryption")]
 pub(super) fn validate_ciphertext(ciphertext: &Ciphertext) -> Result<(), Error> {
     if ciphertext.level != 0 {
         return Err(Error::InvalidLevel {
@@ -103,7 +189,7 @@ pub(super) fn validate_ciphertext(ciphertext: &Ciphertext) -> Result<(), Error> 
                 right: crate::ParameterSource::Ciphertext,
             });
         }
-        super::arithmetic::validate_matrix(
+        validate_matrix(
             poly.coefficients(),
             ciphertext.params.moduli(),
             ciphertext.params.degree(),
@@ -113,9 +199,69 @@ pub(super) fn validate_ciphertext(ciphertext: &Ciphertext) -> Result<(), Error> 
     Ok(())
 }
 
+pub(super) fn validate_matrix(
+    matrix: ArrayView2<'_, u64>,
+    moduli: &[u64],
+    degree: usize,
+    party_id: usize,
+) -> Result<(), Error> {
+    if matrix.dim() != (moduli.len(), degree) {
+        return Err(Error::malformed_shares(
+            party_id,
+            format!(
+                "polynomial has shape {:?}, expected ({}, {degree})",
+                matrix.dim(),
+                moduli.len()
+            ),
+        ));
+    }
+    for (row, (values, &modulus)) in matrix.outer_iter().zip(moduli).enumerate() {
+        if values.as_slice().is_none() {
+            return Err(fhe_math::Error::NonContiguousCoefficients.into());
+        }
+        if let Some(column) = values.iter().position(|&value| value >= modulus) {
+            return Err(Error::malformed_shares(
+                party_id,
+                format!("noncanonical coefficient at row {row}, column {column}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "synchronized-decryption")]
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn synchronized_config_preserves_existing_constructor_validation() {
+        let params = crate::bfv::BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(17)
+            .set_moduli_sizes(&[50, 50, 50])
+            .build_arc()
+            .unwrap();
+        for (n, t) in [(0, 0), (2, 0), (3, 0), (5, 1), (5, 3)] {
+            assert!(SynchronizedDecryptionConfig::new(n, t, params.clone()).is_err());
+        }
+        let config = SynchronizedDecryptionConfig::new(5, 2, params.clone()).unwrap();
+        let decryptor = crate::trbfv::SynchronizedDecryptor::from_config(config.clone()).unwrap();
+        assert_eq!(decryptor.committee_size(), config.committee_size());
+        assert_eq!(decryptor.threshold(), config.threshold());
+        assert_eq!(decryptor.params(), config.params());
+        let wide = crate::bfv::BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_moduli(params.moduli())
+            .set_plaintext_modulus_biguint((num_bigint::BigUint::from(1u32) << 80usize) + 7u32)
+            .build_arc()
+            .unwrap();
+        assert!(matches!(
+            SynchronizedDecryptionConfig::new(3, 1, wide),
+            Err(Error::ParametersError(_))
+        ));
+    }
 
     #[test]
     #[allow(clippy::unwrap_used)]

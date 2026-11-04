@@ -21,16 +21,26 @@ fhe = "0.5.0"
 ## Cargo features
 
 * `tfhe-ntt` enables the accelerated NTT implementation from `tfhe-ntt`.
-* `threshold-decryption` enables the `trbfv` decryption API, the canonical
+* `synchronized-decryption` enables the synchronized `trbfv` decryption API, the
   designated-decryptor API using fresh local noise and pairwise PRF masks.
-  It is enabled by default on this development branch for the planned breaking
-  **0.5** release and adds `ark-ff` and the pinned Interfold `e3-safe` dependency.
-  Disable default features for core BFV/key sharing without these dependencies.
-  See the [migration guide](src/trbfv/README.md#migrating-from-04-to-05)
+  It is enabled by default and adds `ark-ff`
+  and the pinned Interfold `e3-safe` dependency.
+  Disable default features for BFV, key sharing, and SS decryption without these
+  dependencies.
+  See the [synchronized-decryption guide](https://github.com/tlepoint/fhe.rs/blob/main/crates/fhe/src/trbfv/README.md#synchronized-decryption-default)
   and `trbfv_sync_dec` example.
 * `experimental-mbfv` exposes the incomplete multiparty BFV APIs. These APIs
   have additional unresolved security requirements and must not be used in
   production or to protect sensitive data.
+
+SS decryption is always available, with distinct SS-noise and partial-share
+types and no PRF dependencies. Set `default-features = false` for an SS-only
+decryption build; defaults expose both protocols. See the
+[SS-smudging flow](https://github.com/tlepoint/fhe.rs/blob/main/crates/fhe/src/trbfv/README.md#ss-smudging-decryption-always-available)
+and `trbfv_add_ss_smudging` example (which additionally requires
+`experimental-mbfv`). The two protocols use separate configurations, noise owners,
+and partial-share types; enabling both is not a security claim for reusing a key
+across protocols.
 
 ## Example
 
@@ -74,7 +84,10 @@ Note that operations actually happen modulo the `plaintext_modulus`, here set to
 
 ## Examples
 
-More examples exercizing multiple functions from the API are provided in the repository [`examples/`](./examples/). For example, this library implements [SealPIR](https://eprint.iacr.org/2017/1142) and [MulPIR](https://eprint.iacr.org/2019/1483), which can be run as follows:
+Additional API examples are provided in the repository's
+[`examples/`](https://github.com/tlepoint/fhe.rs/tree/main/crates/fhe/examples)
+directory. For example, [SealPIR](https://eprint.iacr.org/2017/1142) and
+[MulPIR](https://eprint.iacr.org/2019/1483) can be run as follows:
 
 ```bash
 cargo run --release --example sealpir

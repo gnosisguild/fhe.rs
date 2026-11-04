@@ -1,9 +1,7 @@
-//! Internal polynomial validation, public interpolation weights, and secret buffers.
+//! Designated-set validation and public interpolation weights.
 
 use crate::Error;
 use fhe_math::zq::Modulus;
-use ndarray::{Array2, ArrayView2};
-use zeroize::Zeroize;
 
 pub(super) fn validate_decryptors(ids: &[usize], n: usize, threshold: usize) -> Result<(), Error> {
     if ids.len() != threshold + 1 {
@@ -15,36 +13,6 @@ pub(super) fn validate_decryptors(ids: &[usize], n: usize, threshold: usize) -> 
         }
         if ids.iter().take(index).any(|&other| other == id) {
             return Err(Error::duplicate_party_id(id));
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn validate_matrix(
-    matrix: ArrayView2<'_, u64>,
-    moduli: &[u64],
-    degree: usize,
-    party_id: usize,
-) -> Result<(), Error> {
-    if matrix.dim() != (moduli.len(), degree) {
-        return Err(Error::malformed_shares(
-            party_id,
-            format!(
-                "polynomial has shape {:?}, expected ({}, {degree})",
-                matrix.dim(),
-                moduli.len()
-            ),
-        ));
-    }
-    for (row, (values, &modulus)) in matrix.outer_iter().zip(moduli).enumerate() {
-        if values.as_slice().is_none() {
-            return Err(fhe_math::Error::NonContiguousCoefficients.into());
-        }
-        if let Some(column) = values.iter().position(|&value| value >= modulus) {
-            return Err(Error::malformed_shares(
-                party_id,
-                format!("noncanonical coefficient at row {row}, column {column}"),
-            ));
         }
     }
     Ok(())
@@ -71,13 +39,4 @@ pub(super) fn lagrange_weight(
         return Err(Error::non_invertible_shares());
     }
     Ok(modulus.mul(numerator, modulus.pow(denominator, **modulus - 2)))
-}
-
-/// Guard temporary secret coefficients until they move into a guarded polynomial.
-pub(super) struct SecretMatrix(pub(super) Array2<u64>);
-
-impl Drop for SecretMatrix {
-    fn drop(&mut self) {
-        self.0.iter_mut().for_each(Zeroize::zeroize);
-    }
 }

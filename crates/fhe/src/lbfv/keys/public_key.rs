@@ -26,12 +26,12 @@ pub struct LBFVPublicKey {
     pub par: Arc<BfvParameters>,
     /// The public key ciphertexts, one for each RNS modulus
     pub c: Vec<Ciphertext>,
-    /// The decomposition size which is the number of RNS moduli (the l in lBFV).
-    /// Note while l in https://eprint.iacr.org/2024/1285.pdf is equal to the size
-    /// chosen of the Gadget vector, here it is equal the number of RNS moduli
-    /// as the library uses the optimization of https://eprint.iacr.org/2018/117.pdf
+    /// The decomposition size: the number of RNS moduli (the `l` in l-BFV).
+    /// The [threshold-encryption construction](https://eprint.iacr.org/2024/1285.pdf)
+    /// uses the gadget-vector length; here RNS decomposition follows the
+    /// [HPS optimization](https://eprint.iacr.org/2018/117.pdf).
     pub l: usize,
-    /// The seed used to generate all ciphertexts deterministically
+    /// Seed for the public random polynomials, not for the fresh encryption errors.
     pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
 }
 
@@ -146,15 +146,16 @@ impl LBFVPublicKey {
         Ok(ct)
     }
 
-    /// Extract the b polynomials from the ciphertexts in the public key at a specified key level and representation.
+    /// Extract the public-key `b` polynomials in NTT-Shoup representation at key level zero.
     ///
-    /// This method extracts the first l = # moduli - ciphertext level, c[0] components from each ciphertext in the public key,
-    /// mod switches them to the key level, and converts them to the specified representation.
+    /// Extracts the `c[0]` component of each of the first
+    /// `l - ciphertext_level` public-key ciphertexts and converts the result to
+    /// [`Representation::NttShoup`].
     ///
     /// # Arguments
     /// * `ciphertext_level` - The level of the ciphertext that will use these polynomials
     /// * `key_level` - The level of the key that will be used (currently must be 0)
-    /// * `rep` - The desired representation for the output polynomials
+    /// * `rep` - Must be [`Representation::NttShoup`]
     ///
     /// # Returns
     /// * `Ok(Vec<Poly>)` - A vector of polynomials in the specified representation at the target level
@@ -162,6 +163,7 @@ impl LBFVPublicKey {
     ///   - The requested ciphertext level is greater than the maximum level
     ///   - The key level is not 0 (current limitation)
     ///   - The public key is not at level 0
+    ///   - The requested representation is not NTT-Shoup
     ///   - Any polynomial operations fail during mod switching or representation changes
     // self.c[0..new_l] is always valid (self.c has self.l elements, new_l <= self.l)
     #[allow(clippy::indexing_slicing)]

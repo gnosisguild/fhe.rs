@@ -21,9 +21,9 @@ use rand_chacha::ChaCha8Rng;
 ///
 /// # Serialization
 ///
-/// When the `protobuf` feature is enabled, a [`CommonRandomPoly`] can be
-/// serialised to / deserialised from raw bytes via [`Serialize`] /
-/// [`DeserializeWithContext`](fhe_traits::DeserializeWithContext).
+/// A [`CommonRandomPoly`] can be serialized to and deserialized from bytes via
+/// [`Serialize`] and [`DeserializeWithContext`]; no serialization feature flag
+/// is required.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct CommonRandomPoly {
     pub(crate) poly: Poly<Ntt>,
@@ -88,7 +88,8 @@ impl CommonRandomPoly {
 /// the associated [`BfvParameters`]. This is the common random material used by:
 ///
 /// - **MBFV** relinearization key generation (Protocol 2, <https://eprint.iacr.org/2020/304>),
-///   where the CRP vector is passed to [`RelinKeyGenerator`](crate::aggregate::RelinKeyGenerator).
+///   where the CRP vector is passed to `crate::mbfv::RelinKeyGenerator`
+///   (available with `experimental-mbfv`).
 /// - **l-BFV** public-key and relinearization-key generation, where two
 ///   independent vectors (the CRS `a` and the URS `d1`) serve as the shared
 ///   polynomials `a_j` and `d1_j` in the linear-key protocol

@@ -1,48 +1,15 @@
+//! Shamir secret sharing over arbitrary-precision finite fields.
+//!
+//! Threshold BFV shares each RNS coefficient in its corresponding prime field.
+//! Use [`ShareManager`](crate::trbfv::ShareManager) for BFV parameter and party-count validation.
+
 use crate::Error;
-/// Shamir Secret Sharing implementation for threshold BFV.
-///
-/// This module provides a complete Shamir Secret Sharing implementation that integrates
-/// with the BFV parameter system.
 use num_bigint::{BigInt, BigRng09};
 use num_traits::{One, Zero};
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 
-/// A rust porting of Shamir Secret Sharing over Finite Field
-/// from https://docs.rs/shamir_secret_sharing adapted to work with
-/// num_bigint v0.4.4.
-///
-/// ---
-///
-/// A rust implementation of Shamir Secret Sharing over Finite Field that we use to secret share
-/// each RNS representative of a value in the ring Z_Q where Q is the product of prime moduli.
-///
-/// The lib support large field charactirics `prime` by taking advantage of `num_bigint`.
-/// It's not optimized for production purpose, which can be improved in several aspects:
-/// 1. replace the `extended_euclid_algo` with machine-friendly `stein_algo` to calculate the modulo inverse;
-/// 2. add commitment scheme to make it verifiable
-///
-///
-/// # Example
-/// use shamir_secret_sharing::ShamirSecretSharing as SSS;
-/// use num_bigint::{BigInt, BigUint};
-/// use num_bigint::Sign::*;
-/// fn main() {
-/// let sss = SSS {
-///     threshold: 2,
-///     share_amount: 5,
-///     prime: BigInt::parse_bytes(b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",16).unwrap()
-///     };
-///
-/// let secret = BigInt::parse_bytes(b"ffffffffffffffffffffffffffffffffffffff", 16).unwrap();
-///
-/// let shares = sss.split(secret.clone(), &mut rand::rng()).unwrap();
-///
-/// println!("shares: {:?}", shares);
-/// assert_eq!(secret, sss.recover(&shares[0..sss.threshold +1]).unwrap());
-/// }
-///
 /// Fork a full-entropy ChaCha20 seed from the caller's RNG.
 ///
 /// Used to derive independent per-task RNGs for parallel sampling without
@@ -53,8 +20,30 @@ pub(crate) fn fork_seed<R: RngCore + CryptoRng>(rng: &mut R) -> [u8; 32] {
     seed
 }
 
+/// Shamir secret sharing over the field defined by [`Self::prime`].
+///
+/// `threshold` is the polynomial degree; recovery requires exactly
+/// `threshold + 1` shares. Callers of this low-level API must choose a prime
+/// modulus and distinct, nonzero evaluation points within the field.
+/// Arithmetic is variable-time, and this type does not provide share commitments,
+/// authentication, or proofs of correct dealing.
+///
+/// # Example
+///
+/// ```rust
+/// use fhe::trbfv::ShamirSecretSharing;
+/// use num_bigint::BigInt;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let sharing = ShamirSecretSharing::new(2, 5, BigInt::from(65537));
+/// let secret = BigInt::from(1234);
+/// let shares = sharing.split(secret.clone(), &mut rand::rng())?;
+/// let selected = shares.get(..3).ok_or("missing shares")?;
+/// assert_eq!(sharing.recover(selected)?, secret);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
-/// Shamir Secret Sharing
 pub struct ShamirSecretSharing {
     /// Threshold for reconstruction (minimum number of shares needed is threshold + 1)
     pub threshold: usize,
@@ -69,7 +58,7 @@ impl ShamirSecretSharing {
     ///
     /// # Arguments
     ///
-    /// * `threshold + 1` - The minimum number of shares needed to reconstruct the secret
+    /// * `threshold` - Polynomial degree; recovery requires `threshold + 1` shares
     /// * `share_amount` - The total number of shares to generate
     /// * `prime` - The prime modulus for the finite field operations
     ///
@@ -251,7 +240,7 @@ impl ShamirSecretSharing {
     }
 
     /**
-     * https://en.wikipedia.org/wiki/Extended_Euclidean_algorithm
+     * <https://en.wikipedia.org/wiki/Extended_Euclidean_algorithm>
      *
      * a*s + b*t = gcd(a,b) a > b
      * r_0 = a*s_0 + b*t_0    s_0 = 1    t_0 = 0

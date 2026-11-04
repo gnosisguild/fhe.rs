@@ -1,53 +1,56 @@
 //! Smudging bounds and statistical-security policy (Urban–Rambaud 2024, Appendix C).
 //!
 //! Computes the coefficient bound and checks the BFV correctness budget.
-//! Sampling and ownership of noise belong to the sibling `noise` module.
+//! Sampling and ownership are implemented separately by each decryption protocol.
 
 use crate::Error;
 use crate::bfv::BfvParameters;
 
+use fhe_math::rq::variance_to_uniform_bound;
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
 use std::sync::Arc;
 
-/// Minimum statistical security parameter accepted for production use.
+#[cfg(feature = "synchronized-decryption")]
+pub use super::synchronized::{SmudgingNoise, SmudgingNoiseGenerator};
+
+/// Minimum statistical-security policy parameter accepted by [`Lambda::secure`].
 ///
 /// This is a statistical-hiding policy threshold: noise with
 /// `B_sm = 2^(lambda + 1) * d * B_C` (`d` = polynomial degree) is intended to
-/// statistically hide the decryption noise for a whole decryption transcript
-/// (all `d` coefficients revealed at once), not just a single coefficient.
+/// statistically hide the decryption noise for a transcript containing `d`
+/// noisy coefficients, not just a single coefficient.
 /// A larger lambda gives a stronger guarantee, not a computational one.
 /// [`MIN_SECURE_LAMBDA`] is a policy choice, not derived from a cryptographic
 /// reduction.
 pub const MIN_SECURE_LAMBDA: usize = 35;
 
-/// Maximum lambda value beyond which `2^(lambda + 1) * d * B_C` is
-/// computationally infeasible to represent. Rejecting values above this
-/// ceiling prevents massive memory allocations from huge BigUint shifts.
+/// Internal lambda cap that bounds allocations from caller-controlled BigUint
+/// shifts. Correctness-budget checks can reject smaller values as well.
 const MAX_FEASIBLE_LAMBDA: usize = 256;
 
 /// Statistical security level for smudging noise generation.
 ///
 /// The smudging bound is always computed as `B_sm = 2^(lambda + 1) * d * B_C`
-/// (`d` = polynomial degree, accounting for all `d` coefficients a single
-/// decryption reveals at once — see issue #108); this type only controls
-/// which values of lambda the library accepts. Production code must use
-/// [`Lambda::secure`], which rejects lambda below [`MIN_SECURE_LAMBDA`]. Test
-/// setups that deliberately trade security for speed must opt in explicitly
-/// via [`Lambda::insecure`].
+/// (`d` = polynomial degree, accounting for the `d` noisy coefficients in a
+/// decryption transcript). [`Lambda::secure`] rejects lambda below
+/// [`MIN_SECURE_LAMBDA`]; [`Lambda::insecure`] explicitly opts out of that check
+/// for test setups. Neither constructor certifies the BFV parameter set's
+/// computational security or the surrounding protocol.
+///
+/// Prefer the constructors: the public enum variants can be constructed directly
+/// and do not themselves enforce the constructor checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lambda {
-    /// Statistical security parameter validated to be >= [`MIN_SECURE_LAMBDA`].
-    /// Construct via [`Lambda::secure`].
+    /// Level marked as meeting the statistical policy.
+    /// Construct via [`Lambda::secure`] to validate the minimum.
     Secure(usize),
-    /// NOT SECURE: lambda below [`MIN_SECURE_LAMBDA`], so the smudging noise
-    /// does not statistically hide the decryption noise. For testing only.
-    /// Construct via [`Lambda::insecure`].
+    /// Explicit testing-only opt-out from the statistical-policy minimum.
+    /// Construct via [`Lambda::insecure`], which clamps lambda to at least 2.
     Insecure(usize),
 }
 
 impl Lambda {
-    /// Create a secure level. Fails if `lambda < MIN_SECURE_LAMBDA`.
+    /// Validate the statistical-policy minimum; fails below [`MIN_SECURE_LAMBDA`].
     pub fn secure(lambda: usize) -> Result<Self, Error> {
         if lambda < MIN_SECURE_LAMBDA {
             return Err(Error::insecure_lambda(lambda, MIN_SECURE_LAMBDA));
@@ -57,8 +60,9 @@ impl Lambda {
 
     /// Create an explicitly insecure level for fast testing (lambda clamped to >= 2).
     ///
-    /// The smudging noise generated under this level does NOT hide the
-    /// decryption noise. Never use in production.
+    /// This opts out of the library's statistical-policy minimum. A small lambda
+    /// does not provide the required hiding margin. Never use this opt-out in
+    /// production.
     #[must_use]
     pub fn insecure(lambda: usize) -> Self {
         Self::Insecure(lambda.max(2))
@@ -72,7 +76,7 @@ impl Lambda {
         }
     }
 
-    /// Whether this level meets the secure minimum.
+    /// Whether this value is marked [`Lambda::Secure`], without revalidating it.
     #[must_use]
     pub fn is_secure(&self) -> bool {
         matches!(self, Self::Secure(_))
@@ -93,10 +97,14 @@ pub struct SmudgingBoundCalculatorConfig {
     pub m: usize,
     /// Encryption error1 infinity-norm bound (BigUint for arbitrary precision).
     ///
-    /// Derived from the actual configured error sampler:
-    /// - CBD branch (error1_variance < 16 as u64): `B_enc = 2 * error1_variance`
+    /// Derived from the configured BFV encryption-error `e1` sampler:
+    /// - CBD branch (error1_variance <= 16): `B_enc = 2 * error1_variance`
     ///   (support bound of CBD(2·variance)).
-    /// - Uniform branch (larger or non-u64 variance): `B_enc = floor(sqrt(3 * error1_variance))`.
+    /// - Uniform branch (larger variance): the smallest integer `B` satisfying
+    ///   `B * (B + 1) >= 3 * error1_variance`, shared with the sampler through
+    ///   [`fhe_math::rq::variance_to_uniform_bound`].
+    ///
+    /// Overrides must conservatively cover the caller's actual encryption path.
     pub b_enc: BigUint,
     /// Encryption error2 bound (u64 for standard integers)
     pub b_e: u64,
@@ -115,20 +123,18 @@ pub struct SmudgingBoundCalculatorConfig {
 
 /// Compute B_enc from the configured error sampler variance.
 ///
-/// Matches the branch chosen by `Poly::conditional_error`:
-/// - CBD for variance fitting in u64 and < 16 → support bound `2 * variance`.
-/// - Uniform otherwise → `floor(sqrt(3 * variance))`.
-fn compute_b_enc(error1_variance: &BigUint) -> BigUint {
-    match error1_variance.to_u64() {
-        Some(v) if v < 16 => {
-            // CBD(2*v): maximum absolute coefficient = 2 * variance.
-            BigUint::from(2u32 * v as u32)
-        }
-        _ => {
-            // Uniform branch: bound = floor(sqrt(3 * variance)).  This
-            // mirrors `variance_to_uniform_bound` in fhe-math.
-            (BigUint::from(3u32) * error1_variance).sqrt()
-        }
+/// Matches `Poly::conditional_error` for supported positive variances: CBD
+/// through 16 inclusive, then the exact shared discrete-uniform support bound.
+fn compute_b_enc(error1_variance: &BigUint) -> Result<BigUint, Error> {
+    if error1_variance <= &BigUint::from(16u32) {
+        // CBD(2*v): maximum absolute coefficient = 2 * variance.
+        Ok(BigUint::from(2u32) * error1_variance)
+    } else {
+        variance_to_uniform_bound(error1_variance)?
+            .to_biguint()
+            .ok_or_else(|| {
+                Error::smudging_bound_infeasible("computed encryption bound is negative")
+            })
     }
 }
 
@@ -156,7 +162,8 @@ impl SmudgingBoundCalculatorConfig {
     /// * `lambda` - Statistical security level
     ///
     /// # Errors
-    /// Returns an error when `n` or `m` is zero.
+    /// Returns an error when `n` or `m` is zero, or the encryption-error support
+    /// bound cannot be computed.
     pub fn new(
         params: Arc<BfvParameters>,
         n: usize,
@@ -174,7 +181,7 @@ impl SmudgingBoundCalculatorConfig {
             ));
         }
         let variance = params.variance();
-        let b_enc = compute_b_enc(params.get_error1_variance());
+        let b_enc = compute_b_enc(params.get_error1_variance())?;
 
         Ok(Self {
             params,
@@ -199,7 +206,8 @@ impl SmudgingBoundCalculatorConfig {
     /// * `lambda` - Statistical security level
     ///
     /// # Errors
-    /// Returns an error when `n` or `m` is zero.
+    /// Returns an error when `n` or `m` is zero, or the encryption-error support
+    /// bound cannot be computed.
     pub fn new_multiplicative(
         params: Arc<BfvParameters>,
         n: usize,
@@ -218,15 +226,19 @@ impl SmudgingBoundCalculatorConfig {
 /// Implements the trBFV security formulas with:
 /// - `Delta = floor(Q / t)` (exact plaintext scaling factor, not `Q/(2t)`).
 /// - Strict correctness inequality: `2 * (B_C + n * B_sm) < Delta`.
-/// - Sampler-aligned `B_enc` (CBD support for small variance, `sqrt(3*var)` for large).
+/// - Configurable `B_enc`, defaulting to the BFV encryption-error sampler's support.
 /// - Distributed RLK error accounting via [`Self::with_accepted_participant_count`].
 /// - Caller-supplied ciphertext noise bound via [`Self::with_initial_ciphertext_noise_bound`].
 ///
 /// ## Limitations (not enforced by this API)
 ///
-/// - **One-time noise:** The calculator only computes a bound. Callers must
-///   sample fresh local noise for every partial decryption; the synchronized
-///   generator provides a consumed, zeroizing owner.
+/// - **Custom bounds:** Overrides of [`SmudgingBoundCalculatorConfig::b_enc`] and
+///   the other noise/key bounds must conservatively cover the actual encryption
+///   path and circuit; the calculator does not verify caller-supplied bounds.
+/// - **One-time noise:** The calculator only computes a bound. Synchronized
+///   callers sample fresh local noise for each partial; SS-smudging callers
+///   sample and deal fresh noise for each decryption. Protocol-specific noise
+///   owners prevent accidental in-memory reuse, not replay of external storage.
 /// - **Even `n`:** Accepted for backwards compatibility, but the paper's `n = 2t+1`
 ///   theorem (odd `n`) does not cover even party counts.
 #[derive(Debug)]
@@ -241,9 +253,8 @@ pub struct SmudgingBoundCalculator {
 }
 
 impl SmudgingBoundCalculator {
-    /// Configuration binding for the local-noise sampler.
-    #[cfg(feature = "threshold-decryption")]
-    pub(super) fn noise_parameters(&self) -> (&Arc<BfvParameters>, usize) {
+    /// Configuration binding for the protocol-specific noise samplers.
+    pub(in crate::trbfv) fn noise_parameters(&self) -> (&Arc<BfvParameters>, usize) {
         (&self.config.params, self.config.n)
     }
 
@@ -287,7 +298,7 @@ impl SmudgingBoundCalculator {
     ///
     /// Implements the trBFV security formula: `B_sm = 2^(lambda + 1) * d * B_C`
     /// (`d` = polynomial degree, accounting for the union bound over all `d`
-    /// coefficients a single decryption reveals — see issue #108) subject to
+    /// noisy coefficients in a decryption transcript) subject to
     /// the strict correctness constraint `2 * (B_C + n * B_sm) < Delta` where
     /// `Delta = floor(Q / t)`.
     ///
@@ -417,8 +428,8 @@ impl SmudgingBoundCalculator {
 
         // --- Compute B_sm = 2^(lambda + 1) * d * B_C
         //
-        // A single decryption reveals all `d` (= degree) coefficients of the
-        // smudging noise at once. `2^lambda * B_C` alone only bounds the
+        // A single decryption transcript contains `d` (= degree) noisy
+        // coefficients. `2^lambda * B_C` alone only bounds the
         // statistical distance for a single coefficient; the union bound over
         // the `d` coefficients requires the additional degree factor.
         // Use BigUint shift to avoid usize → u32 truncation.
@@ -443,6 +454,9 @@ impl SmudgingBoundCalculator {
 mod tests {
     use super::*;
     use crate::bfv::BfvParametersBuilder;
+    use fhe_math::rq::{Context, Poly, PowerBasis, Representation};
+    use rand::{RngCore, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
     use std::str::FromStr;
 
     fn test_params() -> Arc<BfvParameters> {
@@ -455,7 +469,7 @@ mod tests {
     }
 
     /// Parameters with a large error1_variance so the uniform sampler branch
-    /// is exercised (variance >= 16 as u64).
+    /// is exercised (variance > 16).
     fn test_params_large_error1() -> Arc<BfvParameters> {
         BfvParametersBuilder::new()
             .set_degree(8192)
@@ -475,27 +489,99 @@ mod tests {
         assert_eq!(params.variance(), 10);
         assert_eq!(params.get_error1_variance(), &BigUint::from(10_u32));
 
-        let b_enc = compute_b_enc(params.get_error1_variance());
+        let b_enc = compute_b_enc(params.get_error1_variance()).unwrap();
         assert_eq!(b_enc, BigUint::from(20_u32));
     }
 
     #[test]
-    fn b_enc_uniform_branch_is_sqrt_3var() {
-        // Variance=20 (>= 16) takes the uniform branch.
+    fn b_enc_includes_the_cbd_boundary() {
+        for (variance, support) in [(15, 30u32), (16, 32), (17, 7)] {
+            let params = BfvParametersBuilder::new()
+                .set_degree(8)
+                .set_plaintext_modulus(2)
+                .set_moduli(&[65537])
+                .set_error1_variance_usize(variance)
+                .build_arc()
+                .unwrap();
+            let config =
+                SmudgingBoundCalculatorConfig::new(params, 3, 1, Lambda::insecure(2)).unwrap();
+            assert_eq!(config.b_enc, BigUint::from(support), "variance={variance}");
+        }
+    }
+
+    #[test]
+    fn b_enc_uniform_branch_uses_exact_discrete_support() {
+        // Variance=20 requires B=8: 7*8 < 3*20 <= 8*9.
         let params = test_params_large_error1();
         assert_eq!(params.get_error1_variance(), &BigUint::from(20_u32));
 
-        let b_enc = compute_b_enc(params.get_error1_variance());
-        let expected = (BigUint::from(3_u32) * BigUint::from(20_u32)).sqrt();
-        assert_eq!(b_enc, expected);
+        let b_enc = compute_b_enc(params.get_error1_variance()).unwrap();
+        assert_eq!(b_enc, BigUint::from(8u32));
+    }
+
+    #[test]
+    fn b_enc_uniform_support_is_minimal_and_never_undershoots() {
+        let variances = (17u32..=1000).map(BigUint::from).chain([
+            BigUint::from(u64::MAX),
+            BigUint::from(1u32) << 64usize,
+            BigUint::from(1u32) << 128usize,
+        ]);
+        for variance in variances {
+            let bound = compute_b_enc(&variance).unwrap();
+            let target = &variance * 3u32;
+            assert!(
+                &bound * (&bound + 1u32) >= target,
+                "variance={variance}: bound={bound} undershoots the requested variance"
+            );
+            assert!(
+                (&bound - 1u32) * &bound < target,
+                "variance={variance}: bound={bound} is not minimal"
+            );
+        }
+    }
+
+    #[test]
+    fn b_enc_matches_error1_sampler_branches_and_rng_consumption() {
+        let ctx = Context::new_arc(&[65537], 8).unwrap();
+        for variance in [1usize, 15, 16, 17, 20] {
+            let variance_big = BigUint::from(variance);
+            let bound = compute_b_enc(&variance_big).unwrap();
+            let mut rng = ChaCha8Rng::seed_from_u64(95);
+            let mut expected_rng = rng.clone();
+            let actual = Poly::<PowerBasis>::error_1(
+                &ctx,
+                Representation::PowerBasis,
+                &variance_big,
+                &mut rng,
+            )
+            .unwrap();
+            let expected = if variance <= 16 {
+                assert_eq!(bound, BigUint::from(2 * variance));
+                Poly::<PowerBasis>::small(&ctx, variance, &mut expected_rng).unwrap()
+            } else {
+                Poly::<PowerBasis>::uniform_biguint(
+                    &ctx,
+                    Representation::PowerBasis,
+                    &bound,
+                    &mut expected_rng,
+                )
+                .unwrap()
+            };
+            assert_eq!(actual, expected, "variance={variance}");
+            assert_eq!(
+                rng.next_u64(),
+                expected_rng.next_u64(),
+                "variance={variance}"
+            );
+        }
     }
 
     #[test]
     fn b_enc_large_biguint_uses_uniform_branch() {
         // A 128-bit variance does not fit in u64, so the uniform branch is used.
         let var = BigUint::from_str("340282366920938463463374607431768211456").unwrap(); // 2^128
-        let b_enc = compute_b_enc(&var);
-        let expected = (BigUint::from(3_u32) * &var).sqrt();
+        let b_enc = compute_b_enc(&var).unwrap();
+        let expected = BigUint::from_str("31950697969885030203").unwrap();
         assert_eq!(b_enc, expected);
     }
 
@@ -505,7 +591,10 @@ mod tests {
         let config =
             SmudgingBoundCalculatorConfig::new(params.clone(), 5, 2, Lambda::secure(80).unwrap())
                 .unwrap();
-        assert_eq!(config.b_enc, compute_b_enc(params.get_error1_variance()));
+        assert_eq!(
+            config.b_enc,
+            compute_b_enc(params.get_error1_variance()).unwrap()
+        );
     }
 
     #[test]
@@ -739,7 +828,10 @@ mod tests {
         assert_eq!(config.n, 5);
         assert_eq!(config.m, 2);
         assert_eq!(config.lambda.value(), 80);
-        assert_eq!(config.b_enc, compute_b_enc(params.get_error1_variance()));
+        assert_eq!(
+            config.b_enc,
+            compute_b_enc(params.get_error1_variance()).unwrap()
+        );
         assert_eq!(config.b_e, (params.variance() * 2) as u64);
         assert_eq!(
             config.public_key_error,

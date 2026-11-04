@@ -5,7 +5,7 @@
 //! applies Lagrange weights locally, adds fresh unshared smudging noise, and
 //! cancels pairwise PRF masks when its partial decryptions are summed.
 //!
-//! Use the existing [`ShareManager`](crate::trbfv::ShareManager) to deal and aggregate
+//! Use [`ShareManager`](crate::trbfv::ShareManager) to deal and aggregate
 //! secret-key shares. Its aggregate, converted to NTT form, is reusable here.
 //! See the `trbfv_sync_dec` example for both setup and repeated decryptions.
 //!
@@ -14,12 +14,15 @@
 //! prevention. The digest binds `S` and ciphertext coefficients; it is not a
 //! proof of correct partial decryption or a distributed key-setup protocol.
 
-use super::arithmetic::{SecretMatrix, lagrange_weight, validate_decryptors, validate_matrix};
-use super::config::{plaintext_modulus, validate_ciphertext, validate_sharing_parameters};
-use super::errors::SynchronizedDecryptionError;
+use super::arithmetic::{lagrange_weight, validate_decryptors};
 use super::prf::{self, ContextDigest, PartyPrfKeys, context_digest};
 use super::smudging::SmudgingNoise;
 use crate::bfv::{BfvParameters, Ciphertext, Plaintext};
+use crate::trbfv::buffers::SecretMatrix;
+use crate::trbfv::config::{
+    plaintext_modulus, validate_ciphertext, validate_matrix, validate_sharing_parameters,
+};
+use crate::trbfv::errors::SynchronizedDecryptionError;
 use crate::{Error, ParameterSource};
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::rq::{Ntt, Poly, PowerBasis};
@@ -31,7 +34,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 /// Decrypts BFV ciphertexts using a designated set of `threshold + 1` parties.
 ///
-/// Configuration is immutable. As with [`super::ShareManager`], `n >= 3` and
+/// Configuration is immutable. As with [`crate::trbfv::ShareManager`], `n >= 3` and
 /// `threshold = (n - 1) / 2`. Ciphertexts must have two components at level zero
 /// and a plaintext modulus fitting in `u64`.
 #[derive(Debug)]
@@ -42,7 +45,16 @@ pub struct SynchronizedDecryptor {
 }
 
 impl SynchronizedDecryptor {
-    /// Validate a configuration compatible with the existing Shamir sharing API.
+    /// Construct from a synchronized-decryption configuration.
+    pub fn from_config(config: crate::trbfv::SynchronizedDecryptionConfig) -> Result<Self, Error> {
+        Self::new(
+            config.committee_size(),
+            config.threshold(),
+            config.params().clone(),
+        )
+    }
+
+    /// Validate the committee, Shamir sharing parameters, and plaintext width.
     pub fn new(n: usize, threshold: usize, params: Arc<BfvParameters>) -> Result<Self, Error> {
         validate_sharing_parameters(n, threshold, &params)?;
         plaintext_modulus(&params)?;
@@ -74,7 +86,7 @@ impl SynchronizedDecryptor {
     /// Compute `lambda_i * c1 * sk_i + e_i + r_i` for the designated set.
     ///
     /// `secret_key` is this party's aggregate Shamir share, for example the NTT
-    /// conversion of [`super::ShareManager::aggregate_collected_shares`], not
+    /// conversion of [`crate::trbfv::ShareManager::aggregate_collected_shares`], not
     /// its original BFV secret key. Keep it in a zeroizing owner between calls.
     /// `noise` is freshly sampled locally and consumed even if validation fails.
     /// The reusable PRF bundle must belong to `party_id` in this committee.
@@ -127,7 +139,7 @@ impl SynchronizedDecryptor {
             .c
             .get(1)
             .ok_or_else(|| Error::malformed_shares(party_id, "missing c1".to_string()))?;
-        // Main's raw polynomial APIs can retain lazy/variable-time metadata.
+        // Raw polynomial APIs can retain lazy/variable-time metadata.
         // Install the validated canonical residues into fresh constant-time owners.
         let mut product = Zeroizing::new(Poly::<Ntt>::zero(ctx));
         product.set_coefficients(c1.coefficients().to_owned());
@@ -146,7 +158,7 @@ impl SynchronizedDecryptor {
                 lambda,
             );
         }
-        // Main's setter drops the old allocation without wiping it.
+        // The polynomial setter drops the old allocation without wiping it.
         product.zeroize();
         product.set_coefficients(std::mem::take(&mut weighted.0));
         let mask = Zeroizing::new(prf_keys.mask(decryptors, ciphertext)?);

@@ -1,11 +1,11 @@
 //! Fresh local smudging noise with configuration binding and zeroizing ownership.
 
-use super::{SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
 use crate::Error;
 use crate::bfv::BfvParameters;
-use crate::trbfv::arithmetic::SecretMatrix;
+use crate::trbfv::buffers::SecretMatrix;
 use crate::trbfv::config::plaintext_modulus;
 use crate::trbfv::errors::SynchronizedDecryptionError;
+use crate::trbfv::smudging::{SmudgingBoundCalculator, SmudgingBoundCalculatorConfig};
 use fhe_math::rq::{Poly, PowerBasis};
 use fhe_math::zq::Modulus;
 use ndarray::Array2;
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn uses_shared_bound_calculator_and_binds_full_parameters() {
+    fn uses_common_bound_calculator_and_binds_full_parameters() {
         let params = params();
         let config =
             SmudgingBoundCalculatorConfig::new(params.clone(), 3, 2, Lambda::secure(40).unwrap())

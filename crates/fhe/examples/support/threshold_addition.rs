@@ -1,4 +1,5 @@
-//! Complete shared workflow for the three threshold-addition examples.
+//! Local simulation used by the threshold-addition examples.
+//! Transport authentication, proofs, and distributed key establishment are external.
 
 #![allow(clippy::indexing_slicing, clippy::unwrap_used)]
 

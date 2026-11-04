@@ -171,11 +171,13 @@ impl<R: RepresentationTag> PartialEq for Poly<R> {
 
 impl<R: RepresentationTag> Eq for Poly<R> {}
 
-// Implements zeroization of polynomials
+// Zeroize visible coefficients even when an imported matrix has a strided layout.
 impl<R: RepresentationTag> Zeroize for Poly<R> {
     fn zeroize(&mut self) {
         if let Some(coeffs) = self.coefficients.as_slice_mut() {
             coeffs.zeroize()
+        } else {
+            self.coefficients.iter_mut().for_each(Zeroize::zeroize);
         }
         self.zeroize_shoup()
     }
@@ -257,12 +259,12 @@ impl<R: RepresentationTag> Poly<R> {
 
     /// Zeroize the shoup coefficients
     fn zeroize_shoup(&mut self) {
-        if let Some(coeffs_shoup) = self
-            .coefficients_shoup
-            .as_mut()
-            .and_then(|f| f.as_slice_mut())
-        {
-            coeffs_shoup.zeroize()
+        if let Some(coeffs_shoup) = self.coefficients_shoup.as_mut() {
+            if let Some(coeffs) = coeffs_shoup.as_slice_mut() {
+                coeffs.zeroize();
+            } else {
+                coeffs_shoup.iter_mut().for_each(Zeroize::zeroize);
+            }
         }
     }
 
@@ -893,17 +895,35 @@ pub fn variance_to_uniform_bound(variance: &BigUint) -> Result<BigInt> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Context, Ntt, Poly, PowerBasis, Representation, switcher::Switcher,
+        Context, Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher,
         variance_to_uniform_bound,
     };
     use crate::{rq::SubstitutionExponent, zq::Modulus};
     use fhe_util::variance;
     use itertools::Itertools;
+    use ndarray::Array2;
     use num_bigint::BigUint;
     use num_traits::{One, ToPrimitive, Zero};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
     use std::{error::Error, sync::Arc};
+    use zeroize::Zeroize;
+
+    #[test]
+    fn zeroization_clears_strided_coefficients_and_shoup_storage() -> Result<(), Box<dyn Error>> {
+        let ctx = Context::new_arc(&[1153, 12289], 8)?;
+        let mut poly = Poly::<NttShoup>::zero(&ctx);
+        poly.coefficients = Array2::from_elem((8, 2), 42).reversed_axes();
+        poly.coefficients_shoup = Some(Array2::from_elem((8, 2), 43).reversed_axes());
+        assert!(poly.coefficients.as_slice().is_none());
+        poly.zeroize();
+        assert_eq!(poly.coefficients.dim(), (2, 8));
+        assert!(poly.coefficients.iter().all(|&value| value == 0));
+        assert!(poly.coefficients_shoup.as_ref().is_some_and(|matrix| {
+            matrix.dim() == (2, 8) && matrix.iter().all(|&value| value == 0)
+        }));
+        Ok(())
+    }
 
     // Moduli to be used in tests.
     const MODULI: &[u64; 5] = &[

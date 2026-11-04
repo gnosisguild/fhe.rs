@@ -17,7 +17,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [no-default, default, all]
+        include:
+          - features: ss
+            args: --no-default-features
+          - features: default
+            args: ''
+          - features: both
+            args: --no-default-features --features fhe/synchronized-decryption
+          - features: ss-mbfv
+            args: --no-default-features --features fhe/experimental-mbfv
+          - features: all
+            args: --all-features
     steps:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
@@ -30,7 +40,20 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: check
-          args: --workspace --all-targets ${{ matrix.features == 'all' && '--all-features' || matrix.features == 'no-default' && '--no-default-features' || '' }}
+          args: --workspace --all-targets ${{ matrix.args }}
+      - name: SS-only dependency isolation
+        if: matrix.features == 'ss'
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          tree = subprocess.check_output([
+              'cargo', 'tree', '-p', 'fhe', '--no-default-features',
+              '-e', 'normal',
+              '--prefix', 'none', '--format', '{p}',
+          ], text=True)
+          assert not any(line.startswith(('ark-ff ', 'e3-safe ')) for line in tree.splitlines()), tree
+          print('SS-only build has no ark-ff or e3-safe dependencies.')
+          PY
 
   test:
     name: Test Suite (${{ matrix.features }})
@@ -41,7 +64,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [no-default, default, all]
+        include:
+          - features: ss
+            args: --no-default-features
+          - features: default
+            args: ''
+          - features: both
+            args: --no-default-features --features fhe/synchronized-decryption
+          - features: ss-mbfv
+            args: --no-default-features --features fhe/experimental-mbfv
+          - features: all
+            args: --all-features
     steps:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
@@ -54,4 +87,4 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --release --workspace ${{ matrix.features == 'all' && '--all-features' || matrix.features == 'no-default' && '--no-default-features' || '' }}
+          args: --release --workspace ${{ matrix.args }}

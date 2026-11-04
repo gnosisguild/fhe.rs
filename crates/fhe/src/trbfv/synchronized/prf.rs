@@ -2,11 +2,11 @@
 //!
 //! `r_i = sum_{j in S, j != i} (F_{k_i_j}(H(S, ct)) - F_{k_j_i}(H(S, ct)))`.
 //! The context digest absorbs each ciphertext polynomial in power-basis form,
-//! low degree first. That is the coefficient order used by the Interfold circuit.
+//! low degree first. A fixed regression vector pins this encoding.
 
-use super::config::validate_ciphertext;
 use crate::Error;
 use crate::bfv::Ciphertext;
+use crate::trbfv::config::validate_ciphertext;
 use ark_ff::{PrimeField, Zero};
 use e3_safe::{ABSORB_FLAG, Field, SQUEEZE_FLAG, SafeSponge};
 use fhe_math::rq::{Poly, PowerBasis};
@@ -339,7 +339,7 @@ fn evaluate(
     let squeezed = sponge_absorb_squeeze(EVAL_DOMAIN_SEPARATOR_LABEL, input, coefficient_count)?;
 
     let mut coefficients =
-        super::arithmetic::SecretMatrix(ndarray::Array2::zeros((moduli.len(), degree)));
+        crate::trbfv::buffers::SecretMatrix(ndarray::Array2::zeros((moduli.len(), degree)));
     for (row_index, modulus) in moduli.iter().enumerate() {
         for column_index in 0..degree {
             let field_index = row_index

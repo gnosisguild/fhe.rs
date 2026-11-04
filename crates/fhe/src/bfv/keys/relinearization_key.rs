@@ -58,7 +58,7 @@ impl RelinearizationKey {
         Self::new_leveled_internal(sk, 0, 0, rng)
     }
 
-    /// Generate a [`RelinearizationKey`] from a [`KeySwitchingKey`].
+    /// Construct a [`RelinearizationKey`] from an internal key-switching key.
     #[must_use]
     pub fn new_from_ksk(ksk: KeySwitchingKey) -> Self {
         Self { ksk }
