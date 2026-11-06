@@ -15,7 +15,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-fhe = "0.5.0"
+fhe = "0.6.0"
 ```
 
 ## Cargo features
