@@ -6,7 +6,7 @@
 use crate::{Error, ThresholdError};
 
 /// Errors specific to synchronized decryption.
-#[cfg(feature = "threshold-decryption")]
+#[cfg(feature = "synchronized-decryption")]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SynchronizedDecryptionError {

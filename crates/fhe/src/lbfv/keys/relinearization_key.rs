@@ -58,7 +58,7 @@ impl LBFVRelinearizationKey {
     /// generated using the key switching keys from r to s and s to r, following
     /// the l-BFV relinearization algorithm in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
     /// The first key switching key is generated using the seed `d1_seed` and
-    /// the second key switching key is generated using the seed `a_seed`. If
+    /// the second uses the public randomness seed stored in `pk`. If
     /// `d1_seed` is not provided, a new seed is generated. The key in the paper
     /// follows (d0,d1,d2). In our implementation, (d0,d1) is the key switching
     /// key from r to s and (d2, a) is the key switching key from s to r. Note,
@@ -69,7 +69,7 @@ impl LBFVRelinearizationKey {
     ///
     /// # Arguments
     /// * `sk` - The secret key to use for key generation
-    /// * `a_seed` - The seed for the key switching key from s to r
+    /// * `pk` - The l-BFV public key, including its public randomness seed
     /// * `d1_seed` - The seed for the key switching key from r to s
     /// * `ciphertext_level` - The level of the ciphertext to relinearize
     /// * `key_level` - The level of the key to use for relinearization
@@ -128,7 +128,7 @@ impl LBFVRelinearizationKey {
             rng,
         )?;
 
-        // Create key switching key from s to r using -a_seed. Note, we negate 'r' to
+        // Reuse pk's public randomness seed for key switching from s to r. Negate 'r' to
         // counteract the effects of a positive 'a' since we do not want to go into the
         // code and negate 'a' itself. We are using c0 of this key switching key
         // anyways so a positive 'a' is not a big deal. We get (r*a + e + sk*g, a).
@@ -182,7 +182,7 @@ impl LBFVRelinearizationKey {
     /// generated using the key switching keys from r to s and s to r, following
     /// the l-BFV relinearization algorithm in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
     /// The first key switching key is generated using the seed `d1_seed` and
-    /// the second key switching key is generated using the seed `a_seed`. If
+    /// the second uses the public randomness seed stored in `pk`. If
     /// `d1_seed` is not provided, a new seed is generated.
     pub fn new<R: RngCore + CryptoRng>(
         sk: &SecretKey,
@@ -335,7 +335,7 @@ impl LBFVRelinearizationKey {
     ///
     /// # Implementation Details
     /// For each coefficient p in the input polynomial and corresponding polynomial a in the array:
-    /// 1. Takes [p]_{qi} and converts it to [[p]_{qi}]_{qj} for every RNS basis qj
+    /// 1. Takes `[p]_{qi}` and converts it to `[[p]_{qi}]_{qj}` for every RNS basis `qj`
     /// 2. Multiplies this with a and accumulates the result
     fn decompose_poly_and_product_sum(
         &self,

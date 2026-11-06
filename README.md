@@ -8,7 +8,7 @@ For more information about the library, see [fhe.rs](https://fhe.rs).
 The library features:
 
 * An implementation of a RNS-variant of the Brakerski-Fan-Vercauteren (BFV) homomorphic encryption scheme;
-* Performances comparable or better than state-of-the-art libraries in C++ and Go.
+* Shamir key sharing and two distinct threshold-decryption protocols: SS and synchronized decryption.
 
 > **Note**
 > This library is **not** related to the `tfhe-rs` library (a.k.a. `concrete`), Zama's fully homomorphic encryption in Rust, available at [tfhe.rs](https://github.com/zama-ai/tfhe-rs).
@@ -32,16 +32,25 @@ fhe = "0.5.0"
 fhe-traits = "0.5.0"
 ```
 
-### 0.5 threshold-decryption migration
+### Threshold decryption
 
-Release **0.5** is a **breaking release**. Synchronized threshold decryption is
-enabled by default; the legacy `TRBFV` coordinator and shared-smudging
-decryption APIs are retired. Key sharing remains in `ShareManager`. See the
-[migration guide](crates/fhe/src/trbfv/README.md#migrating-from-04-to-05) before
-updating callers, decryption transports, or proof bindings.
+SS (secret-sharing) decryption is always available with typed, single-use noise
+owners and protocol-specific partial shares. The default
+`synchronized-decryption` feature additionally enables the pairwise-PRF protocol.
+Key sharing and aggregation use `ShareManager`; the two decryptors have separate
+configuration, noise, and partial-share types. See the
+[threshold BFV guide](crates/fhe/src/trbfv/README.md) for setup, transport, parameter
+assumptions, and application responsibilities.
 
-Use `default-features = false` for the core BFV/key-sharing build without the
-optional threshold-decryption PRF dependencies.
+Use `default-features = false` for BFV, key sharing, and SS decryption without
+the optional synchronized-decryption PRF dependencies. Defaults expose both
+protocols. Neither SS preprocessing nor SS decryption requires PRF dependencies.
+
+To explicitly build and test both protocols without relying on defaults:
+
+```bash
+cargo test -p fhe --no-default-features --features synchronized-decryption
+```
 
 ## Minimum supported version / toolchain
 

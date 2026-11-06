@@ -1,16 +1,16 @@
-//! Threshold BFV with Shamir key sharing and synchronized decryption.
+//! Threshold BFV with Shamir key sharing and two distinct decryption protocols.
 //!
-//! Decryption uses a designated set, fresh local noise, and pairwise PRF masks from
+//! Default synchronized decryption uses a designated set, fresh local noise, and pairwise PRF masks from
 //! [Colin de Verdière–Passelègue–Stehlé 2026](https://eprint.iacr.org/2026/031).
-//! The `threshold-decryption` feature is enabled by default; disabling it
-//! retains core BFV and key sharing without the optional PRF dependencies.
+//! The `synchronized-decryption` feature is enabled by default; disabling it
+//! retains BFV, key sharing, and SS decryption without the optional PRF dependencies.
+//! SS decryption is always available and uses sampled-and-dealt noise with
+//! separate noise and partial-share types. Defaults expose both protocols.
 
-#[cfg(feature = "threshold-decryption")]
-mod arithmetic;
-#[cfg(feature = "threshold-decryption")]
-mod decryption;
-#[cfg(feature = "threshold-decryption")]
-mod prf;
+mod buffers;
+mod ss;
+#[cfg(feature = "synchronized-decryption")]
+mod synchronized;
 
 /// Configuration and validation for threshold BFV
 pub mod config;
@@ -24,16 +24,22 @@ pub mod shares;
 pub mod smudging;
 
 // Re-export main types for convenience
-#[cfg(feature = "threshold-decryption")]
-pub use decryption::{DecryptionShare, SynchronizedDecryptor};
-#[cfg(feature = "threshold-decryption")]
+pub use config::SsSmudgingDecryptionConfig;
+#[cfg(feature = "synchronized-decryption")]
+pub use config::SynchronizedDecryptionConfig;
+#[cfg(feature = "synchronized-decryption")]
 pub use errors::SynchronizedDecryptionError;
-#[cfg(feature = "threshold-decryption")]
-pub use prf::{PRF_KEY_LEN, PartyPrfKeyTransport, PartyPrfKeys, PrfKey};
 pub use shamir::ShamirSecretSharing;
 pub use shares::ShareManager;
 pub use smudging::{
     Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
 };
-#[cfg(feature = "threshold-decryption")]
-pub use smudging::{SmudgingNoise, SmudgingNoiseGenerator};
+pub use ss::{
+    AggregatedSmudgingShare, DealerSmudgingNoise, DealtSmudgingShares, RecipientSmudgingShare,
+    SsSmudgingDecryptionShare, SsSmudgingDecryptor, SsSmudgingNoiseGenerator,
+};
+#[cfg(feature = "synchronized-decryption")]
+pub use synchronized::{
+    DecryptionShare, PRF_KEY_LEN, PartyPrfKeyTransport, PartyPrfKeys, PrfKey, SmudgingNoise,
+    SmudgingNoiseGenerator, SynchronizedDecryptor,
+};

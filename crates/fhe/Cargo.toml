@@ -15,9 +15,9 @@ workspace = true
 bench = false # Disable default bench (we use criterion)
 
 [features]
-default = ["threshold-decryption"]
+default = ["synchronized-decryption"]
 experimental-mbfv = []
-threshold-decryption = ["dep:ark-ff", "dep:e3-safe"]
+synchronized-decryption = ["dep:ark-ff", "dep:e3-safe"]
 tfhe-ntt = ["fhe-math/tfhe-ntt"]
 
 [dependencies]
@@ -88,6 +88,7 @@ name = "sealpir"
 
 [[example]]
 name = "rgsw"
+test = true
 
 [[example]]
 name = "voting"
@@ -95,24 +96,24 @@ required-features = ["experimental-mbfv"]
 
 [[example]]
 name = "trbfv_add"
-required-features = ["experimental-mbfv", "threshold-decryption"]
+required-features = ["experimental-mbfv", "synchronized-decryption"]
 
 [[example]]
 name = "trbfv_add_bfv_share"
-required-features = ["experimental-mbfv", "threshold-decryption"]
+required-features = ["experimental-mbfv", "synchronized-decryption"]
 
 [[example]]
 name = "trbfv_add_bfv_share_insecure"
-required-features = ["experimental-mbfv", "threshold-decryption"]
-
-[[test]]
-name = "trbfv_secure_e2e"
-required-features = ["experimental-mbfv", "threshold-decryption"]
+required-features = ["experimental-mbfv", "synchronized-decryption"]
 
 [[example]]
 name = "trbfv_sync_dec"
-required-features = ["threshold-decryption"]
+required-features = ["synchronized-decryption"]
 
 [[test]]
 name = "trbfv_sync_dec"
-required-features = ["threshold-decryption"]
+required-features = ["synchronized-decryption"]
+
+[[example]]
+name = "trbfv_add_ss_smudging"
+required-features = ["experimental-mbfv"]

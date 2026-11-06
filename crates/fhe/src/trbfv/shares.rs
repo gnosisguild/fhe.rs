@@ -1,8 +1,10 @@
 //! Shamir key sharing, polynomial conversion, and share aggregation.
+//! SS decryption's typed noise adapters reuse this arithmetic.
 
 use crate::Error;
 use crate::bfv::BfvParameters;
-use crate::trbfv::config::validate_sharing_parameters;
+use crate::trbfv::buffers::SecretMatrix;
+use crate::trbfv::config::{validate_matrix, validate_sharing_parameters};
 use crate::trbfv::shamir::ShamirSecretSharing;
 use fhe_math::rq::traits::TryConvertFrom;
 use fhe_math::rq::{Context, Poly, PowerBasis};
@@ -17,7 +19,7 @@ use std::convert::TryFrom;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-/// Manager for threshold BFV key-share operations.
+/// Manager for threshold BFV Shamir sharing operations.
 ///
 /// # Threshold semantics
 ///
@@ -29,6 +31,8 @@ use zeroize::Zeroizing;
 /// Each party deals its key contribution, exchanges shares through secure
 /// channels, and aggregates the received matrices into its share of the joint
 /// secret. Keep the NTT conversion in a zeroizing owner for decryption.
+/// SS-smudging adapters also deal and aggregate noise with distinct
+/// consumed owners; decryption itself remains in the protocol-specific decryptor.
 #[derive(Debug)]
 pub struct ShareManager {
     /// Number of parties in the threshold scheme (must be `>= 3`)
@@ -105,6 +109,10 @@ impl ShareManager {
     }
 
     /// Generate Shamir Secret Shares for polynomial coefficients from a pre-converted Poly.
+    ///
+    /// Validates sharing parameters, matrix shape/layout, and canonical residues
+    /// before sampling. The input owner and intermediate RNS buffers are cleared
+    /// on failure; successful returned matrices are owned by the caller.
     // seeds[i] is indexed for i in 0..moduli.len(), which equals seeds.len()
     #[allow(clippy::indexing_slicing)]
     pub fn generate_secret_shares_from_poly<R: RngCore + CryptoRng>(
@@ -112,6 +120,7 @@ impl ShareManager {
         poly: Zeroizing<Poly<PowerBasis>>,
         rng: &mut R,
     ) -> Result<Vec<Array2<u64>>, Error> {
+        validate_sharing_parameters(self.n, self.threshold, &self.params)?;
         let moduli: Vec<u64> = poly.ctx().moduli().to_vec();
 
         let min_modulus = moduli.iter().min().ok_or(fhe_math::Error::EmptyModuli)?;
@@ -121,18 +130,24 @@ impl ShareManager {
         }
 
         let coefficients = poly.coefficients();
+        validate_matrix(coefficients, &moduli, self.params.degree(), 0)?;
         let coeff_rows: Vec<_> = coefficients.outer_iter().collect();
+        let coefficient_count = self.params.degree().checked_mul(self.n).ok_or_else(|| {
+            Error::malformed_shares(0, "coefficient matrix size overflows usize".to_string())
+        })?;
 
         // Generate seeds deterministically from the input RNG
-        let seeds: Vec<[u8; 32]> = (0..moduli.len())
-            .map(|_| crate::trbfv::shamir::fork_seed(rng))
-            .collect();
+        let seeds = Zeroizing::new(
+            (0..moduli.len())
+                .map(|_| crate::trbfv::shamir::fork_seed(rng))
+                .collect::<Vec<[u8; 32]>>(),
+        );
 
-        let return_vec: Result<Vec<Array2<u64>>, Error> = moduli
+        let return_vec: Result<Vec<SecretMatrix>, Error> = moduli
             .par_iter()
             .zip(coeff_rows.par_iter())
             .enumerate()
-            .map(|(i, (m, p))| -> Result<Array2<u64>, Error> {
+            .map(|(i, (m, p))| -> Result<SecretMatrix, Error> {
                 // Get rng from seed
                 let mut rng = ChaCha20Rng::from_seed(seeds[i]);
 
@@ -143,7 +158,7 @@ impl ShareManager {
                     prime: BigInt::from(*m),
                 };
 
-                let mut m_data: Vec<u64> = Vec::new();
+                let mut m_data = Zeroizing::new(Vec::<u64>::with_capacity(coefficient_count));
 
                 // For each coeff in the polynomial p under the current modulus m
                 for c in p.iter() {
@@ -154,7 +169,7 @@ impl ShareManager {
 
                     // For each share convert to u64; shares are reduced modulo
                     // the (u64) prime, so this only fails on malformed input
-                    let mut c_vec: Vec<u64> = Vec::with_capacity(self.n);
+                    let mut c_vec = Zeroizing::new(Vec::<u64>::with_capacity(self.n));
                     for (_, c_share) in c_shares.iter() {
                         c_vec.push(c_share.to_u64().ok_or_else(|| {
                             Error::malformed_shares(
@@ -167,20 +182,22 @@ impl ShareManager {
                 }
 
                 // convert flat vector of coeffs to array2
-                let arr_matrix = Array2::from_shape_vec((self.params.degree(), self.n), m_data)
-                    .map_err(|_| {
-                        Error::malformed_shares(
-                            0,
-                            "Failed to create coefficient matrix".to_string(),
-                        )
-                    })?;
+                let mut arr_matrix = SecretMatrix(Array2::zeros((self.params.degree(), self.n)));
+                for (cell, value) in arr_matrix.0.iter_mut().zip(m_data.iter()) {
+                    *cell = *value;
+                }
                 // reverse the columns and rows
-                let reversed_axes = arr_matrix.t();
-                Ok(reversed_axes.to_owned())
+                let reversed_axes = arr_matrix.0.t();
+                Ok(SecretMatrix(reversed_axes.to_owned()))
             })
             .collect();
 
-        return_vec
+        let mut matrices = return_vec?;
+        let mut output = Vec::with_capacity(matrices.len());
+        for matrix in &mut matrices {
+            output.push(std::mem::take(&mut matrix.0));
+        }
+        Ok(output)
     }
 
     /// Aggregate collected secret sharing shares to compute SK_i polynomial sum.
@@ -267,8 +284,8 @@ impl ShareManager {
         // Sum the share matrices row-wise modulo each RNS modulus, copying
         // only once into the result polynomial (instead of cloning each
         // contribution into its own Poly and adding those).
-        let mut sum = Array2::<u64>::zeros(expected_shape);
-        for (row, mut acc_row) in sum.outer_iter_mut().enumerate() {
+        let mut sum = SecretMatrix(Array2::<u64>::zeros(expected_shape));
+        for (row, mut acc_row) in sum.0.outer_iter_mut().enumerate() {
             let &modulus = self.params.moduli().get(row).ok_or_else(|| {
                 Error::malformed_shares(row, "modulus index out of range".to_string())
             })?;
@@ -286,7 +303,7 @@ impl ShareManager {
         }
 
         let mut sum_poly = Poly::<PowerBasis>::zero(ctx);
-        sum_poly.set_coefficients(sum);
+        sum_poly.set_coefficients(std::mem::take(&mut sum.0));
         Ok(sum_poly)
     }
 }
@@ -310,6 +327,58 @@ mod tests {
             .set_moduli(&[0xffffee001, 0xffffc4001, 0x1ffffe0001])
             .build_arc()
             .unwrap()
+    }
+
+    #[test]
+    fn guarded_dealing_preserves_values_layout_and_rng_consumption() {
+        use rand::{RngCore, SeedableRng};
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(17)
+            .set_moduli_sizes(&[50, 50, 50])
+            .build_arc()
+            .unwrap();
+        let mut manager = ShareManager::new(5, 2, params.clone()).unwrap();
+        let poly = manager
+            .coeffs_to_poly_level0([1i64, -2, 3, -4, 5, -6, 7, -8].as_slice())
+            .unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(707);
+        let mut expected_rng = rng.clone();
+        let seeds: Vec<_> = params
+            .moduli()
+            .iter()
+            .map(|_| crate::trbfv::shamir::fork_seed(&mut expected_rng))
+            .collect();
+        let expected: Vec<_> = params
+            .moduli()
+            .iter()
+            .enumerate()
+            .map(|(row, &q)| {
+                let mut row_rng = ChaCha20Rng::from_seed(seeds[row]);
+                let shamir = ShamirSecretSharing::new(2, 5, BigInt::from(q));
+                let mut matrix = Array2::zeros((params.degree(), 5));
+                for column in 0..params.degree() {
+                    let shares = shamir
+                        .split(
+                            BigInt::from(poly.coefficients()[[row, column]]),
+                            &mut row_rng,
+                        )
+                        .unwrap();
+                    for (party, (_, value)) in shares.into_iter().enumerate() {
+                        matrix[[column, party]] = value.to_u64().unwrap();
+                    }
+                }
+                matrix.t().to_owned()
+            })
+            .collect();
+        let actual = manager
+            .generate_secret_shares_from_poly(poly, &mut rng)
+            .unwrap();
+        assert_eq!(actual, expected);
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert_eq!(actual.strides(), expected.strides());
+        }
+        assert_eq!(rng.next_u64(), expected_rng.next_u64());
     }
 
     #[test]
