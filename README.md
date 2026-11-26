@@ -29,8 +29,8 @@ To install, add the following to your project's `Cargo.toml` file:
 
 ```toml
 [dependencies]
-fhe = "0.6.0"
-fhe-traits = "0.6.0"
+fhe = "0.7.0"
+fhe-traits = "0.7.0"
 ```
 
 ### Threshold decryption
