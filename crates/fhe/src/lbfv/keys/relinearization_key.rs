@@ -8,14 +8,11 @@
  */
 
 use crate::bfv::traits::TryConvertFrom;
-use crate::bfv::{BfvParameters, Ciphertext, KeySwitchingKey, SecretKey};
+use crate::bfv::{BfvParameters, Ciphertext, CommonRandomPolyVec, KeySwitchingKey, SecretKey};
 use crate::proto::bfv::KeySwitchingKey as KeySwitchingKeyProto;
 use crate::proto::lbfv::LbfvRelinearizationKey as LBFVRelinearizationKeyProto;
 use crate::{Error, Result, SerializationError};
-use fhe_math::rq::{
-    Context, Ntt, NttShoup, Poly, PowerBasis, Representation, switcher::Switcher,
-    traits::TryConvertFrom as TryConvertFromPoly,
-};
+use fhe_math::rq::{Context, Ntt, NttShoup, Poly, PowerBasis};
 use fhe_traits::{
     DeserializeParametrized, DeserializeWithContext, FheParametrized, PublicData, Serialize,
     VariableTime,
@@ -27,6 +24,7 @@ use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
 
 use super::LBFVPublicKey;
+use super::components::{Components, KeyRows, RelinInputs, row_count};
 
 /// A relinearization key for the l-BFV scheme, consisting of two key switching
 /// keys: one from r to s and another from s to r. This enables single-round
@@ -58,7 +56,7 @@ impl LBFVRelinearizationKey {
     /// generated using the key switching keys from r to s and s to r, following
     /// the l-BFV relinearization algorithm in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
     /// The first key switching key is generated using the seed `d1_seed` and
-    /// the second uses the public randomness seed stored in `pk`. If
+    /// the second uses the concrete `a` rows in `pk` (with or without a seed). If
     /// `d1_seed` is not provided, a new seed is generated. The key in the paper
     /// follows (d0,d1,d2). In our implementation, (d0,d1) is the key switching
     /// key from r to s and (d2, a) is the key switching key from s to r. Note,
@@ -69,7 +67,7 @@ impl LBFVRelinearizationKey {
     ///
     /// # Arguments
     /// * `sk` - The secret key to use for key generation
-    /// * `pk` - The l-BFV public key, including its public randomness seed
+    /// * `pk` - The l-BFV public key for the same secret
     /// * `d1_seed` - The seed for the key switching key from r to s
     /// * `ciphertext_level` - The level of the ciphertext to relinearize
     /// * `key_level` - The level of the key to use for relinearization
@@ -82,79 +80,92 @@ impl LBFVRelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        let ctx_relin_key = sk.params.context_at_level(key_level)?;
-        let ctx_ciphertext = sk.params.context_at_level(ciphertext_level)?;
-        let switcher_up = Switcher::new(ctx_ciphertext, ctx_relin_key)?;
-
-        if ciphertext_level < key_level {
-            return Err(Error::InvalidLevel {
-                level: ciphertext_level,
-                min_level: key_level,
-                max_level: sk.params.max_level(),
-            });
-        }
-
-        if ctx_relin_key.moduli().len() == 1 {
-            return Err(crate::EvaluationKeyError::KeySwitchingNotSupported.into());
-        }
-
-        if ctx_ciphertext.moduli().len() == 1 {
-            return Err(crate::EvaluationKeyError::KeySwitchingNotSupported.into());
-        }
-
-        // Generate random polynomial 'r' from the key distribution
-        let r: SecretKey = SecretKey::random(&sk.params, rng);
-        let r_poly =
-            Poly::<PowerBasis>::try_convert_from(r.coeffs.as_ref(), ctx_ciphertext, false)?;
-        let r_switched_up = r_poly.switch(&switcher_up)?;
-
-        let sk_poly =
-            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx_ciphertext, false)?;
-        let sk_switched_up = sk_poly.switch(&switcher_up)?;
-
-        // Create key switching key from r to s using d1_seed if provided, otherwise
-        // generate new seed (-sk*d1 + e + r*g, d1) = (d0, d1)
+        let count = row_count(&sk.params, ciphertext_level, key_level)?;
+        // 0.6 sampled r before drawing an optional d1 seed. Keep its RNG stream.
+        let r = SecretKey::random(&sk.params, rng);
         let d1_seed = d1_seed.unwrap_or_else(|| {
             let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
             rng.fill(&mut seed);
             seed
         });
-        let ksk_r_to_s = KeySwitchingKey::new_with_seed(
+        let d1 = KeyRows::seeded(sk.params.context_at_level(0)?, count, d1_seed);
+        let a = KeyRows::from_public_key(pk, &sk.params, count, &d1)?;
+        let parts = RelinInputs::new(&sk.params, ciphertext_level, d1, a)?.generate(sk, &r, rng)?;
+        Self::from_components(parts, pk.b_prefix(count))
+    }
+
+    /// Generate a leveled key from explicit `d1` rows and the public key's concrete `a` rows.
+    pub fn new_leveled_with_polys<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        pk: &LBFVPublicKey,
+        d1: Vec<Poly<NttShoup>>,
+        ciphertext_level: usize,
+        key_level: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let count = row_count(&sk.params, ciphertext_level, key_level)?;
+        Self::with_rows(
             sk,
-            &r_switched_up,
-            d1_seed,
+            pk,
+            KeyRows::explicit(d1, sk.params.context_at_level(0)?)?,
+            count,
             ciphertext_level,
-            key_level,
             rng,
-        )?;
+        )
+    }
 
-        // Reuse pk's public randomness seed for key switching from s to r. Negate 'r' to
-        // counteract the effects of a positive 'a' since we do not want to go into the
-        // code and negate 'a' itself. We are using c0 of this key switching key
-        // anyways so a positive 'a' is not a big deal. We get (r*a + e + sk*g, a).
-        let mut neg_r = r.clone();
-        neg_r.coeffs.iter_mut().for_each(|x| *x = x.wrapping_neg());
-        let ksk_s_to_r = KeySwitchingKey::new_with_seed(
-            &neg_r,
-            &sk_switched_up,
-            pk.seed.ok_or(crate::EvaluationKeyError::Missing {
-                component: crate::EvaluationKeyComponent::PublicKeySeed,
-            })?,
-            ciphertext_level,
-            key_level,
-            rng,
-        )?;
+    /// Use the `#moduli - ciphertext_level` leading rows of a shared URS vector.
+    pub fn new_leveled_with_crp<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        pk: &LBFVPublicKey,
+        d1: &CommonRandomPolyVec,
+        ciphertext_level: usize,
+        key_level: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let count = row_count(&sk.params, ciphertext_level, key_level)?;
+        let rows = KeyRows::from_crp(d1, sk.params.context_at_level(0)?, count)?;
+        Self::with_rows(sk, pk, rows, count, ciphertext_level, rng)
+    }
 
-        // Extract b_vec from pk.c[i][0] at the ciphertext level
-        // TODO: we are not switching to the key level here, but since the ciphertext
-        // level defines l (the number of ciphertexts in the public key), this may be fine.
-        // We should probably think about this more carefully.
-        let b_vec =
-            pk.extract_b_polynomials(ciphertext_level, key_level, Representation::NttShoup)?;
+    /// Generate a level-zero key using a shared URS vector.
+    pub fn new_with_crp<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        pk: &LBFVPublicKey,
+        d1: &CommonRandomPolyVec,
+        rng: &mut R,
+    ) -> Result<Self> {
+        Self::new_leveled_with_crp(sk, pk, d1, 0, 0, rng)
+    }
 
+    fn with_rows<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        pk: &LBFVPublicKey,
+        d1: KeyRows,
+        count: usize,
+        level: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let a = KeyRows::from_public_key(pk, &sk.params, count, &d1)?;
+        let inputs = RelinInputs::new(&sk.params, level, d1, a)?;
+        let parts = inputs.generate(sk, &SecretKey::random(&sk.params, rng), rng)?;
+        Self::from_components(parts, pk.b_prefix(count))
+    }
+
+    pub(crate) fn from_components(parts: Components, b_vec: Vec<Poly<NttShoup>>) -> Result<Self> {
+        if b_vec.len() != parts.r_to_s.c0.len()
+            || b_vec
+                .iter()
+                .any(|b| b.ctx() != &parts.r_to_s.ctx_ksk || !b.has_canonical_coefficients())
+        {
+            return Err(crate::EvaluationKeyError::InvalidLbfvLayout {
+                reason: "b rows do not match the relinearization key",
+            }
+            .into());
+        }
         Ok(Self {
-            ksk_r_to_s,
-            ksk_s_to_r,
+            ksk_r_to_s: parts.r_to_s,
+            ksk_s_to_r: parts.s_to_r,
             b_vec,
         })
     }
@@ -182,7 +193,7 @@ impl LBFVRelinearizationKey {
     /// generated using the key switching keys from r to s and s to r, following
     /// the l-BFV relinearization algorithm in [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
     /// The first key switching key is generated using the seed `d1_seed` and
-    /// the second uses the public randomness seed stored in `pk`. If
+    /// the second uses the concrete `a` rows in `pk` (with or without a seed). If
     /// `d1_seed` is not provided, a new seed is generated.
     pub fn new<R: RngCore + CryptoRng>(
         sk: &SecretKey,
@@ -225,6 +236,19 @@ impl LBFVRelinearizationKey {
             })
         } else {
             let ciphertext_ctx = self.ciphertext_ctx();
+            if ct.params != self.ksk_r_to_s.params {
+                return Err(Error::ParameterMismatch {
+                    left: crate::ParameterSource::Ciphertext,
+                    right: crate::ParameterSource::RelinearizationKey,
+                });
+            }
+            ct.validate_for_context(&ct.params, self.ciphertext_level(), &ciphertext_ctx)?;
+            if !ct.c.iter().all(Poly::has_canonical_coefficients) {
+                return Err(crate::EvaluationKeyError::InvalidLbfvLayout {
+                    reason: "relinearization requires canonical ciphertext components",
+                }
+                .into());
+            }
             let c2_hat = ct.c[2].clone().into_power_basis();
 
             let mut c2_prime = self.decompose_poly_and_product_sum(&c2_hat, &self.b_vec)?;
@@ -258,6 +282,7 @@ impl LBFVRelinearizationKey {
 
             // Remove unnecessary third element
             ct.c.truncate(2);
+            ct.seed = None;
             Ok(())
         }
     }
@@ -407,31 +432,25 @@ impl TryConvertFrom<&LBFVRelinearizationKeyProto> for LBFVRelinearizationKey {
         value: &LBFVRelinearizationKeyProto,
         par: &Arc<BfvParameters>,
     ) -> Result<Self> {
-        if value.ksk_r_to_s.is_none() || value.ksk_s_to_r.is_none() {
-            return Err(SerializationError::MissingField {
-                field: crate::SerializedField::RelinearizationKeySwitchingKey,
+        let parts =
+            Components::from_protos(value.ksk_r_to_s.as_ref(), value.ksk_s_to_r.as_ref(), par)?;
+        if value.b_vec.len() != parts.r_to_s.c0.len() {
+            return Err(crate::EvaluationKeyError::InvalidDecompositionLength {
+                actual: value.b_vec.len(),
+                expected: parts.r_to_s.c0.len(),
             }
             .into());
         }
 
-        let ksk_r_to_s =
-            KeySwitchingKey::try_convert_from(value.ksk_r_to_s.as_ref().unwrap(), par)?;
-        let ksk_s_to_r =
-            KeySwitchingKey::try_convert_from(value.ksk_s_to_r.as_ref().unwrap(), par)?;
-
         // Deserialize b_vec
-        let key_ctx = ksk_r_to_s.ctx_ksk.clone();
+        let key_ctx = parts.r_to_s.ctx_ksk.clone();
         let mut b_vec = Vec::with_capacity(value.b_vec.len());
         for poly_bytes in &value.b_vec {
             let poly = Poly::<NttShoup>::from_bytes(poly_bytes, &key_ctx)?;
             b_vec.push(poly);
         }
 
-        Ok(LBFVRelinearizationKey {
-            ksk_r_to_s,
-            ksk_s_to_r,
-            b_vec,
-        })
+        Self::from_components(parts, b_vec)
     }
 }
 

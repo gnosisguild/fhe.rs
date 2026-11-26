@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use crate::ReferenceStringRole;
 use crate::Result;
 use crate::bfv::BfvParameters;
+use crate::reference_string::validate_no_repeated_rows;
 use fhe_math::rq::{Ntt, Poly};
 use fhe_traits::{DeserializeWithContext, Serialize};
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
@@ -110,7 +112,7 @@ impl CommonRandomPoly {
 /// - [`CommonRandomPolyVec::from_seed`] deterministically reconstructs `l`
 ///   polynomials from a single 32-byte seed.
 /// - [`CommonRandomPolyVec::from_polys`] accepts explicit `Poly<Ntt>` values
-///   together with optional seed metadata, validating context, length, and
+///   together with optional seed metadata, validating context, length, row uniqueness, and
 ///   seed consistency.
 #[derive(Debug, Clone)]
 pub struct CommonRandomPolyVec {
@@ -137,6 +139,10 @@ impl CommonRandomPolyVec {
         for _ in 0..l {
             polys.push(CommonRandomPoly::new(params, rng)?);
         }
+        validate_no_repeated_rows(
+            ReferenceStringRole::CommonRandomPolyVector,
+            polys.iter().map(CommonRandomPoly::poly),
+        )?;
         Ok(Self {
             polys: polys.into_boxed_slice(),
             seed: None,
@@ -161,6 +167,10 @@ impl CommonRandomPolyVec {
             seed_rng.fill(&mut seed_i);
             polys.push(CommonRandomPoly::new_deterministic(params, seed_i)?);
         }
+        validate_no_repeated_rows(
+            ReferenceStringRole::CommonRandomPolyVector,
+            polys.iter().map(CommonRandomPoly::poly),
+        )?;
         Ok(Self {
             polys: polys.into_boxed_slice(),
             seed: Some(seed),
@@ -174,6 +184,7 @@ impl CommonRandomPolyVec {
     /// - `polys.len()` must equal `params.moduli().len()` (the level-0 modulus
     ///   count).
     /// - Every polynomial must be at the level-0 context of `params`.
+    /// - No two rows may represent the same concrete polynomial.
     /// - If `seed` is `Some`, the concrete polynomials are verified to match the
     ///   deterministic output of that seed. A contradictory seed is rejected.
     pub fn from_polys(
@@ -199,6 +210,7 @@ impl CommonRandomPolyVec {
             }
         }
 
+        validate_no_repeated_rows(ReferenceStringRole::CommonRandomPolyVector, &polys)?;
         // If a seed is given, verify it reproduces the supplied polynomials.
         if let Some(ref seed) = seed {
             let mut seed_rng = ChaCha8Rng::from_seed(*seed);

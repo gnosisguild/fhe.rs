@@ -67,6 +67,14 @@ fn parse_proto(
     if !degree.is_multiple_of(8) || degree < 8 {
         return Err(PolynomialSerializationError::InvalidDegree { degree }.into());
     }
+    // A serialized RNS matrix describes this ring. It is not a short vector
+    // of plaintext coefficients to be padded or broadcast into a larger ring.
+    if degree != ctx.degree {
+        return Err(Error::DegreeMismatch {
+            found: degree,
+            expected: ctx.degree,
+        });
+    }
 
     let mut expected_nbytes = 0;
     ctx.q

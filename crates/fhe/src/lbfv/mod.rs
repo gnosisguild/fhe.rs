@@ -1,9 +1,8 @@
 //! Public-key and relinearization primitives for l-BFV, based on
 //! [Robust Multiparty Computation from Threshold Encryption Based on RLWE](https://eprint.iacr.org/2024/1285.pdf).
 //!
-//! This module provides the local key and ciphertext operations, not distributed
-//! key establishment, authenticated communication rounds, or a complete robust
-//! threshold protocol. Single-round arithmetic alone does not establish robustness.
+//! [`crate::trlbfv`] constructs these same operational keys from distributed
+//! contributions. [`crate::trbfv`] opens level-zero ciphertexts using Shamir shares.
 
 pub mod keys;
 

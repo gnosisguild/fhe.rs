@@ -143,6 +143,24 @@ mod tests {
     }
 
     #[test]
+    fn serialized_ring_degree_must_match_the_context() -> Result<(), Box<dyn StdError>> {
+        let moduli = Q.get(..2).unwrap();
+        let small = Context::new_arc(moduli, 8)?;
+        let large = Context::new_arc(moduli, 32)?;
+        // The sixteen residues would otherwise fit in one row of the larger
+        // ring and be interpreted as a padded, single-limb coefficient vector.
+        let bytes = Poly::<NttShoup>::zero(&small).to_bytes();
+        assert!(matches!(
+            Poly::<NttShoup>::from_bytes(&bytes, &large),
+            Err(crate::Error::DegreeMismatch {
+                found: 8,
+                expected: 32
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn serialize() -> Result<(), Box<dyn StdError>> {
         let mut rng = rng();
 
