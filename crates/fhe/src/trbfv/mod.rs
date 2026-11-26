@@ -32,7 +32,8 @@ pub use errors::SynchronizedDecryptionError;
 pub use shamir::ShamirSecretSharing;
 pub use shares::ShareManager;
 pub use smudging::{
-    Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator, SmudgingBoundCalculatorConfig,
+    FreshNoiseModel, Lambda, MIN_SECURE_LAMBDA, SmudgingBoundCalculator,
+    SmudgingBoundCalculatorConfig,
 };
 pub use ss::{
     AggregatedSmudgingShare, DealerSmudgingNoise, DealtSmudgingShares, RecipientSmudgingShare,

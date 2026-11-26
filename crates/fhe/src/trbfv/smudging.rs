@@ -83,6 +83,19 @@ impl Lambda {
     }
 }
 
+/// Which public-key encryptor produced the circuit inputs. Ciphertexts do not
+/// record this information. For mixed BFV/l-BFV inputs, select `LbfvPublicKey`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FreshNoiseModel {
+    /// Ordinary BFV public-key encryption: the coefficients of `u` are ternary.
+    #[default]
+    BfvPublicKey,
+    /// l-BFV public-key encryption: `Poly::small(variance)` has coefficient
+    /// support `[-2 * variance, 2 * variance]`.
+    LbfvPublicKey,
+}
+
 /// Configuration for calculating the smudging coefficient bound in threshold BFV.
 ///
 /// All parameters use arbitrary precision arithmetic to handle cryptographically large values.
@@ -119,6 +132,8 @@ pub struct SmudgingBoundCalculatorConfig {
     /// When non-zero, `calculate_sm_bound` applies the Prop. 20 noise growth
     /// recursion for each level before computing B_sm.
     pub mult_depth: u32,
+    /// Encryption randomness used to calculate the fresh input noise bound.
+    pub fresh_noise_model: FreshNoiseModel,
 }
 
 /// Compute B_enc from the configured error sampler variance.
@@ -182,18 +197,31 @@ impl SmudgingBoundCalculatorConfig {
         }
         let variance = params.variance();
         let b_enc = compute_b_enc(params.get_error1_variance())?;
+        let b_e = (2 * variance) as u64;
+        let public_key_error = (n as u64).checked_mul(b_e).ok_or_else(|| {
+            Error::smudging_bound_infeasible("aggregate public-key error exceeds u64")
+        })?;
 
         Ok(Self {
             params,
             n,
             m,
             b_enc,
-            b_e: (2 * variance) as u64,
-            public_key_error: (n as u64) * (2 * variance) as u64,
+            b_e,
+            public_key_error,
             secret_key_bound: n as u64,
             lambda,
             mult_depth: 0,
+            fresh_noise_model: FreshNoiseModel::BfvPublicKey,
         })
+    }
+
+    /// Match the fresh noise bound to the encryption sampler. Existing
+    /// constructors default to [`FreshNoiseModel::BfvPublicKey`].
+    #[must_use]
+    pub fn with_fresh_noise_model(mut self, model: FreshNoiseModel) -> Self {
+        self.fresh_noise_model = model;
+        self
     }
 
     /// Create a configuration for a multiplicative circuit at the given depth.
@@ -366,8 +394,12 @@ impl SmudgingBoundCalculator {
         let e_norm = BigUint::from(self.config.public_key_error);
         let sk_norm = BigUint::from(self.config.secret_key_bound);
 
-        // B_fresh = d·||e_ek||_∞ + B_enc + d·B_e·||sk||_∞
-        let b_fresh = &d * &e_norm + b_enc + &d * &b_e * &sk_norm;
+        // Urban–Rambaud (24)–(25): only u * e_ek depends on the u sampler.
+        let u_bound = match self.config.fresh_noise_model {
+            FreshNoiseModel::BfvPublicKey => 1,
+            FreshNoiseModel::LbfvPublicKey => 2 * self.config.params.variance(),
+        };
+        let b_fresh = &d * u_bound * &e_norm + b_enc + &d * &b_e * &sk_norm;
 
         // Q = product of all moduli
         let q_full = modulus_product(moduli);
@@ -491,6 +523,46 @@ mod tests {
 
         let b_enc = compute_b_enc(params.get_error1_variance()).unwrap();
         assert_eq!(b_enc, BigUint::from(20_u32));
+    }
+
+    #[test]
+    fn lbfv_sampler_changes_only_the_public_key_error_term() -> crate::Result<()> {
+        let params = BfvParametersBuilder::new()
+            .set_degree(8)
+            .set_plaintext_modulus(17)
+            .set_moduli_sizes(&[37; 3])
+            .set_variance(3)
+            .set_error1_variance_usize(8)
+            .build_arc()?;
+        let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 2, Lambda::insecure(2))?;
+        let lbfv = config
+            .clone()
+            .with_fresh_noise_model(FreshNoiseModel::LbfvPublicKey);
+        // ||e_pk|| <= 18, ||s|| <= 3, B_e = 6, B_enc = 16. BFV's fresh
+        // bound is 144 + 16 + 144; l-BFV's is 6 * 144 + 16 + 144.
+        let remainder = modulus_product(params.moduli()) % 17u32;
+        let bound = |config| SmudgingBoundCalculator::new(config).calculate_sm_bound();
+        assert_eq!(bound(config.clone())?, (304u32 + &remainder) * 2u32 * 64u32);
+        assert_eq!(bound(lbfv.clone())?, (1024u32 + &remainder) * 2u32 * 64u32);
+
+        // Depth one scales this difference by Prop. 20's coefficient,
+        // 2 * p * N² * ||s||. A supplied initial bound bypasses both samplers.
+        let depth_one = |mut cfg: SmudgingBoundCalculatorConfig| {
+            cfg.mult_depth = 1;
+            SmudgingBoundCalculator::new(cfg).with_accepted_participant_count(2)
+        };
+        let (bfv, lbfv) = (depth_one(config), depth_one(lbfv));
+        assert_eq!(
+            lbfv.calculate_sm_bound()? - bfv.calculate_sm_bound()?,
+            BigUint::from(720u64 * 2 * 64 * 6528)
+        );
+        assert_eq!(
+            bfv.with_initial_ciphertext_noise_bound(123u32.into())
+                .calculate_sm_bound()?,
+            lbfv.with_initial_ciphertext_noise_bound(123u32.into())
+                .calculate_sm_bound()?
+        );
+        Ok(())
     }
 
     #[test]
