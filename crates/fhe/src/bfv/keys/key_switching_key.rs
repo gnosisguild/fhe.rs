@@ -256,6 +256,30 @@ impl KeySwitchingKey {
         ksk_level: usize,
         rng: &mut R,
     ) -> Result<(Self, Vec<Poly<NttShoup>>)> {
+        let (key, errors) =
+            Self::new_with_c1_guarded(sk, from, c1, ciphertext_level, ksk_level, rng)?;
+        // Retain the 0.6 API: ownership of the unguarded rows transfers to the caller.
+        Ok((
+            key,
+            errors
+                .into_iter()
+                .map(|mut row| {
+                    let empty = Poly::zero(row.ctx());
+                    std::mem::replace(row.as_mut(), empty)
+                })
+                .collect(),
+        ))
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn new_with_c1_guarded<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        from: &Poly<PowerBasis>,
+        c1: Vec<Poly<NttShoup>>,
+        ciphertext_level: usize,
+        ksk_level: usize,
+        rng: &mut R,
+    ) -> Result<(Self, Vec<Zeroizing<Poly<NttShoup>>>)> {
         if ciphertext_level < ksk_level {
             return Err(Error::DefaultError(format!(
                 "ciphertext_level ({ciphertext_level}) must be >= ksk_level ({ksk_level})"
@@ -483,7 +507,7 @@ impl KeySwitchingKey {
         from: &Poly<PowerBasis>,
         c1: &[Poly<NttShoup>],
         rng: &mut R,
-    ) -> Result<(Vec<Poly<NttShoup>>, Vec<Poly<NttShoup>>)> {
+    ) -> Result<(Vec<Poly<NttShoup>>, Vec<Zeroizing<Poly<NttShoup>>>)> {
         let ctx0 = c1
             .first()
             .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
@@ -498,7 +522,7 @@ impl KeySwitchingKey {
             })?;
         let rns = RnsContext::new(moduli_slice)?;
 
-        let pairs: Vec<(Poly<NttShoup>, Poly<NttShoup>)> = c1
+        let pairs: Vec<_> = c1
             .iter()
             .enumerate()
             .map(|(i, c1i)| {
@@ -511,11 +535,7 @@ impl KeySwitchingKey {
 
                 let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
 
-                let mut error_i = b.clone();
-                error_i.allow_variable_time_computations(fhe_traits::VariableTime::new(
-                    fhe_traits::PublicData::assert_public(),
-                ));
-                let error_ntt = error_i.into_ntt_shoup();
+                let error_ntt = Zeroizing::new(b.clone().into_ntt_shoup());
 
                 b -= a_s_pb.as_ref();
 
@@ -544,7 +564,7 @@ impl KeySwitchingKey {
         c1: &[Poly<NttShoup>],
         rng: &mut R,
         log_base: usize,
-    ) -> Result<(Vec<Poly<NttShoup>>, Vec<Poly<NttShoup>>)> {
+    ) -> Result<(Vec<Poly<NttShoup>>, Vec<Zeroizing<Poly<NttShoup>>>)> {
         let ctx0 = c1
             .first()
             .ok_or_else(|| Error::DefaultError("Empty number of c1's".to_string()))?
@@ -553,7 +573,7 @@ impl KeySwitchingKey {
             Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx0, false)?.into_ntt(),
         );
 
-        let pairs: Vec<(Poly<NttShoup>, Poly<NttShoup>)> = c1
+        let pairs: Vec<_> = c1
             .iter()
             .enumerate()
             .map(|(i, c1i)| {
@@ -566,11 +586,7 @@ impl KeySwitchingKey {
 
                 let mut b = Poly::<PowerBasis>::small(a_s_pb.ctx(), sk.params.variance, rng)?;
 
-                let mut error_i = b.clone();
-                error_i.allow_variable_time_computations(fhe_traits::VariableTime::new(
-                    fhe_traits::PublicData::assert_public(),
-                ));
-                let error_ntt = error_i.into_ntt_shoup();
+                let error_ntt = Zeroizing::new(b.clone().into_ntt_shoup());
 
                 b -= a_s_pb.as_ref();
 

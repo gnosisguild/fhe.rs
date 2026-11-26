@@ -3,6 +3,7 @@
 #![doc = include_str!("../README.md")]
 
 mod errors;
+mod reference_string;
 
 pub mod aggregate;
 pub mod bfv;
@@ -11,11 +12,13 @@ pub mod lbfv;
 pub mod mbfv;
 pub mod proto;
 pub mod trbfv;
+pub mod trlbfv;
 pub use errors::{
     CiphertextError, CiphertextOperation, DotProductError, EncodingError, Error,
     EvaluationKeyComponent, EvaluationKeyError, EvaluationOperation, MultipartyError,
-    ParameterSource, ParametersError, PlaintextError, Result, SerializationError, SerializedField,
-    SerializedObject, SerializedPolynomialComponent, ThresholdError,
+    ParameterSource, ParametersError, PlaintextError, ReferenceStringRole, Result,
+    SerializationError, SerializedField, SerializedObject, SerializedPolynomialComponent,
+    ThresholdError,
 };
 
 // Test the source code included in the README.

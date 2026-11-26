@@ -49,6 +49,17 @@ impl Drop for SecretKey {
 }
 
 impl SecretKey {
+    pub(crate) fn validate_coefficient_count(&self) -> Result<()> {
+        if self.coeffs.len() != self.params.degree() {
+            return Err(crate::ParametersError::InvalidSecretKeyCoefficientCount {
+                actual: self.coeffs.len(),
+                expected: self.params.degree(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// The variance used for secret key sampling
     pub const SK_VARIANCE: f32 = 0.5;
 

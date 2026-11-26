@@ -5,11 +5,11 @@ A pure-Rust implementation of threshold BFV homomorphic encryption based on the 
 The implementation covers Shamir sharing, smudging noise, and threshold
 decryption of level-zero, two-component BFV ciphertexts. The bound calculator
 supports additive and multiplicative circuit budgets; compatible ciphertext
-evaluation and relinearization keys must be supplied by callers. It is **not**
-the complete robust
-protocol from the paper: there is no distributed key generation, no broadcast
-channel, no FLSS (function-linear secret sharing), and no GURS (guaranteed
-uniform random string) generation. Two distinct protocols coexist:
+evaluation and relinearization keys can be generated with
+[`fhe::trlbfv`](../trlbfv/mod.rs). For the paper's robust protocol, applications
+supply authenticated broadcast, the linear secret sharing functionality
+(`F_LSS`, §3.2), and the global uniform random string functionality (`G_URS`,
+§2.7). Two distinct decryption protocols coexist:
 **synchronized decryption** (default), with fresh local noise and externally
 established pairwise PRF keys, and **SS (secret-sharing) smudging** (always
 available), with offline sampling/dealing and interpolation-based reconstruction.
@@ -72,6 +72,80 @@ Construct synchronized decryption with `SynchronizedDecryptor::new(n, threshold,
 or `SynchronizedDecryptor::from_config(config)`. Select one
 protocol per deployment/key epoch; coexistence is not a security claim for
 cross-protocol reuse of the same key.
+
+### Generating keys for a threshold multiplication
+
+1. Agree on two independent uniform random strings (§4.3): the public-key vector
+   `a` (called CRS in this library) and the relinearization vector `d1` (called
+   URS). Each may be explicit or reproducible from a seed. For each accepted
+   party, generate a `trlbfv::PublicKeyShare` with `a` and a `trlbfv::RelinKeyShare`
+   with `(d1, a)`, using the **same secret summand** for both. Privately
+   Shamir-share that summand with `ShareManager` for the decryption committee.
+   **Generate the relinearization contribution once.** Publishing two
+   independently generated contributions for the same summand with reused
+   `d1` rows can reveal the summand. Use fresh, disjoint URS rows for every
+   ciphertext level and ceremony; a prefix of the previous level's URS is
+   reuse. All dealers in a given level's ceremony use the same agreed rows.
+   Persist the public contribution bytes before first transmission. On timeout
+   or restart **resend the exact bytes**, including when a witness was needed.
+   If those bytes are lost, do not regenerate with the old `d1`.
+2. Exchange the two typed contribution envelopes as a pair. Pass the accepted
+   pairs to `trlbfv::aggregate_key_pair`; each recipient sums the Shamir shares
+   from exactly those dealers. Matching rows detects inconsistent randomness,
+   not duplicate contributors or inconsistent secrets. Admit at most one pair
+   per authenticated dealer for each level's ceremony in the key epoch. Count
+   a byte-identical retry just once. With malicious dealers, authentication
+   alone does not protect **confidentiality**: a dealer that chooses its pair
+   after seeing the others' contributions can arrange to know the aggregate
+   decryption key. Bind the parameters, epoch, level, dealer, and pair in
+   hiding, binding commitments from all dealers before revealing any pair,
+   or verify proofs of knowledge and correct formation tied to the ceremony.
+   A commitment prevents adaptive choice; it does not prove the Shamir shares
+   use the same secret. When adding a level to an existing key, pin its original
+   public-key contributions and dealer set; do not reopen public-key admission
+   after the shares are public. The library does not implement these checks.
+3. Use the resulting `LBFVPublicKey` to encrypt, multiply the ciphertexts, and
+   call `LBFVRelinearizationKey::relinearizes` to return to two components.
+   Key generation and evaluation support key level zero and ciphertext levels
+   with at least two remaining moduli. Use **ciphertext level zero** for either
+   threshold decryptor.
+4. Use `SmudgingBoundCalculatorConfig::new_with_fresh_noise_model` and pass
+   `FreshNoiseModel::LbfvPublicKey` for any l-BFV input. For one product with
+   no prior additions use `m = 1` and `mult_depth = 1`; use `mult_depth = 0`
+   for addition alone. The ordinary-BFV default in the v0.6 constructors
+   underestimates the fresh noise of l-BFV encryptions. The RLK count
+   defaults to the committee size `n`; if fewer contributed, pass their actual
+   count to `with_accepted_participant_count` and use `from_bound_calculator`.
+   The number of parties opening the product is a separate quantity.
+
+[`trlbfv_mul`](../../examples/trlbfv_mul.rs) runs this flow locally with SS
+decryption. [`trlbfv_e2e`](../../tests/trlbfv_e2e.rs) also exercises the
+synchronized decryptor, with a separate key ceremony. Neither opening
+reconstructs the joint secret.
+
+### Compatibility with v0.6.0
+
+Operational l-BFV public and relinearization keys generated with independent
+reference strings keep their v0.6.0 wire formats. Only `PublicKeyShare` and
+`RelinKeyShare` use the new contribution envelopes. The public-key share
+embeds the v0.6.0 PK message; `dev`'s later compact PK format is incompatible.
+That format change did not change the relinearization-share schema.
+
+Some inputs accepted by v0.6.0 now return errors:
+
+- Fallible l-BFV key generation requires exactly `params.degree()` secret
+  coefficients. The infallible `LBFVPublicKey::new_with_seed` retains its
+  v0.6.0 behavior.
+- A public key's `l` and row count must match the modulus count. Its master
+  seed, per-row seeds, and explicit `a` rows must agree wherever supplied.
+- Reference strings cannot contain repeated rows. The RLK's URS and the PK's
+  CRS must be disjoint: using the PK seed for `d1_seed` is rejected. If such
+  a v0.6.0 relinearization key was published, treat its secret as compromised.
+  Replace the secret and its dependent keys; generating a fresh RLK for that
+  same secret does not restore confidentiality.
+- An l-BFV key-switching component must encode `c1` explicitly or by seed,
+  never both. The shared polynomial decoder also requires the serialized
+  degree to match the supplied context.
 
 ### Test organization and parameter sets
 
@@ -325,7 +399,30 @@ Let `mult_depth` be the number of multiplication levels.
   `m * (B_fresh + Q mod p)` or a caller-injected bound (see
   [`SmudgingBoundCalculator::with_initial_ciphertext_noise_bound`](smudging.rs)).
   `B_fresh` itself is derived from the encryption-noise and key-norm bounds,
-  using the sampler-specific `B_enc` (see below).
+  using the sampler-specific `B_enc` (see below). For ring degree `N`,
+
+  ```text
+  B_fresh = N * ||u||∞ * public_key_error + B_enc + N * B_e * secret_key_bound
+  ```
+
+  Ordinary BFV (the default) samples ternary `u`, so `||u||∞ ≤ 1`.
+  For `LBFVPublicKey` encryption, select `FreshNoiseModel::LbfvPublicKey`:
+  the centered-binomial sampler gives `||u||∞ ≤ 2 * params.variance()`.
+  Only the term multiplying the public-key error changes. Ciphertext bytes
+  do not identify the sampler. This adapts the fresh-noise bound of Appendix
+  C.3, Eq. (25), for correctness and for the `B_C / B_sm` condition in
+  §7.1, Eq. (8).
+
+  The second condition in Eq. (8) concerns joint-key encryption. Section 4.3
+  samples `u` from the key distribution, and Appendix D.2, Lemma 23 uses
+  `||u||∞ ≤ 1`. Under its other norm bounds, the two terms masked by the
+  encryption error have norms at most `N * n * B` and `N * n * B * ||u||∞`,
+  where `B` bounds each small error. With the v0.6 l-BFV sampler, that step
+  would require `N * n * B * (1 + 2 * params.variance()) / B_enc` to be
+  negligible in `lambda`, in place of `2 * N * n * B / B_enc`. The calculator
+  does not check this condition; callers choose the encryption-error
+  distribution through `error1_variance`. The norm bound alone does not
+  establish Lemma 23 for this sampler.
 
 - **Recursion** (Prop.&nbsp;20 of Urban–Rambaud 2024):
 
@@ -410,9 +507,9 @@ paper's theorem and have not been independently analyzed.
 
 This module implements sharing, smudging, and decryption — it does **not**
 include the complete robust protocol stack from Urban–Rambaud&nbsp;2024:
-- No distributed key generation (DKG).
+- The distributed l-BFV key arithmetic does not implement robust dealer agreement or prove correct shares.
 - No authenticated broadcast channel.
-- No FLSS pre-processing or GURS generation.
+- No `F_LSS` preprocessing or `G_URS` setup.
 - No proactive refresh or identifiable-abort mechanisms.
 
 Callers who need full end-to-end robust threshold FHE must provide these

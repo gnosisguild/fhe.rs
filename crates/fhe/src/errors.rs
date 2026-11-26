@@ -267,6 +267,8 @@ pub enum EncodingError {
 #[expect(missing_docs, reason = "error variants are documented inline")]
 #[non_exhaustive]
 pub enum EvaluationKeyError {
+    #[error("Inconsistent l-BFV key layout: {reason}")]
+    InvalidLbfvLayout { reason: &'static str },
     #[error("The parameters do not support key switching")]
     KeySwitchingNotSupported,
 
@@ -341,11 +343,53 @@ pub enum MultipartyError {
     #[error("At least one protocol share is required")]
     NoShares,
 
+    #[error(
+        "The {role:?} of share {share_index} differs from that of share {reference_share_index}"
+    )]
+    ReferenceStringMismatch {
+        role: ReferenceStringRole,
+        share_index: usize,
+        reference_share_index: usize,
+    },
+
+    #[error("Relinearization key CRS row {row_index} does not match the public key")]
+    PublicKeyCrsMismatch { row_index: usize },
+
+    #[error("Reference string seed does not reproduce row {index}")]
+    CommonRandomPolynomialSeedMismatch { index: usize },
+
+    #[error("The CRS and URS seeds must be independent; identical seeds supplied")]
+    IdenticalReferenceStringSeeds,
+
+    #[error("{role:?} rows {first_index} and {second_index} contain the same polynomial")]
+    RepeatedReferenceStringRow {
+        role: ReferenceStringRole,
+        first_index: usize,
+        second_index: usize,
+    },
+
+    #[error("CRS row {crs_index} equals URS row {urs_index}")]
+    OverlappingReferenceStringRows { crs_index: usize, urs_index: usize },
+
     #[error("Expected {expected} common random polynomials, got {actual}")]
     InvalidCommonRandomPolynomialCount { actual: usize, expected: usize },
 
     #[error("Round-two relinearization share is missing its round-one aggregation")]
     MissingRelinearizationRoundOneShare,
+}
+
+/// Role of shared polynomials in l-BFV key generation.
+/// Urban–Rambaud §4.3 calls both `a` and `d1` uniform random strings.
+/// [`Self::Crs`] and [`Self::Urs`] distinguish their uses in this library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReferenceStringRole {
+    /// Public-key randomness `a`.
+    Crs,
+    /// Relinearization-key randomness `d1`.
+    Urs,
+    /// Shared vector whose role is not yet assigned.
+    CommonRandomPolyVector,
 }
 
 /// Separate enum for errors arising from serialization.
@@ -420,6 +464,8 @@ impl From<std::io::Error> for SerializationError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SerializedObject {
+    TrlbfvPublicKeyShare,
+    RelinKeyShare,
     Ciphertext,
     EvaluationKey,
     Parameters,
@@ -433,6 +479,8 @@ pub enum SerializedObject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SerializedField {
+    PublicKeyShareKey,
+    RelinKeyShareContribution,
     GaloisKeySwitchingKey,
     ParametersPlaintextModulus,
     PublicKeyCiphertext,
@@ -454,6 +502,8 @@ pub enum SerializedPolynomialComponent {
 #[expect(missing_docs, reason = "error variants are documented inline")]
 #[non_exhaustive]
 pub enum ParametersError {
+    #[error("Secret key has {actual} coefficients; expected {expected}")]
+    InvalidSecretKeyCoefficientCount { actual: usize, expected: usize },
     /// Indicates that the degree is invalid.
     #[error("Invalid polynomial degree {degree}: must be a power of 2 between {min} and {max}")]
     InvalidDegree {

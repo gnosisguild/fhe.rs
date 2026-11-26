@@ -11,12 +11,16 @@ use rand_chacha::ChaCha8Rng;
 use zeroize::Zeroizing;
 
 use crate::bfv::{
-    BfvParameters, Ciphertext, Encoding, EncryptionIntermediates, Plaintext, SecretKey,
-    traits::TryConvertFrom,
+    BfvParameters, Ciphertext, CommonRandomPolyVec, Encoding, EncryptionIntermediates, Plaintext,
+    SecretKey, traits::TryConvertFrom,
 };
 use crate::proto::bfv::Ciphertext as CiphertextProto;
 use crate::proto::lbfv::LbfvPublicKey as LBFVPublicKeyProto;
-use fhe_math::rq::{Ntt, NttShoup, Poly, Representation, switcher::Switcher};
+use crate::reference_string::{same_concrete_values, validate_no_repeated_rows};
+use crate::{EvaluationKeyError, MultipartyError, ReferenceStringRole};
+use fhe_math::rq::{
+    Ntt, NttShoup, Poly, PowerBasis, Representation, traits::TryConvertFrom as TryConvertPoly,
+};
 use fhe_traits::{DeserializeParametrized, FheEncrypter, FheParametrized, Serialize};
 
 /// Public key for the L-BFV encryption scheme.
@@ -35,27 +39,55 @@ pub struct LBFVPublicKey {
     pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
 }
 
+#[derive(Clone, Copy)]
+enum RowSource {
+    CiphertextDecoder,
+    InMemory,
+}
+
 impl LBFVPublicKey {
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a provided
     /// seed. The seed is used to generate l seeds for the ciphertexts which are
     /// used to generate the random polynomials aᵢ for each ciphertext
     /// deterministically.
+    ///
+    /// This legacy constructor retains the secret-key polynomial conversion's
+    /// zero-padding of short inputs. Use [`Self::try_new_with_seed`] to require
+    /// exactly `degree` coefficients and return an error for invalid inputs.
+    ///
+    /// # Panics
+    /// Panics if the key cannot be generated, for example if `sk` has more
+    /// coefficients than the ring degree.
+    #[expect(
+        clippy::expect_used,
+        reason = "preserve the infallible 0.6 constructor"
+    )]
     pub fn new_with_seed<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         seed: <ChaCha8Rng as SeedableRng>::Seed,
         rng: &mut R,
     ) -> Self {
-        let zero = Plaintext::zero(Encoding::poly(), &sk.params).unwrap();
+        Self::seeded(sk, seed, rng).expect("invalid l-BFV key-generation input")
+    }
+
+    /// Fallible seeded key generation for callers supplying a secret contribution.
+    pub fn try_new_with_seed<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        seed: [u8; 32],
+        rng: &mut R,
+    ) -> Result<Self> {
+        sk.validate_coefficient_count()?;
+        Self::seeded(sk, seed, rng)
+    }
+
+    fn seeded<R: RngCore + CryptoRng>(sk: &SecretKey, seed: [u8; 32], rng: &mut R) -> Result<Self> {
+        let zero = Plaintext::zero(Encoding::poly(), &sk.params)?;
         let mut c: Vec<Ciphertext> = Vec::with_capacity(sk.params.moduli().len());
-        let mut seed_rng = ChaCha8Rng::from_seed(seed); // This is used to generate the seeds for the ciphertexts by creating a new
-        // ChaCha8Rng from the input seed
 
         // Create a vector of ciphertexts, each encrypting zero, for each RNS modulus
         // [(b₁, a₁), ..., (bₗ, aₗ)].
-        for _ in 0..sk.params.moduli().len() {
-            let mut seed_i = <ChaCha8Rng as SeedableRng>::Seed::default();
-            seed_rng.fill(&mut seed_i);
-            let mut ct = sk.try_encrypt_with_seed(&zero, seed_i, rng).unwrap();
+        for seed_i in Self::row_seeds(seed).take(sk.params.moduli().len()) {
+            let mut ct = sk.try_encrypt_with_seed(&zero, seed_i, rng)?;
             // The polynomials of a public key should not allow for variable time
             // computation.
             ct.c.iter_mut()
@@ -63,20 +95,196 @@ impl LBFVPublicKey {
             c.push(ct);
         }
 
-        Self {
+        validate_no_repeated_rows(
+            ReferenceStringRole::Crs,
+            c.iter().filter_map(|row| row.c.get(1)),
+        )?;
+        Ok(Self {
             par: sk.params.clone(),
             c,
             l: sk.params.moduli().len(),
             seed: Some(seed),
-        }
+        })
     }
 
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a random
     /// seed.
     pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
+        sk.validate_coefficient_count()?;
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
-        Ok(Self::new_with_seed(sk, seed, rng))
+        Self::seeded(sk, seed, rng)
+    }
+
+    fn row_seeds(seed: [u8; 32]) -> impl Iterator<Item = [u8; 32]> {
+        let mut rng = ChaCha8Rng::from_seed(seed);
+        std::iter::repeat_with(move || {
+            let mut row = [0; 32];
+            rng.fill(&mut row);
+            row
+        })
+    }
+
+    /// Generate a key using the supplied level-zero public randomness.
+    pub fn new_with_crp<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        crp: &CommonRandomPolyVec,
+        rng: &mut R,
+    ) -> Result<Self> {
+        Self::from_crs(sk, crp.to_polys(), crp.seed(), rng)
+    }
+
+    pub(crate) fn from_crs<R: RngCore + CryptoRng>(
+        sk: &SecretKey,
+        a: Vec<Poly<Ntt>>,
+        seed: Option<[u8; 32]>,
+        rng: &mut R,
+    ) -> Result<Self> {
+        sk.validate_coefficient_count()?;
+        Self::validate_crs(&a, &sk.params, seed)?;
+        let ctx = sk.params.context_at_level(0)?;
+        let s = Zeroizing::new(
+            Poly::<PowerBasis>::try_convert_from(sk.coeffs.as_ref(), ctx, false)?.into_ntt(),
+        );
+        let b = a
+            .iter()
+            .map(|a| {
+                let product = Zeroizing::new(a * s.as_ref());
+                let mut b = Poly::<Ntt>::small(ctx, sk.params.variance(), rng)?;
+                b -= product.as_ref();
+                Ok(b)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::assemble(b, a, sk.params.clone(), seed)
+    }
+
+    /// Construct an operational key from ordered `(b, a)` rows. A supplied
+    /// master seed must reproduce every concrete `a` polynomial.
+    pub fn from_parts(
+        b: Vec<Poly<Ntt>>,
+        a: Vec<Poly<Ntt>>,
+        params: Arc<BfvParameters>,
+        seed: Option<[u8; 32]>,
+    ) -> Result<Self> {
+        Self::validate_crs(&a, &params, seed)?;
+        Self::assemble(b, a, params, seed)
+    }
+
+    fn validate_crs(
+        a: &[Poly<Ntt>],
+        params: &Arc<BfvParameters>,
+        seed: Option<[u8; 32]>,
+    ) -> Result<()> {
+        let ctx = params.context_at_level(0)?;
+        if a.len() != params.moduli().len() {
+            return Err(EvaluationKeyError::InvalidDecompositionLength {
+                actual: a.len(),
+                expected: params.moduli().len(),
+            }
+            .into());
+        }
+        let mut seeds = seed.map(Self::row_seeds);
+        for (index, row) in a.iter().enumerate() {
+            if row.ctx() != ctx || !row.has_canonical_coefficients() {
+                return Err(EvaluationKeyError::InvalidLbfvLayout {
+                    reason: "CRS rows must be canonical level-zero polynomials",
+                }
+                .into());
+            }
+            if let Some(seed) = seeds.as_mut().and_then(Iterator::next)
+                && !same_concrete_values(row, &Poly::<Ntt>::random_from_seed(ctx, seed))
+            {
+                return Err(MultipartyError::CommonRandomPolynomialSeedMismatch { index }.into());
+            }
+        }
+        validate_no_repeated_rows(ReferenceStringRole::Crs, a)
+    }
+
+    fn assemble(
+        b: Vec<Poly<Ntt>>,
+        a: Vec<Poly<Ntt>>,
+        par: Arc<BfvParameters>,
+        seed: Option<[u8; 32]>,
+    ) -> Result<Self> {
+        let l = a.len();
+        if b.len() != l {
+            return Err(EvaluationKeyError::InvalidDecompositionLength {
+                actual: b.len(),
+                expected: l,
+            }
+            .into());
+        }
+        let ctx = par.context_at_level(0)?;
+        let mut seeds = seed.map(Self::row_seeds);
+        let c = b
+            .into_iter()
+            .zip(a)
+            .map(|(mut b, mut a)| {
+                if b.ctx() != ctx || !b.has_canonical_coefficients() {
+                    return Err(EvaluationKeyError::InvalidLbfvLayout {
+                        reason: "public-key b rows must be canonical level-zero polynomials",
+                    }
+                    .into());
+                }
+                a.disallow_variable_time_computations();
+                b.disallow_variable_time_computations();
+                Ok(Ciphertext {
+                    params: par.clone(),
+                    c: vec![b, a],
+                    level: 0,
+                    seed: seeds.as_mut().and_then(Iterator::next),
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self { par, c, l, seed })
+    }
+
+    /// Public fields and per-ciphertext seed metadata can be mutated by a
+    /// 0.6 caller. Check them before using an operational key in a key ceremony.
+    pub(crate) fn validate_rows(&self) -> Result<()> {
+        self.validate_rows_from(RowSource::InMemory)
+    }
+
+    fn validate_rows_from(&self, source: RowSource) -> Result<()> {
+        let expected = self.par.moduli().len();
+        if self.l != expected || self.c.len() != expected {
+            return Err(EvaluationKeyError::InvalidLbfvLayout {
+                reason: "public-key row count and l must match the modulus count",
+            }
+            .into());
+        }
+        let ctx = self.par.context_at_level(0)?;
+        let mut seeds = self.seed.map(Self::row_seeds);
+        let mut rows = Vec::with_capacity(expected);
+        for (index, row) in self.c.iter().enumerate() {
+            row.validate_for_context(&self.par, 0, ctx)?;
+            let [b, a] = row.c.as_slice() else {
+                return Err(EvaluationKeyError::InvalidLbfvLayout {
+                    reason: "public-key rows must contain exactly (b, a)",
+                }
+                .into());
+            };
+            if !b.has_canonical_coefficients() || !a.has_canonical_coefficients() {
+                return Err(EvaluationKeyError::InvalidLbfvLayout {
+                    reason: "public-key rows must be canonical",
+                }
+                .into());
+            }
+            let derived = seeds.as_mut().and_then(Iterator::next);
+            // A seeded ciphertext carries only `b` and the seed that its decoder
+            // just used to generate `a`. Explicit or mutable rows have no such guarantee.
+            let expanded_by_decoder =
+                matches!((source, row.seed), (RowSource::CiphertextDecoder, Some(_)));
+            if let Some(seed) = derived.or(row.seed)
+                && (row.seed.is_some_and(|actual| actual != seed)
+                    || (!expanded_by_decoder
+                        && !same_concrete_values(a, &Poly::<Ntt>::random_from_seed(ctx, seed))))
+            {
+                return Err(MultipartyError::CommonRandomPolynomialSeedMismatch { index }.into());
+            }
+            rows.push(a);
+        }
+        validate_no_repeated_rows(ReferenceStringRole::Crs, rows)
     }
 
     /// Encrypt a plaintext and return the randomness and errors used to construct it.
@@ -129,6 +337,12 @@ impl LBFVPublicKey {
             .ok_or(crate::EvaluationKeyError::EmptyPublicKey)?;
         pt.validate_for(&self.par)?;
         key.validate_for(&self.par)?;
+        if key.c.len() != 2 || !key.c.iter().all(Poly::has_canonical_coefficients) {
+            return Err(EvaluationKeyError::InvalidLbfvLayout {
+                reason: "encryption requires a canonical two-component public-key row",
+            }
+            .into());
+        }
 
         let plaintext_level = pt.level();
         if plaintext_level < key.level {
@@ -164,9 +378,7 @@ impl LBFVPublicKey {
     ///   - The key level is not 0 (current limitation)
     ///   - The public key is not at level 0
     ///   - The requested representation is not NTT-Shoup
-    ///   - Any polynomial operations fail during mod switching or representation changes
-    // self.c[0..new_l] is always valid (self.c has self.l elements, new_l <= self.l)
-    #[allow(clippy::indexing_slicing)]
+    ///   - The public key has inconsistent rows or seed metadata
     pub fn extract_b_polynomials(
         &self,
         ciphertext_level: usize,
@@ -182,8 +394,6 @@ impl LBFVPublicKey {
             });
         }
 
-        // Note: this may seem redundant, but it's because in the future, we want to experiment with different key levels
-        // for the public key.
         if key_level != 0 {
             return Err(Error::InvalidLevel {
                 level: key_level,
@@ -192,39 +402,24 @@ impl LBFVPublicKey {
             });
         }
 
-        let key_ctx = self.par.context_at_level(key_level)?;
-        if self.c[0].c[0].ctx() != key_ctx {
-            return Err(Error::ParameterMismatch {
-                left: crate::ParameterSource::PublicKey,
-                right: crate::ParameterSource::Parameters,
-            });
-        }
-
-        // Note: key switching is redundant for now.
-        // Create switcher to mod switch from initial to final context (for when public key is at different level than ciphertext)
-        let ciphertext_ctx = self.par.context_at_level(ciphertext_level)?;
-        let switcher = Switcher::new(ciphertext_ctx, key_ctx)?;
-
-        // Extract (l - level) b polynomials and change representation accordingly
-        let new_l = self.l - ciphertext_level;
-        let mut b_polynomials = Vec::with_capacity(new_l);
-        for i in 0..new_l {
-            let mut poly = self.c[i].c[0].clone();
-            if poly.ctx() != key_ctx {
-                poly = poly.switch(&switcher)?;
+        if rep != Representation::NttShoup {
+            return Err(EvaluationKeyError::UnsupportedRepresentation {
+                found: format!("{rep:?}"),
             }
-            let poly = match rep {
-                Representation::NttShoup => poly.into_ntt_shoup(),
-                Representation::PowerBasis | Representation::Ntt => {
-                    return Err(crate::EvaluationKeyError::UnsupportedRepresentation {
-                        found: format!("{rep:?}"),
-                    }
-                    .into());
-                }
-            };
-            b_polynomials.push(poly);
+            .into());
         }
-        Ok(b_polynomials)
+        self.validate_rows()?;
+        Ok(self.b_prefix(self.l - ciphertext_level))
+    }
+
+    pub(crate) fn b_prefix(&self, count: usize) -> Vec<Poly<NttShoup>> {
+        self.c
+            .iter()
+            .take(count)
+            .filter_map(|row| row.first())
+            .cloned()
+            .map(Poly::<Ntt>::into_ntt_shoup)
+            .collect()
     }
 }
 
@@ -304,6 +499,12 @@ impl DeserializeParametrized for LBFVPublicKey {
             })
         })?;
 
+        Self::from_proto(proto, par)
+    }
+}
+
+impl LBFVPublicKey {
+    pub(crate) fn from_proto(proto: LBFVPublicKeyProto, par: &Arc<BfvParameters>) -> Result<Self> {
         if proto.c.is_empty() {
             return Err(Error::SerializationError(
                 SerializationError::MissingField {
@@ -312,8 +513,21 @@ impl DeserializeParametrized for LBFVPublicKey {
             ));
         }
 
+        if proto.l as usize != par.moduli().len() || proto.c.len() != proto.l as usize {
+            return Err(EvaluationKeyError::InvalidLbfvLayout {
+                reason: "serialized public-key row count or l does not match the parameters",
+            }
+            .into());
+        }
         let mut c: Vec<Ciphertext> = Vec::with_capacity(proto.c.len());
         for ct_proto in proto.c {
+            if ct_proto.c.len() != if ct_proto.seed.is_empty() { 2 } else { 1 } {
+                return Err(SerializationError::InvalidCiphertextPolynomialCount {
+                    actual: ct_proto.c.len(),
+                    seed_present: !ct_proto.seed.is_empty(),
+                }
+                .into());
+            }
             let mut ct = Ciphertext::try_convert_from(&ct_proto, par)?;
             if ct.level != 0 {
                 return Err(SerializationError::InvalidPublicKeyLevel {
@@ -345,12 +559,14 @@ impl DeserializeParametrized for LBFVPublicKey {
             None
         };
 
-        Ok(Self {
+        let key = Self {
             par: par.clone(),
             c,
             l: proto.l as usize,
             seed,
-        })
+        };
+        key.validate_rows_from(RowSource::CiphertextDecoder)?;
+        Ok(key)
     }
 }
 

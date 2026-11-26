@@ -597,6 +597,21 @@ impl<R: RepresentationTag> Poly<R> {
         Ok(q)
     }
 
+    /// Check that the RNS coefficient matrix has the expected shape, contiguous
+    /// row-major layout, and residues in `[0, q)` for each limb. Lazy NTT
+    /// operands are not canonical. This variable-time check is for public data.
+    #[must_use]
+    pub fn has_canonical_coefficients(&self) -> bool {
+        !self.has_lazy_coefficients
+            && self.coefficients.dim() == (self.ctx.moduli().len(), self.ctx.degree)
+            && self.coefficients.is_standard_layout()
+            && self
+                .coefficients
+                .outer_iter()
+                .zip(self.ctx.moduli())
+                .all(|(row, q)| row.iter().all(|x| x < q))
+    }
+
     /// Returns the context of the underlying polynomial
     #[must_use]
     pub fn ctx(&self) -> &Arc<Context> {
