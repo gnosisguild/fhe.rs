@@ -3,13 +3,14 @@
 
 use fhe::bfv::{BfvParameters, BfvParametersBuilder, CommonRandomPolyVec, SecretKey};
 use fhe::proto::lbfv::{
-    LbfvPublicKeyShare, LbfvRelinKeyContribution, LbfvRelinKeyShare, LbfvRelinearizationKey,
+    LbfvPublicKey, LbfvPublicKeyShare, LbfvRelinKeyContribution, LbfvRelinKeyShare,
+    LbfvRelinearizationKey,
 };
 use fhe::trlbfv::{
     Aggregate, LBFVPublicKey, LBFVRelinearizationKey, PublicKeyShare, RelinKeyShare,
     aggregate_key_pair, aggregate_relinearization_key,
 };
-use fhe::{Error, MultipartyError, ReferenceStringRole, Result};
+use fhe::{Error, MultipartyError, ParametersError, ReferenceStringRole, Result};
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
 use fhe_traits::{DeserializeParametrized, Serialize};
 use ndarray::Array2;
@@ -158,6 +159,33 @@ fn rejects_malformed_wire_layouts_before_aggregation() -> Result<()> {
 }
 
 #[test]
+fn public_key_decode_checks_seeded_and_explicit_rows_against_the_master_seed() -> Result<()> {
+    let params = params(17)?;
+    let mut rng = ChaCha8Rng::from_seed([78; 32]);
+    let sk = SecretKey::random(&params, &mut rng);
+    let pk = LBFVPublicKey::new_with_seed(&sk, [1; 32], &mut rng);
+    let mut wire = LbfvPublicKey::from(&pk);
+    // Materialize one row; its siblings still carry only their row seeds.
+    wire.c[1].seed.clear();
+    wire.c[1].c.push(pk.c[1][1].to_bytes());
+    let decode = |wire: &LbfvPublicKey| LBFVPublicKey::from_bytes(&wire.encode_to_vec(), &params);
+    assert_eq!(decode(&wire)?.to_bytes(), wire.encode_to_vec());
+
+    let mut wrong_seed = wire.clone();
+    wrong_seed.c[2].seed[0] ^= 1;
+    assert_eq!(
+        decode(&wrong_seed).unwrap_err(),
+        Error::Multiparty(MultipartyError::CommonRandomPolynomialSeedMismatch { index: 2 })
+    );
+    wire.c[1].c[1] = Poly::<Ntt>::zero(params.context_at_level(0)?).to_bytes();
+    assert_eq!(
+        decode(&wire).unwrap_err(),
+        Error::Multiparty(MultipartyError::CommonRandomPolynomialSeedMismatch { index: 1 })
+    );
+    Ok(())
+}
+
+#[test]
 fn mutable_keys_and_external_polynomials_are_checked_before_use() -> Result<()> {
     let par = params(17)?;
     let mut rng = ChaCha8Rng::from_seed([75; 32]);
@@ -177,6 +205,13 @@ fn mutable_keys_and_external_polynomials_are_checked_before_use() -> Result<()> 
     changed = pk.clone();
     changed.c.swap(0, 1);
     assert!(aggregate(&changed).is_err());
+    // An in-memory caller can replace a decoded `a` without changing either seed.
+    changed = LBFVPublicKey::from_bytes(&pk.to_bytes(), &par)?;
+    changed.c[0][1] = Poly::<Ntt>::zero(par.context_at_level(0)?);
+    assert_eq!(
+        aggregate(&changed).unwrap_err(),
+        Error::Multiparty(MultipartyError::CommonRandomPolynomialSeedMismatch { index: 0 })
+    );
     changed = pk.clone();
     changed.l = 0;
     assert!(aggregate(&changed).is_err());
@@ -222,8 +257,49 @@ fn mutable_keys_and_external_polynomials_are_checked_before_use() -> Result<()> 
             .is_err()
     );
     assert!(RelinKeyShare::contribute_with_seed(&sk, [2; 32], [1; 32], 1, 1, &mut rng).is_err());
-    let truncated = SecretKey::new(vec![1], &par);
-    assert!(PublicKeyShare::contribute_with_seed(&truncated, [1; 32], &mut rng).is_err());
+    Ok(())
+}
+
+#[test]
+fn fallible_key_generation_rejects_truncated_secret_keys() -> Result<()> {
+    let params = params(17)?;
+    let mut rng = ChaCha8Rng::from_seed([79; 32]);
+    let short = SecretKey::new(vec![1], &params);
+    let mut padded = vec![0; params.degree()];
+    padded[0] = 1;
+    let padded = SecretKey::new(padded, &params);
+    let pk = LBFVPublicKey::new_with_seed(&padded, [1; 32], &mut rng.clone());
+    // The infallible v0.6 constructor retains its zero-padding behavior.
+    assert_eq!(LBFVPublicKey::new_with_seed(&short, [1; 32], &mut rng), pk);
+
+    let check = |err| {
+        assert_eq!(
+            err,
+            Error::ParametersError(ParametersError::InvalidSecretKeyCoefficientCount {
+                actual: 1,
+                expected: params.degree(),
+            })
+        )
+    };
+    check(LBFVPublicKey::new(&short, &mut rng).unwrap_err());
+    check(LBFVPublicKey::try_new_with_seed(&short, [1; 32], &mut rng).unwrap_err());
+    check(PublicKeyShare::contribute_with_seed(&short, [1; 32], &mut rng).unwrap_err());
+    check(
+        RelinKeyShare::contribute_with_seed(&short, [2; 32], [1; 32], 0, 0, &mut rng).unwrap_err(),
+    );
+
+    let d1 = CommonRandomPolyVec::from_seed(&params, [2; 32])?;
+    check(LBFVRelinearizationKey::new_leveled(&short, &pk, d1.seed(), 0, 0, &mut rng).unwrap_err());
+    check(LBFVRelinearizationKey::new_with_crp(&short, &pk, &d1, &mut rng).unwrap_err());
+    let polys = d1
+        .to_polys()
+        .into_iter()
+        .map(Poly::<Ntt>::into_ntt_shoup)
+        .collect();
+    check(
+        LBFVRelinearizationKey::new_leveled_with_polys(&short, &pk, polys, 0, 0, &mut rng)
+            .unwrap_err(),
+    );
     Ok(())
 }
 

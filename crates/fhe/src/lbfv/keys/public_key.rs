@@ -39,14 +39,25 @@ pub struct LBFVPublicKey {
     pub seed: Option<<ChaCha8Rng as SeedableRng>::Seed>,
 }
 
+#[derive(Clone, Copy)]
+enum RowSource {
+    CiphertextDecoder,
+    InMemory,
+}
+
 impl LBFVPublicKey {
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a provided
     /// seed. The seed is used to generate l seeds for the ciphertexts which are
     /// used to generate the random polynomials aᵢ for each ciphertext
     /// deterministically.
     ///
-    /// This legacy constructor panics on invalid inputs. Use
-    /// [`Self::try_new_with_seed`] for fallible contribution generation.
+    /// This legacy constructor retains the secret-key polynomial conversion's
+    /// zero-padding of short inputs. Use [`Self::try_new_with_seed`] to require
+    /// exactly `degree` coefficients and return an error for invalid inputs.
+    ///
+    /// # Panics
+    /// Panics if the key cannot be generated, for example if `sk` has more
+    /// coefficients than the ring degree.
     #[expect(
         clippy::expect_used,
         reason = "preserve the infallible 0.6 constructor"
@@ -99,6 +110,7 @@ impl LBFVPublicKey {
     /// Generate a new [`LBFVPublicKey`] from a [`SecretKey`] using a random
     /// seed.
     pub fn new<R: RngCore + CryptoRng>(sk: &SecretKey, rng: &mut R) -> Result<Self> {
+        sk.validate_coefficient_count()?;
         let mut seed = <ChaCha8Rng as SeedableRng>::Seed::default();
         rng.fill(&mut seed);
         Self::seeded(sk, seed, rng)
@@ -230,6 +242,10 @@ impl LBFVPublicKey {
     /// Public fields and per-ciphertext seed metadata can be mutated by a
     /// 0.6 caller. Check them before using an operational key in a key ceremony.
     pub(crate) fn validate_rows(&self) -> Result<()> {
+        self.validate_rows_from(RowSource::InMemory)
+    }
+
+    fn validate_rows_from(&self, source: RowSource) -> Result<()> {
         let expected = self.par.moduli().len();
         if self.l != expected || self.c.len() != expected {
             return Err(EvaluationKeyError::InvalidLbfvLayout {
@@ -255,9 +271,14 @@ impl LBFVPublicKey {
                 .into());
             }
             let derived = seeds.as_mut().and_then(Iterator::next);
+            // A seeded ciphertext carries only `b` and the seed that its decoder
+            // just used to generate `a`. Explicit or mutable rows have no such guarantee.
+            let expanded_by_decoder =
+                matches!((source, row.seed), (RowSource::CiphertextDecoder, Some(_)));
             if let Some(seed) = derived.or(row.seed)
                 && (row.seed.is_some_and(|actual| actual != seed)
-                    || !same_concrete_values(a, &Poly::<Ntt>::random_from_seed(ctx, seed)))
+                    || (!expanded_by_decoder
+                        && !same_concrete_values(a, &Poly::<Ntt>::random_from_seed(ctx, seed))))
             {
                 return Err(MultipartyError::CommonRandomPolynomialSeedMismatch { index }.into());
             }
@@ -544,7 +565,7 @@ impl LBFVPublicKey {
             l: proto.l as usize,
             seed,
         };
-        key.validate_rows()?;
+        key.validate_rows_from(RowSource::CiphertextDecoder)?;
         Ok(key)
     }
 }

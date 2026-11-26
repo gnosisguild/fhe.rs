@@ -84,7 +84,8 @@ impl Lambda {
 }
 
 /// Which public-key encryptor produced the circuit inputs. Ciphertexts do not
-/// record this information. For mixed BFV/l-BFV inputs, select `LbfvPublicKey`.
+/// record this information. If any input was encrypted with an l-BFV public
+/// key, select [`Self::LbfvPublicKey`], including for additive-only circuits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FreshNoiseModel {
@@ -169,6 +170,8 @@ fn compute_delta(q: &BigUint, t: &BigUint) -> BigUint {
 
 impl SmudgingBoundCalculatorConfig {
     /// Create a bound-calculator configuration with standard parameters.
+    /// The default assumes ordinary BFV public-key encryption. For l-BFV
+    /// inputs, call [`Self::with_fresh_noise_model`] with [`FreshNoiseModel::LbfvPublicKey`].
     ///
     /// # Arguments
     /// * `params` - BFV parameters
@@ -225,6 +228,7 @@ impl SmudgingBoundCalculatorConfig {
     }
 
     /// Create a configuration for a multiplicative circuit at the given depth.
+    /// As in [`Self::new`], the fresh-noise model defaults to ordinary BFV.
     ///
     /// # Arguments
     /// * `params` - BFV parameters

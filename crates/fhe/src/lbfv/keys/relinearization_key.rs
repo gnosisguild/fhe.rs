@@ -80,6 +80,7 @@ impl LBFVRelinearizationKey {
         key_level: usize,
         rng: &mut R,
     ) -> Result<Self> {
+        sk.validate_coefficient_count()?;
         let count = row_count(&sk.params, ciphertext_level, key_level)?;
         // 0.6 sampled r before drawing an optional d1 seed. Keep its RNG stream.
         let r = SecretKey::random(&sk.params, rng);
@@ -146,6 +147,7 @@ impl LBFVRelinearizationKey {
         level: usize,
         rng: &mut R,
     ) -> Result<Self> {
+        sk.validate_coefficient_count()?;
         let a = KeyRows::from_public_key(pk, &sk.params, count, &d1)?;
         let inputs = RelinInputs::new(&sk.params, level, d1, a)?;
         let parts = inputs.generate(sk, &SecretKey::random(&sk.params, rng), rng)?;

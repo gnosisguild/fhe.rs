@@ -153,8 +153,9 @@ pub fn aggregate_relinearization_key(
 }
 
 /// Aggregate both operational keys from one collection of matched contributions.
-/// An omitted pair is omitted from both keys. Duplicate submissions are summed
-/// twice; the caller authenticates each pair and verifies common-secret provenance.
+/// An omitted pair is omitted from both keys. Admit one pair per authenticated
+/// dealer per key epoch, including on retries: every submitted pair is summed.
+/// The caller verifies that each pair uses the same secret summand as its Shamir sharing.
 /// Form pairs at admission: zipping independent streams silently truncates to the shorter one.
 pub fn aggregate_key_pair<I: IntoIterator<Item = (PublicKeyShare, RelinKeyShare)>>(
     pairs: I,

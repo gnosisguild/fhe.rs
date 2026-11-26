@@ -82,16 +82,19 @@ cross-protocol reuse of the same key.
 2. Exchange the two typed contribution envelopes as a pair. Pass the accepted
    pairs to `trlbfv::aggregate_key_pair`; each recipient sums the Shamir shares
    from exactly those dealers. Matching rows detects inconsistent randomness,
-   not duplicate contributors or inconsistent secrets. Applications bind each
-   pair to an authenticated dealer, key epoch, and accepted set.
+   not duplicate contributors or inconsistent secrets. Admit at most one pair
+   per authenticated dealer and key epoch. A transport retry must not add a
+   second copy: that would count the dealer's summand twice in the keys.
 3. Use the resulting `LBFVPublicKey` to encrypt, multiply the ciphertexts, and
    call `LBFVRelinearizationKey::relinearizes` to return to two components.
    Key generation and evaluation support key level zero and ciphertext levels
    with at least two remaining moduli. Use **ciphertext level zero** for either
    threshold decryptor.
 4. For one product with no prior additions, use `new_multiplicative` with
-   `m = 1`, `mult_depth = 1`, and
-   `.with_fresh_noise_model(FreshNoiseModel::LbfvPublicKey)`. The RLK count
+   `m = 1` and `mult_depth = 1`. For either a product or an additive-only
+   circuit (`mult_depth = 0`), select
+   `.with_fresh_noise_model(FreshNoiseModel::LbfvPublicKey)`: the default BFV
+   model underestimates the fresh noise of l-BFV encryptions. The RLK count
    defaults to the committee size `n`; if fewer contributed, pass their actual
    count to `with_accepted_participant_count` and use `from_bound_calculator`.
    The number of parties opening the product is a separate quantity.
@@ -100,6 +103,25 @@ cross-protocol reuse of the same key.
 decryption. [`trlbfv_e2e`](../../tests/trlbfv_e2e.rs) also exercises the
 synchronized decryptor, with a separate key ceremony. Neither opening
 reconstructs the joint secret.
+
+### Compatibility with v0.6.0
+
+Operational l-BFV public and relinearization keys generated with independent
+reference strings keep their v0.6.0 wire formats. Only `PublicKeyShare` and
+`RelinKeyShare` use the new contribution envelopes.
+
+Some inputs accepted by v0.6.0 now return errors:
+
+- Fallible l-BFV key generation requires exactly `params.degree()` secret
+  coefficients. The infallible `LBFVPublicKey::new_with_seed` retains its
+  v0.6.0 behavior.
+- A public key's `l` and row count must match the modulus count. Its master
+  seed, per-row seeds, and explicit `a` rows must agree wherever supplied.
+- Reference strings cannot contain repeated rows. The RLK's URS and the PK's
+  CRS must be disjoint: using the PK seed for `d1_seed` is rejected.
+- An l-BFV key-switching component must encode `c1` explicitly or by seed,
+  never both. The shared polynomial decoder also requires the serialized
+  degree to match the supplied context.
 
 ### Test organization and parameter sets
 
