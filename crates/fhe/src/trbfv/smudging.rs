@@ -170,8 +170,8 @@ fn compute_delta(q: &BigUint, t: &BigUint) -> BigUint {
 
 impl SmudgingBoundCalculatorConfig {
     /// Create a bound-calculator configuration with standard parameters.
-    /// The default assumes ordinary BFV public-key encryption. For l-BFV
-    /// inputs, call [`Self::with_fresh_noise_model`] with [`FreshNoiseModel::LbfvPublicKey`].
+    /// This v0.6 constructor assumes ordinary BFV public-key encryption.
+    /// For l-BFV or mixed inputs, use [`Self::new_with_fresh_noise_model`].
     ///
     /// # Arguments
     /// * `params` - BFV parameters
@@ -187,6 +187,21 @@ impl SmudgingBoundCalculatorConfig {
         n: usize,
         m: usize,
         lambda: Lambda,
+    ) -> Result<Self, Error> {
+        Self::new_with_fresh_noise_model(params, n, m, 0, lambda, FreshNoiseModel::BfvPublicKey)
+    }
+
+    /// Configure the circuit and its input encryptor together. `m` is the
+    /// addition fan-in and `mult_depth` is zero for an additive-only circuit.
+    /// Select [`FreshNoiseModel::LbfvPublicKey`] if any input used an l-BFV
+    /// public key: ciphertext bytes do not identify the encryption sampler.
+    pub fn new_with_fresh_noise_model(
+        params: Arc<BfvParameters>,
+        n: usize,
+        m: usize,
+        mult_depth: u32,
+        lambda: Lambda,
+        fresh_noise_model: FreshNoiseModel,
     ) -> Result<Self, Error> {
         if n == 0 {
             return Err(Error::smudging_bound_infeasible(
@@ -214,13 +229,13 @@ impl SmudgingBoundCalculatorConfig {
             public_key_error,
             secret_key_bound: n as u64,
             lambda,
-            mult_depth: 0,
-            fresh_noise_model: FreshNoiseModel::BfvPublicKey,
+            mult_depth,
+            fresh_noise_model,
         })
     }
 
     /// Match the fresh noise bound to the encryption sampler. Existing
-    /// constructors default to [`FreshNoiseModel::BfvPublicKey`].
+    /// v0.6 constructors default to [`FreshNoiseModel::BfvPublicKey`].
     #[must_use]
     pub fn with_fresh_noise_model(mut self, model: FreshNoiseModel) -> Self {
         self.fresh_noise_model = model;
@@ -247,9 +262,14 @@ impl SmudgingBoundCalculatorConfig {
         mult_depth: u32,
         lambda: Lambda,
     ) -> Result<Self, Error> {
-        let mut config = Self::new(params, n, m, lambda)?;
-        config.mult_depth = mult_depth;
-        Ok(config)
+        Self::new_with_fresh_noise_model(
+            params,
+            n,
+            m,
+            mult_depth,
+            lambda,
+            FreshNoiseModel::BfvPublicKey,
+        )
     }
 }
 
@@ -539,9 +559,14 @@ mod tests {
             .set_error1_variance_usize(8)
             .build_arc()?;
         let config = SmudgingBoundCalculatorConfig::new(params.clone(), 3, 2, Lambda::insecure(2))?;
-        let lbfv = config
-            .clone()
-            .with_fresh_noise_model(FreshNoiseModel::LbfvPublicKey);
+        let lbfv = SmudgingBoundCalculatorConfig::new_with_fresh_noise_model(
+            params.clone(),
+            3,
+            2,
+            0,
+            Lambda::insecure(2),
+            FreshNoiseModel::LbfvPublicKey,
+        )?;
         // ||e_pk|| <= 18, ||s|| <= 3, B_e = 6, B_enc = 16. BFV's fresh
         // bound is 144 + 16 + 144; l-BFV's is 6 * 144 + 16 + 144.
         let remainder = modulus_product(params.moduli()) % 17u32;

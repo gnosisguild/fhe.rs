@@ -63,8 +63,8 @@ impl Committee {
             let sk = SecretKey::random(params, rng);
             let public = PublicKeyShare::contribute_with_crp(&sk, a, rng)?;
             let relin = RelinKeyShare::contribute_with_crp(&sk, d1, a, 0, 0, rng)?;
-            // Public messages from this dealer travel as one authenticated pair
-            // in a real protocol. Shamir-share precisely the same summand.
+            // A real dealer persists these bytes before publishing its pair,
+            // then resends them verbatim on retry. Shamir-share the same summand.
             pairs.push((
                 PublicKeyShare::from_bytes(&public.to_bytes(), params)?,
                 RelinKeyShare::from_bytes(&relin.to_bytes(), params)?,
@@ -117,14 +117,14 @@ impl Committee {
     pub fn noise_config(&self) -> Result<SmudgingBoundCalculatorConfig> {
         // One fresh ciphertext per operand, one multiplication. All three
         // parties contributed to the RLK, irrespective of which two open.
-        Ok(SmudgingBoundCalculatorConfig::new_multiplicative(
+        SmudgingBoundCalculatorConfig::new_with_fresh_noise_model(
             self.manager.params.clone(),
             PARTIES,
             1,
             1,
             Lambda::secure(40)?,
-        )?
-        .with_fresh_noise_model(FreshNoiseModel::LbfvPublicKey))
+            FreshNoiseModel::LbfvPublicKey,
+        )
     }
 
     pub fn decrypt_ss<R: RngCore + CryptoRng>(

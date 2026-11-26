@@ -81,22 +81,39 @@ cross-protocol reuse of the same key.
    party, generate a `trlbfv::PublicKeyShare` with `a` and a `trlbfv::RelinKeyShare`
    with `(d1, a)`, using the **same secret summand** for both. Privately
    Shamir-share that summand with `ShareManager` for the decryption committee.
+   **Generate the relinearization contribution once.** Publishing two
+   independently generated contributions for the same summand with reused
+   `d1` rows can reveal the summand. Use fresh, disjoint URS rows for every
+   ciphertext level and ceremony; a prefix of the previous level's URS is
+   reuse. All dealers in a given level's ceremony use the same agreed rows.
+   Persist the public contribution bytes before first transmission. On timeout
+   or restart **resend the exact bytes**, including when a witness was needed.
+   If those bytes are lost, do not regenerate with the old `d1`.
 2. Exchange the two typed contribution envelopes as a pair. Pass the accepted
    pairs to `trlbfv::aggregate_key_pair`; each recipient sums the Shamir shares
    from exactly those dealers. Matching rows detects inconsistent randomness,
    not duplicate contributors or inconsistent secrets. Admit at most one pair
-   per authenticated dealer and key epoch. A transport retry must not add a
-   second copy: that would count the dealer's summand twice in the keys.
+   per authenticated dealer for each level's ceremony in the key epoch. Count
+   a byte-identical retry just once. With malicious dealers, authentication
+   alone does not protect **confidentiality**: a dealer that chooses its pair
+   after seeing the others' contributions can arrange to know the aggregate
+   decryption key. Bind the parameters, epoch, level, dealer, and pair in
+   hiding, binding commitments from all dealers before revealing any pair,
+   or verify proofs of knowledge and correct formation tied to the ceremony.
+   A commitment prevents adaptive choice; it does not prove the Shamir shares
+   use the same secret. When adding a level to an existing key, pin its original
+   public-key contributions and dealer set; do not reopen public-key admission
+   after the shares are public. The library does not implement these checks.
 3. Use the resulting `LBFVPublicKey` to encrypt, multiply the ciphertexts, and
    call `LBFVRelinearizationKey::relinearizes` to return to two components.
    Key generation and evaluation support key level zero and ciphertext levels
    with at least two remaining moduli. Use **ciphertext level zero** for either
    threshold decryptor.
-4. For one product with no prior additions, use `new_multiplicative` with
-   `m = 1` and `mult_depth = 1`. For either a product or an additive-only
-   circuit (`mult_depth = 0`), select
-   `.with_fresh_noise_model(FreshNoiseModel::LbfvPublicKey)`: the default BFV
-   model underestimates the fresh noise of l-BFV encryptions. The RLK count
+4. Use `SmudgingBoundCalculatorConfig::new_with_fresh_noise_model` and pass
+   `FreshNoiseModel::LbfvPublicKey` for any l-BFV input. For one product with
+   no prior additions use `m = 1` and `mult_depth = 1`; use `mult_depth = 0`
+   for addition alone. The ordinary-BFV default in the v0.6 constructors
+   underestimates the fresh noise of l-BFV encryptions. The RLK count
    defaults to the committee size `n`; if fewer contributed, pass their actual
    count to `with_accepted_participant_count` and use `from_bound_calculator`.
    The number of parties opening the product is a separate quantity.
@@ -110,7 +127,9 @@ reconstructs the joint secret.
 
 Operational l-BFV public and relinearization keys generated with independent
 reference strings keep their v0.6.0 wire formats. Only `PublicKeyShare` and
-`RelinKeyShare` use the new contribution envelopes.
+`RelinKeyShare` use the new contribution envelopes. The public-key share
+embeds the v0.6.0 PK message; `dev`'s later compact PK format is incompatible.
+That format change did not change the relinearization-share schema.
 
 Some inputs accepted by v0.6.0 now return errors:
 
@@ -120,7 +139,10 @@ Some inputs accepted by v0.6.0 now return errors:
 - A public key's `l` and row count must match the modulus count. Its master
   seed, per-row seeds, and explicit `a` rows must agree wherever supplied.
 - Reference strings cannot contain repeated rows. The RLK's URS and the PK's
-  CRS must be disjoint: using the PK seed for `d1_seed` is rejected.
+  CRS must be disjoint: using the PK seed for `d1_seed` is rejected. If such
+  a v0.6.0 relinearization key was published, treat its secret as compromised.
+  Replace the secret and its dependent keys; generating a fresh RLK for that
+  same secret does not restore confidentiality.
 - An l-BFV key-switching component must encode `c1` explicitly or by seed,
   never both. The shared polynomial decoder also requires the serialized
   degree to match the supplied context.

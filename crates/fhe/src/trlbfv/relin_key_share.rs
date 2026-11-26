@@ -21,12 +21,25 @@ pub struct RelinKeyWitness {
 }
 
 /// One party's contribution `(d0ᵢ, d2ᵢ)` with the shared `d1` and `a` rows.
+///
+/// # Dealer confidentiality
+/// Generate **once** for a given secret summand and URS `d1`. Publishing a
+/// second, freshly randomized contribution with reused `d1` rows can disclose
+/// the summand, even at a different ciphertext level. Agree on independent,
+/// disjoint URS rows for each level and ceremony; changing the encoding or
+/// taking a shorter prefix does not make the rows fresh.
+///
+/// Persist the serialized contribution before sending it. On timeout or
+/// restart, resend those exact bytes; do not call a constructor again. These
+/// constructors cannot check which rows the dealer used in previous calls.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelinKeyShare(pub(super) Components);
 
 impl RelinKeyShare {
     /// Generate with independent URS and CRS seeds, in that order. The CRS
     /// seed must match the public-key contribution's seed.
+    /// Use a fresh `d1` seed per level; generate once and resend the stored
+    /// bytes on retry (see [dealer confidentiality](Self#dealer-confidentiality)).
     pub fn contribute_with_seed<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         d1: [u8; 32],
@@ -47,6 +60,8 @@ impl RelinKeyShare {
     }
 
     /// Generate from exactly one explicit URS and CRS row per ciphertext modulus.
+    /// Use disjoint `d1` rows per level; generate once and resend the stored
+    /// bytes on retry (see [dealer confidentiality](Self#dealer-confidentiality)).
     pub fn contribute_with_polys<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         d1: Vec<Poly<NttShoup>>,
@@ -68,6 +83,8 @@ impl RelinKeyShare {
 
     /// Use the leading `#moduli - ciphertext_level` rows of each shared vector.
     /// The key level is zero; the ciphertext context needs at least two moduli.
+    /// Supply a fresh `d1` vector per level; generate once and resend the stored
+    /// bytes on retry (see [dealer confidentiality](Self#dealer-confidentiality)).
     pub fn contribute_with_crp<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         d1: &CommonRandomPolyVec,
@@ -84,6 +101,9 @@ impl RelinKeyShare {
     }
 
     /// Like [`Self::contribute_with_crp`], additionally returning the guarded witness.
+    /// Use this **instead of** generating an ordinary share with the same rows.
+    /// Use fresh `d1` per level and resend the stored public bytes on retry;
+    /// keep the witness private (see [dealer confidentiality](Self#dealer-confidentiality)).
     pub fn contribute_with_crp_and_witness<R: RngCore + CryptoRng>(
         sk: &SecretKey,
         d1: &CommonRandomPolyVec,

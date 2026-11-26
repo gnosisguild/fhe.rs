@@ -41,6 +41,8 @@ impl PublicKeyShare {
     }
 
     /// Import a contribution's concrete public rows and optional CRS seed.
+    /// Structural validation does not prove that the dealer knows the secret
+    /// summand. See [`super::aggregate_key_pair`] before admitting contributions.
     pub fn from_parts(
         b: Vec<Poly<Ntt>>,
         a: Vec<Poly<Ntt>>,

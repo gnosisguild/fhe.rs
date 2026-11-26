@@ -10,3 +10,8 @@ calls. For `pk-explicit.bin`, the generator cleared `pk.seed` and rebuilt
 each row with `Ciphertext::new(row.to_vec(), &params)` before serializing.
 This clears each row's derived seed too, so the fixture contains both
 polynomials of every row.
+
+`rlk-level1.bin` uses the same secret and public key, a separate URS seed
+`[8; 32]`, ciphertext level 1, key level 0, and `ChaCha8Rng::from_seed([54; 32])`
+for `LBFVRelinearizationKey::new_leveled`. It was written by the same unmodified
+v0.6.0 library.

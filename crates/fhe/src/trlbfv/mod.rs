@@ -4,12 +4,15 @@
 //! generated reference strings: `a` (CRS) and `d1` (URS). Exchange the two
 //! typed contribution messages and call [`aggregate_key_pair`] on the accepted
 //! pairs. The resulting keys use the ordinary [`crate::lbfv`] wire formats.
+//! Generate only one [`RelinKeyShare`] per secret and URS, use fresh `d1`
+//! rows per level, and resend the saved bytes on retry.
 //!
 //! Shamir-share those same secret summands with [`crate::trbfv::ShareManager`]
 //! for threshold decryption. For ciphertexts encrypted with the resulting
 //! public key select [`crate::trbfv::FreshNoiseModel::LbfvPublicKey`].
-//! Aggregation checks concrete rows and layouts, not identities, duplicate or
-//! replayed submissions, or proofs of correct contributions.
+//! Against malicious dealers, key confidentiality also requires protection
+//! from adaptive (rogue-key) contributions. See [`aggregate_key_pair`] for
+//! the admission requirements.
 
 mod aggregate;
 mod public_key_share;

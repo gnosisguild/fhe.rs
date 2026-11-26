@@ -10,7 +10,9 @@ use fhe::trlbfv::{
     Aggregate, LBFVPublicKey, LBFVRelinearizationKey, PublicKeyShare, RelinKeyShare,
     aggregate_key_pair, aggregate_relinearization_key,
 };
-use fhe::{Error, MultipartyError, ParametersError, ReferenceStringRole, Result};
+use fhe::{
+    Error, EvaluationKeyError, MultipartyError, ParametersError, ReferenceStringRole, Result,
+};
 use fhe_math::rq::{Ntt, Poly, PowerBasis, traits::TryConvertFrom};
 use fhe_traits::{DeserializeParametrized, Serialize};
 use ndarray::Array2;
@@ -82,13 +84,101 @@ fn mixed_seed_metadata_uses_concrete_rows_and_the_leveled_prefix() -> Result<()>
         rk
     );
 
-    // The single-party API also uses a seedless PK's actual a rows.
+    // Compare the two APIs on one deterministic test vector (identical RNG tape).
+    // Both must encode the same key using the seedless PK's actual a rows.
     let sk = SecretKey::random(&params, &mut rng);
     let pk = LBFVPublicKey::new_with_crp(&sk, &explicit_a, &mut rng)?;
     let via_crp =
         LBFVRelinearizationKey::new_leveled_with_crp(&sk, &pk, &d1, 1, 0, &mut rng.clone())?;
     let via_seed = LBFVRelinearizationKey::new_leveled(&sk, &pk, d1.seed(), 1, 0, &mut rng)?;
     assert_eq!(via_crp, via_seed);
+    Ok(())
+}
+
+#[test]
+fn public_key_aggregation_checks_every_dealers_concrete_crs() -> Result<()> {
+    let params = params(17)?;
+    let mut rng = ChaCha8Rng::from_seed([80; 32]);
+    let a = CommonRandomPolyVec::new(&params, &mut rng)?.to_polys();
+    let mut other_a = a.clone();
+    other_a[2] = Poly::<Ntt>::random(params.context_at_level(0)?, &mut rng);
+    let shares = [&a, &other_a].map(|rows| {
+        let sk = SecretKey::random(&params, &mut rng);
+        PublicKeyShare::contribute_with_polys(&sk, rows, &mut rng)
+    });
+    assert_eq!(
+        LBFVPublicKey::from_shares(shares).unwrap_err(),
+        Error::Multiparty(MultipartyError::ReferenceStringMismatch {
+            role: ReferenceStringRole::Crs,
+            share_index: 1,
+            reference_share_index: 0,
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn from_parts_preserves_rows_and_rejects_malformed_imports() -> Result<()> {
+    let params = params(17)?;
+    let mut rng = ChaCha8Rng::from_seed([81; 32]);
+    let sk = SecretKey::random(&params, &mut rng);
+    let seed = [1; 32];
+    let original = PublicKeyShare::contribute_with_seed(&sk, seed, &mut rng)?;
+    let (a, b) = (original.a_components()?, original.b_components()?);
+    let import = |b, a, seed| PublicKeyShare::from_parts(b, a, params.clone(), seed);
+    let seeded = import(b.clone(), a.clone(), Some(seed))?;
+    assert_eq!(seeded.to_bytes(), original.to_bytes());
+    let explicit = import(b.clone(), a.clone(), None)?;
+    let explicit = PublicKeyShare::from_bytes(&explicit.to_bytes(), &params)?;
+    assert_eq!(explicit.a_components()?, a);
+    assert_eq!(explicit.b_components()?, b);
+    assert!(LBFVPublicKey::from_shares([explicit])?.seed.is_none());
+
+    let len_error = Error::EvaluationKey(EvaluationKeyError::InvalidDecompositionLength {
+        actual: 2,
+        expected: 3,
+    });
+    assert_eq!(
+        import(b[..2].to_vec(), a.clone(), None).unwrap_err(),
+        len_error
+    );
+    assert_eq!(
+        import(b[..2].to_vec(), a[..2].to_vec(), None).unwrap_err(),
+        len_error
+    );
+    let mut wrong_seed_rows = a.clone();
+    wrong_seed_rows.swap(1, 2);
+    assert_eq!(
+        import(b.clone(), wrong_seed_rows, Some(seed)).unwrap_err(),
+        Error::Multiparty(MultipartyError::CommonRandomPolynomialSeedMismatch { index: 1 })
+    );
+    let mut repeated = a.clone();
+    repeated[2] = a[0].clone();
+    assert_eq!(
+        import(b.clone(), repeated, None).unwrap_err(),
+        Error::Multiparty(MultipartyError::RepeatedReferenceStringRow {
+            role: ReferenceStringRole::Crs,
+            first_index: 0,
+            second_index: 2,
+        })
+    );
+    let wrong_context = Poly::<Ntt>::zero(params.context_at_level(1)?);
+    let mut wrong_a = a.clone();
+    wrong_a[1] = wrong_context.clone();
+    assert!(matches!(
+        import(b.clone(), wrong_a, None),
+        Err(Error::EvaluationKey(
+            EvaluationKeyError::InvalidLbfvLayout { .. }
+        ))
+    ));
+    let mut wrong_b = b;
+    wrong_b[1] = wrong_context;
+    assert!(matches!(
+        import(wrong_b, a, None),
+        Err(Error::EvaluationKey(
+            EvaluationKeyError::InvalidLbfvLayout { .. }
+        ))
+    ));
     Ok(())
 }
 
@@ -134,11 +224,16 @@ fn rejects_malformed_wire_layouts_before_aggregation() -> Result<()> {
             contribution: Some(p),
         }
         .encode_to_vec();
-        assert!(RelinKeyShare::from_bytes(&wire, &params).is_err());
+        RelinKeyShare::from_bytes(&wire, &params).unwrap_err()
     };
     rejects(|p| p.ksk_s_to_r = None);
     rejects(|p| p.ksk_r_to_s.as_mut().unwrap().ksk_level = 1);
-    rejects(|p| p.ksk_s_to_r.as_mut().unwrap().ciphertext_level = 1);
+    assert_eq!(
+        rejects(|p| p.ksk_s_to_r.as_mut().unwrap().ciphertext_level = 1),
+        Error::EvaluationKey(EvaluationKeyError::InvalidLbfvLayout {
+            reason: "inconsistent level, decomposition or seeded/explicit KSK rows",
+        })
+    );
     rejects(|p| p.ksk_s_to_r.as_mut().unwrap().log_base = 2);
     rejects(|p| {
         p.ksk_r_to_s.as_mut().unwrap().c0.pop();
@@ -351,6 +446,8 @@ fn guarded_witness_satisfies_both_key_equations() -> Result<()> {
     let a = CommonRandomPolyVec::from_seed(&params, [1; 32])?;
     let d1 = CommonRandomPolyVec::from_seed(&params, [2; 32])?;
     let sk = SecretKey::random(&params, &mut rng);
+    // Test equivalence on a copy of the same RNG tape. There is only one
+    // distinct public message; a dealer needing the witness calls only the latter API.
     let ordinary = RelinKeyShare::contribute_with_crp(&sk, &d1, &a, 0, 0, &mut rng.clone())?;
     let (share, w) = RelinKeyShare::contribute_with_crp_and_witness(&sk, &d1, &a, 0, 0, &mut rng)?;
     assert_eq!(share, ordinary);

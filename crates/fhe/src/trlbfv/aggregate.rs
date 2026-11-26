@@ -72,6 +72,7 @@ fn sum_direction<'a>(
 /// Combine relinearization shares with an already aggregated public key. The
 /// caller must select exactly the same contributors for both keys. Prefer
 /// [`aggregate_key_pair`] when both sets of contributions are available.
+/// Its dealer-admission and confidentiality requirements apply here as well.
 pub fn aggregate_relinearization_key(
     shares: &[RelinKeyShare],
     public_key: &LBFVPublicKey,
@@ -154,9 +155,15 @@ pub fn aggregate_relinearization_key(
 
 /// Aggregate both operational keys from one collection of matched contributions.
 /// An omitted pair is omitted from both keys. Admit one pair per authenticated
-/// dealer per key epoch, including on retries: every submitted pair is summed.
+/// dealer for this epoch and level, including on retries: every submitted pair is summed.
 /// The caller verifies that each pair uses the same secret summand as its Shamir sharing.
 /// Form pairs at admission: zipping independent streams silently truncates to the shorter one.
+///
+/// An authenticated dealer who chooses its contribution after seeing the
+/// others' can compromise confidentiality: it may know the aggregate decryption
+/// key. Use a binding, hiding commit-then-reveal protocol for the full pairs
+/// (fix all commitments before any reveal), or verify proofs of knowledge and
+/// correct formation bound to the ceremony. Aggregation verifies neither.
 pub fn aggregate_key_pair<I: IntoIterator<Item = (PublicKeyShare, RelinKeyShare)>>(
     pairs: I,
 ) -> Result<(LBFVPublicKey, LBFVRelinearizationKey)> {

@@ -29,6 +29,10 @@ use super::components::{Components, KeyRows, RelinInputs, row_count};
 /// A relinearization key for the l-BFV scheme, consisting of two key switching
 /// keys: one from r to s and another from s to r. This enables single-round
 /// relinearization of ciphertexts after homomorphic multiplication.
+///
+/// Use independent `d1` rows for each key generated with the same secret,
+/// including at different ciphertext levels. Publishing newly randomized keys
+/// with reused URS rows can disclose the secret. Retransmit a stored key on retry.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct LBFVRelinearizationKey {
     /// Key switching key that transforms ciphertexts encrypted under r to
