@@ -379,6 +379,8 @@ pub enum MultipartyError {
 }
 
 /// Role of shared polynomials in l-BFV key generation.
+/// Urban–Rambaud §4.3 calls both `a` and `d1` uniform random strings.
+/// [`Self::Crs`] and [`Self::Urs`] distinguish their uses in this library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReferenceStringRole {

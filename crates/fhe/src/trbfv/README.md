@@ -6,9 +6,10 @@ The implementation covers Shamir sharing, smudging noise, and threshold
 decryption of level-zero, two-component BFV ciphertexts. The bound calculator
 supports additive and multiplicative circuit budgets; compatible ciphertext
 evaluation and relinearization keys can be generated with
-[`fhe::trlbfv`](../trlbfv/mod.rs). The library implements the key arithmetic;
-authenticated broadcast, FLSS (function-linear secret sharing), and GURS
-(guaranteed uniform random string) generation are external. Two distinct protocols coexist:
+[`fhe::trlbfv`](../trlbfv/mod.rs). For the paper's robust protocol, applications
+supply authenticated broadcast, the linear secret sharing functionality
+(`F_LSS`, §3.2), and the global uniform random string functionality (`G_URS`,
+§2.7). Two distinct decryption protocols coexist:
 **synchronized decryption** (default), with fresh local noise and externally
 established pairwise PRF keys, and **SS (secret-sharing) smudging** (always
 available), with offline sampling/dealing and interpolation-based reconstruction.
@@ -74,11 +75,12 @@ cross-protocol reuse of the same key.
 
 ### Generating keys for a threshold multiplication
 
-1. Agree on independent shared CRS `a` and URS `d1` vectors. Each may be
-   explicit or reproducible from a seed. For each accepted party, generate a
-   `trlbfv::PublicKeyShare` with `a` and a `trlbfv::RelinKeyShare` with
-   `(d1, a)`, using the **same secret summand** for both. Privately Shamir-share
-   that summand with `ShareManager` for the decryption committee.
+1. Agree on two independent uniform random strings (§4.3): the public-key vector
+   `a` (called CRS in this library) and the relinearization vector `d1` (called
+   URS). Each may be explicit or reproducible from a seed. For each accepted
+   party, generate a `trlbfv::PublicKeyShare` with `a` and a `trlbfv::RelinKeyShare`
+   with `(d1, a)`, using the **same secret summand** for both. Privately
+   Shamir-share that summand with `ShareManager` for the decryption committee.
 2. Exchange the two typed contribution envelopes as a pair. Pass the accepted
    pairs to `trlbfv::aggregate_key_pair`; each recipient sums the Shamir shares
    from exactly those dealers. Matching rows detects inconsistent randomness,
@@ -385,10 +387,20 @@ Let `mult_depth` be the number of multiplication levels.
   For `LBFVPublicKey` encryption, select `FreshNoiseModel::LbfvPublicKey`:
   the centered-binomial sampler gives `||u||∞ ≤ 2 * params.variance()`.
   Only the term multiplying the public-key error changes. Ciphertext bytes
-  do not identify the sampler. This adapts the correctness/noise bound of
-  Urban–Rambaud Appendix C.3, Eq. (25), used for smudging in §7.1, Eq. (8).
-  It does not extend the separate joint-key encryption proof in Appendix D.2,
-  which also assumes `||u||∞ ≤ 1`.
+  do not identify the sampler. This adapts the fresh-noise bound of Appendix
+  C.3, Eq. (25), for correctness and for the `B_C / B_sm` condition in
+  §7.1, Eq. (8).
+
+  The second condition in Eq. (8) concerns joint-key encryption. Section 4.3
+  samples `u` from the key distribution, and Appendix D.2, Lemma 23 uses
+  `||u||∞ ≤ 1`. Under its other norm bounds, the two terms masked by the
+  encryption error have norms at most `N * n * B` and `N * n * B * ||u||∞`,
+  where `B` bounds each small error. With the v0.6 l-BFV sampler, that step
+  would require `N * n * B * (1 + 2 * params.variance()) / B_enc` to be
+  negligible in `lambda`, in place of `2 * N * n * B / B_enc`. The calculator
+  does not check this condition; callers choose the encryption-error
+  distribution through `error1_variance`. The norm bound alone does not
+  establish Lemma 23 for this sampler.
 
 - **Recursion** (Prop.&nbsp;20 of Urban–Rambaud 2024):
 
@@ -475,7 +487,7 @@ This module implements sharing, smudging, and decryption — it does **not**
 include the complete robust protocol stack from Urban–Rambaud&nbsp;2024:
 - The distributed l-BFV key arithmetic does not implement robust dealer agreement or prove correct shares.
 - No authenticated broadcast channel.
-- No FLSS pre-processing or GURS generation.
+- No `F_LSS` preprocessing or `G_URS` setup.
 - No proactive refresh or identifiable-abort mechanisms.
 
 Callers who need full end-to-end robust threshold FHE must provide these
