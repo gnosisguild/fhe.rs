@@ -8,6 +8,9 @@ This library provides implementations of:
 
 * BFV, the Brakerski-Fan-Vercauteren (BFV) homomorphic encryption scheme.
   More precisely, this library implements a leveled variant of the [HPS](https://eprint.iacr.org/2018/117) (Halevi--Polyakov--Shoup) RNS-variant of the scheme.
+* Distributed l-BFV key generation (`fhe::trlbfv`). `aggregate_key_pair` combines
+  each party's public-key and relinearization-key contributions. See the `trlbfv_mul`
+  example for an encrypted product opened by two of three parties using SS decryption.
 
 ## Installation
 

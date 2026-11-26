@@ -8,6 +8,7 @@ For more information about the library, see [fhe.rs](https://fhe.rs).
 The library features:
 
 * An implementation of a RNS-variant of the Brakerski-Fan-Vercauteren (BFV) homomorphic encryption scheme;
+* Distributed l-BFV public and relinearization keys for evaluating encrypted products;
 * Shamir key sharing and two distinct threshold-decryption protocols: SS and synchronized decryption.
 
 > **Note**
@@ -41,6 +42,9 @@ Key sharing and aggregation use `ShareManager`; the two decryptors have separate
 configuration, noise, and partial-share types. See the
 [threshold BFV guide](crates/fhe/src/trbfv/README.md) for setup, transport, parameter
 assumptions, and application responsibilities.
+
+Run `cargo run -p fhe --no-default-features --example trlbfv_mul` for a
+three-party key ceremony, encrypted multiplication, and 2-of-3 SS decryption.
 
 Use `default-features = false` for BFV, key sharing, and SS decryption without
 the optional synchronized-decryption PRF dependencies. Defaults expose both
